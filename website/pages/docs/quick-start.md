@@ -2,6 +2,17 @@
 
 A node needs a metadata database and an object store. For a first run both can be local files, so nothing has to be installed besides the binary.
 
+## Install
+
+Build the `pico` binary from source with the Rust toolchain:
+
+```bash
+git clone https://github.com/picomq/picomq && cd picomq
+cargo install --path picomq/pico-cli
+```
+
+This puts `pico` in `~/.cargo/bin`, which cargo adds to the `PATH`. To build without installing, use `cargo build --release -p pico-cli` and run `./target/release/pico`. The [Docker](#docker) section below skips the host install entirely.
+
 ## Run a node
 
 ```bash
@@ -23,6 +34,8 @@ pico serve \
     --storage '-2@s3://bucket?region=us-east-1'
 ```
 
+<div class="pico-or">or</div>
+
 ## Docker
 
 The `harness/aio` compose files start everything in one command, including Postgres and RustFS as the object store:
@@ -42,7 +55,12 @@ Nodes serve on `http://localhost:4437` (the cluster adds `:4438`). The admin das
 
 ## First stream
 
-The `pico` binary is also the client:
+The `pico` binary is also the client. If the node runs in compose and `pico` is not installed on the host, prefix the commands with `docker compose exec pico`, or use the [HTTP section](#the-same-over-http) below.
+
+```bash
+# example with Docker
+docker compose exec pico pico ls 
+```
 
 ```bash
 pico create /streams/orders --content-type text/plain

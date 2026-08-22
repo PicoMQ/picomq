@@ -635,6 +635,23 @@ html {
   }
 }
 
+.pico-or {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 2.25rem 0 0.75rem;
+  color: var(--vp-c-text-3);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.8125rem;
+}
+
+.pico-or::before,
+.pico-or::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
 .pico-diagram {
   margin: 28px 0;
   padding: 28px 16px;
