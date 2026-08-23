@@ -5,6 +5,7 @@
 #   fly storage create --name picomq-data
 #   fly secrets set PICO_META_URL='postgres://user:pass@host:5432/picomq'
 #   fly secrets set PICO_STORAGE='-2@s3://picomq-data?region=auto&endpoint=https://fly.storage.tigris.dev'
+#   fly secrets set PICO_AUTH_BOOTSTRAP_TOKEN=...   # see docs/operations/auth
 #   fly deploy --config harness/fly/fly.toml
 #
 # The admin listener (9090) is intentionally not published. Reach it with
@@ -24,6 +25,7 @@ primary_region = "iad"
   PICO_LISTEN = "0.0.0.0:4437"
   PICO_ADMIN_LISTEN = "0.0.0.0:9090"
   PICO_HTTP_ADDRESS = "https://picomq.fly.dev"
+  PICO_AUTH = "required"
 
 [http_service]
   internal_port = 4437

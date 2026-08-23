@@ -4,7 +4,7 @@ Everything ships in one binary. `pico` runs a node, acts as a client for both pr
 
 ## Connecting
 
-Client commands take their connection from three global flags, each with an environment variable equivalent.
+Client commands take their connection from global flags, each with an environment variable equivalent: where to talk, which wire protocol, and the credential.
 
 ```bash
 pico --endpoint http://node2.internal:4437 head /streams/orders
@@ -13,6 +13,8 @@ pico --http2 append /streams/orders
 ```
 
 `--endpoint` (`PICO_ENDPOINT`) is the server base URL, defaulting to `http://127.0.0.1:4437`. `--protocol` (`PICO_PROTOCOL`) selects `pico` or `ds`, since the two protocols differ on the wire. `--http2` (`PICO_HTTP2`) speaks HTTP/2 over cleartext, which multiplexes many concurrent appends over one connection.
+
+`--token` (`PICO_TOKEN`) is the bearer credential for a server running with auth required, and it rarely belongs on the command line. `pico auth login` stores it instead, in the OS keyring or a private `credentials.toml` next to the config when no keyring is available (`PICO_NO_KEYRING=1` forces the file, the right setting for CI), and every command attaches the stored credential automatically. An explicit flag or variable wins over storage. `pico auth status` shows where the credential lives, its id, and whether the endpoint accepts it, and `pico auth logout` removes it. Getting a token in the first place is covered in [Authentication](/docs/operations/auth).
 
 ## Profiles
 
@@ -24,7 +26,7 @@ pico config use prod
 pico ls
 ```
 
-`set` stores the global flags under a name, `get` and `ls` inspect them, `rm` deletes one, `use` picks the default, and `path` prints the file location. Flags always win over the profile, so a saved default can be overridden per invocation.
+`set` stores the global flags under a name, `get` and `ls` inspect them, `rm` deletes one, `use` picks the default, and `path` prints the file location. Flags always win over the profile, so a saved default can be overridden per invocation. Stored credentials are filed under the profile name too, so `pico auth login` against two clusters keeps their tokens apart.
 
 ## Stream commands
 

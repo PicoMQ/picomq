@@ -15,6 +15,7 @@ fly launch --no-deploy --copy-config --config harness/fly/fly.toml
 fly storage create --name picomq-data
 fly secrets set PICO_META_URL='postgres://user:pass@host:5432/picomq'
 fly secrets set PICO_STORAGE='-2@s3://picomq-data?region=auto&endpoint=https://fly.storage.tigris.dev'
+fly secrets set PICO_AUTH_BOOTSTRAP_TOKEN=...   # see Authentication
 fly deploy --config harness/fly/fly.toml
 ```
 
@@ -38,7 +39,7 @@ fly deploy --config harness/fly/fly.cluster.toml -a picomq-2 \
     -e PICO_NODE_ID=2 -e PICO_HTTP_ADDRESS=https://picomq-2.fly.dev
 ```
 
-Every app gets the same `PICO_META_URL` and `PICO_STORAGE` secrets, plus the Tigris credentials, which makes them one cluster. `PICO_HTTP_ADDRESS` must be the app's public URL because it is used verbatim in redirects.
+Every app gets the same `PICO_META_URL`, `PICO_STORAGE`, and `PICO_AUTH_BOOTSTRAP_TOKEN` secrets, plus the Tigris credentials, which makes them one cluster. `PICO_HTTP_ADDRESS` must be the app's public URL because it is used verbatim in redirects.
 
 ## What the config pins down
 
@@ -48,6 +49,6 @@ A few choices in the configs matter and are worth keeping when adapting them.
 
 The health check hits `/ready` on the admin port, so Fly routes traffic only after the node has registered. Combined with `--shutdown-drain-sec` this makes `fly deploy` a clean rolling restart.
 
-The admin listener is not published. It has no authentication, so it stays on the private network, reachable through `fly proxy 9090` or from other apps in the organization.
+The admin listener is not published. It is authenticated like the protocol listener, but the control plane has no business on the public internet, so it stays on the private network, reachable through `fly proxy 9090` or from other apps in the organization.
 
 The WAL keeps its default `batchInterval` of 250ms, which is the right setting for object storage over the network.

@@ -269,6 +269,11 @@ fn put_command_body(buf: &mut BytesMut, command: &MetadataCommand) {
         MetadataCommand::DeleteKv { key } => {
             put_str(buf, key);
         }
+        MetadataCommand::DeleteKvIfMatches { key, expected } => {
+            put_str(buf, key);
+            buf.put_u32_le(expected.len() as u32);
+            buf.put_slice(expected);
+        }
         MetadataCommand::TransferStream {
             stream_id,
             from_node,
@@ -408,6 +413,10 @@ fn get_command_body(buf: &mut &[u8]) -> Result<MetadataCommand, CodecError> {
         },
         18 => MetadataCommand::PlaceStream {
             stream_id: get_u64(buf)?,
+        },
+        19 => MetadataCommand::DeleteKvIfMatches {
+            key: get_str(buf)?,
+            expected: get_blob(buf)?,
         },
         other => return Err(CodecError::UnknownCommand(other)),
     })
@@ -739,6 +748,10 @@ mod tests {
             MetadataCommand::DeleteKv {
                 key: "path/c".into(),
             },
+            MetadataCommand::DeleteKvIfMatches {
+                key: "path/d".into(),
+                expected: Bytes::from_static(&[6, 7, 8]),
+            },
         ]
     }
 
@@ -800,7 +813,7 @@ mod tests {
         ));
 
         // Unknown codes must be rejected, never misparsed.
-        for type_code in [0u8, 19, 200] {
+        for type_code in [0u8, 20, 200] {
             let bytes = [CODEC_VERSION, type_code];
             assert!(matches!(
                 decode_command(&bytes),
@@ -911,6 +924,14 @@ mod tests {
                 .prop_map(|(key, value)| MetadataCommand::PutKv {
                     key,
                     value: Bytes::from(value)
+                }),
+            (
+                "[a-z/]{0,32}",
+                proptest::collection::vec(any::<u8>(), 0..64)
+            )
+                .prop_map(|(key, expected)| MetadataCommand::DeleteKvIfMatches {
+                    key,
+                    expected: Bytes::from(expected)
                 }),
         ]
     }

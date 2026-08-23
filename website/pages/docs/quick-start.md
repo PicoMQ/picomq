@@ -30,9 +30,14 @@ Against real infrastructure the same command points at Postgres and an S3 bucket
 pico serve \
     --node-id 2 --protocol ds \
     --listen 0.0.0.0:4437 --http-address http://node2.internal:4437 \
+    --auth required --auth-bootstrap-token-file ./root-token \
     --meta-url postgres://user:pass@pg:5432/picomq \
     --storage '-2@s3://bucket?region=us-east-1'
 ```
+
+::: info Note
+Listening beyond `127.0.0.1` requires auth or an explicit `--insecure-allow-remote` opt-out. See [Authentication](/docs/operations/auth) for generating the token.
+:::
 
 <div class="pico-or">or</div>
 
@@ -50,6 +55,10 @@ docker compose -f compose.lite.yml up --build      # SQLite + file://, no deps
 ```
 
 Nodes serve on `http://localhost:4437` (the cluster adds `:4438`). The admin dashboard is at `http://localhost:9090`, and `:9091` for the second node. RustFS exposes its API on `:9000` and a console on `:9001`.
+
+::: info Note
+The compose nodes run with auth off for development. Setting `PICO_AUTH=required` in `.env` turns it on, see [Authentication](/docs/operations/auth).
+:::
 
 `harness/byo` has the same layout for an existing Postgres and object store. Set `PICO_META_URL`, `PICO_STORAGE`, and the `AWS_*` credentials in `.env`.
 

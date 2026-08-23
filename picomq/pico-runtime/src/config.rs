@@ -56,6 +56,16 @@ pub struct InvalidMetaUrl {
     pub url: String,
 }
 
+/// Whether the frontends and the admin plane require bearer tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthMode {
+    /// No enforcement. Non-loopback binds are refused in this mode.
+    #[default]
+    Off,
+    /// Every classified request needs a token that passes scope checks.
+    Required,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub node_id: i32,
@@ -78,6 +88,13 @@ pub struct ServerConfig {
     pub shutdown_drain: Duration,
     /// `acceptQueueSize`). The kernel clamps it to `somaxconn`.
     pub backlog: i32,
+    pub auth_mode: AuthMode,
+    /// Permits non-loopback binds with auth off.
+    pub insecure_allow_remote: bool,
+    /// Root token (wire form) seeded at startup with [`Scope::root`]
+    /// (`pico_auth::Scope::root`). Idempotent across restarts. A different
+    /// stored token under the same id fails startup.
+    pub bootstrap_token: Option<String>,
     /// `ServerConfig#applyTo`.
     pub engine: s3stream::Config,
 }
@@ -104,6 +121,9 @@ impl Default for ServerConfig {
             max_chunk_size: 64 * 1024,
             shutdown_drain: Duration::ZERO,
             backlog: 1024,
+            auth_mode: AuthMode::Off,
+            insecure_allow_remote: false,
+            bootstrap_token: None,
             engine: s3stream::Config::default(),
         }
     }

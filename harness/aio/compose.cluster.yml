@@ -16,6 +16,10 @@ x-pico: &pico
     PICO_PROTOCOL: ${PICO_PROTOCOL:-pico}
     PICO_LISTEN: 0.0.0.0:4437
     PICO_ADMIN_LISTEN: 0.0.0.0:9090
+    # Dev default: auth off. Set PICO_AUTH=required and a bootstrap token to turn it on.
+    PICO_AUTH: ${PICO_AUTH:-off}
+    PICO_INSECURE_ALLOW_REMOTE: ${PICO_INSECURE_ALLOW_REMOTE:-true}
+    PICO_AUTH_BOOTSTRAP_TOKEN: ${PICO_AUTH_BOOTSTRAP_TOKEN:-ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY}
     PICO_META_URL: postgres://picomq:picomq@postgres:5432/picomq
     PICO_STORAGE: "-2@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true"
     # Local RustFS makes S3 requests free, so batch and commit aggressively.

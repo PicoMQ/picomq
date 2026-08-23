@@ -21,6 +21,7 @@ const docsSidebar = [
       { text: 'Leases', link: '/docs/design/leases' },
       { text: 'Garbage collection', link: '/docs/design/gc' },
       { text: 'Protocols', link: '/docs/design/protocols' },
+      { text: 'Authorization', link: '/docs/design/auth' },
     ],
   },
   {
@@ -28,6 +29,7 @@ const docsSidebar = [
     items: [
       { text: 'CLI', link: '/docs/operations/cli' },
       { text: 'Configuration', link: '/docs/operations/configuration' },
+      { text: 'Authentication', link: '/docs/operations/auth' },
       {
         text: 'Deployment',
         items: [

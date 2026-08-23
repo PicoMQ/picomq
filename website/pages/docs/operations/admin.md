@@ -15,6 +15,9 @@ Reads cost nothing. They are answered from the node's in-memory metadata view, n
 | `GET /admin/streams/{name}` | One stream: owner, state, epoch, offsets, content type, pending transfer. |
 | `POST /admin/transfer` | Start a stream transfer, body `{"stream": name, "toNode": id}`. |
 | `POST /admin/nodes/{id}` | Update a node's placement slots, body `{"slots": n}`. |
+| `GET /admin/tokens` | List token records visible to the caller, with a `count`, informational only. |
+| `POST /admin/tokens` | Issue a token narrowed from the caller's scope. |
+| `DELETE /admin/tokens/{id}` | Revoke a token, effective on the next request. |
 
 Errors come back as JSON with an `error` message and a meaningful status, so a rejected transfer says why, not just that it failed.
 
@@ -32,6 +35,10 @@ The dashboard is served at the admin listener's root, embedded in the binary, so
 
 A binary built without the dashboard assets serves a hint page at the root instead, while the JSON API keeps working. The published Docker images always include the dashboard.
 
+When auth is required, the dashboard prompts for a token on first rejection and keeps it in session storage for the tab, sending it as a bearer header on every API call. Token management itself stays on the JSON API.
+
 ## Exposure
 
-The admin listener has no authentication. It binds to `127.0.0.1` by default, and in any real deployment it should stay on a private interface, behind a VPN, or behind an authenticating proxy. `--no-admin` disables the listener entirely for nodes that should expose nothing but the protocol, at the cost of the probes.
+With `--auth required`, every `/admin` route needs a bearer token whose scope covers the operation and includes the `admin` audience, so the listener can be exposed like any authenticated API. The probes and the dashboard's static assets stay open. Probes stay open so orchestrators need no credentials, and the assets contain no data and are what prompts for the token. Details are in [Authentication](/docs/operations/auth).
+
+With auth off the listener is wide open, and the node refuses to bind it anywhere but loopback unless `--insecure-allow-remote` opts out. `--no-admin` disables the listener entirely for nodes that should expose nothing but the protocol, at the cost of the probes. TLS in front remains a deployment concern either way, since tokens travel as bearer headers.

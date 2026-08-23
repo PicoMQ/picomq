@@ -86,16 +86,15 @@ impl PicoClient {
             .iter()
             .map(|body| RecordEnvelope::new(0, BTreeMap::new(), body.clone()))
             .collect();
-        let response = self
+        let request = self
             .http
             .post(self.url(name, ""))
             .header(CONTENT_TYPE, CT_BATCH_BINARY)
             .header(H_PRODUCER_ID, producer.id)
             .header(H_PRODUCER_EPOCH, producer.epoch.to_string())
             .header(H_PRODUCER_SEQ, producer.seq.to_string())
-            .body(encode_batch_append(&envelopes))
-            .send()
-            .await?;
+            .body(encode_batch_append(&envelopes));
+        let response = send(&self.http, request).await?;
         let response = expect(response, &[200]).await?;
         let next = header(&response, H_NEXT_SEQ).unwrap_or_else(|| "0".to_owned());
         // A duplicate is answered with 200 and "nothing applied": the records
@@ -114,12 +113,11 @@ impl PicoClient {
     }
 
     pub async fn trim(&self, name: &str, seq: u64) -> Result<String> {
-        let response = self
+        let request = self
             .http
             .post(self.url(name, ""))
-            .header(H_TRIM_SEQ, seq.to_string())
-            .send()
-            .await?;
+            .header(H_TRIM_SEQ, seq.to_string());
+        let response = send(&self.http, request).await?;
         let response = expect(response, &[200]).await?;
         Ok(header(&response, H_START_SEQ).unwrap_or_else(|| "0".to_owned()))
     }
@@ -134,11 +132,8 @@ impl PicoClient {
     }
 
     async fn head_once(&self, name: &str) -> Result<Option<StreamInfo>> {
-        let response = self
-            .http
-            .request(Method::HEAD, self.url(name, ""))
-            .send()
-            .await?;
+        let request = self.http.request(Method::HEAD, self.url(name, ""));
+        let response = send(&self.http, request).await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -171,7 +166,7 @@ impl PicoClient {
         if live == Live::LongPoll {
             query.push_str("&live=long-poll");
         }
-        let response = self.http.get(self.url(name, &query)).send().await?;
+        let response = send(&self.http, self.http.get(self.url(name, &query))).await?;
         let response = expect(
             response,
             if live == Live::Off {
@@ -218,7 +213,7 @@ impl PicoClient {
         if limit > 0 {
             query.push_str(&format!("&limit={limit}"));
         }
-        let response = self.http.get(self.url("/", &query)).send().await?;
+        let response = send(&self.http, self.http.get(self.url("/", &query))).await?;
         let response = expect(response, &[200]).await?;
         let body: serde_json::Value = response.json().await?;
 
@@ -263,7 +258,7 @@ impl StreamApi for PicoClient {
         if let Some(ttl) = ttl_seconds {
             request = request.header(H_TTL, ttl.to_string());
         }
-        let response = expect(request.send().await?, &[200, 201]).await?;
+        let response = expect(send(&self.http, request).await?, &[200, 201]).await?;
         Ok(response.status() == StatusCode::CREATED)
     }
 
@@ -281,13 +276,12 @@ impl StreamApi for PicoClient {
             .iter()
             .map(|body| RecordEnvelope::new(0, BTreeMap::new(), body.clone()))
             .collect();
-        let response = self
+        let request = self
             .http
             .post(self.url(name, ""))
             .header(CONTENT_TYPE, CT_BATCH_BINARY)
-            .body(encode_batch_append(&envelopes))
-            .send()
-            .await?;
+            .body(encode_batch_append(&envelopes));
+        let response = send(&self.http, request).await?;
         let response = expect(response, &[200]).await?;
         let next = header(&response, H_NEXT_SEQ).unwrap_or_else(|| "0".to_owned());
         Ok(AppendAck {
@@ -314,18 +308,14 @@ impl StreamApi for PicoClient {
     }
 
     async fn close(&self, name: &str) -> Result<String> {
-        let response = self
-            .http
-            .post(self.url(name, ""))
-            .header(H_CLOSED, "true")
-            .send()
-            .await?;
+        let request = self.http.post(self.url(name, "")).header(H_CLOSED, "true");
+        let response = send(&self.http, request).await?;
         let response = expect(response, &[200]).await?;
         Ok(header(&response, H_NEXT_SEQ).unwrap_or_else(|| "0".to_owned()))
     }
 
     async fn delete(&self, name: &str) -> Result<bool> {
-        let response = self.http.delete(self.url(name, "")).send().await?;
+        let response = send(&self.http, self.http.delete(self.url(name, ""))).await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(false);
         }
@@ -348,6 +338,39 @@ fn stream_info(node: &serde_json::Value) -> StreamInfo {
 
 pub(crate) fn default_http() -> Result<reqwest::Client> {
     crate::http_client(&crate::ClientConfig::default())
+}
+
+const MAX_REDIRECT_HOPS: usize = 5;
+
+/// Send, following ownership redirects (307/308) by re-issuing the request at
+/// the Location. The clone keeps every header, so the credential rides each
+/// hop, which reqwest's own redirect handling would strip across origins.
+pub(crate) async fn send(
+    http: &reqwest::Client,
+    builder: reqwest::RequestBuilder,
+) -> Result<Response> {
+    let mut request = builder.build()?;
+    for _ in 0..MAX_REDIRECT_HOPS {
+        let base = request.url().clone();
+        let retry = request.try_clone();
+        let response = http.execute(request).await?;
+        let status = response.status().as_u16();
+        if status != 307 && status != 308 {
+            return Ok(response);
+        }
+        let Some(target) = header(&response, "location").and_then(|loc| base.join(&loc).ok())
+        else {
+            return Err(ClientError::new(
+                status,
+                ErrorKind::Other,
+                "redirect_without_location",
+            ));
+        };
+        let mut next = retry.expect("bodies are Bytes, always clonable");
+        *next.url_mut() = target;
+        request = next;
+    }
+    Err(ClientError::new(0, ErrorKind::Other, "too_many_redirects"))
 }
 
 pub(crate) fn header(response: &Response, name: &str) -> Option<String> {
@@ -406,6 +429,10 @@ pub(crate) async fn expect(response: Response, expected: &[u16]) -> Result<Respo
 fn kind(status: u16, code: &str, closed: bool) -> ErrorKind {
     match status {
         400 => ErrorKind::BadRequest,
+        401 => ErrorKind::Unauthenticated,
+        // The auth gate says `permission_denied`, producer fencing says
+        // `fenced`. Same status, different problem.
+        403 if code == "permission_denied" => ErrorKind::PermissionDenied,
         403 => ErrorKind::StaleEpoch,
         404 => ErrorKind::NotFound,
         409 if closed || code == "closed" => ErrorKind::Closed,

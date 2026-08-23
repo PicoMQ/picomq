@@ -14,11 +14,12 @@ Durability follows the storage. With `file://` the data is as durable as that di
 
 ## Cluster
 
-Each node needs a unique `--node-id`, the shared Postgres URL, the shared bucket, and a `--http-address` that clients and other nodes can reach.
+Each node needs a unique `--node-id`, the shared Postgres URL, the shared bucket, and a `--http-address` that clients and other nodes can reach. Binding beyond loopback requires either auth or an explicit `--insecure-allow-remote` opt-out. Here each node gets `--auth required` and the shared bootstrap token, which is idempotent across nodes and restarts (see [Authentication](/docs/operations/auth)).
 
 ```bash
 pico serve --node-id 1 --listen 0.0.0.0:4437 \
     --http-address http://node1.internal:4437 \
+    --auth required --auth-bootstrap-token-file /run/secrets/pico-root \
     --meta-url postgres://user:pass@pg:5432/picomq \
     --storage '-2@s3://picomq?region=us-east-1'
 ```
@@ -29,7 +30,7 @@ Routing shapes what sits in front of the nodes. Clients are redirected to a stre
 
 Images are published to GitHub Container Registry on every merge, tagged `latest`, by version, and by commit SHA. The image builds the dashboard and embeds it, so the admin listener serves the full UI with no extra setup.
 
-The repository has two compose harnesses. `harness/aio` is self-contained, starting Postgres and RustFS alongside one or two nodes, and `harness/byo` has the same layout against an existing Postgres and object store, configured through `.env`.
+The repository has two compose harnesses. `harness/aio` is self-contained, starting Postgres and RustFS alongside one or two nodes, auth off by default (`PICO_AUTH=required` in `.env` turns it on with a known dev bootstrap token). `harness/byo` has the same layout against an existing Postgres and object store, configured through `.env`, runs with auth required, and refuses to start without a bootstrap token.
 
 ```bash
 cd harness/aio && cp .env.example .env

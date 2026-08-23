@@ -30,8 +30,10 @@ pub trait KVClient: Send + Sync {
     /// Delete. Returns the deleted value, None if the key did not exist.
     async fn del_kv(&self, key: &str) -> Result<Option<Bytes>, StreamError>;
 
+    /// Delete if value matches. Returns the deleted value, None if missing or mismatched.
+    async fn del_kv_if(&self, key: &str, expected: &Bytes) -> Result<Option<Bytes>, StreamError>;
+
     /// List key-values whose keys start with `prefix`, ordered by key. Empty
     /// list if no key matches.
-    ///
     async fn list_kv(&self, prefix: &str) -> Result<Vec<KeyValue>, StreamError>;
 }

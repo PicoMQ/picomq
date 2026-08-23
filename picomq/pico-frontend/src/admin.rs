@@ -11,11 +11,16 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::{header, StatusCode, Uri};
+use axum::extract::{Path, Request, State};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use pico_auth::{
+    check_issue, scope_from_json, scope_to_json, AccessToken, Audience, AuthError, AuthPrincipal,
+    Authorizer, Operation, TokenRecord, TokenStore as _,
+};
 use pico_metadata::MetadataState;
 use pico_server::registry::RegistryEntry;
 use pico_server::{ErrorKind, OwnershipService, PicoNode, ServiceError};
@@ -34,6 +39,8 @@ pub struct AdminState {
     serving: Arc<AtomicBool>,
     /// Maintenance-lease holdership, when the host runs a lease keeper.
     leadership: Option<watch::Receiver<bool>>,
+    /// Bearer enforcement on `/admin` routes. `None` leaves them open.
+    authorizer: Option<Arc<Authorizer>>,
 }
 
 impl AdminState {
@@ -42,11 +49,17 @@ impl AdminState {
             node,
             serving: Arc::new(AtomicBool::new(true)),
             leadership: None,
+            authorizer: None,
         }
     }
 
     pub fn with_leadership(mut self, leadership: Option<watch::Receiver<bool>>) -> Self {
         self.leadership = leadership;
+        self
+    }
+
+    pub fn with_authorizer(mut self, authorizer: Option<Arc<Authorizer>>) -> Self {
+        self.authorizer = authorizer;
         self
     }
 
@@ -70,6 +83,8 @@ const DASHBOARD_HINT: &str = "<!doctype html><html><body style=\"font-family: sa
 or use the Docker image. The <code>/admin</code> API is available.</p>\
 </body></html>";
 
+/// Probes and dashboard assets are open. `/admin` routes are gated when an
+/// authorizer is set: the asset shell carries no data, it prompts for a token.
 pub fn router(state: AdminState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -79,11 +94,90 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/nodes/{id}", post(update_node))
         .route("/admin/streams/{*name}", get(stream))
         .route("/admin/transfer", post(transfer))
+        .route("/admin/tokens", get(list_tokens).post(issue_token))
+        .route("/admin/tokens/{*id}", delete(revoke_token))
         .route("/", get(|| async { asset("index.html") }))
         .fallback(get(|uri: Uri| async move {
             asset(uri.path().trim_start_matches('/'))
         }))
+        .layer(axum::middleware::from_fn(cors))
         .with_state(state)
+}
+
+/// OPTIONS preflight plus CORS headers, so a dashboard served from another
+/// origin can send `Authorization`.
+async fn cors(request: Request, next: Next) -> Response {
+    if request.method() == Method::OPTIONS {
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        cors_headers(response.headers_mut());
+        return response;
+    }
+    let mut response = next.run(request).await;
+    cors_headers(response.headers_mut());
+    response
+}
+
+fn cors_headers(headers: &mut HeaderMap) {
+    headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
+    headers.insert(
+        "Access-Control-Allow-Methods",
+        HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+    );
+    headers.insert(
+        "Access-Control-Allow-Headers",
+        HeaderValue::from_static("authorization, content-type"),
+    );
+}
+
+/// `Ok(None)`: auth off. `Ok(Some)`: authenticated and allowed.
+async fn gate(
+    state: &AdminState,
+    headers: &HeaderMap,
+    op: Operation,
+    resource: Option<&str>,
+) -> Result<Option<AuthPrincipal>, Response> {
+    let principal = authenticate(state, headers).await?;
+    if let Some(principal) = &principal {
+        state
+            .authorizer
+            .as_ref()
+            .expect("principal implies authorizer")
+            .authorize(principal, op, resource)
+            .map_err(|err| auth_error(&err))?;
+    }
+    Ok(principal)
+}
+
+async fn authenticate(
+    state: &AdminState,
+    headers: &HeaderMap,
+) -> Result<Option<AuthPrincipal>, Response> {
+    let Some(authorizer) = &state.authorizer else {
+        return Ok(None);
+    };
+    let credential = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| auth_error(&AuthError::Unauthenticated))?;
+    authorizer
+        .authenticate(credential, Audience::Admin, pico_common::now_ms())
+        .await
+        .map(Some)
+        .map_err(|err| auth_error(&err))
+}
+
+fn auth_error(err: &AuthError) -> Response {
+    if let AuthError::Store(detail) = err {
+        tracing::warn!(%detail, "admin auth store failure");
+    }
+    let (status, _, message) = crate::auth::status_code(err);
+    let mut response = error_response(StatusCode::from_u16(status).expect("known status"), message);
+    if status == 401 {
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    }
+    response
 }
 
 fn asset(path: &str) -> Response {
@@ -149,7 +243,10 @@ async fn ready(State(state): State<AdminState>) -> Response {
     (status, Json(body)).into_response()
 }
 
-async fn cluster(State(state): State<AdminState>) -> Response {
+async fn cluster(State(state): State<AdminState>, headers: HeaderMap) -> Response {
+    if let Err(response) = gate(&state, &headers, Operation::ClusterRead, None).await {
+        return response;
+    }
     let config = state.node.config();
     let view = state.node.views().load();
     let body = json!({
@@ -168,7 +265,10 @@ async fn cluster(State(state): State<AdminState>) -> Response {
     (StatusCode::OK, Json(body)).into_response()
 }
 
-async fn nodes(State(state): State<AdminState>) -> Response {
+async fn nodes(State(state): State<AdminState>, headers: HeaderMap) -> Response {
+    if let Err(response) = gate(&state, &headers, Operation::NodeRead, None).await {
+        return response;
+    }
     let local_id = state.node.config().node_id;
     let view = state.node.views().load();
     let nodes: Vec<Value> = view
@@ -182,7 +282,14 @@ async fn nodes(State(state): State<AdminState>) -> Response {
 
 /// Stream detail by name, read entirely from the published view so an admin
 /// GET never opens (and thereby claims) the stream.
-async fn stream(State(state): State<AdminState>, Path(name): Path<String>) -> Response {
+async fn stream(
+    State(state): State<AdminState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = gate(&state, &headers, Operation::StreamInspect, None).await {
+        return response;
+    }
     let name = format!("/{name}");
     let view = state.node.views().load();
     let Some(value) = view.state.get_kv(&name) else {
@@ -236,7 +343,14 @@ async fn stream(State(state): State<AdminState>, Path(name): Path<String>) -> Re
 
 /// Requests a live ownership move. Returns 202: the move completes
 /// asynchronously via the transfer watcher on the owning node.
-async fn transfer(State(state): State<AdminState>, Json(body): Json<Value>) -> Response {
+async fn transfer(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = gate(&state, &headers, Operation::TransferStream, None).await {
+        return response;
+    }
     let Some(name) = body.get("stream").and_then(Value::as_str) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"stream\"");
     };
@@ -263,8 +377,12 @@ async fn transfer(State(state): State<AdminState>, Json(body): Json<Value>) -> R
 async fn update_node(
     State(state): State<AdminState>,
     Path(id): Path<i32>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
+    if let Err(response) = gate(&state, &headers, Operation::UpdateNodeSlots, None).await {
+        return response;
+    }
     let Some(slots) = body.get("slots").and_then(Value::as_u64) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"slots\"");
     };
@@ -294,6 +412,141 @@ async fn update_node(
             format!("node {id} is not registered"),
         ),
     }
+}
+
+/// Listing is filtered to ids the caller's token matcher allows. `count` is
+/// the number of visible records, informational only, never an enforced cap.
+async fn list_tokens(State(state): State<AdminState>, headers: HeaderMap) -> Response {
+    let principal = match authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    if let Some(principal) = &principal {
+        if !principal.scope.allows_operation(Operation::ListTokens) {
+            return auth_error(&AuthError::Denied);
+        }
+    }
+    let records = match state.node.tokens().store().list_prefix("").await {
+        Ok(records) => records,
+        Err(err) => return auth_error(&err),
+    };
+    let tokens: Vec<Value> = records
+        .iter()
+        .filter(|record| match &principal {
+            Some(principal) => principal.scope.allows_token_id(&record.id),
+            None => true,
+        })
+        .map(token_json)
+        .collect();
+    let body = json!({ "count": tokens.len(), "tokens": tokens });
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Issues a token narrowed from the caller's scope. With auth off the issuer
+/// is the root scope. The secret is in the response once and never stored.
+async fn issue_token(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let principal = match authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(id) = body.get("id").and_then(Value::as_str) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing \"id\"");
+    };
+    let Some(scope_value) = body.get("scope") else {
+        return error_response(StatusCode::BAD_REQUEST, "missing \"scope\"");
+    };
+    let requested = match scope_from_json(scope_value) {
+        Ok(requested) => requested,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid scope"),
+    };
+    // An uncredentialed admin plane is never intended.
+    if id == pico_auth::ANONYMOUS_TOKEN_ID && requested.allows_audience(Audience::Admin) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "the anonymous grant cannot carry the admin audience",
+        );
+    }
+    let issuer = principal
+        .as_ref()
+        .map(|p| p.scope.clone())
+        .unwrap_or_else(pico_auth::Scope::root);
+    if let Err(err) = check_issue(&issuer, id, &requested) {
+        return match err {
+            AuthError::Malformed => {
+                error_response(StatusCode::BAD_REQUEST, "dead or invalid scope")
+            }
+            AuthError::NarrowingRejected => {
+                error_response(StatusCode::FORBIDDEN, "scope exceeds issuer")
+            }
+            other => auth_error(&other),
+        };
+    }
+    let Ok((token, verifier)) = AccessToken::issue(id) else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid token id");
+    };
+    let record = TokenRecord {
+        id: id.to_owned(),
+        verifier,
+        scope: requested,
+        created_at_ms: pico_common::now_ms(),
+        issued_by: principal.map(|p| p.id.clone()).unwrap_or_default(),
+    };
+    let stored = match state
+        .node
+        .tokens()
+        .store()
+        .put_if_absent(record.clone())
+        .await
+    {
+        Ok(stored) => stored,
+        Err(err) => return auth_error(&err),
+    };
+    if !stored {
+        return error_response(StatusCode::CONFLICT, format!("token {id} already exists"));
+    }
+    let body = json!({
+        "id": id,
+        "token": token.render(),
+        "scope": scope_to_json(&record.scope),
+        "createdAtMs": record.created_at_ms,
+    });
+    (StatusCode::CREATED, Json(body)).into_response()
+}
+
+/// Conditional on the stored verifier, so a concurrent reissue of the same id
+/// is never revoked by a stale request.
+async fn revoke_token(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = gate(&state, &headers, Operation::RevokeToken, Some(&id)).await {
+        return response;
+    }
+    let store = state.node.tokens().store();
+    let record = match store.get(&id).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, format!("no token {id}")),
+        Err(err) => return auth_error(&err),
+    };
+    match store.delete_if(&id, &record.verifier).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => error_response(StatusCode::CONFLICT, "token changed, retry"),
+        Err(err) => auth_error(&err),
+    }
+}
+
+fn token_json(record: &TokenRecord) -> Value {
+    json!({
+        "id": record.id,
+        "scope": scope_to_json(&record.scope),
+        "createdAtMs": record.created_at_ms,
+        "issuedBy": record.issued_by,
+    })
 }
 
 fn node_json(state: &MetadataState, node: &pico_metadata::state::NodeRow, local_id: i32) -> Value {

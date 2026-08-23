@@ -35,6 +35,10 @@ impl Drop for Server {
 }
 
 pub fn start(dir: &std::path::Path, protocol: &str) -> Server {
+    start_with(dir, protocol, &[])
+}
+
+pub fn start_with(dir: &std::path::Path, protocol: &str, extra: &[&str]) -> Server {
     let http = free_port();
     let admin = free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_pico"))
@@ -59,6 +63,7 @@ pub fn start(dir: &std::path::Path, protocol: &str) -> Server {
             "--wal-upload-interval-ms",
             "200",
         ])
+        .args(extra)
         .spawn()
         .unwrap();
     Server {
@@ -117,9 +122,11 @@ pub fn no_config() -> std::path::PathBuf {
 }
 
 /// Run the built binary with an explicit config file and nothing implied.
+/// The keyring is skipped so tests never touch the developer's keychain.
 pub fn pico_raw(config: &std::path::Path, args: &[&str], stdin: Option<&str>) -> Run {
     let mut child = Command::new(env!("CARGO_BIN_EXE_pico"))
         .env("PICO_CONFIG", config)
+        .env("PICO_NO_KEYRING", "1")
         .args(args)
         .stdin(if stdin.is_some() {
             Stdio::piped()

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 s3stream = { workspace = true }
+pico-auth = { workspace = true }
 pico-frontend = { workspace = true }
 pico-runtime = { workspace = true }
 pico-client = { workspace = true }
@@ -28,6 +29,8 @@ clap = { workspace = true }
 # `signal` for the ctrl-c handler (PORT: Java's shutdown hook).
 tokio = { workspace = true, features = ["signal"] }
 tracing-subscriber = { workspace = true }
+# linux-native is kernel keyutils: no dbus, so the Docker build stays lean.
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "linux-native"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

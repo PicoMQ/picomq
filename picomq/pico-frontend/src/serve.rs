@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use pico_auth::Authorizer;
 use pico_server::PicoNode;
 use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
 use tokio::net::TcpListener;
@@ -59,6 +60,8 @@ pub struct ServeOptions {
     /// Maintenance-lease holdership for the admin API, when the host runs a
     /// lease keeper. `None` reports `leaseHolder: null`.
     pub leadership: Option<watch::Receiver<bool>>,
+    /// Bearer-token enforcement on the protocol listener. `None` disables it.
+    pub authorizer: Option<Arc<Authorizer>>,
 }
 
 impl Default for ServeOptions {
@@ -74,6 +77,7 @@ impl Default for ServeOptions {
             shutdown_drain: Duration::ZERO,
             backlog: 1024,
             leadership: None,
+            authorizer: None,
         }
     }
 }
@@ -98,28 +102,36 @@ pub struct RunningServer {
 /// choices.
 pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Result<RunningServer> {
     let protocol_router = match options.protocol {
-        Protocol::Pico => Arc::new(PicoFrontend::with_tuning(
-            node.service(),
-            node.ownership(),
-            options.routing_mode,
-            options.long_poll_timeout,
-            options.sse_max_duration,
-            options.max_chunk_size,
-        ))
+        Protocol::Pico => Arc::new(
+            PicoFrontend::with_tuning(
+                node.service(),
+                node.ownership(),
+                options.routing_mode,
+                options.long_poll_timeout,
+                options.sse_max_duration,
+                options.max_chunk_size,
+            )
+            .with_authorizer(options.authorizer.clone()),
+        )
         .router(),
-        Protocol::Ds => Arc::new(DsFrontend::with_tuning(
-            node.service(),
-            node.ownership(),
-            options.routing_mode,
-            options.long_poll_timeout,
-            options.sse_max_duration,
-            options.max_chunk_size,
-        ))
+        Protocol::Ds => Arc::new(
+            DsFrontend::with_tuning(
+                node.service(),
+                node.ownership(),
+                options.routing_mode,
+                options.long_poll_timeout,
+                options.sse_max_duration,
+                options.max_chunk_size,
+            )
+            .with_authorizer(options.authorizer.clone()),
+        )
         .router(),
     };
 
     let (stop, _) = watch::channel(false);
-    let admin = AdminState::new(node.clone()).with_leadership(options.leadership.clone());
+    let admin = AdminState::new(node.clone())
+        .with_leadership(options.leadership.clone())
+        .with_authorizer(options.authorizer.clone());
     let mut tasks = Vec::with_capacity(2);
 
     let (local_addr, task) =

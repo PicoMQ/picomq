@@ -37,12 +37,21 @@ pub struct Endpoint {
     /// Saved profile to take connection defaults from (`pico config`).
     #[arg(long, env = "PICO_PROFILE", global = true)]
     pub profile: Option<String>,
+
+    /// Bearer token. Defaults to the one stored for the profile
+    /// (`pico auth login`).
+    #[arg(long, env = "PICO_TOKEN", global = true, hide_env_values = true)]
+    pub token: Option<String>,
 }
 
 impl Endpoint {
     /// Layer the flags over the selected profile.
     pub fn resolve(self) -> Result<Target, String> {
         let profile = crate::config::selected(self.profile.as_deref())?;
+        let token = match self.token {
+            Some(token) => Some(token),
+            None => crate::auth::lookup(&crate::auth::profile_name(self.profile.as_deref())?)?,
+        };
         Ok(Target {
             endpoint: self
                 .endpoint
@@ -54,6 +63,7 @@ impl Endpoint {
                 .unwrap_or(ProtocolArg::Pico),
             // A bare flag cannot say "off", so a profile can only turn this on.
             http2: self.http2 || profile.http2.unwrap_or(false),
+            token,
         })
     }
 }
@@ -64,12 +74,14 @@ pub struct Target {
     pub endpoint: String,
     pub protocol: ProtocolArg,
     pub http2: bool,
+    pub token: Option<String>,
 }
 
 impl Target {
     pub fn client_config(&self) -> ClientConfig {
         ClientConfig {
             http2: self.http2,
+            token: self.token.clone(),
             ..Default::default()
         }
     }

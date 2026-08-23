@@ -13,6 +13,7 @@ members = [
     "s3stream/s3stream-core",
     "s3stream/s3stream",
     "picomq/pico-common",
+    "picomq/pico-auth",
     "picomq/pico-metadata",
     "picomq/pico-sql",
     "picomq/pico-server",
@@ -37,6 +38,7 @@ s3stream-wal = { path = "s3stream/s3stream-wal" }
 s3stream-core = { path = "s3stream/s3stream-core" }
 s3stream = { path = "s3stream/s3stream" }
 pico-common = { path = "picomq/pico-common" }
+pico-auth = { path = "picomq/pico-auth" }
 pico-metadata = { path = "picomq/pico-metadata" }
 pico-sql = { path = "picomq/pico-sql" }
 pico-server = { path = "picomq/pico-server" }
@@ -57,6 +59,11 @@ toml = "0.8"
 # Locating the user config directory per platform.
 dirs = "5"
 base64 = "0.22"
+# pico-auth: opaque token verifier (uniform secret, not a password KDF).
+sha2 = "0.10"
+subtle = "2"
+zeroize = { version = "1", features = ["derive"] }
+getrandom = "0.2"
 tokio-stream = "0.1"
 # RFC3339 instants for Pico-Expires-At (PORT of Java `Instant.parse/toString`).
 humantime = "2"

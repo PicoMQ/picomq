@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'preact/hooks'
 import {
+  AuthRequired,
   fetchCluster,
   fetchNodes,
   fetchReady,
+  setToken,
   type ClusterInfo,
   type NodeInfo,
   type Readiness,
@@ -35,12 +37,44 @@ function leaseLabel(cluster: ClusterInfo | null): string {
   return cluster.leaseHolder ? 'holder' : 'standby'
 }
 
+function TokenGate({ message, onSubmit }: { message: string; onSubmit: (token: string) => void }) {
+  const [draft, setDraft] = useState('')
+
+  return (
+    <section class="ss-section ss-token-gate">
+      <h2>Access token</h2>
+      <p>{message}. Paste a token with the admin audience to continue.</p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          const token = draft.trim()
+          if (token) {
+            onSubmit(token)
+          }
+        }}
+      >
+        <input
+          type="password"
+          class="mono"
+          placeholder="Bearer token"
+          value={draft}
+          onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
+        />
+        <button type="submit">Unlock</button>
+      </form>
+    </section>
+  )
+}
+
 export function App() {
   const [cluster, setCluster] = useState<ClusterInfo | null>(null)
   const [nodes, setNodes] = useState<NodeInfo[]>([])
   const [ready, setReady] = useState<Readiness | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [authNeeded, setAuthNeeded] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
+  // Bumped when a token is submitted, so polling restarts immediately.
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     let alive = true
@@ -57,9 +91,16 @@ export function App() {
         setNodes(n.nodes)
         setReady(r)
         setError(null)
+        setAuthNeeded(null)
         setUpdatedAt(new Date())
       } catch (e) {
-        if (alive) {
+        if (!alive) {
+          return
+        }
+        if (e instanceof AuthRequired) {
+          setAuthNeeded(e.message)
+          setError(null)
+        } else {
           setError(e instanceof Error ? e.message : String(e))
         }
       }
@@ -72,7 +113,28 @@ export function App() {
       alive = false
       clearInterval(timer)
     }
-  }, [])
+  }, [attempt])
+
+  if (authNeeded) {
+    return (
+      <div class="ss-app">
+        <header class="ss-topbar">
+          <span class="name">PicoMQ</span>
+          <span class="tag">admin</span>
+          <span class="spacer" />
+          <Pill state="warn" label="locked" />
+        </header>
+        <TokenGate
+          message={authNeeded}
+          onSubmit={(token) => {
+            setToken(token)
+            setAuthNeeded(null)
+            setAttempt((n) => n + 1)
+          }}
+        />
+      </div>
+    )
+  }
 
   const readyState = ready?.ready ? 'ok' : ready ? 'warn' : 'err'
   const readyLabel = ready?.ready ? 'ready' : ready ? 'not ready' : 'unknown'

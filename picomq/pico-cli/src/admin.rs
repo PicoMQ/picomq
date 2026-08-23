@@ -21,6 +21,11 @@ pub struct AdminArgs {
     )]
     pub admin_endpoint: String,
 
+    /// Bearer token for the admin plane. Defaults to `PICO_TOKEN`, then the
+    /// token stored for the default profile (`pico auth login`).
+    #[arg(long, env = "PICO_ADMIN_TOKEN", hide_env_values = true)]
+    pub token: Option<String>,
+
     /// Print raw JSON instead of formatted lines.
     #[arg(long)]
     pub json: bool,
@@ -55,9 +60,17 @@ pub enum AdminCommand {
 }
 
 pub async fn run(args: AdminArgs) -> Result<i32, String> {
+    let token = match args.token {
+        Some(token) => Some(token),
+        None => match std::env::var("PICO_TOKEN") {
+            Ok(token) => Some(token),
+            Err(_) => crate::auth::lookup(&crate::auth::profile_name(None)?)?,
+        },
+    };
     let api = Api {
         base: args.admin_endpoint.trim_end_matches('/').to_owned(),
         http: reqwest::Client::new(),
+        token,
     };
     match args.command {
         AdminCommand::Cluster => {
@@ -181,13 +194,20 @@ pub async fn run(args: AdminArgs) -> Result<i32, String> {
 struct Api {
     base: String,
     http: reqwest::Client,
+    token: Option<String>,
 }
 
 impl Api {
+    fn credentialed(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
+    }
+
     async fn get(&self, path: &str) -> Result<Value, String> {
         let response = self
-            .http
-            .get(format!("{}{path}", self.base))
+            .credentialed(self.http.get(format!("{}{path}", self.base)))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -196,8 +216,7 @@ impl Api {
 
     async fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
         let response = self
-            .http
-            .post(format!("{}{path}", self.base))
+            .credentialed(self.http.post(format!("{}{path}", self.base)))
             .json(body)
             .send()
             .await

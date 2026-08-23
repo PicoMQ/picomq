@@ -215,3 +215,43 @@ td.mono {
   padding-top: 16px;
   border-top: 1px solid var(--ss-gutter);
 }
+
+.ss-token-gate {
+  max-width: 480px;
+}
+
+.ss-token-gate p {
+  color: var(--ss-text-2);
+  margin: 0 0 16px;
+}
+
+.ss-token-gate form {
+  display: flex;
+  gap: 8px;
+}
+
+.ss-token-gate input {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--ss-bg-elv);
+  border: 1px solid var(--ss-divider);
+  border-radius: var(--ss-radius);
+  color: var(--ss-text-1);
+  font-family: var(--ss-font-mono);
+  font-size: 13px;
+}
+
+.ss-token-gate input:focus {
+  outline: none;
+  border-color: var(--ss-brand-soft);
+}
+
+.ss-token-gate button {
+  padding: 8px 16px;
+  background: var(--ss-brand);
+  color: var(--ss-bg);
+  border: none;
+  border-radius: var(--ss-radius);
+  font-weight: 600;
+  cursor: pointer;
+}
