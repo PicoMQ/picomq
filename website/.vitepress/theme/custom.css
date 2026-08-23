@@ -112,7 +112,6 @@ html {
   border-bottom: none;
 }
 
-/* Shared nav edge inset — home and docs use the same horizontal rhythm. */
 :root {
   --pico-nav-edge: 24px;
 }
@@ -187,8 +186,6 @@ html {
   position: relative;
 }
 
-/* Picidae plate: fixed right-side page background, flush with the
-   nav/content column edge (same vertical line as the GitHub link). */
 :root {
   --pico-bird-w: min(52vw, 36rem);
   --pico-bird-h: calc(100vh - var(--vp-nav-height) + 4rem);
@@ -210,7 +207,6 @@ html {
   background-size: contain;
 }
 
-/* Base plate — same edge fade as before. */
 .VPHome::before {
   opacity: 0.55;
   -webkit-mask-image: linear-gradient(
@@ -222,7 +218,6 @@ html {
   mask-image: linear-gradient(to left, #000 0%, #000 48%, transparent 100%);
 }
 
-/* Extra weight on the bird only — edges stay at the base plate above. */
 .VPHome::after {
   opacity: 0.45;
   -webkit-mask-image: radial-gradient(
@@ -263,9 +258,97 @@ html {
   }
 }
 
+.pico-bird-color {
+  position: fixed;
+  z-index: 0;
+  pointer-events: none;
+  top: var(--vp-nav-height);
+  right: var(--pico-nav-edge);
+  width: var(--pico-bird-w);
+  height: var(--pico-bird-h);
+  background-image: url("/images/picidae-color.webp");
+  background-repeat: no-repeat;
+  background-position: right top;
+  background-size: contain;
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  --pico-bird-mx: 50%;
+  --pico-bird-my: 40%;
+  -webkit-mask-image:
+    radial-gradient(
+      circle 12rem at var(--pico-bird-mx) var(--pico-bird-my),
+      #000 0%,
+      #000 12%,
+      rgb(0 0 0 / 0.72) 28%,
+      rgb(0 0 0 / 0.35) 48%,
+      rgb(0 0 0 / 0.1) 68%,
+      transparent 100%
+    ),
+    linear-gradient(to left, #000 0%, #000 48%, transparent 100%);
+  mask-image:
+    radial-gradient(
+      circle 12rem at var(--pico-bird-mx) var(--pico-bird-my),
+      #000 0%,
+      #000 12%,
+      rgb(0 0 0 / 0.72) 28%,
+      rgb(0 0 0 / 0.35) 48%,
+      rgb(0 0 0 / 0.1) 68%,
+      transparent 100%
+    ),
+    linear-gradient(to left, #000 0%, #000 48%, transparent 100%);
+  -webkit-mask-composite: source-in;
+  mask-composite: intersect;
+}
+
+.pico-bird-color.active {
+  opacity: 0.92;
+}
+
+@media (max-width: 959px) {
+  .pico-bird-color {
+    -webkit-mask-image:
+      radial-gradient(
+        circle 8rem at var(--pico-bird-mx) var(--pico-bird-my),
+        #000 0%,
+        #000 14%,
+        rgb(0 0 0 / 0.65) 32%,
+        rgb(0 0 0 / 0.28) 52%,
+        transparent 100%
+      ),
+      linear-gradient(to left, #000 0%, #000 48%, transparent 100%);
+    mask-image:
+      radial-gradient(
+        circle 8rem at var(--pico-bird-mx) var(--pico-bird-my),
+        #000 0%,
+        #000 14%,
+        rgb(0 0 0 / 0.65) 32%,
+        rgb(0 0 0 / 0.28) 52%,
+        transparent 100%
+      ),
+      linear-gradient(to left, #000 0%, #000 48%, transparent 100%);
+  }
+}
+
+@media (max-width: 639px) {
+  .pico-bird-color {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pico-bird-color {
+    display: none;
+  }
+}
+
 .VPHome > * {
   position: relative;
   z-index: 1;
+}
+
+.VPHome > .pico-bird-color {
+  position: fixed;
+  z-index: 0;
 }
 
 .pico-etymology {
@@ -286,11 +369,31 @@ html {
   background: rgb(255 255 255 / 0.52);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  pointer-events: none;
+}
+
+.pico-etymology p {
+  margin: 0;
 }
 
 .pico-etymology em {
   font-style: italic;
+}
+
+.pico-etymology__credit {
+  margin-top: 0.35rem;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: var(--pico-ink-4);
+}
+
+.pico-etymology__credit a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+
+.pico-etymology__credit a:hover {
+  color: var(--pico-ink-2);
 }
 
 @media (max-width: 639px) {

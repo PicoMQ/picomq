@@ -6,6 +6,7 @@ const docsSidebar = [
     items: [
       { text: 'Introduction', link: '/docs/' },
       { text: 'Quick start', link: '/docs/quick-start' },
+      { text: 'Playground', link: '/docs/playground' },
     ],
   },
   {
