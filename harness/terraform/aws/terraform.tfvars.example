@@ -1,0 +1,24 @@
+region     = "us-east-1"
+project    = "picomq"
+node_count = 2
+domain     = "picomq.internal"
+image      = "ghcr.io/picomq/picomq:latest"
+
+db_password = "change-me"
+
+# Existing VPC. Omit vpc_id and private_subnet_ids to create a network instead.
+vpc_id = "vpc-xxxxxxxx"
+private_subnet_ids = [
+  "subnet-aaaaaaaa",
+  "subnet-bbbbbbbb",
+]
+
+# Optional. Omit to generate and store a bootstrap token in Secrets Manager.
+# bootstrap_token = "BASE64URL(id).BASE64URL(32bytes)"
+
+# create_s3_endpoint = true
+# force_destroy      = false
+# db_multi_az        = true
+# db_instance_class  = "db.t4g.micro"
+# task_cpu           = 512
+# task_memory        = 1024
