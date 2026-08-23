@@ -34,6 +34,8 @@ The node id is the one value worth care. Reusing an id for a different machine i
 
 `--http-address` matters in any multi-node deployment. It is registered in the metadata state and used verbatim in redirects, so it must be a URL clients can actually reach, not a bind address. The default only works single-node on localhost.
 
+Binding either listener to anything but loopback requires `--auth required`. A node asked to expose an unauthenticated listener refuses to start, unless `--insecure-allow-remote` deliberately opts out for deployments that bring their own network boundary.
+
 `--protocol` is a global flag rather than a serve flag, selecting whether this listener speaks `pico` or `ds`.
 
 ## Metadata
@@ -64,6 +66,17 @@ S3 credentials come from the standard `AWS_*` environment variables. Compatible 
 ```
 
 `--wal` optionally puts the WAL in its own bucket. When absent the WAL shares the data bucket under the next bucket id, which is the right default unless WAL and data need different storage classes or lifecycle rules.
+
+## Auth
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--auth` | `off` | `required` gates every request on both listeners. `off` allows loopback binds only. |
+| `--insecure-allow-remote` | off | Permit non-loopback binds with auth off. |
+| `--auth-bootstrap-token` | none | Root token in wire form, seeded at startup. Idempotent across restarts. |
+| `--auth-bootstrap-token-file` | none | Read the bootstrap token from a file instead, keeping it out of process listings. |
+
+A different token under an already-stored bootstrap id fails startup rather than silently rotating a live credential. Bootstrap, token issuance, and client credentials are covered in [Authentication](/docs/operations/auth).
 
 ## Behavior
 

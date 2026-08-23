@@ -22,7 +22,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
 futures = { workspace = true }
+pico-auth = { workspace = true }
 pico-runtime = { workspace = true }
 s3stream = { workspace = true }
 tempfile = { workspace = true }

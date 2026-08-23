@@ -5,13 +5,14 @@ pub mod config;
 use std::sync::Arc;
 use std::time::Duration;
 
+use pico_auth::{AccessToken, Scope, TokenRecord, TokenStore, Verifier};
 use pico_frontend::{RunningServer, ServeOptions};
 use pico_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
-use pico_server::{NodeConfig, PicoNode};
+use pico_server::{KvTokenStore, NodeConfig, PicoNode};
 use pico_sql::{LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig, SqliteStore};
 use s3stream::{IdUri, ObjectStorageTrait, ObjectStoreAdapter};
 
-pub use config::{MetaBackend, ServerConfig};
+pub use config::{AuthMode, MetaBackend, ServerConfig};
 
 /// (`MetadataLifecycle`).
 const LIFECYCLE_TICK: Duration = Duration::from_secs(1);
@@ -38,6 +39,14 @@ pub enum RuntimeError {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "auth is off: refusing non-loopback bind {addr}, run with auth required, bind loopback, or pass --insecure-allow-remote"
+    )]
+    InsecureBind { addr: std::net::SocketAddr },
+    #[error("bootstrap token: {0}")]
+    BootstrapToken(#[from] pico_auth::AuthError),
+    #[error("bootstrap token {id:?} conflicts with a stored token of the same id")]
+    BootstrapConflict { id: String },
 }
 
 /// A running PicoMQ process: metadata log, node, background maintenance and
@@ -46,6 +55,7 @@ pub struct PicoServer {
     server: RunningServer,
     lease: LeaseKeeper,
     lifecycle: tokio::task::JoinHandle<()>,
+    token_expiry: tokio::task::JoinHandle<()>,
     /// Kept alive for the process lifetime: dropping it aborts the log's
     /// flusher/tailer tasks, so it must outlive the node.
     sink: Arc<SqlSink>,
@@ -55,6 +65,13 @@ pub struct PicoServer {
 /// in that order: metadata first (a node must be registered before it can
 /// own streams), then storage and the engine, then listeners.
 pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
+    if config.auth_mode == AuthMode::Off && !config.insecure_allow_remote {
+        for addr in [Some(config.addr), config.admin_addr].into_iter().flatten() {
+            if !addr.ip().is_loopback() {
+                return Err(RuntimeError::InsecureBind { addr });
+            }
+        }
+    }
     let store = open_store(&config.meta_backend).await?;
     let (sink, views) = SqlSink::open(store.clone(), SqlSinkConfig::default()).await?;
     let sink = Arc::new(sink);
@@ -89,6 +106,10 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         .await?,
     );
 
+    if let Some(wire) = &config.bootstrap_token {
+        bootstrap_token(node.tokens().store().as_ref(), wire).await?;
+    }
+
     let lease = LeaseKeeper::spawn(
         store,
         format!("node-{}-{}", config.node_id, config.node_epoch),
@@ -104,8 +125,15 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         LIFECYCLE_TICK,
     ))
     .drive(lease.leadership());
+    let token_expiry = node
+        .tokens()
+        .spawn_expiry_loop(lease.leadership(), LIFECYCLE_TICK);
 
     let addr = config.addr;
+    let authorizer = match config.auth_mode {
+        AuthMode::Required => Some(node.authorizer()),
+        AuthMode::Off => None,
+    };
     let server = pico_frontend::serve(
         node,
         ServeOptions {
@@ -119,6 +147,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             shutdown_drain: config.shutdown_drain,
             backlog: config.backlog,
             leadership: Some(lease.leadership()),
+            authorizer,
         },
     )
     .await
@@ -128,8 +157,38 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         server,
         lease,
         lifecycle,
+        token_expiry,
         sink,
     })
+}
+
+/// Seed the operator's root token. Idempotent: a restart with the same token
+/// is a no-op. A different token under the same id fails startup instead of
+/// silently rotating a live credential.
+async fn bootstrap_token(store: &KvTokenStore, wire: &str) -> Result<(), RuntimeError> {
+    let token = AccessToken::parse(wire)?;
+    let verifier = Verifier::from_secret(&token.secret);
+    let record = TokenRecord {
+        id: token.id.clone(),
+        verifier,
+        scope: Scope::root(),
+        created_at_ms: pico_common::now_ms(),
+        issued_by: String::new(),
+    };
+    if store.put_if_absent(record).await? {
+        tracing::info!(id = %token.id, "bootstrap token stored");
+        return Ok(());
+    }
+    let existing = store
+        .get(&token.id)
+        .await?
+        .ok_or_else(|| RuntimeError::BootstrapConflict {
+            id: token.id.clone(),
+        })?;
+    if existing.verifier == verifier && existing.scope == Scope::root() {
+        return Ok(());
+    }
+    Err(RuntimeError::BootstrapConflict { id: token.id })
 }
 
 fn open_bucket(uri: &str) -> Result<Arc<dyn ObjectStorageTrait>, RuntimeError> {
@@ -179,6 +238,7 @@ impl PicoServer {
     pub async fn shutdown(self) {
         self.server.shutdown().await;
         self.lifecycle.abort();
+        self.token_expiry.abort();
         self.lease.shutdown().await;
         drop(self.sink);
     }

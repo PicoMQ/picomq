@@ -19,6 +19,7 @@ use serde_json::{json, Map, Value};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
+use pico_auth::{Audience, Authorizer};
 use pico_server::framing::{mime_equals, mime_of};
 use pico_server::ownership::OwnershipService;
 use pico_server::{
@@ -26,6 +27,7 @@ use pico_server::{
     ServiceError, StreamMeta,
 };
 
+use crate::auth::Permit;
 use crate::envelope::{
     decode_batch_append, decode_envelope, decode_json_append, encode_batch_read, encode_envelope,
     encode_json_read, RecordEnvelope, SequencedRecord,
@@ -72,6 +74,7 @@ pub struct PicoFrontend {
     service: Arc<S3StreamService>,
     ownership: Arc<dyn OwnershipService>,
     timestamps: StreamTimestamps,
+    authorizer: Option<Arc<Authorizer>>,
     mode: RoutingMode,
     long_poll_timeout: Duration,
     sse_max_duration: Duration,
@@ -107,6 +110,7 @@ impl PicoFrontend {
             service,
             ownership,
             timestamps,
+            authorizer: None,
             mode,
             long_poll_timeout,
             sse_max_duration,
@@ -116,6 +120,12 @@ impl PicoFrontend {
                 64 * 1024
             },
         }
+    }
+
+    /// `None` disables the gate, requests pass through unauthenticated.
+    pub fn with_authorizer(mut self, authorizer: Option<Arc<Authorizer>>) -> Self {
+        self.authorizer = authorizer;
+        self
     }
 
     /// (`app.addHttpHandler(..., router::handle)`).
@@ -129,11 +139,28 @@ async fn dispatch(
     request: axum::extract::Request,
 ) -> Response {
     let (parts, body) = request.into_parts();
+    let permit = match crate::auth::gate(
+        frontend.authorizer.as_deref(),
+        Audience::Pico,
+        &parts.method,
+        &parts.uri,
+        &parts.headers,
+    )
+    .await
+    {
+        Ok(permit) => permit,
+        Err(response) => return *response,
+    };
+    let name = match &permit {
+        Some(permit) => permit.stream_name.clone(),
+        None => stream_name(&parts.uri),
+    };
     if let Some(response) = route(
         frontend.ownership.as_ref(),
         frontend.mode,
         &parts.method,
         &parts.uri,
+        &name,
     )
     .await
     {
@@ -144,19 +171,27 @@ async fn dispatch(
         Err(_) => return error(413, "internal", "content too large", None),
     };
     frontend
-        .handle(parts.method, parts.uri, parts.headers, body)
+        .handle(parts.method, parts.uri, parts.headers, body, name, permit)
         .await
 }
 
 impl PicoFrontend {
-    async fn handle(&self, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
+    async fn handle(
+        &self,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+        body: Bytes,
+        name: String,
+        permit: Option<Permit>,
+    ) -> Response {
         let result = match method {
             Method::OPTIONS => Ok(options()),
-            Method::PUT => self.put(&uri, &headers, &body).await,
-            Method::POST => self.post(&uri, &headers, &body).await,
-            Method::DELETE => self.delete(&uri).await,
-            Method::HEAD => self.head(&uri).await,
-            Method::GET => self.get(&uri, &headers).await,
+            Method::PUT => self.put(&uri, &headers, &body, &name).await,
+            Method::POST => self.post(&uri, &headers, &body, &name).await,
+            Method::DELETE => self.delete(&name).await,
+            Method::HEAD => self.head(&name).await,
+            Method::GET => self.get(&uri, &headers, &name, permit.as_ref()).await,
             _ => Ok(error(405, "method_not_allowed", "method not allowed", None)),
         };
         result.unwrap_or_else(service_error_response)
@@ -167,9 +202,9 @@ impl PicoFrontend {
         uri: &Uri,
         headers: &HeaderMap,
         body: &Bytes,
+        name: &str,
     ) -> Result<Response, ServiceError> {
-        let name = stream_name(uri);
-        if name == "/" {
+        if stream_name(uri) == "/" {
             return Ok(error(
                 400,
                 "bad_request",
@@ -199,7 +234,7 @@ impl PicoFrontend {
         let result = self
             .service
             .create(CreateCommand {
-                name: name.clone(),
+                name: name.to_owned(),
                 content_type: engine_ct(&user_ct),
                 ttl_seconds,
                 expires_at_ms,
@@ -237,8 +272,8 @@ impl PicoFrontend {
         Ok(response)
     }
 
-    async fn head(&self, uri: &Uri) -> Result<Response, ServiceError> {
-        let Some(meta) = self.service.head(&stream_name(uri)).await? else {
+    async fn head(&self, name: &str) -> Result<Response, ServiceError> {
+        let Some(meta) = self.service.head(name).await? else {
             return Ok(respond(404, None, false));
         };
         let mut response = respond(200, Some(&meta.next_offset), meta.closed);
@@ -251,9 +286,9 @@ impl PicoFrontend {
         uri: &Uri,
         headers: &HeaderMap,
         body: &Bytes,
+        name: &str,
     ) -> Result<Response, ServiceError> {
-        let name = stream_name(uri);
-        if name == "/" {
+        if stream_name(uri) == "/" {
             return Ok(error(400, "bad_request", "no stream in path", None));
         }
         if let Some(trim_seq) =
@@ -262,12 +297,12 @@ impl PicoFrontend {
             if !body.is_empty() {
                 return Err(bad_request("trim takes no body"));
             }
-            let start = self.service.trim(&name, trim_seq).await?;
+            let start = self.service.trim(name, trim_seq).await?;
             let mut response = respond(200, None, false);
             set_header(&mut response, H_START_SEQ, &start.to_string());
             return Ok(response);
         }
-        self.append(&name, headers, body).await
+        self.append(name, headers, body).await
     }
 
     async fn append(
@@ -345,37 +380,53 @@ impl PicoFrontend {
         Ok(response)
     }
 
-    async fn delete(&self, uri: &Uri) -> Result<Response, ServiceError> {
-        let name = stream_name(uri);
-        let deleted = self.service.delete(&name).await?;
+    async fn delete(&self, name: &str) -> Result<Response, ServiceError> {
+        let deleted = self.service.delete(name).await?;
         if deleted {
-            self.timestamps.invalidate(&name);
+            self.timestamps.invalidate(name);
         }
         Ok(respond(if deleted { 204 } else { 404 }, None, false))
     }
 
-    async fn get(&self, uri: &Uri, headers: &HeaderMap) -> Result<Response, ServiceError> {
-        let name = stream_name(uri);
-        if name == "/" {
-            return self.list(uri).await;
+    async fn get(
+        &self,
+        uri: &Uri,
+        headers: &HeaderMap,
+        name: &str,
+        permit: Option<&Permit>,
+    ) -> Result<Response, ServiceError> {
+        if stream_name(uri) == "/" {
+            return self.list(uri, permit).await;
         }
-        let seq = self.parse_seq(uri, headers, &name).await?;
+        let seq = self.parse_seq(uri, headers, name).await?;
         match query_param(uri, "live") {
             None => {
-                let out = self.read(&name, seq, uri).await?;
-                self.write_read(uri, headers, &name, seq, out, false)
+                let out = self.read(name, seq, uri).await?;
+                self.write_read(uri, headers, name, seq, out, false)
             }
-            Some(mode) if mode == "long-poll" => self.long_poll(uri, headers, &name, seq).await,
-            Some(mode) if mode == "sse" => self.sse(&name, seq).await,
+            Some(mode) if mode == "long-poll" => self.long_poll(uri, headers, name, seq).await,
+            Some(mode) if mode == "sse" => self.sse(name, seq).await,
             Some(mode) => Err(bad_request(format!("invalid live mode: {mode}"))),
         }
     }
 
-    async fn list(&self, uri: &Uri) -> Result<Response, ServiceError> {
-        let prefix = query_param(uri, "prefix")
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| "/".into());
-        let start_after = query_param(uri, "start_after");
+    async fn list(&self, uri: &Uri, permit: Option<&Permit>) -> Result<Response, ServiceError> {
+        let prefix = match permit {
+            Some(permit) => permit.stream_name.clone(),
+            None => query_param(uri, "prefix")
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| "/".into()),
+        };
+        let start_after = match (permit, query_param(uri, "start_after")) {
+            (Some(permit), Some(after)) => Some(
+                permit
+                    .principal
+                    .scope
+                    .resolve_stream_name(&after)
+                    .map_err(|_| bad_request("invalid start_after"))?,
+            ),
+            (_, after) => after,
+        };
         let limit = parse_strict_u64(query_param(uri, "limit").as_deref(), "invalid limit")?;
         let result = self
             .service
@@ -386,8 +437,12 @@ impl PicoFrontend {
             .streams
             .iter()
             .map(|meta| {
+                let name = match permit {
+                    Some(permit) => permit.principal.scope.strip_stream_name(&meta.name),
+                    None => &meta.name,
+                };
                 let mut node = Map::new();
-                node.insert("name".into(), json!(meta.name));
+                node.insert("name".into(), json!(name));
                 node.insert("content_type".into(), json!(user_ct_of(&meta.content_type)));
                 node.insert("start_seq".into(), json!(meta.start_offset.record_offset()));
                 node.insert("next_seq".into(), json!(meta.next_offset.record_offset()));
@@ -832,7 +887,12 @@ fn respond(status: u16, next: Option<&OffsetToken>, closed: bool) -> Response {
 }
 
 /// JSON `{error, message?, next_seq?}`.
-fn error(status: u16, code: &str, message: &str, next: Option<&OffsetToken>) -> Response {
+pub(crate) fn error(
+    status: u16,
+    code: &str,
+    message: &str,
+    next: Option<&OffsetToken>,
+) -> Response {
     let mut response = base_response(status);
     set_header(&mut response, header::CONTENT_TYPE.as_str(), CT_JSON);
     set_header(&mut response, header::CACHE_CONTROL.as_str(), "no-store");

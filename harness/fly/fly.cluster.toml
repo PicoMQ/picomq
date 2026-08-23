@@ -11,6 +11,7 @@
 #   fly secrets set -a picomq-N PICO_META_URL='postgres://user:pass@host:5432/picomq'
 #   fly secrets set -a picomq-N PICO_STORAGE='-2@s3://picomq-data?region=auto&endpoint=https://fly.storage.tigris.dev'
 #   fly secrets set -a picomq-N AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+#   fly secrets set -a picomq-N PICO_AUTH_BOOTSTRAP_TOKEN=...   # same token on every app
 #
 # Routing stays on redirect, so PICO_HTTP_ADDRESS must be the app's public URL.
 # The admin listener (9090) is intentionally not published.
@@ -26,6 +27,7 @@ primary_region = "iad"
 [env]
   PICO_LISTEN = "0.0.0.0:4437"
   PICO_ADMIN_LISTEN = "0.0.0.0:9090"
+  PICO_AUTH = "required"
 
 [http_service]
   internal_port = 4437

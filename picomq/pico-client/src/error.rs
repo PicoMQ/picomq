@@ -17,6 +17,11 @@ pub enum ErrorKind {
     Conflict,
     /// 403: a newer producer epoch fenced this one.
     StaleEpoch,
+    /// 401: no credential, or one the server does not accept.
+    Unauthenticated,
+    /// 403 from scope checks. Distinct from [`StaleEpoch`]
+    /// (`ErrorKind::StaleEpoch`): a fencing 403 is not an auth failure.
+    PermissionDenied,
     /// 410: the requested position was trimmed away.
     OffsetGone,
     /// 400.

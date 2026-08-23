@@ -2,6 +2,7 @@
 //! profiles.
 
 mod admin;
+mod auth;
 mod bench;
 mod config;
 mod io;
@@ -12,6 +13,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use crate::admin::AdminArgs;
+use crate::auth::AuthCommand;
 use crate::bench::BenchArgs;
 use crate::config::ConfigCommand;
 use crate::serve::ServeArgs;
@@ -51,6 +53,10 @@ enum Command {
     /// Manage saved endpoints.
     #[command(subcommand)]
     Config(ConfigCommand),
+
+    /// Manage stored credentials.
+    #[command(subcommand)]
+    Auth(AuthCommand),
 }
 
 #[tokio::main]
@@ -91,9 +97,14 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
     if let Command::Admin(args) = command {
         return Ok(admin::run(args).await?);
     }
+    // Auth edits the stored credential the others read, so like `config` it
+    // must not need a resolvable endpoint.
+    if let Command::Auth(command) = command {
+        return Ok(auth::run(command, &endpoint).await?);
+    }
     let target = endpoint.resolve()?;
     match command {
-        Command::Config(_) | Command::Admin(_) => unreachable!("handled above"),
+        Command::Config(_) | Command::Admin(_) | Command::Auth(_) => unreachable!("handled above"),
         Command::Stream(command) => Ok(stream::run(&target, command).await?),
         Command::Bench(args) => Ok(bench::run(&target, args).await?),
         Command::Serve(args) => {

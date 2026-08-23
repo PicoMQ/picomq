@@ -6,8 +6,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
+use pico_auth::AccessToken;
 use pico_frontend::Protocol;
-use pico_runtime::{MetaBackend, ServerConfig};
+use pico_runtime::{AuthMode, MetaBackend, RuntimeError, ServerConfig};
 
 fn loopback() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 0))
@@ -112,6 +113,88 @@ async fn ds_protocol_over_a_started_process() {
     assert_eq!(read.text().await.unwrap(), "hello-from-ds");
 
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn auth_off_refuses_non_loopback_binds() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut refused = config(dir.path(), Protocol::Pico, 1);
+    refused.addr = SocketAddr::from(([0, 0, 0, 0], 0));
+    assert!(matches!(
+        pico_runtime::start(refused).await,
+        Err(RuntimeError::InsecureBind { .. })
+    ));
+
+    let mut refused_admin = config(dir.path(), Protocol::Pico, 1);
+    refused_admin.admin_addr = Some(SocketAddr::from(([0, 0, 0, 0], 0)));
+    assert!(matches!(
+        pico_runtime::start(refused_admin).await,
+        Err(RuntimeError::InsecureBind { .. })
+    ));
+}
+
+#[tokio::test]
+async fn insecure_allow_remote_permits_non_loopback_binds() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut allowed = config(dir.path(), Protocol::Pico, 1);
+    allowed.addr = SocketAddr::from(([0, 0, 0, 0], 0));
+    allowed.admin_addr = Some(SocketAddr::from(([0, 0, 0, 0], 0)));
+    allowed.insecure_allow_remote = true;
+    let server = pico_runtime::start(allowed).await.unwrap();
+    server.shutdown().await;
+}
+
+/// Bootstrap seeds the root token once, enforcement turns on with the mode,
+/// a restart with the same token is a no-op, and a different token under the
+/// same id refuses to start.
+#[tokio::test]
+async fn bootstrap_enforces_and_stays_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, _) = AccessToken::issue("ops/root").unwrap();
+    let secured = |epoch: i64, wire: String| {
+        let mut config = config(dir.path(), Protocol::Pico, epoch);
+        config.auth_mode = AuthMode::Required;
+        config.bootstrap_token = Some(wire);
+        config
+    };
+
+    let http = reqwest::Client::new();
+    let first = pico_runtime::start(secured(1, root.render()))
+        .await
+        .unwrap();
+    let url = format!("http://{}/streams/locked", first.local_addr());
+    assert_eq!(
+        http.put(&url)
+            .header("Content-Type", "text/plain")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401,
+        "enforcement is on"
+    );
+    assert_eq!(
+        http.put(&url)
+            .header("Content-Type", "text/plain")
+            .bearer_auth(root.render())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
+    first.shutdown().await;
+
+    let second = pico_runtime::start(secured(2, root.render()))
+        .await
+        .unwrap();
+    second.shutdown().await;
+
+    let (imposter, _) = AccessToken::issue("ops/root").unwrap();
+    assert!(matches!(
+        pico_runtime::start(secured(3, imposter.render())).await,
+        Err(RuntimeError::BootstrapConflict { id }) if id == "ops/root"
+    ));
 }
 
 /// The point of a SQL log plus object storage: state survives the process.

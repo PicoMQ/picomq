@@ -106,6 +106,9 @@ fn apply_inner(
         MetadataCommand::PutKv { key, value } => put_kv(state, key, value),
         MetadataCommand::PutKvIfAbsent { key, value } => put_kv_if_absent(state, key, value),
         MetadataCommand::DeleteKv { key } => delete_kv(state, key),
+        MetadataCommand::DeleteKvIfMatches { key, expected } => {
+            delete_kv_if_matches(state, key, expected)
+        }
         MetadataCommand::TransferStream {
             stream_id,
             from_node,
@@ -1084,6 +1087,19 @@ fn delete_kv(state: &mut MetadataState, key: &str) -> Result<MetadataResult, Met
     Ok(MetadataResult::Value(state.kv.remove(key)))
 }
 
+fn delete_kv_if_matches(
+    state: &mut MetadataState,
+    key: &str,
+    expected: &bytes::Bytes,
+) -> Result<MetadataResult, MetadataError> {
+    match state.kv.get(key) {
+        Some(current) if current == expected => Ok(MetadataResult::Value(state.kv.remove(key))),
+        _ => Err(MetadataError::Redundant {
+            message: format!("kv key {key} missing or value mismatch"),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1602,6 +1618,53 @@ mod tests {
         assert_eq!(result, MetadataResult::Value(None));
     }
 
+    #[test]
+    fn kv_delete_if_matches_and_rejects_mismatch() {
+        let mut state = MetadataState::new();
+        let hello = Bytes::from_static(b"hello");
+        let world = Bytes::from_static(b"world");
+        apply(
+            &mut state,
+            &MetadataCommand::PutKv {
+                key: "k".into(),
+                value: hello.clone(),
+            },
+        )
+        .unwrap();
+
+        assert!(apply(
+            &mut state,
+            &MetadataCommand::DeleteKvIfMatches {
+                key: "k".into(),
+                expected: world.clone(),
+            },
+        )
+        .unwrap_err()
+        .is_redundant());
+        assert_eq!(state.kv.get("k"), Some(&hello));
+
+        let result = apply(
+            &mut state,
+            &MetadataCommand::DeleteKvIfMatches {
+                key: "k".into(),
+                expected: hello.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result, MetadataResult::Value(Some(hello)));
+        assert!(state.kv.get("k").is_none());
+
+        assert!(apply(
+            &mut state,
+            &MetadataCommand::DeleteKvIfMatches {
+                key: "k".into(),
+                expected: world,
+            },
+        )
+        .unwrap_err()
+        .is_redundant());
+    }
+
     /// Determinism over a scripted random command sequence.
     #[test]
     fn applying_same_operations_produces_identical_state() {
@@ -1859,6 +1922,12 @@ mod tests {
                     }
                 }),
                 "[a-c]{1,2}".prop_map(|k| MetadataCommand::DeleteKv { key: k }),
+                ("[a-c]{1,2}", proptest::collection::vec(any::<u8>(), 0..4)).prop_map(|(k, v)| {
+                    MetadataCommand::DeleteKvIfMatches {
+                        key: k,
+                        expected: Bytes::from(v),
+                    }
+                }),
             ]
         }
 

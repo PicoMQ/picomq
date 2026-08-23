@@ -7,12 +7,14 @@
 
 use std::sync::Arc;
 
+use pico_auth::Authorizer;
 use pico_metadata::{CommandSink, MetadataNodeHandle, ViewPublisher};
 use s3stream::{
     Client as _, Config, KVClient, ObjectStorageTrait, ObjectWalConfig, ObjectWalService,
     S3StreamBuilder, S3StreamEngine,
 };
 
+use crate::auth::TokenService;
 use crate::error::ServiceError;
 use crate::ownership::MetadataOwnershipService;
 use crate::service::S3StreamService;
@@ -55,6 +57,7 @@ pub struct PicoNode {
     engine: S3StreamEngine,
     service: Arc<S3StreamService>,
     ownership: Arc<MetadataOwnershipService>,
+    tokens: Arc<TokenService>,
     transfer_watcher: tokio::task::JoinHandle<()>,
 }
 
@@ -96,7 +99,7 @@ impl PicoNode {
         let kv_client: Arc<dyn KVClient> = engine.kv_client();
         let service = Arc::new(S3StreamService::new(
             engine.stream_client(),
-            kv_client,
+            kv_client.clone(),
             views.clone(),
             handle.clone(),
             Arc::new(StreamWaiterRegistry::new()),
@@ -107,6 +110,7 @@ impl PicoNode {
             config.http_address.clone(),
             service.clone(),
         ));
+        let tokens = Arc::new(TokenService::new(kv_client));
         let transfer_watcher =
             TransferWatcher::spawn(service.clone(), views.clone(), config.node_id);
 
@@ -117,6 +121,7 @@ impl PicoNode {
             engine,
             service,
             ownership,
+            tokens,
             transfer_watcher,
         })
     }
@@ -131,6 +136,14 @@ impl PicoNode {
 
     pub fn ownership(&self) -> Arc<MetadataOwnershipService> {
         self.ownership.clone()
+    }
+
+    pub fn tokens(&self) -> Arc<TokenService> {
+        self.tokens.clone()
+    }
+
+    pub fn authorizer(&self) -> Arc<Authorizer> {
+        self.tokens.authorizer()
     }
 
     pub fn advertised_address(&self) -> &str {

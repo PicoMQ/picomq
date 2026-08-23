@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 pico-server = { workspace = true }
 pico-common = { workspace = true }
+pico-auth = { workspace = true }
 pico-metadata = { workspace = true }
 s3stream = { workspace = true }
 axum = { workspace = true, features = ["http2"] }

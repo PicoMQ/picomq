@@ -126,6 +126,18 @@ impl crate::api::KVClient for MemoryKvClient {
         Ok(self.map.lock().expect("kv poisoned").remove(key))
     }
 
+    async fn del_kv_if(
+        &self,
+        key: &str,
+        expected: &bytes::Bytes,
+    ) -> Result<Option<bytes::Bytes>, StreamError> {
+        let mut map = self.map.lock().expect("kv poisoned");
+        match map.get(key) {
+            Some(current) if current == expected => Ok(map.remove(key)),
+            _ => Ok(None),
+        }
+    }
+
     async fn list_kv(&self, prefix: &str) -> Result<Vec<crate::api::KeyValue>, StreamError> {
         let map = self.map.lock().expect("kv poisoned");
         let mut entries: Vec<crate::api::KeyValue> = map

@@ -436,6 +436,25 @@ impl KVClient for MetadataKvClient {
         }
     }
 
+    async fn del_kv_if(&self, key: &str, expected: &Bytes) -> Result<Option<Bytes>, StreamError> {
+        let proposed = self
+            .node
+            .sink
+            .propose(MetadataCommand::DeleteKvIfMatches {
+                key: key.to_owned(),
+                expected: expected.clone(),
+            })
+            .await;
+        match proposed {
+            Ok(p) => match p.result {
+                MetadataResult::Value(value) => Ok(value),
+                other => Err(unexpected_result(other)),
+            },
+            Err(e) if e.is_redundant() => Ok(None),
+            Err(e) => Err(e.to_stream_error()),
+        }
+    }
+
     async fn list_kv(&self, prefix: &str) -> Result<Vec<KeyValue>, StreamError> {
         Ok(self
             .node

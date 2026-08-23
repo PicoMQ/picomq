@@ -28,6 +28,9 @@ pub struct ClientConfig {
     /// speak it, and an HTTP/1.1-only server or proxy will simply fail.
     pub http2: bool,
     pub retry: RetryPolicy,
+    /// Bearer token (wire form) sent on every request, including each
+    /// redirect hop.
+    pub token: Option<String>,
 }
 
 /// Open a client for `protocol` against `endpoint`, HTTP/1.1 and no retries.
@@ -48,15 +51,26 @@ pub fn connect_with(
     })
 }
 
-/// `followRedirects(NORMAL)` (307s to the owning node).
+/// Automatic redirects are off: reqwest strips the Authorization header when
+/// a 307 to the owning node crosses origins. The clients follow redirects
+/// themselves (see `pico::send`), keeping the credential on every hop.
 pub fn http_client(config: &ClientConfig) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(65));
+        .timeout(std::time::Duration::from_secs(65))
+        .redirect(reqwest::redirect::Policy::none());
     if config.http2 {
         // Cleartext HTTP/2 has no ALPN to negotiate with, so the client has to
         // assume the server speaks it.
         builder = builder.http2_prior_knowledge();
+    }
+    if let Some(token) = &config.token {
+        let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| ClientError::transport("token is not a valid header value"))?;
+        value.set_sensitive(true);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+        builder = builder.default_headers(headers);
     }
     builder.build().map_err(ClientError::from)
 }

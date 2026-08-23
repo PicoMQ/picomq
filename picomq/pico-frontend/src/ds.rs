@@ -22,6 +22,7 @@ use serde_json::{json, Map, Value};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
+use pico_auth::{Audience, Authorizer};
 use pico_server::framing::{is_json, mime_of};
 use pico_server::ownership::OwnershipService;
 use pico_server::types::Producer;
@@ -61,6 +62,7 @@ const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub struct DsFrontend {
     service: Arc<S3StreamService>,
     ownership: Arc<dyn OwnershipService>,
+    authorizer: Option<Arc<Authorizer>>,
     mode: RoutingMode,
     long_poll_timeout: Duration,
     sse_max_duration: Duration,
@@ -94,6 +96,7 @@ impl DsFrontend {
         Self {
             service,
             ownership,
+            authorizer: None,
             mode,
             long_poll_timeout,
             sse_max_duration,
@@ -103,6 +106,12 @@ impl DsFrontend {
                 64 * 1024
             },
         }
+    }
+
+    /// `None` disables the gate; requests pass through unauthenticated.
+    pub fn with_authorizer(mut self, authorizer: Option<Arc<Authorizer>>) -> Self {
+        self.authorizer = authorizer;
+        self
     }
 
     pub fn router(self: Arc<Self>) -> Router {
@@ -115,11 +124,28 @@ async fn dispatch(
     request: axum::extract::Request,
 ) -> Response {
     let (parts, body) = request.into_parts();
+    let permit = match crate::auth::gate(
+        frontend.authorizer.as_deref(),
+        Audience::DurableStreams,
+        &parts.method,
+        &parts.uri,
+        &parts.headers,
+    )
+    .await
+    {
+        Ok(permit) => permit,
+        Err(response) => return *response,
+    };
+    let name = match permit {
+        Some(permit) => permit.stream_name,
+        None => stream_name(&parts.uri),
+    };
     if let Some(response) = route(
         frontend.ownership.as_ref(),
         frontend.mode,
         &parts.method,
         &parts.uri,
+        &name,
     )
     .await
     {
@@ -130,22 +156,29 @@ async fn dispatch(
         Err(_) => return fail(413, "content too large"),
     };
     frontend
-        .handle(parts.method, parts.uri, parts.headers, body)
+        .handle(parts.method, parts.uri, parts.headers, body, name)
         .await
 }
 
 impl DsFrontend {
-    async fn handle(&self, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
+    async fn handle(
+        &self,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+        body: Bytes,
+        name: String,
+    ) -> Response {
         let result = match method {
             Method::OPTIONS => Ok(options()),
-            Method::PUT => self.put(&uri, &headers, body).await,
-            Method::POST => self.post(&uri, &headers, body).await,
-            Method::DELETE => match self.service.delete(&stream_name(&uri)).await {
+            Method::PUT => self.put(&uri, &headers, body, name).await,
+            Method::POST => self.post(&uri, &headers, body, name).await,
+            Method::DELETE => match self.service.delete(&name).await {
                 Ok(deleted) => Ok(respond(if deleted { 204 } else { 404 }, None, false)),
                 Err(e) => Err(e),
             },
-            Method::HEAD => self.head(&uri).await,
-            Method::GET => self.get(&uri, &headers).await,
+            Method::HEAD => self.head(&name).await,
+            Method::GET => self.get(&uri, &headers, &name).await,
             _ => Ok(fail(405, "method not allowed")),
         };
         result.unwrap_or_else(service_error_response)
@@ -156,8 +189,8 @@ impl DsFrontend {
         uri: &Uri,
         headers: &HeaderMap,
         body: Bytes,
+        name: String,
     ) -> Result<Response, ServiceError> {
-        let name = stream_name(uri);
         let ttl_seconds = parse_strict_u64_header(headers, H_STREAM_TTL, "invalid Stream-TTL")?;
         let expires_at_ms =
             parse_instant_header(headers, H_STREAM_EXPIRES_AT, "invalid Stream-Expires-At")?;
@@ -200,11 +233,11 @@ impl DsFrontend {
 
     async fn post(
         &self,
-        uri: &Uri,
+        _uri: &Uri,
         headers: &HeaderMap,
         body: Bytes,
+        name: String,
     ) -> Result<Response, ServiceError> {
-        let name = stream_name(uri);
         let close = truthy(headers, H_STREAM_CLOSED);
         let producer = producer_of(headers)?;
         let has_producer = producer.is_some();
@@ -256,8 +289,8 @@ impl DsFrontend {
         Ok(response)
     }
 
-    async fn head(&self, uri: &Uri) -> Result<Response, ServiceError> {
-        let Some(meta) = self.service.head(&stream_name(uri)).await? else {
+    async fn head(&self, name: &str) -> Result<Response, ServiceError> {
+        let Some(meta) = self.service.head(name).await? else {
             return Ok(respond(404, None, false));
         };
         let mut response = respond(200, Some(&meta.next_offset), meta.closed);
@@ -279,15 +312,19 @@ impl DsFrontend {
         Ok(response)
     }
 
-    async fn get(&self, uri: &Uri, headers: &HeaderMap) -> Result<Response, ServiceError> {
-        let name = stream_name(uri);
+    async fn get(
+        &self,
+        uri: &Uri,
+        headers: &HeaderMap,
+        name: &str,
+    ) -> Result<Response, ServiceError> {
         let live = query_param(uri, "live").filter(|v| !v.is_empty());
         let offset_raw = query_param(uri, "offset");
         let offset_now = offset_raw
             .as_deref()
             .is_some_and(|raw| raw.eq_ignore_ascii_case("now"));
         let offset = self
-            .parse_offset(&name, offset_raw.as_deref(), live.is_some())
+            .parse_offset(name, offset_raw.as_deref(), live.is_some())
             .await?;
         let cursor_raw = query_param(uri, "cursor");
 
@@ -295,15 +332,15 @@ impl DsFrontend {
             None => {
                 let out = self
                     .service
-                    .read(&name, offset, self.max_chunk_size, 0)
+                    .read(name, offset, self.max_chunk_size, 0)
                     .await?;
-                self.write_read(headers, &name, offset, out, false, offset_now)
+                self.write_read(headers, name, offset, out, false, offset_now)
             }
             Some("long-poll") => {
-                self.long_poll(headers, &name, offset, cursor_raw.as_deref())
+                self.long_poll(headers, name, offset, cursor_raw.as_deref())
                     .await
             }
-            Some("sse") => self.sse(&name, offset, cursor_raw.as_deref()).await,
+            Some("sse") => self.sse(name, offset, cursor_raw.as_deref()).await,
             Some(_) => Err(bad_request("invalid live mode")),
         }
     }
@@ -627,7 +664,7 @@ fn respond(status: u16, next: Option<&OffsetToken>, closed: bool) -> Response {
     response
 }
 
-fn fail(status: u16, message: &str) -> Response {
+pub(crate) fn fail(status: u16, message: &str) -> Response {
     let mut response = base_response(status);
     set_header(&mut response, header::CONTENT_TYPE.as_str(), CT_TEXT);
     set_header(&mut response, header::CACHE_CONTROL.as_str(), "no-store");

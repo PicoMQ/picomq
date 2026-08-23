@@ -11,6 +11,7 @@ repository.workspace = true
 s3stream = { workspace = true }
 pico-metadata = { workspace = true }
 pico-common = { workspace = true }
+pico-auth = { workspace = true }
 
 async-trait = { workspace = true }
 bytes = { workspace = true }

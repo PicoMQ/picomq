@@ -1,6 +1,7 @@
 //! HTTP frontends: Pico protocol and Durable Streams, plus admin and bind/shutdown.
 
 pub mod admin;
+mod auth;
 pub mod ds;
 pub mod envelope;
 mod http;
@@ -10,6 +11,7 @@ pub mod serve;
 pub mod timestamps;
 
 pub use admin::AdminState;
+pub use auth::{gate, Permit};
 pub use ds::DsFrontend;
 pub use pico::PicoFrontend;
 pub use route::RoutingMode;

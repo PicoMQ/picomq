@@ -20,23 +20,24 @@ pub enum RoutingMode {
 }
 
 /// Decide whether this request is served here. `Some(response)` short-circuits
-/// (redirect or routing error).`None` means handle locally.
+/// (redirect or routing error).`None` means handle locally. Ownership is by
+/// the stored `name`. The redirect location is from the original URI.
 pub async fn route(
     ownership: &dyn OwnershipService,
     mode: RoutingMode,
     method: &Method,
     uri: &Uri,
+    name: &str,
 ) -> Option<Response> {
-    let name = stream_name(uri);
     if mode == RoutingMode::LocalAlways
-        || name == "/"
+        || stream_name(uri) == "/"
         || *method == Method::PUT
         || *method == Method::OPTIONS
     {
         return None;
     }
 
-    let owner = match ownership.owner_of(&name).await {
+    let owner = match ownership.owner_of(name).await {
         Ok(owner) => owner,
         Err(e) => return Some(routing_error(&e.message)),
     };

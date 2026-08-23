@@ -8,11 +8,12 @@
 //! `--topo` / `ClusterConfig` files are not ported.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use pico_frontend::{Protocol, RoutingMode};
-use pico_runtime::{MetaBackend, ServerConfig};
+use pico_runtime::{AuthMode, MetaBackend, ServerConfig};
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {
@@ -92,6 +93,33 @@ pub struct ServeArgs {
     /// Upload buffered WAL this often even below the threshold. 0 disables it.
     #[arg(long)]
     wal_upload_interval_ms: Option<u64>,
+
+    /// `off` leaves requests open and refuses non-loopback binds.
+    #[arg(long, value_enum, env = "PICO_AUTH", default_value_t = AuthArg::Off)]
+    auth: AuthArg,
+
+    /// Permit non-loopback binds with auth off.
+    #[arg(long, env = "PICO_INSECURE_ALLOW_REMOTE")]
+    insecure_allow_remote: bool,
+
+    /// Root token (wire form) seeded at startup. Idempotent across restarts,
+    /// a different stored token under the same id fails startup.
+    #[arg(long, env = "PICO_AUTH_BOOTSTRAP_TOKEN")]
+    auth_bootstrap_token: Option<String>,
+
+    /// Read the bootstrap token from this file instead.
+    #[arg(
+        long,
+        env = "PICO_AUTH_BOOTSTRAP_TOKEN_FILE",
+        conflicts_with = "auth_bootstrap_token"
+    )]
+    auth_bootstrap_token_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum AuthArg {
+    Off,
+    Required,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -121,6 +149,18 @@ impl ServeArgs {
             engine.wal_upload_interval_ms = interval;
         }
 
+        let bootstrap_token = match (self.auth_bootstrap_token, self.auth_bootstrap_token_file) {
+            (token @ Some(_), None) => token,
+            (None, Some(path)) => Some(
+                std::fs::read_to_string(&path)
+                    .map_err(|e| format!("read bootstrap token file {}: {e}", path.display()))?
+                    .trim()
+                    .to_owned(),
+            ),
+            (None, None) => None,
+            (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
+        };
+
         Ok(ServerConfig {
             node_id: self.node_id,
             node_epoch: self.node_epoch.unwrap_or(defaults.node_epoch),
@@ -142,6 +182,12 @@ impl ServeArgs {
             max_chunk_size: self.max_chunk_size,
             shutdown_drain: Duration::from_secs(self.shutdown_drain_sec),
             backlog: self.backlog,
+            auth_mode: match self.auth {
+                AuthArg::Off => AuthMode::Off,
+                AuthArg::Required => AuthMode::Required,
+            },
+            insecure_allow_remote: self.insecure_allow_remote,
+            bootstrap_token,
             engine,
         })
     }

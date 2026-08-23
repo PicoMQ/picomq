@@ -16,6 +16,8 @@ A request for a stream owned by another node returns `307` with the owner's addr
 
 `message` and `next_seq` appear when they help. Unknown streams return `404`, malformed requests `400`, and ownership conflicts `409`.
 
+With auth required, every request sends `Authorization: Bearer <token>`. A missing or invalid credential is `401` with a `WWW-Authenticate: Bearer` challenge, and a valid credential with insufficient scope is `403`. Standard HTTP clients drop `Authorization` on cross-origin redirects and ownership redirects cross origins, so clients must follow `307`s themselves and re-attach the credential, which is what `pico-client` and the CLI do. See [Authorization](/docs/design/auth) for the scope model.
+
 ## Create
 
 ```
@@ -103,8 +105,8 @@ Lists streams as JSON. `prefix` filters by name prefix, `limit` caps the page, a
 
 ## Admin API
 
-Admin endpoints and the dashboard are covered in [Admin API and dashboard](/docs/operations/admin). The OpenAPI spec includes them as well.
+Admin endpoints, the token control plane (`/admin/tokens`), and the dashboard are covered in [Admin API and dashboard](/docs/operations/admin) and [Authentication](/docs/operations/auth). The OpenAPI spec includes them as well.
 
 ## Durable Streams
 
-A listener started with `--protocol ds` speaks the Durable Streams open protocol on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers, raw record bodies, and one record per append. Streams created through either protocol are readable through both.
+A listener started with `--protocol ds` speaks the Durable Streams open protocol on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers, raw record bodies, and one record per append. Streams created through either protocol are readable through both. Auth rejections on this listener are plain text `401`/`403` with no headers beyond the spec's own, so producer fencing (`403` with `Producer-Epoch`) stays distinguishable from a scope denial.

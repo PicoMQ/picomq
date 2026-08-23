@@ -14,7 +14,7 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::{Method, Response, StatusCode};
 
 use crate::error::{ClientError, ErrorKind, Result};
-use crate::pico::{default_http, header, truthy, urlencode};
+use crate::pico::{default_http, header, send, truthy, urlencode};
 use crate::retry::RetryPolicy;
 use crate::types::{
     AppendAck, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo, StreamListing,
@@ -56,11 +56,8 @@ impl DsClient {
     }
 
     async fn head_once(&self, name: &str) -> Result<Option<StreamInfo>> {
-        let response = self
-            .http
-            .request(Method::HEAD, self.url(name, ""))
-            .send()
-            .await?;
+        let request = self.http.request(Method::HEAD, self.url(name, ""));
+        let response = send(&self.http, request).await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -93,7 +90,7 @@ impl DsClient {
         if live == Live::LongPoll {
             query.push_str("&live=long-poll");
         }
-        let response = self.http.get(self.url(name, &query)).send().await?;
+        let response = send(&self.http, self.http.get(self.url(name, &query))).await?;
         let response = expect(response, &[200, 204]).await?;
 
         let next = header(&response, H_STREAM_NEXT_OFFSET).unwrap_or_else(|| from.to_owned());
@@ -150,7 +147,7 @@ impl StreamApi for DsClient {
         if let Some(ttl) = ttl_seconds {
             request = request.header(H_STREAM_TTL, ttl.to_string());
         }
-        let response = expect(request.send().await?, &[200, 201]).await?;
+        let response = expect(send(&self.http, request).await?, &[200, 201]).await?;
         Ok(response.status() == StatusCode::CREATED)
     }
 
@@ -165,13 +162,12 @@ impl StreamApi for DsClient {
                 records.len()
             )));
         };
-        let response = self
+        let request = self
             .http
             .post(self.url(name, ""))
             .header(CONTENT_TYPE, content_type)
-            .body(body.clone())
-            .send()
-            .await?;
+            .body(body.clone());
+        let response = send(&self.http, request).await?;
         let response = expect(response, &[200, 204]).await?;
         let next = header(&response, H_STREAM_NEXT_OFFSET).unwrap_or_default();
         Ok(AppendAck {
@@ -201,18 +197,17 @@ impl StreamApi for DsClient {
     }
 
     async fn close(&self, name: &str) -> Result<String> {
-        let response = self
+        let request = self
             .http
             .post(self.url(name, ""))
-            .header(H_STREAM_CLOSED, "true")
-            .send()
-            .await?;
+            .header(H_STREAM_CLOSED, "true");
+        let response = send(&self.http, request).await?;
         let response = expect(response, &[200, 204]).await?;
         Ok(header(&response, H_STREAM_NEXT_OFFSET).unwrap_or_default())
     }
 
     async fn delete(&self, name: &str) -> Result<bool> {
-        let response = self.http.delete(self.url(name, "")).send().await?;
+        let response = send(&self.http, self.http.delete(self.url(name, ""))).await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(false);
         }
@@ -236,7 +231,11 @@ async fn expect(response: Response, expected: &[u16]) -> Result<Response> {
 
     let (kind, code) = match status {
         400 => (ErrorKind::BadRequest, "bad_request"),
-        403 => (ErrorKind::StaleEpoch, "stale_epoch"),
+        401 => (ErrorKind::Unauthenticated, "unauthenticated"),
+        // DS has no error codes. A fencing 403 carries Producer-Epoch, an
+        // auth 403 never does.
+        403 if epoch.is_some() => (ErrorKind::StaleEpoch, "stale_epoch"),
+        403 => (ErrorKind::PermissionDenied, "permission_denied"),
         404 => (ErrorKind::NotFound, "not_found"),
         409 if closed => (ErrorKind::Closed, "closed"),
         409 if expected_seq.is_some() || received_seq.is_some() => {
