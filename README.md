@@ -1,6 +1,7 @@
 # PicoMQ
 
-PicoMQ is durable, real-time streams over HTTP, built on S3-compatible object storage. Docs: https://picomq.com/docs/
+PicoMQ is durable, real-time streams over HTTP, built on S3-compatible object storage.
+[Documentation](https://picomq.com/docs/) · [Quick start](https://picomq.com/docs/quick-start) · [Playground](https://picomq.com/docs/playground)
 
 - **`s3stream/`** the stream engine (see [s3stream/README.md](s3stream/README.md))
 - **`picomq/`** the host: metadata plane, server, HTTP frontends (Pico protocol and Durable Streams), client, and the `pico` CLI
