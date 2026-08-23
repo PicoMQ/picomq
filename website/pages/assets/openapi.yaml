@@ -5,7 +5,8 @@ info:
   description: >
     The Pico protocol, PicoMQ's native HTTP API, plus the admin API served by
     each node's admin listener. A stream is addressed by its path. Requests for
-    a stream owned by another node return 307 with the owner's address.
+    a stream owned by another node return 307 with the owner's address. With
+    auth required, send `Authorization: Bearer <token>` (probes stay open).
 servers:
   - url: http://127.0.0.1:4437
     description: Protocol listener
@@ -15,6 +16,11 @@ tags:
     description: The Pico protocol.
   - name: admin
     description: Admin listener endpoints (default port 9090).
+  - name: tokens
+    description: Token control plane on the admin listener.
+
+security:
+  - BearerAuth: []
 
 paths:
   /:
@@ -41,6 +47,10 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StreamList" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /{stream}:
     parameters:
@@ -83,6 +93,10 @@ paths:
           description: Already exists with the same content type.
           headers:
             Pico-Next-Seq: { $ref: "#/components/headers/NextSeq" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           description: Exists with a different content type.
           content:
@@ -139,6 +153,10 @@ paths:
             Pico-Timestamp:
               description: Timestamp assigned to the records.
               schema: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           description: Producer conflict or sealed stream.
           headers:
@@ -210,6 +228,10 @@ paths:
           description: Long poll timed out with no new records.
         "304":
           description: Nothing new since the ETag in If-None-Match.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
     head:
       tags: [streams]
       summary: Stream metadata
@@ -227,6 +249,10 @@ paths:
               schema: { type: string }
             Pico-Closed:
               schema: { type: boolean }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: No such stream.
     delete:
@@ -236,6 +262,10 @@ paths:
       responses:
         "204":
           description: Deleted. The name is immediately reusable.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: No such stream.
 
@@ -244,6 +274,7 @@ paths:
       tags: [admin]
       summary: Liveness
       servers: [{ url: "http://127.0.0.1:9090" }]
+      security: []
       responses:
         "200":
           description: The process is up.
@@ -252,6 +283,7 @@ paths:
       tags: [admin]
       summary: Readiness
       servers: [{ url: "http://127.0.0.1:9090" }]
+      security: []
       responses:
         "200":
           description: Serving and registered in the metadata state.
@@ -278,6 +310,10 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Cluster" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
   /admin/nodes:
     get:
       tags: [admin]
@@ -294,6 +330,10 @@ paths:
                   nodes:
                     type: array
                     items: { $ref: "#/components/schemas/Node" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
   /admin/streams/{stream}:
     get:
       tags: [admin]
@@ -307,6 +347,10 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StreamDetail" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
         "404":
           description: No such stream.
   /admin/transfer:
@@ -341,6 +385,10 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
   /admin/nodes/{id}:
     post:
       tags: [admin]
@@ -366,10 +414,89 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Node" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
         "404":
           description: No such node.
+  /admin/tokens:
+    get:
+      tags: [tokens]
+      summary: List tokens
+      servers: [{ url: "http://127.0.0.1:9090" }]
+      responses:
+        "200":
+          description: Records visible to the caller. Secrets are never returned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenList" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+    post:
+      tags: [tokens]
+      summary: Issue a token
+      servers: [{ url: "http://127.0.0.1:9090" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IssueTokenRequest" }
+      responses:
+        "201":
+          description: Issued. The wire token appears once.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssueTokenResponse" }
+        "400":
+          description: Invalid id or scope.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminError" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "409":
+          description: Token id already exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminError" }
+  /admin/tokens/{id}:
+    delete:
+      tags: [tokens]
+      summary: Revoke a token
+      servers: [{ url: "http://127.0.0.1:9090" }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Revoked.
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          description: No such token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminError" }
+        "409":
+          description: Token changed concurrently.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminError" }
 
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
   parameters:
     Stream:
       name: stream
@@ -381,6 +508,33 @@ components:
     NextSeq:
       description: The stream's next sequence. Pass as `seq` to resume.
       schema: { type: integer }
+  responses:
+    Unauthenticated:
+      description: Missing or invalid credential.
+      headers:
+        WWW-Authenticate:
+          schema: { type: string, enum: [Bearer] }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Valid credential, insufficient scope (or producer fencing on append).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    AdminUnauthenticated:
+      description: Missing or invalid credential.
+      headers:
+        WWW-Authenticate:
+          schema: { type: string, enum: [Bearer] }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/AdminError" }
+    AdminForbidden:
+      description: Valid credential, insufficient scope.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/AdminError" }
   schemas:
     Error:
       type: object
@@ -389,6 +543,11 @@ components:
         error: { type: string }
         message: { type: string }
         next_seq: { type: integer }
+    AdminError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
     JsonBatch:
       type: object
       required: [records]
@@ -495,3 +654,87 @@ components:
           properties:
             fromNode: { type: integer }
             toNode: { type: integer }
+    ResourceMatcher:
+      type: object
+      oneOf:
+        - required: [exact]
+          properties:
+            exact: { type: string }
+        - required: [prefix]
+          properties:
+            prefix: { type: string }
+    ReadWrite:
+      type: object
+      properties:
+        read: { type: boolean }
+        write: { type: boolean }
+    Scope:
+      type: object
+      properties:
+        streams:
+          type: array
+          items: { $ref: "#/components/schemas/ResourceMatcher" }
+        tokens:
+          type: array
+          items: { $ref: "#/components/schemas/ResourceMatcher" }
+        groups:
+          type: object
+          properties:
+            stream: { $ref: "#/components/schemas/ReadWrite" }
+            tokens: { $ref: "#/components/schemas/ReadWrite" }
+            admin: { $ref: "#/components/schemas/ReadWrite" }
+        ops:
+          type: array
+          items:
+            type: string
+            enum:
+              [
+                read,
+                head,
+                list,
+                create,
+                append,
+                trim,
+                close,
+                delete,
+                issue_token,
+                revoke_token,
+                list_tokens,
+                cluster_read,
+                node_read,
+                stream_inspect,
+                transfer_stream,
+                update_node_slots,
+              ]
+        audiences:
+          type: array
+          items: { type: string, enum: [pico, durable_streams, admin] }
+        autoPrefixStreams: { type: boolean }
+        expiresAtMs: { type: [integer, "null"] }
+    TokenRecord:
+      type: object
+      properties:
+        id: { type: string }
+        scope: { $ref: "#/components/schemas/Scope" }
+        createdAtMs: { type: integer }
+        issuedBy: { type: string }
+    TokenList:
+      type: object
+      properties:
+        count: { type: integer }
+        tokens:
+          type: array
+          items: { $ref: "#/components/schemas/TokenRecord" }
+    IssueTokenRequest:
+      type: object
+      required: [id, scope]
+      properties:
+        id: { type: string }
+        scope: { $ref: "#/components/schemas/Scope" }
+    IssueTokenResponse:
+      type: object
+      properties:
+        id: { type: string }
+        token: { type: string }
+        scope: { $ref: "#/components/schemas/Scope" }
+        createdAtMs: { type: integer }

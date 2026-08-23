@@ -1,8 +1,8 @@
-# picomq
+# PicoMQ
 
-PicoMQ is durable, real-time streams over HTTP, built on S3-compatible object storage.
+PicoMQ is durable, real-time streams over HTTP, built on S3-compatible object storage. Docs: https://picomq.com/docs/
 
-- **`s3stream/`** the stream engine (see `s3stream/README.md`)
+- **`s3stream/`** the stream engine (see [s3stream/README.md](s3stream/README.md))
 - **`picomq/`** the host: metadata plane, server, HTTP frontends (Pico protocol and Durable Streams), client, and the `pico` CLI
 
 ## Install
@@ -22,7 +22,7 @@ pico serve \
     --storage '-2@file://./objects'
 ```
 
-Every flag has a `PICO_*` env equivalent. `/health` and `/ready` are on `--admin-listen` (default `127.0.0.1:9090`).
+Every flag has a `PICO_*` env equivalent. `/health` and `/ready` are on `--admin-listen` (default `127.0.0.1:9090`). Auth is off by default, non-loopback binds need `--auth required` or `--insecure-allow-remote`.
 
 ## Docker
 
@@ -37,7 +37,8 @@ docker compose -f compose.cluster.yml up --build   # same stack, 2 nodes
 docker compose -f compose.lite.yml up --build      # SQLite + file://, no deps
 ```
 
-Pico: `http://localhost:4437` (cluster also `:4438`). Dashboard: `:9090`. `harness/byo` is the same against an existing Postgres and object store, configured through `.env`.
+Pico: `http://localhost:4437` (cluster also `:4438`). Dashboard: `:9090`. 
+`harness/byo` is the same against an existing Postgres and object store, configured through `.env`.
 
 ## Use it
 
