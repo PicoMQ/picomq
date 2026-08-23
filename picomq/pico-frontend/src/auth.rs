@@ -26,7 +26,7 @@ pub async fn gate(
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
-) -> Result<Option<Permit>, Response> {
+) -> Result<Option<Permit>, Box<Response>> {
     let Some(ops) = classify(audience, method, uri, headers) else {
         return Ok(None);
     };
@@ -39,14 +39,14 @@ pub async fn gate(
             authorizer
                 .authenticate(credential, audience, now_ms)
                 .await
-                .map_err(|err| reject(audience, err))?,
+                .map_err(|err| Box::new(reject(audience, err)))?,
             false,
         ),
         None => (
             authorizer
                 .authenticate_anonymous(audience, now_ms)
                 .await
-                .map_err(|err| reject(audience, err))?,
+                .map_err(|err| Box::new(reject(audience, err)))?,
             true,
         ),
     };
@@ -59,11 +59,11 @@ pub async fn gate(
     let client_name = auth_resource(audience, uri);
     let stored = authorizer
         .resolve_stream_name(&principal, &client_name)
-        .map_err(|err| reject(audience, demote(err)))?;
+        .map_err(|err| Box::new(reject(audience, demote(err))))?;
     for op in ops {
         authorizer
             .authorize(&principal, op, Some(&stored))
-            .map_err(|err| reject(audience, demote(err)))?;
+            .map_err(|err| Box::new(reject(audience, demote(err))))?;
     }
     Ok(Some(Permit {
         principal,

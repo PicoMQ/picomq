@@ -135,7 +135,7 @@ async fn gate(
     headers: &HeaderMap,
     op: Operation,
     resource: Option<&str>,
-) -> Result<Option<AuthPrincipal>, Response> {
+) -> Result<Option<AuthPrincipal>, Box<Response>> {
     let principal = authenticate(state, headers).await?;
     if let Some(principal) = &principal {
         state
@@ -143,7 +143,7 @@ async fn gate(
             .as_ref()
             .expect("principal implies authorizer")
             .authorize(principal, op, resource)
-            .map_err(|err| auth_error(&err))?;
+            .map_err(|err| Box::new(auth_error(&err)))?;
     }
     Ok(principal)
 }
@@ -151,19 +151,19 @@ async fn gate(
 async fn authenticate(
     state: &AdminState,
     headers: &HeaderMap,
-) -> Result<Option<AuthPrincipal>, Response> {
+) -> Result<Option<AuthPrincipal>, Box<Response>> {
     let Some(authorizer) = &state.authorizer else {
         return Ok(None);
     };
     let credential = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| auth_error(&AuthError::Unauthenticated))?;
+        .ok_or_else(|| Box::new(auth_error(&AuthError::Unauthenticated)))?;
     authorizer
         .authenticate(credential, Audience::Admin, pico_common::now_ms())
         .await
         .map(Some)
-        .map_err(|err| auth_error(&err))
+        .map_err(|err| Box::new(auth_error(&err)))
 }
 
 fn auth_error(err: &AuthError) -> Response {
@@ -245,7 +245,7 @@ async fn ready(State(state): State<AdminState>) -> Response {
 
 async fn cluster(State(state): State<AdminState>, headers: HeaderMap) -> Response {
     if let Err(response) = gate(&state, &headers, Operation::ClusterRead, None).await {
-        return response;
+        return *response;
     }
     let config = state.node.config();
     let view = state.node.views().load();
@@ -267,7 +267,7 @@ async fn cluster(State(state): State<AdminState>, headers: HeaderMap) -> Respons
 
 async fn nodes(State(state): State<AdminState>, headers: HeaderMap) -> Response {
     if let Err(response) = gate(&state, &headers, Operation::NodeRead, None).await {
-        return response;
+        return *response;
     }
     let local_id = state.node.config().node_id;
     let view = state.node.views().load();
@@ -288,7 +288,7 @@ async fn stream(
     headers: HeaderMap,
 ) -> Response {
     if let Err(response) = gate(&state, &headers, Operation::StreamInspect, None).await {
-        return response;
+        return *response;
     }
     let name = format!("/{name}");
     let view = state.node.views().load();
@@ -349,7 +349,7 @@ async fn transfer(
     Json(body): Json<Value>,
 ) -> Response {
     if let Err(response) = gate(&state, &headers, Operation::TransferStream, None).await {
-        return response;
+        return *response;
     }
     let Some(name) = body.get("stream").and_then(Value::as_str) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"stream\"");
@@ -381,7 +381,7 @@ async fn update_node(
     Json(body): Json<Value>,
 ) -> Response {
     if let Err(response) = gate(&state, &headers, Operation::UpdateNodeSlots, None).await {
-        return response;
+        return *response;
     }
     let Some(slots) = body.get("slots").and_then(Value::as_u64) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"slots\"");
@@ -419,7 +419,7 @@ async fn update_node(
 async fn list_tokens(State(state): State<AdminState>, headers: HeaderMap) -> Response {
     let principal = match authenticate(&state, &headers).await {
         Ok(principal) => principal,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if let Some(principal) = &principal {
         if !principal.scope.allows_operation(Operation::ListTokens) {
@@ -451,7 +451,7 @@ async fn issue_token(
 ) -> Response {
     let principal = match authenticate(&state, &headers).await {
         Ok(principal) => principal,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(id) = body.get("id").and_then(Value::as_str) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"id\"");
@@ -525,7 +525,7 @@ async fn revoke_token(
     headers: HeaderMap,
 ) -> Response {
     if let Err(response) = gate(&state, &headers, Operation::RevokeToken, Some(&id)).await {
-        return response;
+        return *response;
     }
     let store = state.node.tokens().store();
     let record = match store.get(&id).await {

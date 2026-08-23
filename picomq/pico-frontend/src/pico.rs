@@ -149,7 +149,7 @@ async fn dispatch(
     .await
     {
         Ok(permit) => permit,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let name = match &permit {
         Some(permit) => permit.stream_name.clone(),
