@@ -112,14 +112,24 @@ html {
   border-bottom: none;
 }
 
-.VPNavBar:not(.has-sidebar) .wrapper {
-  padding-left: var(--pico-content-pad) !important;
-  padding-right: var(--pico-content-pad) !important;
+/* Shared nav edge inset — home and docs use the same horizontal rhythm. */
+:root {
+  --pico-nav-edge: 24px;
 }
 
-.VPNavBar:not(.has-sidebar) .container {
-  max-width: var(--pico-content-max) !important;
-  width: 100%;
+@media (min-width: 768px) {
+  :root {
+    --pico-nav-edge: 32px;
+  }
+}
+
+@media (min-width: 1440px) {
+  :root {
+    --pico-nav-edge: max(
+      32px,
+      calc((100vw - (var(--vp-layout-max-width) - 64px)) / 2)
+    );
+  }
 }
 
 .VPNavBar:not(.has-sidebar) .container > .title {
@@ -134,12 +144,12 @@ html {
 }
 
 @media (min-width: 960px) {
-  .VPNavBar.has-sidebar .wrapper {
-    padding-right: 32px !important;
-    padding-left: 32px !important;
+  .VPNavBar .wrapper {
+    padding-right: var(--pico-nav-edge) !important;
+    padding-left: var(--pico-nav-edge) !important;
   }
 
-  .VPNavBar.has-sidebar .container {
+  .VPNavBar .container {
     max-width: none !important;
   }
 
@@ -168,19 +178,6 @@ html {
   }
 }
 
-@media (min-width: 1440px) {
-  .VPNavBar.has-sidebar .wrapper {
-    padding-right: max(
-      32px,
-      calc((100vw - (var(--vp-layout-max-width) - 64px)) / 2)
-    ) !important;
-    padding-left: max(
-      32px,
-      calc((100vw - (var(--vp-layout-max-width) - 64px)) / 2)
-    ) !important;
-  }
-}
-
 .VPHome,
 .VPContent.is-home {
   overflow: visible;
@@ -188,6 +185,118 @@ html {
 
 .VPHome {
   position: relative;
+}
+
+/* Picidae plate: fixed right-side page background, flush with the
+   nav/content column edge (same vertical line as the GitHub link). */
+:root {
+  --pico-bird-w: min(52vw, 36rem);
+  --pico-bird-h: calc(100vh - var(--vp-nav-height) + 4rem);
+}
+
+.VPHome::before,
+.VPHome::after {
+  content: "";
+  position: fixed;
+  z-index: 0;
+  pointer-events: none;
+  top: var(--vp-nav-height);
+  right: var(--pico-nav-edge);
+  width: var(--pico-bird-w);
+  height: var(--pico-bird-h);
+  background-image: url("/images/picidae.webp");
+  background-repeat: no-repeat;
+  background-position: right top;
+  background-size: contain;
+}
+
+/* Base plate — same edge fade as before. */
+.VPHome::before {
+  opacity: 0.55;
+  -webkit-mask-image: linear-gradient(
+    to left,
+    #000 0%,
+    #000 48%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(to left, #000 0%, #000 48%, transparent 100%);
+}
+
+/* Extra weight on the bird only — edges stay at the base plate above. */
+.VPHome::after {
+  opacity: 0.45;
+  -webkit-mask-image: radial-gradient(
+    ellipse 48% 58% at 38% 40%,
+    #000 0%,
+    #000 40%,
+    rgb(0 0 0 / 0.4) 68%,
+    transparent 100%
+  );
+  mask-image: radial-gradient(
+    ellipse 48% 58% at 38% 40%,
+    #000 0%,
+    #000 40%,
+    rgb(0 0 0 / 0.4) 68%,
+    transparent 100%
+  );
+}
+
+@media (max-width: 959px) {
+  :root {
+    --pico-bird-w: min(58vw, 22rem);
+    --pico-bird-h: calc(100vh - var(--vp-nav-height) + 2rem);
+  }
+
+  .VPHome::before {
+    opacity: 0.28;
+  }
+
+  .VPHome::after {
+    opacity: 0.2;
+  }
+}
+
+@media (max-width: 639px) {
+  .VPHome::before,
+  .VPHome::after {
+    display: none;
+  }
+}
+
+.VPHome > * {
+  position: relative;
+  z-index: 1;
+}
+
+.pico-etymology {
+  position: fixed;
+  z-index: 1;
+  right: calc(var(--pico-nav-edge) + 0.85rem);
+  top: calc(var(--vp-nav-height) + var(--pico-bird-h) * 0.74);
+  margin: 0;
+  max-width: min(14.5rem, calc(var(--pico-bird-w) * 0.7));
+  padding: 0.4rem 0.6rem;
+  font-family: var(--pico-font-serif);
+  font-size: 0.8125rem;
+  font-weight: 400;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+  color: var(--pico-ink-3);
+  text-align: left;
+  background: rgb(255 255 255 / 0.52);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+
+.pico-etymology em {
+  font-style: italic;
+}
+
+@media (max-width: 639px) {
+  .pico-etymology {
+    display: none;
+  }
 }
 
 .VPNavBarMenuLink {
@@ -416,13 +525,14 @@ html {
   max-width: none;
   margin-top: 0;
   padding: 1.25rem 0 0;
-  border-top: 1px solid var(--pico-hairline);
+  border-top: none;
   text-align: left;
 }
 
 .VPFooter .copyright {
-  font-size: 0.8rem;
-  font-weight: 500;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.8125rem;
+  font-weight: 400;
   color: var(--vp-c-text-2);
 }
 
