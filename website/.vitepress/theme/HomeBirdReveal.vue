@@ -1,15 +1,55 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 
-const active = ref(false);
-const mx = ref('50%');
-const my = ref('40%');
+const IMG_ASPECT = 610 / 780;
+const FACE_FX = 0.45;
+const FACE_FY = 0.42;
+
+const faceX = ref('70%');
+const faceY = ref('42%');
+const faceBlobX = ref('14rem');
+const faceBlobY = ref('17.5rem');
+
+const cursorOn = ref(false);
+const mx = ref('70%');
+const my = ref('42%');
+const blob = ref('12rem');
 
 let reduced = false;
 let birdLeft = 0;
 let birdTop = 0;
 let birdW = 0;
 let birdH = 0;
+let drawLeft = 0;
+let drawTop = 0;
+let drawW = 0;
+let drawH = 0;
+
+function layoutImage() {
+  if (birdW / birdH > IMG_ASPECT) {
+    drawH = birdH;
+    drawW = birdH * IMG_ASPECT;
+    drawLeft = birdW - drawW;
+    drawTop = 0;
+  } else {
+    drawW = birdW;
+    drawH = birdW / IMG_ASPECT;
+    drawLeft = birdW - drawW;
+    drawTop = 0;
+  }
+}
+
+function placeFace() {
+  if (drawW <= 0 || drawH <= 0) {
+    return;
+  }
+  const narrow = window.matchMedia('(max-width: 959px)').matches;
+  faceX.value = `${((drawLeft + FACE_FX * drawW) / birdW) * 100}%`;
+  faceY.value = `${((drawTop + FACE_FY * drawH) / birdH) * 100}%`;
+  faceBlobX.value = narrow ? '9rem' : '14rem';
+  faceBlobY.value = narrow ? '12rem' : '17.5rem';
+  blob.value = narrow ? '8rem' : '12rem';
+}
 
 function measure() {
   const root = document.documentElement;
@@ -29,6 +69,8 @@ function measure() {
   birdTop = rect.top;
   birdW = rect.width;
   birdH = rect.height;
+  layoutImage();
+  placeFace();
 }
 
 function onMove(event: PointerEvent) {
@@ -46,43 +88,62 @@ function onMove(event: PointerEvent) {
     y <= birdTop + birdH + pad;
 
   if (!inside) {
-    active.value = false;
+    cursorOn.value = false;
     return;
   }
 
-  active.value = true;
+  cursorOn.value = true;
   mx.value = `${((x - birdLeft) / birdW) * 100}%`;
   my.value = `${((y - birdTop) / birdH) * 100}%`;
 }
 
-function onLeave() {
-  active.value = false;
+function hideCursor() {
+  cursorOn.value = false;
 }
 
 onMounted(() => {
   reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  if (reduced || window.matchMedia('(max-width: 639px)').matches) {
+  if (window.matchMedia('(max-width: 639px)').matches) {
     return;
   }
 
   measure();
+  if (reduced) {
+    return;
+  }
+
   window.addEventListener('pointermove', onMove, { passive: true });
   window.addEventListener('resize', measure, { passive: true });
-  document.addEventListener('mouseleave', onLeave);
+  document.addEventListener('mouseleave', hideCursor);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener('pointermove', onMove);
   window.removeEventListener('resize', measure);
-  document.removeEventListener('mouseleave', onLeave);
+  document.removeEventListener('mouseleave', hideCursor);
 });
 </script>
 
 <template>
   <div
-    class="pico-bird-color"
+    class="pico-bird-color pico-bird-color--face active"
     aria-hidden="true"
-    :class="{ active }"
-    :style="{ '--pico-bird-mx': mx, '--pico-bird-my': my }"
+    :style="{
+      '--pico-bird-mx': faceX,
+      '--pico-bird-my': faceY,
+      '--pico-bird-blob-x': faceBlobX,
+      '--pico-bird-blob-y': faceBlobY,
+    }"
+  />
+  <div
+    class="pico-bird-color pico-bird-color--cursor"
+    aria-hidden="true"
+    :class="{ active: cursorOn }"
+    :style="{
+      '--pico-bird-mx': mx,
+      '--pico-bird-my': my,
+      '--pico-bird-blob-x': blob,
+      '--pico-bird-blob-y': blob,
+    }"
   />
 </template>

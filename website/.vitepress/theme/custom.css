@@ -62,9 +62,7 @@ html {
 }
 
 .Layout {
-  background:
-    radial-gradient(circle at 100% 0%, rgb(15 22 32 / 0.05), transparent 28%),
-    var(--pico-surface-0);
+  background: var(--pico-surface-0);
 }
 
 @media (min-width: 640px) {
@@ -84,6 +82,10 @@ html {
   box-sizing: border-box;
   width: min(var(--pico-content-max), calc(100% - (2 * var(--pico-content-pad))));
   margin-inline: auto;
+}
+
+.VPNav {
+  z-index: 100 !important;
 }
 
 .VPNavBar {
@@ -114,6 +116,8 @@ html {
 
 :root {
   --pico-nav-edge: 24px;
+  --pico-bird-w: min(52vw, 36rem);
+  --pico-bird-h: calc(100vh - var(--vp-nav-height) + 4rem);
 }
 
 @media (min-width: 768px) {
@@ -186,11 +190,6 @@ html {
   position: relative;
 }
 
-:root {
-  --pico-bird-w: min(52vw, 36rem);
-  --pico-bird-h: calc(100vh - var(--vp-nav-height) + 4rem);
-}
-
 .VPHome::before,
 .VPHome::after {
   content: "";
@@ -236,28 +235,6 @@ html {
   );
 }
 
-@media (max-width: 959px) {
-  :root {
-    --pico-bird-w: min(58vw, 22rem);
-    --pico-bird-h: calc(100vh - var(--vp-nav-height) + 2rem);
-  }
-
-  .VPHome::before {
-    opacity: 0.28;
-  }
-
-  .VPHome::after {
-    opacity: 0.2;
-  }
-}
-
-@media (max-width: 639px) {
-  .VPHome::before,
-  .VPHome::after {
-    display: none;
-  }
-}
-
 .pico-bird-color {
   position: fixed;
   z-index: 0;
@@ -272,11 +249,14 @@ html {
   background-size: contain;
   opacity: 0;
   transition: opacity 0.35s ease;
-  --pico-bird-mx: 50%;
-  --pico-bird-my: 40%;
+  --pico-bird-mx: 70%;
+  --pico-bird-my: 42%;
+  --pico-bird-blob-x: 14rem;
+  --pico-bird-blob-y: 17.5rem;
   -webkit-mask-image:
     radial-gradient(
-      circle 12rem at var(--pico-bird-mx) var(--pico-bird-my),
+      ellipse var(--pico-bird-blob-x) var(--pico-bird-blob-y) at var(--pico-bird-mx)
+        var(--pico-bird-my),
       #000 0%,
       #000 12%,
       rgb(0 0 0 / 0.72) 28%,
@@ -287,7 +267,8 @@ html {
     linear-gradient(to left, #000 0%, #000 48%, transparent 100%);
   mask-image:
     radial-gradient(
-      circle 12rem at var(--pico-bird-mx) var(--pico-bird-my),
+      ellipse var(--pico-bird-blob-x) var(--pico-bird-blob-y) at var(--pico-bird-mx)
+        var(--pico-bird-my),
       #000 0%,
       #000 12%,
       rgb(0 0 0 / 0.72) 28%,
@@ -301,41 +282,32 @@ html {
 }
 
 .pico-bird-color.active {
-  opacity: 0.92;
+  opacity: 1;
 }
 
 @media (max-width: 959px) {
+  :root {
+    --pico-bird-w: min(58vw, 22rem);
+    --pico-bird-h: calc(100vh - var(--vp-nav-height) + 2rem);
+  }
+
+  .VPHome::before {
+    opacity: 0.28;
+  }
+
+  .VPHome::after {
+    opacity: 0.2;
+  }
+
   .pico-bird-color {
-    -webkit-mask-image:
-      radial-gradient(
-        circle 8rem at var(--pico-bird-mx) var(--pico-bird-my),
-        #000 0%,
-        #000 14%,
-        rgb(0 0 0 / 0.65) 32%,
-        rgb(0 0 0 / 0.28) 52%,
-        transparent 100%
-      ),
-      linear-gradient(to left, #000 0%, #000 48%, transparent 100%);
-    mask-image:
-      radial-gradient(
-        circle 8rem at var(--pico-bird-mx) var(--pico-bird-my),
-        #000 0%,
-        #000 14%,
-        rgb(0 0 0 / 0.65) 32%,
-        rgb(0 0 0 / 0.28) 52%,
-        transparent 100%
-      ),
-      linear-gradient(to left, #000 0%, #000 48%, transparent 100%);
+    --pico-bird-blob-x: 8rem;
+    --pico-bird-blob-y: 12rem;
   }
 }
 
 @media (max-width: 639px) {
-  .pico-bird-color {
-    display: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
+  .VPHome::before,
+  .VPHome::after,
   .pico-bird-color {
     display: none;
   }
@@ -348,12 +320,12 @@ html {
 
 .VPHome > .pico-bird-color {
   position: fixed;
-  z-index: 0;
+  z-index: 1;
 }
 
 .pico-etymology {
-  position: fixed;
-  z-index: 1;
+  position: fixed !important;
+  z-index: 2;
   right: calc(var(--pico-nav-edge) + 0.85rem);
   top: calc(var(--vp-nav-height) + var(--pico-bird-h) * 0.74);
   margin: 0;
