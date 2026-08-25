@@ -43,11 +43,16 @@ pub struct ServeArgs {
     #[arg(long, env = "PICO_META_URL", default_value = "sqlite:./data/meta.db")]
     meta_url: String,
 
-    #[arg(long, env = "PICO_STORAGE", default_value = "-2@file://./objects")]
+    #[arg(
+        long,
+        env = "PICO_STORAGE",
+        default_value = "-2@file://./objects",
+        allow_hyphen_values = true
+    )]
     storage: String,
 
     /// WAL bucket URI. Defaults to the data bucket with its own bucket id
-    #[arg(long, env = "PICO_WAL")]
+    #[arg(long, env = "PICO_WAL", allow_hyphen_values = true)]
     wal: Option<String>,
 
     #[arg(long, env = "PICO_CLUSTER_ID", default_value = "picomq")]
@@ -70,6 +75,10 @@ pub struct ServeArgs {
 
     #[arg(long, default_value_t = 64 * 1024)]
     max_chunk_size: usize,
+
+    /// Cap on a single request body. Oversized bodies get `413`.
+    #[arg(long, env = "PICO_MAX_REQUEST_SIZE", default_value_t = 32 * 1024 * 1024)]
+    max_request_size: usize,
 
     /// Seconds to fail readiness before closing listeners, so a load balancer
     #[arg(long, default_value_t = 0)]
@@ -180,6 +189,7 @@ impl ServeArgs {
             long_poll_timeout: Duration::from_secs(self.long_poll_timeout_sec),
             sse_max_duration: Duration::from_secs(self.sse_max_duration_sec),
             max_chunk_size: self.max_chunk_size,
+            max_request_size: self.max_request_size,
             shutdown_drain: Duration::from_secs(self.shutdown_drain_sec),
             backlog: self.backlog,
             auth_mode: match self.auth {

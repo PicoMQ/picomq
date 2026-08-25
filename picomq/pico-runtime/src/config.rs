@@ -85,6 +85,8 @@ pub struct ServerConfig {
     pub long_poll_timeout: Duration,
     pub sse_max_duration: Duration,
     pub max_chunk_size: usize,
+    /// Cap on a single request body. Oversized bodies get `413`.
+    pub max_request_size: usize,
     pub shutdown_drain: Duration,
     /// `acceptQueueSize`). The kernel clamps it to `somaxconn`.
     pub backlog: i32,
@@ -100,7 +102,7 @@ pub struct ServerConfig {
 }
 
 /// Defaults: 127.0.0.1:4437, admin 9090, redirect routing, 25s long poll,
-/// 55s SSE, 64 KiB chunks, no drain, storage under `./objects`.
+/// 55s SSE, 64 KiB chunks, 32 MiB request bodies, no drain, storage under `./objects`.
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -119,6 +121,7 @@ impl Default for ServerConfig {
             long_poll_timeout: Duration::from_secs(25),
             sse_max_duration: Duration::from_secs(55),
             max_chunk_size: 64 * 1024,
+            max_request_size: 32 * 1024 * 1024,
             shutdown_drain: Duration::ZERO,
             backlog: 1024,
             auth_mode: AuthMode::Off,

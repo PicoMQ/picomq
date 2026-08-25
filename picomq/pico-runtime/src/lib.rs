@@ -144,6 +144,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             long_poll_timeout: config.long_poll_timeout,
             sse_max_duration: config.sse_max_duration,
             max_chunk_size: config.max_chunk_size,
+            max_request_size: config.max_request_size,
             shutdown_drain: config.shutdown_drain,
             backlog: config.backlog,
             leadership: Some(lease.leadership()),

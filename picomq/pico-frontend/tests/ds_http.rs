@@ -35,7 +35,13 @@ async fn ds_protocol_end_to_end() {
         .await
         .unwrap();
     assert_eq!(created.status(), 201);
-    assert_eq!(created.headers()["Location"], "/ds/orders");
+    assert_eq!(
+        created.headers()["Location"],
+        format!(
+            "{}/ds/orders",
+            server.node.advertised_address().trim_end_matches('/')
+        )
+    );
     assert_eq!(
         created.headers()["Stream-Next-Offset"],
         "00000000000000000000"

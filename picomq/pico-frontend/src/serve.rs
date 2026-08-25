@@ -46,6 +46,8 @@ pub struct ServeOptions {
     pub long_poll_timeout: Duration,
     pub sse_max_duration: Duration,
     pub max_chunk_size: usize,
+    /// Cap on a single request body. Oversized bodies get `413`.
+    pub max_request_size: usize,
     /// How long to keep failing readiness before closing listeners, so a
     /// load balancer can drain traffic first.
     pub shutdown_drain: Duration,
@@ -74,6 +76,7 @@ impl Default for ServeOptions {
             long_poll_timeout: Duration::from_secs(25),
             sse_max_duration: Duration::from_secs(55),
             max_chunk_size: 64 * 1024,
+            max_request_size: 32 * 1024 * 1024,
             shutdown_drain: Duration::ZERO,
             backlog: 1024,
             leadership: None,
@@ -110,6 +113,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
                 options.long_poll_timeout,
                 options.sse_max_duration,
                 options.max_chunk_size,
+                options.max_request_size,
             )
             .with_authorizer(options.authorizer.clone()),
         )
@@ -122,6 +126,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
                 options.long_poll_timeout,
                 options.sse_max_duration,
                 options.max_chunk_size,
+                options.max_request_size,
             )
             .with_authorizer(options.authorizer.clone()),
         )

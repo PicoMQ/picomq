@@ -7,7 +7,7 @@ pico serve \
     --node-id 2 \
     --listen 0.0.0.0:4437 --http-address http://node2.internal:4437 \
     --meta-url postgres://user:pass@pg:5432/picomq \
-    --storage '-2@s3://bucket?region=us-east-1'
+    --storage=-2@s3://bucket?region=us-east-1
 ```
 
 ## Identity
@@ -55,14 +55,14 @@ SQLite is a file, so it works for exactly one node. Every multi-node cluster nee
 `--storage` is the data bucket in the form `bucket-id@uri`. The bucket id is the engine's internal identifier and any stable value works, and the URI selects the backend.
 
 ```bash
---storage '-2@file://./objects'                # local filesystem
---storage '-2@s3://bucket?region=us-east-1'    # S3 and compatible stores
+--storage=-2@file://./objects                # local filesystem
+--storage=-2@s3://bucket?region=us-east-1    # S3 and compatible stores
 ```
 
 S3 credentials come from the standard `AWS_*` environment variables. Compatible stores such as MinIO or RustFS take `endpoint` and `pathStyle` parameters on the URI:
 
 ```bash
---storage '-2@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true'
+--storage=-2@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true
 ```
 
 `--wal` optionally puts the WAL in its own bucket. When absent the WAL shares the data bucket under the next bucket id, which is the right default unless WAL and data need different storage classes or lifecycle rules.
@@ -86,6 +86,7 @@ A different token under an already-stored bootstrap id fails startup rather than
 | `--long-poll-timeout-sec` | `25` | How long a waiting read parks before returning empty. |
 | `--sse-max-duration-sec` | `55` | Connection cap for SSE, after which the client reconnects. |
 | `--max-chunk-size` | `65536` | Response chunk size for streamed reads. |
+| `--max-request-size` | `33554432` | Cap on a single request body. Oversized bodies get `413`. |
 
 The two timeouts default below common proxy idle limits. Raise them only if every intermediary between clients and nodes is known to allow longer idle connections.
 

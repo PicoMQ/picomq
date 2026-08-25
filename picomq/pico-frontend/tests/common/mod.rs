@@ -65,6 +65,7 @@ async fn start(protocol: Protocol) -> TestServer {
             long_poll_timeout: Duration::from_secs(1),
             sse_max_duration: Duration::from_secs(2),
             max_chunk_size: 64 * 1024,
+            max_request_size: 32 * 1024 * 1024,
             ..Default::default()
         },
     )

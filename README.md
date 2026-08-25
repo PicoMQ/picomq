@@ -20,7 +20,7 @@ This puts the `pico` binary in `~/.cargo/bin`. Or run it in place with `cargo ru
 # single node: SQLite metadata log, local object storage
 pico serve \
     --meta-url sqlite:./data/meta.db \
-    --storage '-2@file://./objects'
+    --storage=-2@file://./objects
 ```
 
 Every flag has a `PICO_*` env equivalent. `/health` and `/ready` are on `--admin-listen` (default `127.0.0.1:9090`). Auth is off by default, non-loopback binds need `--auth required` or `--insecure-allow-remote`.

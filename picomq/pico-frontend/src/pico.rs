@@ -65,11 +65,12 @@ pub const DEFAULT_CT: &str = "application/octet-stream";
 const CACHE_CATCH_UP: &str = "public, max-age=60, stale-while-revalidate=300";
 
 const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
-const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_MAX_CHUNK_SIZE: usize = 64 * 1024;
+const DEFAULT_MAX_REQUEST_SIZE: usize = 32 * 1024 * 1024;
 
 /// The Pico frontend over one node's service + ownership pair.
 ///
-/// Defaults: 25s long poll, 55s SSE cap, 64 KiB chunks.
+/// Defaults: 25s long poll, 55s SSE cap, 64 KiB chunks, 32 MiB request bodies.
 pub struct PicoFrontend {
     service: Arc<S3StreamService>,
     ownership: Arc<dyn OwnershipService>,
@@ -79,6 +80,7 @@ pub struct PicoFrontend {
     long_poll_timeout: Duration,
     sse_max_duration: Duration,
     max_chunk_size: usize,
+    max_request_size: usize,
 }
 
 impl PicoFrontend {
@@ -93,7 +95,8 @@ impl PicoFrontend {
             mode,
             Duration::from_secs(25),
             Duration::from_secs(55),
-            64 * 1024,
+            DEFAULT_MAX_CHUNK_SIZE,
+            DEFAULT_MAX_REQUEST_SIZE,
         )
     }
 
@@ -104,6 +107,7 @@ impl PicoFrontend {
         long_poll_timeout: Duration,
         sse_max_duration: Duration,
         max_chunk_size: usize,
+        max_request_size: usize,
     ) -> Self {
         let timestamps = StreamTimestamps::new(service.clone());
         Self {
@@ -117,7 +121,12 @@ impl PicoFrontend {
             max_chunk_size: if max_chunk_size > 0 {
                 max_chunk_size
             } else {
-                64 * 1024
+                DEFAULT_MAX_CHUNK_SIZE
+            },
+            max_request_size: if max_request_size > 0 {
+                max_request_size
+            } else {
+                DEFAULT_MAX_REQUEST_SIZE
             },
         }
     }
@@ -130,7 +139,11 @@ impl PicoFrontend {
 
     /// (`app.addHttpHandler(..., router::handle)`).
     pub fn router(self: Arc<Self>) -> Router {
-        Router::new().fallback(any(dispatch)).with_state(self)
+        let limit = self.max_request_size;
+        Router::new()
+            .fallback(any(dispatch))
+            .layer(axum::extract::DefaultBodyLimit::max(limit))
+            .with_state(self)
     }
 }
 
@@ -166,7 +179,7 @@ async fn dispatch(
     {
         return response;
     }
-    let body = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+    let body = match axum::body::to_bytes(body, frontend.max_request_size).await {
         Ok(body) => body,
         Err(_) => return error(413, "internal", "content too large", None),
     };
