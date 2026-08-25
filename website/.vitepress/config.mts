@@ -47,6 +47,10 @@ const docsSidebar = [
     text: 'API reference',
     items: [{ text: 'HTTP API', link: '/docs/api' }],
   },
+  {
+    text: 'Community',
+    items: [{ text: 'Contribute', link: '/docs/contribute' }],
+  },
 ];
 
 export default defineConfig({
@@ -89,6 +93,7 @@ export default defineConfig({
     nav: [
       { text: 'Home', link: '/' },
       { text: 'Docs', link: '/docs' },
+      { text: 'Contribute', link: '/docs/contribute' },
       { text: 'GitHub', link: 'https://github.com/picomq/picomq' },
     ],
     sidebar: docsSidebar,
