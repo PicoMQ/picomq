@@ -19,7 +19,7 @@ This puts `pico` in `~/.cargo/bin`, which cargo adds to the `PATH`. To build wit
 # single node: SQLite metadata log, local object storage
 pico serve \
     --meta-url sqlite:./data/meta.db \
-    --storage '-2@file://./objects'
+    --storage=-2@file://./objects
 ```
 
 The server listens on `http://127.0.0.1:4437` and the admin listener on `http://127.0.0.1:9090`. Every flag has a `PICO_*` environment variable equivalent.
@@ -32,7 +32,7 @@ pico serve \
     --listen 0.0.0.0:4437 --http-address http://node2.internal:4437 \
     --auth required --auth-bootstrap-token-file ./root-token \
     --meta-url postgres://user:pass@pg:5432/picomq \
-    --storage '-2@s3://bucket?region=us-east-1'
+    --storage=-2@s3://bucket?region=us-east-1
 ```
 
 ::: info Note

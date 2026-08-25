@@ -53,12 +53,12 @@ const CT_EVENT_STREAM: &str = "text/event-stream";
 const CT_TEXT: &str = "text/plain; charset=utf-8";
 const DEFAULT_CT: &str = "application/octet-stream";
 const CACHE_CATCH_UP: &str = "public, max-age=60, stale-while-revalidate=300";
-
-const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_MAX_CHUNK_SIZE: usize = 64 * 1024;
+const DEFAULT_MAX_REQUEST_SIZE: usize = 32 * 1024 * 1024;
 
 /// The Durable Streams frontend over one node's service + ownership pair.
 ///
-/// Defaults: 25s long poll, 55s SSE cap, 64 KiB chunks.
+/// Defaults: 25s long poll, 55s SSE cap, 64 KiB chunks, 32 MiB request bodies.
 pub struct DsFrontend {
     service: Arc<S3StreamService>,
     ownership: Arc<dyn OwnershipService>,
@@ -67,6 +67,7 @@ pub struct DsFrontend {
     long_poll_timeout: Duration,
     sse_max_duration: Duration,
     max_chunk_size: usize,
+    max_request_size: usize,
 }
 
 impl DsFrontend {
@@ -81,7 +82,8 @@ impl DsFrontend {
             mode,
             Duration::from_secs(25),
             Duration::from_secs(55),
-            64 * 1024,
+            DEFAULT_MAX_CHUNK_SIZE,
+            DEFAULT_MAX_REQUEST_SIZE,
         )
     }
 
@@ -92,6 +94,7 @@ impl DsFrontend {
         long_poll_timeout: Duration,
         sse_max_duration: Duration,
         max_chunk_size: usize,
+        max_request_size: usize,
     ) -> Self {
         Self {
             service,
@@ -103,7 +106,12 @@ impl DsFrontend {
             max_chunk_size: if max_chunk_size > 0 {
                 max_chunk_size
             } else {
-                64 * 1024
+                DEFAULT_MAX_CHUNK_SIZE
+            },
+            max_request_size: if max_request_size > 0 {
+                max_request_size
+            } else {
+                DEFAULT_MAX_REQUEST_SIZE
             },
         }
     }
@@ -115,7 +123,11 @@ impl DsFrontend {
     }
 
     pub fn router(self: Arc<Self>) -> Router {
-        Router::new().fallback(any(dispatch)).with_state(self)
+        let limit = self.max_request_size;
+        Router::new()
+            .fallback(any(dispatch))
+            .layer(axum::extract::DefaultBodyLimit::max(limit))
+            .with_state(self)
     }
 }
 
@@ -151,7 +163,7 @@ async fn dispatch(
     {
         return response;
     }
-    let body = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+    let body = match axum::body::to_bytes(body, frontend.max_request_size).await {
         Ok(body) => body,
         Err(_) => return fail(413, "content too large"),
     };
@@ -226,7 +238,14 @@ impl DsFrontend {
             &meta.content_type,
         );
         if result.created {
-            set_header(&mut response, header::LOCATION.as_str(), uri.path());
+            let mut location = self
+                .ownership
+                .local_node()
+                .advertised_address
+                .trim_end_matches('/')
+                .to_owned();
+            location.push_str(uri.path());
+            set_header(&mut response, header::LOCATION.as_str(), &location);
         }
         Ok(response)
     }

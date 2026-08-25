@@ -7,7 +7,7 @@ A PicoMQ cluster is defined by two shared resources. Every node points at the sa
 One node with SQLite and a local directory is a complete deployment, suitable for development and small single-machine workloads.
 
 ```bash
-pico serve --meta-url sqlite:./data/meta.db --storage '-2@file://./objects'
+pico serve --meta-url sqlite:./data/meta.db --storage=-2@file://./objects
 ```
 
 Durability follows the storage. With `file://` the data is as durable as that disk. Pointing the same single node at S3 gives object store durability without running Postgres, since SQLite only limits how many nodes can share the metadata log, one.
@@ -21,7 +21,7 @@ pico serve --node-id 1 --listen 0.0.0.0:4437 \
     --http-address http://node1.internal:4437 \
     --auth required --auth-bootstrap-token-file /run/secrets/pico-root \
     --meta-url postgres://user:pass@pg:5432/picomq \
-    --storage '-2@s3://picomq?region=us-east-1'
+    --storage=-2@s3://picomq?region=us-east-1
 ```
 
 Routing shapes what sits in front of the nodes. Clients are redirected to a stream's owner with its advertised address, so clients must be able to reach every node directly and follow redirects. A load balancer works fine as the entry point for creates and first requests, but it should not be the only reachable address, since redirects bypass it by design.
