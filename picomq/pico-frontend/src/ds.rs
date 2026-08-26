@@ -23,6 +23,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
 use pico_auth::{Audience, Authorizer};
+use pico_protocol::ds::{
+    H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ,
+    H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR, H_STREAM_EXPIRES_AT, H_STREAM_NEXT_OFFSET,
+    H_STREAM_SEQ, H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL, H_STREAM_UP_TO_DATE,
+};
 use pico_server::framing::{is_json, mime_of};
 use pico_server::ownership::OwnershipService;
 use pico_server::types::Producer;
@@ -36,19 +41,6 @@ use crate::http::{
 };
 use crate::route::{route, stream_name, RoutingMode};
 
-pub const H_STREAM_NEXT_OFFSET: &str = "Stream-Next-Offset";
-pub const H_STREAM_UP_TO_DATE: &str = "Stream-Up-To-Date";
-pub const H_STREAM_TTL: &str = "Stream-TTL";
-pub const H_STREAM_EXPIRES_AT: &str = "Stream-Expires-At";
-pub const H_STREAM_CLOSED: &str = "Stream-Closed";
-pub const H_STREAM_CURSOR: &str = "Stream-Cursor";
-pub const H_STREAM_SSE_DATA_ENCODING: &str = "Stream-SSE-Data-Encoding";
-pub const H_STREAM_SEQ: &str = "Stream-Seq";
-pub const H_PRODUCER_ID: &str = "Producer-Id";
-pub const H_PRODUCER_EPOCH: &str = "Producer-Epoch";
-pub const H_PRODUCER_SEQ: &str = "Producer-Seq";
-pub const H_PRODUCER_EXPECTED_SEQ: &str = "Producer-Expected-Seq";
-pub const H_PRODUCER_RECEIVED_SEQ: &str = "Producer-Received-Seq";
 const CT_EVENT_STREAM: &str = "text/event-stream";
 const CT_TEXT: &str = "text/plain; charset=utf-8";
 const DEFAULT_CT: &str = "application/octet-stream";

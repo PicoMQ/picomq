@@ -8,6 +8,7 @@ description = "PicoMQ HTTP frontends: the Pico protocol and the Durable Streams 
 repository.workspace = true
 
 [dependencies]
+pico-protocol = { workspace = true }
 pico-server = { workspace = true }
 pico-common = { workspace = true }
 pico-auth = { workspace = true }

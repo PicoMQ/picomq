@@ -13,7 +13,7 @@ use base64::Engine as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde_json::{json, Map, Value};
 
-use pico_server::{ErrorKind, ServiceError};
+use crate::error::CodecError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordEnvelope {
@@ -41,8 +41,8 @@ pub struct SequencedRecord {
 const ENVELOPE_VERSION: u8 = 1;
 const BATCH_VERSION: u8 = 1;
 
-fn bad_request(message: impl Into<String>) -> ServiceError {
-    ServiceError::with_message(ErrorKind::BadRequest, None, false, message)
+fn malformed(message: impl Into<String>) -> CodecError {
+    CodecError::new(message)
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ pub fn encode_envelope(envelope: &RecordEnvelope) -> Bytes {
     buf.freeze()
 }
 
-pub fn decode_envelope(payload: &[u8]) -> Result<RecordEnvelope, ServiceError> {
+pub fn decode_envelope(payload: &[u8]) -> Result<RecordEnvelope, CodecError> {
     let mut buf = payload;
     check_version(&mut buf, ENVELOPE_VERSION, "record envelope")?;
     let timestamp = get_i64(&mut buf)?;
@@ -71,7 +71,7 @@ pub fn decode_envelope(payload: &[u8]) -> Result<RecordEnvelope, ServiceError> {
     ))
 }
 
-pub fn decode_envelope_timestamp(payload: &[u8]) -> Result<i64, ServiceError> {
+pub fn decode_envelope_timestamp(payload: &[u8]) -> Result<i64, CodecError> {
     let mut buf = payload;
     check_version(&mut buf, ENVELOPE_VERSION, "record envelope")?;
     get_i64(&mut buf)
@@ -94,7 +94,7 @@ fn put_headers(buf: &mut BytesMut, headers: &BTreeMap<String, String>) {
     }
 }
 
-fn get_headers(buf: &mut &[u8]) -> Result<BTreeMap<String, String>, ServiceError> {
+fn get_headers(buf: &mut &[u8]) -> Result<BTreeMap<String, String>, CodecError> {
     let count = get_u32(buf)?;
     let mut headers = BTreeMap::new();
     for _ in 0..count {
@@ -125,7 +125,7 @@ pub fn encode_batch_append(records: &[RecordEnvelope]) -> Bytes {
     buf.freeze()
 }
 
-pub fn decode_batch_append(payload: &[u8]) -> Result<Vec<RecordEnvelope>, ServiceError> {
+pub fn decode_batch_append(payload: &[u8]) -> Result<Vec<RecordEnvelope>, CodecError> {
     let mut buf = payload;
     check_version(&mut buf, BATCH_VERSION, "batch")?;
     let count = get_u32(&mut buf)?;
@@ -156,7 +156,7 @@ pub fn encode_batch_read(records: &[SequencedRecord]) -> Bytes {
     buf.freeze()
 }
 
-pub fn decode_batch_read(payload: &[u8]) -> Result<Vec<SequencedRecord>, ServiceError> {
+pub fn decode_batch_read(payload: &[u8]) -> Result<Vec<SequencedRecord>, CodecError> {
     let mut buf = payload;
     check_version(&mut buf, BATCH_VERSION, "batch")?;
     let count = get_u32(&mut buf)?;
@@ -195,13 +195,13 @@ pub fn encode_json_read(records: &[SequencedRecord]) -> Bytes {
     Bytes::from(serde_json::to_vec(&array).expect("json encode"))
 }
 
-pub fn decode_json_append(payload: &[u8]) -> Result<Vec<RecordEnvelope>, ServiceError> {
-    let root: Value = serde_json::from_slice(payload).map_err(|_| bad_request("invalid JSON"))?;
+pub fn decode_json_append(payload: &[u8]) -> Result<Vec<RecordEnvelope>, CodecError> {
+    let root: Value = serde_json::from_slice(payload).map_err(|_| malformed("invalid JSON"))?;
     let Some(array) = root.get("records").and_then(Value::as_array) else {
-        return Err(bad_request("records must be a non-empty array"));
+        return Err(malformed("records must be a non-empty array"));
     };
     if array.is_empty() {
-        return Err(bad_request("records must be a non-empty array"));
+        return Err(malformed("records must be a non-empty array"));
     }
     array
         .iter()
@@ -219,12 +219,12 @@ fn put_json_body(node: &mut Map<String, Value>, body: &[u8]) {
     };
 }
 
-fn json_body(node: &Value) -> Result<Bytes, ServiceError> {
+fn json_body(node: &Value) -> Result<Bytes, CodecError> {
     if let Some(b64) = node.get("body_b64").and_then(Value::as_str) {
         return base64::engine::general_purpose::STANDARD
             .decode(b64)
             .map(Bytes::from)
-            .map_err(|_| bad_request("invalid body_b64"));
+            .map_err(|_| malformed("invalid body_b64"));
     }
     Ok(node
         .get("body")
@@ -252,51 +252,51 @@ fn json_headers(node: &Value) -> BTreeMap<String, String> {
 
 // ---- decode helpers ----
 
-fn check_version(buf: &mut &[u8], expected: u8, what: &str) -> Result<(), ServiceError> {
+fn check_version(buf: &mut &[u8], expected: u8, what: &str) -> Result<(), CodecError> {
     if buf.is_empty() {
-        return Err(bad_request(format!("truncated {what}")));
+        return Err(malformed(format!("truncated {what}")));
     }
     let version = buf.get_u8();
     if version != expected {
-        return Err(bad_request(format!("unknown {what} version {version}")));
+        return Err(malformed(format!("unknown {what} version {version}")));
     }
     Ok(())
 }
 
-fn get_u32(buf: &mut &[u8]) -> Result<u32, ServiceError> {
+fn get_u32(buf: &mut &[u8]) -> Result<u32, CodecError> {
     if buf.len() < 4 {
-        return Err(bad_request("truncated payload"));
+        return Err(malformed("truncated payload"));
     }
     Ok(buf.get_u32())
 }
 
-fn get_u64(buf: &mut &[u8]) -> Result<u64, ServiceError> {
+fn get_u64(buf: &mut &[u8]) -> Result<u64, CodecError> {
     if buf.len() < 8 {
-        return Err(bad_request("truncated payload"));
+        return Err(malformed("truncated payload"));
     }
     Ok(buf.get_u64())
 }
 
-fn get_i64(buf: &mut &[u8]) -> Result<i64, ServiceError> {
+fn get_i64(buf: &mut &[u8]) -> Result<i64, CodecError> {
     if buf.len() < 8 {
-        return Err(bad_request("truncated payload"));
+        return Err(malformed("truncated payload"));
     }
     Ok(buf.get_i64())
 }
 
-fn get_bytes(buf: &mut &[u8]) -> Result<Bytes, ServiceError> {
+fn get_bytes(buf: &mut &[u8]) -> Result<Bytes, CodecError> {
     let len = get_u32(buf)? as usize;
     if buf.len() < len {
-        return Err(bad_request("truncated payload"));
+        return Err(malformed("truncated payload"));
     }
     let out = Bytes::copy_from_slice(&buf[..len]);
     buf.advance(len);
     Ok(out)
 }
 
-fn get_string(buf: &mut &[u8]) -> Result<String, ServiceError> {
+fn get_string(buf: &mut &[u8]) -> Result<String, CodecError> {
     let bytes = get_bytes(buf)?;
-    String::from_utf8(bytes.to_vec()).map_err(|_| bad_request("invalid UTF-8 in headers"))
+    String::from_utf8(bytes.to_vec()).map_err(|_| malformed("invalid UTF-8 in headers"))
 }
 
 #[cfg(test)]

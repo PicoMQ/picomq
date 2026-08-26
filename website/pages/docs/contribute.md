@@ -11,7 +11,7 @@ If you are new to the project, new to Rust, or just unsure whether a change belo
 The workspace is split into two areas with a hard boundary between them:
 
 - **`s3stream/`** is the stream engine: WAL, object layout, caching, compaction. It is a self-contained library (crates, wire specification, conformance fixtures).
-- **`picomq/`** is the host: metadata plane, server, HTTP frontends (Pico protocol and Durable Streams), client, and the `pico` CLI. Host crates depend only on the `s3stream` facade crate, never on engine internals.
+- **`picomq/`** is the host: metadata plane, server, HTTP frontends (Pico protocol and Durable Streams), client, and the `pico` CLI. Host crates depend only on the `s3stream` facade crate, never on engine internals. The wire vocabulary (header constants, record envelope codec) lives in `pico-protocol`, a small crate shared by the frontends and `pico-client`, which keeps the client publishable as a standalone SDK with no server dependencies.
 
 Keeping that boundary intact is a review criterion. If a change in `picomq/*` needs something from inside the engine, the right move is to widen the facade.
 

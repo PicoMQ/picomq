@@ -6,6 +6,8 @@
 use axum::http::{header, HeaderMap, Method, Uri};
 use axum::response::Response;
 use pico_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
+use pico_protocol::ds::H_STREAM_CLOSED;
+use pico_protocol::pico::{H_CLOSED, H_TRIM_SEQ};
 
 use crate::ds;
 use crate::http::{header_str, set_header, truthy};
@@ -87,10 +89,10 @@ fn classify(
 fn classify_pico(method: &Method, uri: &Uri, headers: &HeaderMap) -> Option<Vec<Operation>> {
     Some(match *method {
         Method::PUT => vec![Operation::Create],
-        Method::POST if header_str(headers, pico::H_TRIM_SEQ).is_some() => {
+        Method::POST if header_str(headers, H_TRIM_SEQ).is_some() => {
             vec![Operation::Trim]
         }
-        Method::POST => write_ops(truthy(headers, pico::H_CLOSED), empty_body(headers)),
+        Method::POST => write_ops(truthy(headers, H_CLOSED), empty_body(headers)),
         Method::DELETE => vec![Operation::Delete],
         Method::HEAD => vec![Operation::Head],
         Method::GET if stream_name(uri) == "/" => vec![Operation::List],
@@ -102,7 +104,7 @@ fn classify_pico(method: &Method, uri: &Uri, headers: &HeaderMap) -> Option<Vec<
 fn classify_ds(method: &Method, _uri: &Uri, headers: &HeaderMap) -> Option<Vec<Operation>> {
     Some(match *method {
         Method::PUT => vec![Operation::Create],
-        Method::POST => write_ops(truthy(headers, ds::H_STREAM_CLOSED), empty_body(headers)),
+        Method::POST => write_ops(truthy(headers, H_STREAM_CLOSED), empty_body(headers)),
         Method::DELETE => vec![Operation::Delete],
         Method::HEAD => vec![Operation::Head],
         Method::GET => vec![Operation::Read],
@@ -202,18 +204,14 @@ mod tests {
         let uri = Uri::from_static("/orders");
         let root = Uri::from_static("/");
         assert_eq!(
-            classify_pico(
-                &Method::POST,
-                &uri,
-                &headers_with(&[(pico::H_TRIM_SEQ, "1")])
-            ),
+            classify_pico(&Method::POST, &uri, &headers_with(&[(H_TRIM_SEQ, "1")])),
             Some(vec![Operation::Trim])
         );
         assert_eq!(
             classify_pico(
                 &Method::POST,
                 &uri,
-                &headers_with(&[(pico::H_CLOSED, "true"), ("content-length", "0")])
+                &headers_with(&[(H_CLOSED, "true"), ("content-length", "0")])
             ),
             Some(vec![Operation::Close])
         );
@@ -221,7 +219,7 @@ mod tests {
             classify_pico(
                 &Method::POST,
                 &uri,
-                &headers_with(&[(pico::H_CLOSED, "true"), ("content-length", "4")])
+                &headers_with(&[(H_CLOSED, "true"), ("content-length", "4")])
             ),
             Some(vec![Operation::Append, Operation::Close])
         );
@@ -243,16 +241,12 @@ mod tests {
             classify_ds(
                 &Method::POST,
                 &uri,
-                &headers_with(&[(ds::H_STREAM_CLOSED, "true"), ("content-length", "0")])
+                &headers_with(&[(H_STREAM_CLOSED, "true"), ("content-length", "0")])
             ),
             Some(vec![Operation::Close])
         );
         assert_eq!(
-            classify_ds(
-                &Method::POST,
-                &uri,
-                &headers_with(&[(pico::H_TRIM_SEQ, "1")])
-            ),
+            classify_ds(&Method::POST, &uri, &headers_with(&[(H_TRIM_SEQ, "1")])),
             Some(vec![Operation::Append])
         );
         assert_eq!(

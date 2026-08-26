@@ -13,6 +13,7 @@ members = [
     "s3stream/s3stream-core",
     "s3stream/s3stream",
     "picomq/pico-common",
+    "picomq/pico-protocol",
     "picomq/pico-auth",
     "picomq/pico-metadata",
     "picomq/pico-sql",
@@ -38,6 +39,7 @@ s3stream-wal = { path = "s3stream/s3stream-wal" }
 s3stream-core = { path = "s3stream/s3stream-core" }
 s3stream = { path = "s3stream/s3stream" }
 pico-common = { path = "picomq/pico-common" }
+pico-protocol = { path = "picomq/pico-protocol" }
 pico-auth = { path = "picomq/pico-auth" }
 pico-metadata = { path = "picomq/pico-metadata" }
 pico-sql = { path = "picomq/pico-sql" }

@@ -8,11 +8,7 @@ description = "PicoMQ client: the Pico protocol and Durable Streams over HTTP"
 repository.workspace = true
 
 [dependencies]
-# The record codec and header constants are the shared protocol vocabulary
-# (PORT: Java's `frontend/native/model`, a module both its client and server
-# depend on). Here that vocabulary still lives in `pico-frontend`; a client
-# shipped on its own would want it split into a model crate first.
-pico-frontend = { workspace = true }
+pico-protocol = { workspace = true }
 
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -25,6 +21,7 @@ tokio = { workspace = true }
 axum = { workspace = true }
 futures = { workspace = true }
 pico-auth = { workspace = true }
+pico-frontend = { workspace = true }
 pico-runtime = { workspace = true }
 s3stream = { workspace = true }
 tempfile = { workspace = true }

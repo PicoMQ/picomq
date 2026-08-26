@@ -17,6 +17,10 @@ pub(crate) fn bad_request(message: impl Into<String>) -> ServiceError {
     ServiceError::with_message(ErrorKind::BadRequest, None, false, message)
 }
 
+pub(crate) fn codec_error(e: pico_protocol::CodecError) -> ServiceError {
+    bad_request(e.message)
+}
+
 pub(crate) fn base_response(status: u16) -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::from_u16(status).expect("valid status");

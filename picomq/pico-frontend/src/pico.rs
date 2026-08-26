@@ -20,6 +20,16 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
 use pico_auth::{Audience, Authorizer};
+use pico_protocol::envelope::{
+    decode_batch_append, decode_envelope, decode_json_append, encode_batch_read, encode_envelope,
+    encode_json_read, RecordEnvelope, SequencedRecord,
+};
+use pico_protocol::pico::{
+    CT_BATCH_BINARY, CT_BATCH_JSON, CT_CORE, CT_CORE_PARAM, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT,
+    H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT, H_MATCH_SEQ, H_NEXT_SEQ, H_PRODUCER_EPOCH,
+    H_PRODUCER_ID, H_PRODUCER_SEQ, H_RECEIVED_SEQ, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL,
+    H_UP_TO_DATE,
+};
 use pico_server::framing::{mime_equals, mime_of};
 use pico_server::ownership::OwnershipService;
 use pico_server::{
@@ -28,40 +38,14 @@ use pico_server::{
 };
 
 use crate::auth::Permit;
-use crate::envelope::{
-    decode_batch_append, decode_envelope, decode_json_append, encode_batch_read, encode_envelope,
-    encode_json_read, RecordEnvelope, SequencedRecord,
-};
 use crate::http::{
-    bad_request, base_response, cursor, etag, format_instant, header_str, parse_instant_header,
-    parse_strict_u64, parse_strict_u64_header, query_param, set_header, truthy,
+    bad_request, base_response, codec_error, cursor, etag, format_instant, header_str,
+    parse_instant_header, parse_strict_u64, parse_strict_u64_header, query_param, set_header,
+    truthy,
 };
 use crate::route::{route, stream_name, RoutingMode};
 use crate::timestamps::StreamTimestamps;
 
-pub const H_START_SEQ: &str = "Pico-Start-Seq";
-pub const H_NEXT_SEQ: &str = "Pico-Next-Seq";
-pub const H_TIMESTAMP: &str = "Pico-Timestamp";
-pub const H_MATCH_SEQ: &str = "Pico-Match-Seq";
-pub const H_TRIM_SEQ: &str = "Pico-Trim-Seq";
-pub const H_TTL: &str = "Pico-TTL";
-pub const H_EXPIRES_AT: &str = "Pico-Expires-At";
-pub const H_CLOSED: &str = "Pico-Closed";
-pub const H_UP_TO_DATE: &str = "Pico-Up-To-Date";
-pub const H_CURSOR: &str = "Pico-Cursor";
-pub const H_PRODUCER_ID: &str = "Pico-Producer-Id";
-pub const H_PRODUCER_EPOCH: &str = "Pico-Producer-Epoch";
-pub const H_PRODUCER_SEQ: &str = "Pico-Producer-Seq";
-pub const H_EXPECTED_SEQ: &str = "Pico-Expected-Seq";
-pub const H_RECEIVED_SEQ: &str = "Pico-Received-Seq";
-pub const CT_BATCH_JSON: &str = "application/vnd.picomq.batch+json";
-pub const CT_BATCH_BINARY: &str = "application/vnd.picomq.batch";
-pub const CT_JSON: &str = "application/json";
-pub const CT_EVENT_STREAM: &str = "text/event-stream";
-/// The engine-side wrapper MIME. The user's content type is its `ct` param.
-pub const CT_CORE: &str = "application/x-picomq";
-pub const CT_CORE_PARAM: &str = "ct";
-pub const DEFAULT_CT: &str = "application/octet-stream";
 const CACHE_CATCH_UP: &str = "public, max-age=60, stale-while-revalidate=300";
 
 const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
@@ -783,10 +767,10 @@ fn service_error_response(e: ServiceError) -> Response {
 fn decode_records(headers: &HeaderMap, body: &Bytes) -> Result<Vec<RecordEnvelope>, ServiceError> {
     let mime = mime_of(header_str(headers, header::CONTENT_TYPE.as_str()));
     if mime == CT_BATCH_JSON {
-        return decode_json_append(body);
+        return decode_json_append(body).map_err(codec_error);
     }
     if mime == CT_BATCH_BINARY {
-        return decode_batch_append(body);
+        return decode_batch_append(body).map_err(codec_error);
     }
     Ok(vec![RecordEnvelope::new(
         0,
@@ -857,7 +841,7 @@ fn to_sequenced(
         .map(|record| {
             Ok(SequencedRecord {
                 seq: record.offset.record_offset(),
-                envelope: decode_envelope(&record.payload)?,
+                envelope: decode_envelope(&record.payload).map_err(codec_error)?,
             })
         })
         .collect()

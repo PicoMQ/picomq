@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use pico_frontend::ds::{
+use pico_protocol::ds::{
     H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_RECEIVED_SEQ, H_STREAM_CLOSED,
     H_STREAM_NEXT_OFFSET, H_STREAM_TTL, H_STREAM_UP_TO_DATE,
 };
