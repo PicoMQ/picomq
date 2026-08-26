@@ -1,0 +1,17 @@
+[package]
+name = "pico-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "PicoMQ wire protocol: header constants and record envelope codecs"
+repository.workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+bytes = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

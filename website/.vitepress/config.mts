@@ -45,7 +45,10 @@ const docsSidebar = [
   },
   {
     text: 'API reference',
-    items: [{ text: 'HTTP API', link: '/docs/api' }],
+    items: [
+      { text: 'HTTP API', link: '/docs/api' },
+      { text: 'Rust client', link: '/docs/client' },
+    ],
   },
   {
     text: 'Community',

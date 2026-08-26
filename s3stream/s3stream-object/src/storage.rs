@@ -251,30 +251,14 @@ impl ObjectStoreAdapter {
     /// Build from an s3stream bucket URI (`IdURI` format: `{id}@{scheme}://{bucket}?k=v`).
     ///
     /// Supported protocols:
-    /// - `s3`: AWS S3 or compatible. Honors `region`, `endpoint`, `pathStyle` query
-    ///   builder chain).
+    /// - `s3`: AWS S3 or compatible. Honors `region`, `endpoint`, `pathStyle`,
+    ///   `s3Express` query builder chain).
     /// - `file`: local filesystem rooted at the path (dev/test).
     /// - `mem`: in-memory backend (tests).
     pub fn from_bucket_uri(uri: &str) -> Result<Self, ObjectError> {
         let uri = IdUri::parse(uri)?;
         let inner: std::sync::Arc<dyn object_store::ObjectStore> = match uri.protocol.as_str() {
-            "s3" => {
-                let mut builder =
-                    object_store::aws::AmazonS3Builder::from_env().with_bucket_name(&uri.path);
-                if let Some(region) = uri.extension_str("region") {
-                    builder = builder.with_region(region);
-                }
-                if let Some(endpoint) = uri.extension_str("endpoint") {
-                    builder = builder.with_endpoint(endpoint);
-                    if endpoint.starts_with("http://") {
-                        builder = builder.with_allow_http(true);
-                    }
-                }
-                if uri.extension_bool("pathStyle", false) {
-                    builder = builder.with_virtual_hosted_style_request(false);
-                }
-                std::sync::Arc::new(builder.build().map_err(ObjectError::Backend)?)
-            }
+            "s3" => std::sync::Arc::new(s3_builder(&uri).build().map_err(ObjectError::Backend)?),
             "file" => std::sync::Arc::new(
                 object_store::local::LocalFileSystem::new_with_prefix(&uri.path)
                     .map_err(ObjectError::Backend)?,
@@ -295,6 +279,32 @@ impl ObjectStoreAdapter {
     pub fn new(inner: std::sync::Arc<dyn object_store::ObjectStore>, bucket_id: i16) -> Self {
         Self { inner, bucket_id }
     }
+}
+
+/// AWS directory bucket names carry this reserved suffix
+/// (`{base}--{zone-id}--x-s3`). Standard buckets cannot use it, so it is a
+/// safe signal to switch to S3 Express session auth, matching AWS SDK
+/// behavior. `s3Express=true` forces it explicitly.
+const S3_EXPRESS_BUCKET_SUFFIX: &str = "--x-s3";
+
+fn s3_builder(uri: &IdUri) -> object_store::aws::AmazonS3Builder {
+    let mut builder = object_store::aws::AmazonS3Builder::from_env().with_bucket_name(&uri.path);
+    if let Some(region) = uri.extension_str("region") {
+        builder = builder.with_region(region);
+    }
+    if let Some(endpoint) = uri.extension_str("endpoint") {
+        builder = builder.with_endpoint(endpoint);
+        if endpoint.starts_with("http://") {
+            builder = builder.with_allow_http(true);
+        }
+    }
+    if uri.extension_bool("pathStyle", false) {
+        builder = builder.with_virtual_hosted_style_request(false);
+    }
+    if uri.extension_bool("s3Express", false) || uri.path.ends_with(S3_EXPRESS_BUCKET_SUFFIX) {
+        builder = builder.with_s3_express(true);
+    }
+    builder
 }
 
 /// Multipart writer over `object_store::MultipartUpload`.
@@ -577,6 +587,47 @@ mod tests {
     async fn memory_storage_contract() {
         let storage = MemoryObjectStorage::new(0);
         contract(&storage).await;
+    }
+
+    #[test]
+    fn s3_express_enabled_by_param() {
+        let uri = IdUri::parse("0@s3://my-bucket?region=us-east-1&s3Express=true").unwrap();
+        let builder = s3_builder(&uri);
+        assert_eq!(
+            builder.get_config_value(&object_store::aws::AmazonS3ConfigKey::S3Express),
+            Some("true".into())
+        );
+        assert_eq!(
+            builder.get_config_value(&object_store::aws::AmazonS3ConfigKey::Region),
+            Some("us-east-1".into())
+        );
+    }
+
+    #[test]
+    fn s3_express_enabled_by_directory_bucket_name() {
+        let uri = IdUri::parse("0@s3://my-wal--use1-az4--x-s3?region=us-east-1").unwrap();
+        let builder = s3_builder(&uri);
+        assert_eq!(
+            builder.get_config_value(&object_store::aws::AmazonS3ConfigKey::S3Express),
+            Some("true".into())
+        );
+    }
+
+    #[test]
+    fn s3_express_off_for_standard_bucket() {
+        let uri = IdUri::parse(
+            "0@s3://my-bucket?region=us-east-1&endpoint=http://127.0.0.1:9000&pathStyle=true",
+        )
+        .unwrap();
+        let builder = s3_builder(&uri);
+        let express = builder
+            .get_config_value(&object_store::aws::AmazonS3ConfigKey::S3Express)
+            .unwrap_or_else(|| "false".into());
+        assert_eq!(express, "false");
+        assert_eq!(
+            builder.get_config_value(&object_store::aws::AmazonS3ConfigKey::Endpoint),
+            Some("http://127.0.0.1:9000".into())
+        );
     }
 
     #[test]

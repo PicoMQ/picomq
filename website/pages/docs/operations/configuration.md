@@ -67,6 +67,23 @@ S3 credentials come from the standard `AWS_*` environment variables. Compatible 
 
 `--wal` optionally puts the WAL in its own bucket. When absent the WAL shares the data bucket under the next bucket id, which is the right default unless WAL and data need different storage classes or lifecycle rules.
 
+### S3 Express One Zone for the WAL
+
+The WAL bucket can be an [S3 Express One Zone](https://aws.amazon.com/s3/storage-classes/express-one-zone/) directory bucket while the data bucket stays on standard S3. Express PUTs complete in single-digit milliseconds, so this cuts append acknowledgment latency without changing the data bucket's economics.
+
+A directory bucket is detected automatically from AWS's reserved name suffix (`{base}--{zone-id}--x-s3`), which switches the client to Express session authentication. The `s3Express=true` URI parameter forces it explicitly.
+
+```bash
+--storage=-2@s3://picomq-data?region=us-east-1 \
+--wal=-4@s3://picomq-wal--use1-az4--x-s3?region=us-east-1&batchInterval=15
+```
+
+Three things make this setup effective:
+
+- **Lower `batchInterval`.** The default 250 ms batch window exists to amortize standard S3 request costs. Express PUTs are faster and cheaper, so a 10 to 25 ms window turns the latency gain into client-visible acknowledgment latency.
+- **Run the node in the bucket's availability zone.** The zone is encoded in the bucket name. Cross-zone access works but gives most of the latency win back.
+- **Keep the Express residency short.** `--wal-upload-threshold` and `--wal-upload-interval-ms` control how quickly WAL data compacts out to the data bucket. Express is single-zone storage, so acknowledged records carry that exposure until they land in the standard bucket.
+
 ## Auth
 
 | Flag | Default | Purpose |

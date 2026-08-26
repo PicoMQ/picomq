@@ -9,9 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use pico_protocol::envelope::decode_envelope_timestamp;
 use pico_server::{OffsetToken, S3StreamService, ServiceError};
-
-use crate::envelope::decode_envelope_timestamp;
 
 pub struct StreamTimestamps {
     service: Arc<S3StreamService>,

@@ -1683,6 +1683,7 @@ dependencies = [
  "futures",
  "pico-auth",
  "pico-frontend",
+ "pico-protocol",
  "pico-runtime",
  "reqwest",
  "s3stream",
@@ -1710,6 +1711,7 @@ dependencies = [
  "pico-auth",
  "pico-common",
  "pico-metadata",
+ "pico-protocol",
  "pico-server",
  "reqwest",
  "rust-embed",
@@ -1736,6 +1738,16 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "pico-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

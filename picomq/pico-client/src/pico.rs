@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use pico_frontend::envelope::{decode_batch_read, encode_batch_append, RecordEnvelope};
-use pico_frontend::pico::{
+use pico_protocol::envelope::{decode_batch_read, encode_batch_append, RecordEnvelope};
+use pico_protocol::pico::{
     CT_BATCH_BINARY, H_CLOSED, H_EXPIRES_AT, H_NEXT_SEQ, H_PRODUCER_EPOCH, H_PRODUCER_ID,
     H_PRODUCER_SEQ, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE,
 };

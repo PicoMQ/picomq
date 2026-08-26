@@ -3,7 +3,6 @@
 pub mod admin;
 mod auth;
 pub mod ds;
-pub mod envelope;
 mod http;
 pub mod pico;
 pub mod route;

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bytes::Bytes;
-use pico_frontend::envelope::{decode_batch_read, encode_batch_append, RecordEnvelope};
+use pico_protocol::envelope::{decode_batch_read, encode_batch_append, RecordEnvelope};
 use serde_json::Value;
 
 use common::pico_server;
