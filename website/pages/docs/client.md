@@ -1,6 +1,6 @@
 # Rust client
 
-`pico-client` is the Rust SDK. It speaks both wire protocols, the native Pico protocol and [Durable Streams](/docs/design/protocols), behind one `StreamApi` trait, and includes a batching producer for high-throughput appends.
+`pico-client` is the Rust SDK for the HTTP protocols. It speaks the native Pico protocol and [Durable Streams](/docs/design/protocols) behind one `StreamApi` trait, and includes a batching producer for high-throughput appends. Kafka needs no SDK here: [standard Kafka clients](/docs/kafka) connect directly.
 
 The crate is standalone. It depends on `pico-protocol`, the small crate holding the shared wire vocabulary (header constants and the record envelope codec), plus the usual HTTP stack (`reqwest`, `tokio`). Pulling in the client does not build any part of the server.
 

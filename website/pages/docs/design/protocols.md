@@ -1,6 +1,14 @@
 # Protocols
 
-PicoMQ speaks two client protocols. The Pico protocol is the native API, with all custom headers under the `Pico-*` prefix. Durable Streams is an open protocol implemented on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers. A listener serves one or the other, chosen in the node's configuration, and both are thin translations over the same stream service. Nothing in the storage or metadata layers knows which protocol a record arrived through.
+PicoMQ speaks three client protocols.
+
+- **Pico protocol.** The native HTTP API, with all custom headers under the `Pico-*` prefix.
+- **Durable Streams.** An open HTTP protocol implemented on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers.
+- **[Kafka wire protocol](/docs/kafka).** Serves standard Kafka clients over TCP.
+
+A node serves one of the three, chosen in its configuration, and each is a thin translation over the same stream service. Nothing in the storage or metadata layers knows which protocol a record arrived through.
+
+This page covers the two HTTP protocols, which share a resource model and a stored record format. The Kafka frontend makes different choices for compatibility's sake and has [its own page](/docs/kafka).
 
 ## The resource model
 
@@ -31,7 +39,9 @@ Every record is stored as an envelope so nothing about it is lost between protoc
 </svg>
 </div>
 
-The envelope is the reason the two protocols can share storage. A record appended through one protocol reads back through the other with its timestamp and metadata intact, because the stored form belongs to neither. The timestamp is assigned by the owning node and is monotonic per stream, so equal wall-clock readings still order correctly. Headers are the record's own key-value metadata, distinct from HTTP headers.
+The envelope is the reason the two HTTP protocols can share storage. A record appended through one protocol reads back through the other with its timestamp and metadata intact, because the stored form belongs to neither. The timestamp is assigned by the owning node and is monotonic per stream, so equal wall-clock readings still order correctly. Headers are the record's own key-value metadata, distinct from HTTP headers.
+
+Kafka streams are the deliberate exception: the Kafka frontend stores the client's record batches verbatim rather than re-encoding them into envelopes, so fetches return the exact bytes Kafka clients expect with no per-record work. The two stored forms coexist because streams carry a content type, and a stream is written and read through the protocol family that created it.
 
 Appends come in three shapes, a single body, a JSON batch, and a binary batch, each with its own content type. Records in a batch are ordered under the stream's gate together, so they always occupy consecutive offsets, and the append is acknowledged once the whole batch is durable.
 
@@ -41,6 +51,6 @@ Exactly-once appends over HTTP need the server to remember, because a client tha
 
 ## Routing at the edge
 
-Both frontends share one routing step in front of every handler, so the protocol code never thinks about ownership. Creates are always served locally, since create is what places a stream in the first place, and everything else follows the decision table in [Ownership and routing](/docs/design/ownership), redirecting to the owner when the stream is served elsewhere. A routing failure returns an error rather than a guess.
+All frontends share one routing step in front of every handler, so the protocol code never thinks about ownership. Creates are always served locally, since create is what places a stream in the first place, and everything else follows the decision table in [Ownership and routing](/docs/design/ownership), redirecting to the owner when the stream is served elsewhere. A routing failure returns an error rather than a guess.
 
 SSE connections are capped at `55` seconds and long polls at `25` by default, both below common proxy idle timeouts, so intermediaries see regular traffic instead of connections worth killing. Clients resume from their last offset or cursor and lose nothing across reconnects.

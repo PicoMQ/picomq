@@ -32,6 +32,7 @@ pub enum Protocol {
     #[default]
     Pico,
     Ds,
+    Kafka,
 }
 
 #[derive(Debug, Clone)]
@@ -52,12 +53,6 @@ pub struct ServeOptions {
     /// load balancer can drain traffic first.
     pub shutdown_drain: Duration,
     /// The listener accept queue size.
-    ///
-    /// The OS default of 128 is easily overrun by an HTTP/1.1 client opening
-    /// one connection per in-flight request. The excess SYNs are dropped and
-    /// retried, so throughput falls off a cliff instead of degrading. The
-    /// kernel clamps this to `somaxconn` (128 on macOS, 4096 on current
-    /// Linux), so asking for more is a ceiling, not a guarantee.
     pub backlog: i32,
     /// Maintenance-lease holdership for the admin API, when the host runs a
     /// lease keeper. `None` reports `leaseHolder: null`.
@@ -131,6 +126,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
             .with_authorizer(options.authorizer.clone()),
         )
         .router(),
+        Protocol::Kafka => Router::new(),
     };
 
     let (stop, _) = watch::channel(false);

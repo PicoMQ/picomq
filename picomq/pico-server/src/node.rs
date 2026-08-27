@@ -21,18 +21,18 @@ use crate::service::S3StreamService;
 use crate::transfer::TransferWatcher;
 use crate::waiter::StreamWaiterRegistry;
 
-/// The node identity + engine tuning the host passes in.
-///
-/// `slots` is the placement weight. Storage and WAL come in as host-provided
-/// handles. URI parsing belongs to the CLI.
+/// Node identity and engine tuning the host passes in.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
     pub node_id: i32,
     pub node_epoch: i64,
-    /// (advertised address, used for
-    /// redirects).
+    /// Advertised address, used for redirects.
     pub http_address: String,
+    /// Placement weight.
     pub slots: u32,
+    /// Advertised addresses of additional wire protocols, keyed by protocol
+    /// name (e.g. `"kafka"`).
+    pub protocol_addresses: std::collections::BTreeMap<String, String>,
     pub cluster_id: String,
     pub engine: Config,
 }
@@ -44,6 +44,7 @@ impl Default for NodeConfig {
             node_epoch: 1,
             http_address: "http://127.0.0.1:4437".to_owned(),
             slots: 1,
+            protocol_addresses: Default::default(),
             cluster_id: "picomq".to_owned(),
             engine: Config::default(),
         }
@@ -75,7 +76,11 @@ impl PicoNode {
         let handle =
             MetadataNodeHandle::new(config.node_id, config.node_epoch, sink, views.clone());
         handle
-            .register_with_slots(&config.http_address, config.slots)
+            .register_with_slots(
+                &config.http_address,
+                config.slots,
+                config.protocol_addresses.clone(),
+            )
             .await
             .map_err(|e| e.to_stream_error())?;
 

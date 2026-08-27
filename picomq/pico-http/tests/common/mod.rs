@@ -1,5 +1,5 @@
 //! Loopback test harness: a `PicoNode` on `LocalSink` + memory object
-//! storage, served over a real TCP socket by `pico_frontend::serve`. The same
+//! storage, served over a real TCP socket by `pico_http::serve`. The same
 //! bind path `pico serve` uses. Timeouts are shortened for tests (short long
 //! poll, 2s SSE cap).
 
@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pico_frontend::{serve, Protocol, RoutingMode, RunningServer, ServeOptions};
+use pico_http::{serve, Protocol, RoutingMode, RunningServer, ServeOptions};
 use pico_metadata::LocalSink;
 use pico_server::{NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};

@@ -50,7 +50,9 @@ pub fn encode(state: &MetadataState) -> Bytes {
         buf.put_i64_le(node.epoch);
         put_str(&mut buf, &node.http_address);
         buf.put_u32_le(node.slots);
+        put_str_map(&mut buf, &node.protocol_addresses);
     }
+    buf.put_u64_le(state.next_producer_id);
 
     buf.put_u64_le(state.next_object_id);
     buf.put_u64_le(state.prepared.len() as u64);
@@ -139,6 +141,7 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
         let epoch = get_i64(&mut buf)?;
         let http_address = get_str(&mut buf)?;
         let slots = get_u32(&mut buf)?;
+        let protocol_addresses = get_str_map(&mut buf)?;
         state.nodes.insert(
             node_id,
             NodeRow {
@@ -146,9 +149,11 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
                 epoch,
                 http_address,
                 slots,
+                protocol_addresses,
             },
         );
     }
+    state.next_producer_id = get_u64(&mut buf)?;
 
     state.next_object_id = get_u64(&mut buf)?;
     for _ in 0..get_u64(&mut buf)? {
@@ -281,6 +286,27 @@ fn put_str(buf: &mut BytesMut, s: &str) {
     buf.put_slice(s.as_bytes());
 }
 
+fn put_str_map(buf: &mut BytesMut, map: &std::collections::BTreeMap<String, String>) {
+    buf.put_u32_le(map.len() as u32);
+    for (key, value) in map {
+        put_str(buf, key);
+        put_str(buf, value);
+    }
+}
+
+fn get_str_map(
+    buf: &mut &[u8],
+) -> Result<std::collections::BTreeMap<String, String>, SnapshotError> {
+    let len = get_u32(buf)? as usize;
+    let mut map = std::collections::BTreeMap::new();
+    for _ in 0..len {
+        let key = get_str(buf)?;
+        let value = get_str(buf)?;
+        map.insert(key, value);
+    }
+    Ok(map)
+}
+
 fn get_str(buf: &mut &[u8]) -> Result<String, SnapshotError> {
     let len = get_u32(buf)? as usize;
     if buf.remaining() < len {
@@ -324,7 +350,10 @@ mod tests {
     /// destroyed FIFO (after a clean), and KV entries.
     fn rich_state() -> MetadataState {
         let mut state = MetadataState::new();
-        for (node_id, node_epoch, addr) in [(1, 10i64, "http://n1:9090"), (2, 20, "")] {
+        for (node_id, node_epoch, addr, kafka) in [
+            (1, 10i64, "http://n1:9090", Some("n1:9092")),
+            (2, 20, "", None),
+        ] {
             apply(
                 &mut state,
                 &MetadataCommand::RegisterNode {
@@ -332,10 +361,27 @@ mod tests {
                     node_epoch,
                     http_address: addr.into(),
                     slots: 1,
+                    protocol_addresses: kafka
+                        .map(|address| {
+                            std::collections::BTreeMap::from([(
+                                "kafka".to_owned(),
+                                address.to_owned(),
+                            )])
+                        })
+                        .unwrap_or_default(),
                 },
             )
             .unwrap();
         }
+        apply(
+            &mut state,
+            &MetadataCommand::AllocateProducerIds {
+                node_id: 1,
+                node_epoch: 10,
+                count: 5,
+            },
+        )
+        .unwrap();
         for _ in 0..3 {
             apply(
                 &mut state,

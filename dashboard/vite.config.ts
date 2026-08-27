@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [preact()],
   base: './',
   build: {
-    outDir: '../picomq/pico-frontend/_dashboard',
+    outDir: '../picomq/pico-http/_dashboard',
     emptyOutDir: true,
   },
   server: {

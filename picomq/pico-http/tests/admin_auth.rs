@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use pico_auth::{AccessToken, Scope, TokenRecord, TokenStore};
-use pico_frontend::{serve, Protocol, RoutingMode, RunningServer, ServeOptions};
+use pico_http::{serve, Protocol, RoutingMode, RunningServer, ServeOptions};
 use pico_server::PicoNode;
 use serde_json::{json, Value};
 

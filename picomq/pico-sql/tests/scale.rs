@@ -40,6 +40,7 @@ async fn run_gate(total: u64) {
         node_epoch: EPOCH,
         http_address: String::new(),
         slots: 1,
+        protocol_addresses: Default::default(),
     })
     .await
     .unwrap();

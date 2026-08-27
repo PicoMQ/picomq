@@ -1,0 +1,30 @@
+[package]
+name = "pico-kafka"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Kafka wire-protocol frontend for PicoMQ"
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+fastrand = { workspace = true }
+futures = { workspace = true }
+kafka-protocol = { version = "0.18", default-features = false, features = ["broker", "client", "gzip", "zstd", "snappy", "lz4"] }
+pico-metadata = { workspace = true }
+pico-server = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+pico-metadata = { workspace = true }
+pico-server = { workspace = true }
+s3stream = { workspace = true }
+tokio-test = { workspace = true }
+
+[lints]
+workspace = true

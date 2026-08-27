@@ -25,6 +25,7 @@ fn build(total: u64, open_every: u64) -> MetadataState {
                 node_epoch: EPOCH,
                 http_address: String::new(),
                 slots: 1,
+                protocol_addresses: Default::default(),
             },
         )
         .unwrap();

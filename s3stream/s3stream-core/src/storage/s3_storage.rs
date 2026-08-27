@@ -149,6 +149,7 @@ struct StorageInner {
     force_ticker_deadline: Mutex<Instant>,
     delay_trim_ms: u64,
     delay_trim_queue: Mutex<VecDeque<(RecordOffset, Completion)>>,
+    inflight_trims: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     max_data_write_rate: Mutex<f64>,
     shutdown: AtomicBool,
     background: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -252,6 +253,7 @@ impl S3Storage {
                 force_ticker_deadline: Mutex::new(Instant::now()),
                 delay_trim_ms,
                 delay_trim_queue: Mutex::new(VecDeque::new()),
+                inflight_trims: Mutex::new(Vec::new()),
                 max_data_write_rate: Mutex::new(0.0),
                 shutdown: AtomicBool::new(false),
                 background: Mutex::new(Vec::new()),
@@ -896,13 +898,13 @@ impl StorageInner {
     }
 
     fn delay_trim(self: &Arc<Self>, offset: RecordOffset, cf: Completion) {
-        if self.delay_trim_ms == 0 {
+        let handle = if self.delay_trim_ms == 0 {
             tracing::info!(?offset, "try trim WAL");
             let inner = Arc::clone(self);
             tokio::spawn(async move {
                 let result = inner.wal.trim(offset).await.map_err(|e| e.to_string());
                 cf.complete(result);
-            });
+            })
         } else {
             self.delay_trim_queue
                 .lock()
@@ -922,10 +924,15 @@ impl StorageInner {
                     let result = inner.wal.trim(offset).await.map_err(|e| e.to_string());
                     cf.complete(result);
                 }
-            });
-        }
+            })
+        };
+        let mut inflight = self.inflight_trims.lock().expect("trim tasks poisoned");
+        inflight.retain(|h| !h.is_finished());
+        inflight.push(handle);
     }
 
+    /// Flush queued trims and await spawned ones, so no trim task survives
+    /// shutdown to delete objects under a successor's recovery.
     async fn delay_trim_close(self: &Arc<Self>) {
         let pending: Vec<(RecordOffset, Completion)> = {
             let mut queue = self.delay_trim_queue.lock().expect("trim queue poisoned");
@@ -934,6 +941,13 @@ impl StorageInner {
         for (offset, cf) in pending {
             let result = self.wal.trim(offset).await.map_err(|e| e.to_string());
             cf.complete(result);
+        }
+        let inflight: Vec<tokio::task::JoinHandle<()>> = {
+            let mut tasks = self.inflight_trims.lock().expect("trim tasks poisoned");
+            tasks.drain(..).collect()
+        };
+        for handle in inflight {
+            let _ = handle.await;
         }
     }
 }

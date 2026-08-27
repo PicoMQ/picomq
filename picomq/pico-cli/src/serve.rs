@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
-use pico_frontend::{Protocol, RoutingMode};
+use pico_http::{Protocol, RoutingMode};
 use pico_runtime::{AuthMode, MetaBackend, ServerConfig};
 
 #[derive(Debug, Args)]
@@ -30,6 +30,14 @@ pub struct ServeArgs {
 
     #[arg(long, env = "PICO_ADMIN_LISTEN", default_value = "127.0.0.1:9090")]
     admin_listen: SocketAddr,
+
+    /// Kafka listener bind address, used with `--protocol kafka`.
+    #[arg(long, env = "PICO_KAFKA_LISTEN", default_value = "127.0.0.1:9092")]
+    kafka_listen: SocketAddr,
+
+    /// Kafka address advertised to clients. Defaults to `--kafka-listen`.
+    #[arg(long, env = "PICO_KAFKA_ADVERTISE")]
+    kafka_advertise: Option<String>,
 
     #[arg(long)]
     no_admin: bool,
@@ -177,6 +185,8 @@ impl ServeArgs {
             admin_addr: (!self.no_admin).then_some(self.admin_listen),
             advertised_url: self.http_address,
             protocol,
+            kafka_listen: self.kafka_listen,
+            kafka_advertise: self.kafka_advertise,
             meta_backend: MetaBackend::parse(&self.meta_url)?,
             storage_uri: self.storage,
             wal_uri: self.wal,

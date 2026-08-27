@@ -4,11 +4,8 @@ use bytes::Bytes;
 
 use crate::error::{ErrorKind, ServiceError};
 
-/// Opaque, order-preserving stream position token.
-///
-/// The wire form is the record offset zero-padded to 20 digits so
-/// lexicographic order equals numeric order. `parse` accepts negative input
-/// as "beginning".
+/// Opaque stream position token. The wire form is the record offset
+/// zero-padded to 20 digits so lexicographic order equals numeric order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OffsetToken {
     record_offset: u64,
@@ -99,6 +96,80 @@ pub struct StreamRecord {
     pub payload: Bytes,
 }
 
+/// Numeric idempotent-producer identity on one batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumericProducer {
+    pub id: i64,
+    pub epoch: i16,
+    pub first_seq: i32,
+}
+
+/// One batch inside an append payload. `patch_at` is the byte position of
+/// the 8-byte base-offset field the service rewrites, which must sit outside
+/// any payload checksum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchSpan {
+    pub patch_at: usize,
+    pub record_count: u32,
+}
+
+/// One batch-payload append, stored verbatim except for the base-offset
+/// patch of each contained batch.
+#[derive(Debug, Clone)]
+pub struct AppendBatchCommand {
+    pub name: String,
+    pub payload: Bytes,
+    /// Contained batches in payload order. Non-empty, and a producer is only
+    /// allowed with exactly one batch.
+    pub batches: Vec<BatchSpan>,
+    /// When set, the same identity must be readable from the stored payload
+    /// header (`producer::producer_identity`) for takeover recovery.
+    pub producer: Option<NumericProducer>,
+    pub base_timestamp_ms: i64,
+}
+
+impl AppendBatchCommand {
+    pub fn record_count(&self) -> u32 {
+        self.batches
+            .iter()
+            .fold(0u32, |acc, span| acc.saturating_add(span.record_count))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppendBatchResult {
+    /// First offset of the batch. For a duplicate this is the offset the
+    /// original attempt landed at.
+    pub base_offset: u64,
+    pub duplicate: bool,
+    pub log_start_offset: u64,
+}
+
+/// One stored batch, returned verbatim. `base_offset` may be below the
+/// requested position when the position falls mid-batch.
+#[derive(Debug, Clone)]
+pub struct StreamBatch {
+    pub base_offset: u64,
+    /// Exclusive.
+    pub last_offset: u64,
+    pub count: u32,
+    pub payload: Bytes,
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchReadResult {
+    pub batches: Vec<StreamBatch>,
+    pub next_offset: u64,
+    pub high_watermark: u64,
+    pub log_start_offset: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamWatermarks {
+    pub log_start_offset: u64,
+    pub high_watermark: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateCommand {
     pub name: String,
@@ -107,9 +178,35 @@ pub struct CreateCommand {
     pub expires_at_ms: Option<i64>,
     pub closed: bool,
     pub initial_payload: Bytes,
+    /// Caller-assigned external identity for the stream (e.g. the Kafka
+    /// topic UUID), resolvable via `lookup_by_external_id`. `None` when the
+    /// frontend has no such notion.
+    pub external_id: Option<[u8; 16]>,
+    /// Set only by in-process callers (e.g. the group coordinator) to create
+    /// streams under the reserved `/_sys/` prefix. Client frontends must
+    /// leave this false.
+    pub internal: bool,
 }
 
 impl CreateCommand {
+    /// An open, empty stream carrying a caller-assigned external identity.
+    pub fn with_external_id(
+        name: impl Into<String>,
+        content_type: impl Into<String>,
+        external_id: [u8; 16],
+    ) -> Self {
+        Self {
+            name: name.into(),
+            content_type: content_type.into(),
+            ttl_seconds: None,
+            expires_at_ms: None,
+            closed: false,
+            initial_payload: Bytes::new(),
+            external_id: Some(external_id),
+            internal: false,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ServiceError> {
         if self.ttl_seconds.is_some() && self.expires_at_ms.is_some() {
             return Err(ServiceError::with_message(
@@ -200,6 +297,8 @@ pub struct StreamMeta {
     pub next_offset: OffsetToken,
     pub submitted_offset: OffsetToken,
     pub closed: bool,
+    /// Caller-assigned external identity, all zeros when none was set.
+    pub external_id: [u8; 16],
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +379,8 @@ mod tests {
             expires_at_ms: Some(10),
             closed: false,
             initial_payload: Bytes::new(),
+            external_id: None,
+            internal: false,
         };
         assert!(cmd.validate().is_err());
     }

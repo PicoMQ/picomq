@@ -47,8 +47,13 @@ const docsSidebar = [
     text: 'API reference',
     items: [
       { text: 'HTTP API', link: '/docs/api' },
+      { text: 'Kafka protocol', link: '/docs/kafka' },
       { text: 'Rust client', link: '/docs/client' },
     ],
+  },
+  {
+    text: 'FAQ',
+    items: [{ text: 'Why not Kafka?', link: '/docs/faq/why-not-kafka' }],
   },
   {
     text: 'Community',

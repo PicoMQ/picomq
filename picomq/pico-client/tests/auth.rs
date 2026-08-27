@@ -13,7 +13,7 @@ use pico_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
 use pico_client::{ClientConfig, ErrorKind, PicoClient, RetryPolicy, StreamApi};
-use pico_frontend::Protocol as ServeProtocol;
+use pico_http::Protocol as ServeProtocol;
 use pico_runtime::{AuthMode, MetaBackend, PicoServer, ServerConfig};
 
 async fn secured_server(dir: &std::path::Path) -> (PicoServer, String, AccessToken) {

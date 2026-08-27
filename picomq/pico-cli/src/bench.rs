@@ -191,7 +191,7 @@ fn json_batch(record_size: usize, batch: usize) -> Bytes {
 }
 
 pub async fn run(endpoint: &Target, args: BenchArgs) -> Result<i32, ClientError> {
-    let protocol = Protocol::from(endpoint.protocol);
+    let protocol = endpoint.protocol.client_protocol()?;
     let payload = Arc::new(Payload::build(protocol, args.record_size, args.batch));
     let streams = args.streams.max(1);
     let workers = args.in_flight.max(1);

@@ -129,7 +129,7 @@ impl TokenService {
         self.store.clone()
     }
 
-    /// One expiry pass. Returns the number removed; `delete_if` skips records
+    /// One expiry pass returning the number removed. `delete_if` skips records
     /// rotated since the list.
     pub async fn remove_expired(&self, now_ms: i64) -> Result<usize, AuthError> {
         let mut removed = 0;

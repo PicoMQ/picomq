@@ -29,6 +29,7 @@ fn register(node_id: i32, node_epoch: i64) -> MetadataCommand {
         node_epoch,
         http_address: String::new(),
         slots: 1,
+        protocol_addresses: Default::default(),
     }
 }
 

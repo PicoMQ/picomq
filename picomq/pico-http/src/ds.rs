@@ -215,6 +215,8 @@ impl DsFrontend {
                 expires_at_ms,
                 closed: truthy(headers, H_STREAM_CLOSED),
                 initial_payload: body,
+                external_id: None,
+                internal: false,
             })
             .await?;
         let meta = result.meta;

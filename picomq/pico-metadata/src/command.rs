@@ -1,6 +1,6 @@
 //! The replicated command set: the *only* way metadata changes.
 //!
-//! Nineteen variants with stable type codes (see the codec).
+//! Twenty variants with stable type codes (see the codec).
 //!
 //! Why a closed command enum (and not methods mutating state): every mutation is
 //! a value that goes through the consensus log, so the state machine is
@@ -17,13 +17,15 @@ use s3stream::{CommitStreamSetObjectRequest, CompactStreamObjectRequest, StreamM
 /// as the "never opened" stream epoch (`StreamControlManager#createStream`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetadataCommand {
-    /// Registers/refreshes a node
-    /// epoch and its advertised HTTP address. An older epoch is fenced.
+    /// Registers/refreshes a node epoch and its advertised addresses. An
+    /// older epoch is fenced. An empty `protocol_addresses` map keeps the
+    /// stored addresses, a non-empty map replaces them wholesale.
     RegisterNode {
         node_id: i32,
         node_epoch: i64,
         http_address: String,
         slots: u32,
+        protocol_addresses: std::collections::BTreeMap<String, String>,
     },
 
     PlaceStream {
@@ -134,9 +136,8 @@ pub enum MetadataCommand {
         key: String,
     },
 
-    /// Deletes only when the stored value equals `expected`.
-    /// Apply returns the removed value on match; mismatch or missing key is
-    /// reported as redundant so revoke/expiry cannot wipe a rotated record.
+    /// Deletes only when the stored value equals `expected`. Mismatch or a
+    /// missing key is redundant so revoke/expiry cannot wipe a rotated record.
     DeleteKvIfMatches {
         key: String,
         expected: bytes::Bytes,
@@ -166,6 +167,15 @@ pub enum MetadataCommand {
         node_epoch: i64,
         count: u32,
     },
+
+    /// Leases `count` consecutive numeric producer ids and returns the
+    /// first. Ids are never reclaimed, so an id stays unique for the
+    /// cluster's lifetime.
+    AllocateProducerIds {
+        node_id: i32,
+        node_epoch: i64,
+        count: u32,
+    },
 }
 
 impl MetadataCommand {
@@ -190,6 +200,7 @@ impl MetadataCommand {
             MetadataCommand::CreateStreams { .. } => 17,
             MetadataCommand::PlaceStream { .. } => 18,
             MetadataCommand::DeleteKvIfMatches { .. } => 19,
+            MetadataCommand::AllocateProducerIds { .. } => 20,
         }
     }
 }

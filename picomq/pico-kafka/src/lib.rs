@@ -1,0 +1,22 @@
+//! Kafka wire-protocol frontend for PicoMQ.
+
+mod batch;
+mod broker;
+mod dispatch;
+mod error;
+mod frame;
+mod group;
+mod handlers;
+mod listener;
+mod topic;
+mod versions;
+
+pub const PROTOCOL_NAME: &str = "kafka";
+
+pub use broker::BrokerContext;
+pub use dispatch::{dispatch, RequestContext};
+pub use error::KafkaError;
+pub use frame::{read_frame, write_frame};
+pub use handlers::{HandlerError, HandlerOutcome, ResponseFrame};
+pub use listener::{KafkaListener, ListenerConfig};
+pub use versions::{lookup_versions, supported_apis, SupportedApi};
