@@ -121,11 +121,12 @@ impl StreamCache {
                 hi = mid;
             } else if start_offset >= record.last_offset() {
                 lo = mid + 1;
-            } else if start_offset == record.base_offset() {
-                return Some(mid);
             } else {
-                // Inside the batch but not at its base: mismatch.
-                return None;
+                // At the base or inside the batch: serve the covering batch.
+                // Batches are stored verbatim, so a mid-batch read must return
+                // the whole batch and let the reader skip leading records
+                // (block-cache reads are block-granular and behave the same).
+                return Some(mid);
             }
         }
         None
@@ -714,6 +715,23 @@ mod tests {
 
         // Miss.
         assert!(cache.get(1, 40, 50, usize::MAX).is_empty());
+    }
+
+    /// A start offset inside a batch returns the covering batch; readers skip
+    /// leading records themselves (same contract as block-granular reads).
+    #[test]
+    fn get_mid_batch_returns_covering_batch() {
+        let cache = LogCache::new(1 << 30, 1 << 20, DEFAULT_MAX_BLOCK_STREAM_COUNT);
+        assert!(cache.put(record(1, 0, 3, 16))); // [0, 3)
+        assert!(cache.put(record(1, 3, 2, 16))); // [3, 5)
+
+        let got = cache.get(1, 1, 3, usize::MAX);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].base_offset(), 0);
+
+        let got = cache.get(1, 4, 5, usize::MAX);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].base_offset(), 3);
     }
 
     /// Continuous ranges spanning blocks are served together.

@@ -1,10 +1,6 @@
 //! Named streams over the engine, with registry state in the metadata KV.
-//!
-//! Appends submit under the per-stream gate (order fixed), then await
-//! durability outside it so pipelined requests share WAL group commits.
-//! A dropped caller cannot wedge the stream: confirm/fencing finishes in a
-//! detached completer. Post-durability tail-cache updates may interleave.
-//! `record_append` tolerates gaps.
+//! Appends submit under the per-stream gate, then await durability outside
+//! it so pipelined requests share WAL group commits.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -20,10 +16,12 @@ use s3stream::{
 
 use crate::error::{ErrorKind, ServiceError};
 use crate::framing;
+use crate::producer::{self, Admission};
 use crate::registry::{validate_producer, ClosedBy, ProducerDecision, RegistryEntry};
 use crate::types::{
-    AppendCommand, AppendResult, CloseResult, CreateCommand, CreateResult, OffsetToken, ReadResult,
-    StreamList, StreamMeta, StreamRecord,
+    AppendBatchCommand, AppendBatchResult, AppendCommand, AppendResult, BatchReadResult,
+    CloseResult, CreateCommand, CreateResult, OffsetToken, ReadResult, StreamBatch, StreamList,
+    StreamMeta, StreamRecord, StreamWatermarks,
 };
 use crate::waiter::StreamWaiterRegistry;
 
@@ -35,6 +33,8 @@ const TAIL_MAX_RECORDS: usize = 4096;
 /// pending transfer settling.
 const TRANSFER_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSFER_SETTLE_POLL: Duration = Duration::from_millis(50);
+/// Records between durable producer-state checkpoints.
+const PRODUCER_CHECKPOINT_INTERVAL: u64 = 4096;
 
 /// Recent appended records kept in memory so tail reads skip the engine fetch.
 #[derive(Default)]
@@ -111,7 +111,15 @@ pub struct S3StreamService {
     local_epochs: Mutex<HashMap<u64, u64>>,
     gates: Mutex<HashMap<String, Arc<Gate>>>,
     entry_cache: Mutex<HashMap<String, RegistryEntry>>,
+    /// External id -> stream name, rebuilt lazily from the registry on miss.
+    external_ids: Mutex<HashMap<[u8; 16], String>>,
     open_lock: tokio::sync::Mutex<()>,
+}
+
+/// Stream names under `/_sys/` are reserved for internal state (e.g. Kafka
+/// consumer groups) and rejected for client creates.
+pub fn is_reserved_name(name: &str) -> bool {
+    name == "/_sys" || name.starts_with("/_sys/")
 }
 
 impl S3StreamService {
@@ -132,6 +140,7 @@ impl S3StreamService {
             local_epochs: Mutex::new(HashMap::new()),
             gates: Mutex::new(HashMap::new()),
             entry_cache: Mutex::new(HashMap::new()),
+            external_ids: Mutex::new(HashMap::new()),
             open_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -145,6 +154,14 @@ impl S3StreamService {
     pub async fn create(&self, command: CreateCommand) -> Result<CreateResult, ServiceError> {
         command.validate()?;
         let name = normalize(&command.name);
+        if is_reserved_name(&name) && !command.internal {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "the /_sys/ prefix is reserved",
+            ));
+        }
         let gate = self.gate_of(&name);
         let _op = gate.op.lock().await;
 
@@ -171,6 +188,9 @@ impl S3StreamService {
             last_seq: None,
             producers: Default::default(),
             closed_by: None,
+            external_id: command.external_id.unwrap_or([0; 16]),
+            numeric_producers: Default::default(),
+            producer_state_offset: 0,
         };
         let stored = self
             .kv_client
@@ -184,6 +204,7 @@ impl S3StreamService {
             .lock()
             .unwrap()
             .insert(name.clone(), current.clone());
+        self.index_external_id(&name, &current);
 
         if current.stream_id != candidate.stream_id {
             return self
@@ -215,6 +236,27 @@ impl S3StreamService {
             None => Ok(None),
             Some(entry) => Ok(Some(self.to_meta_live(&name, &entry).await?)),
         }
+    }
+
+    /// Registry-backed metadata without opening the stream, so it answers
+    /// for streams owned by other nodes. Offsets are the committed values.
+    pub async fn describe(&self, name: &str) -> Result<Option<StreamMeta>, ServiceError> {
+        let name = normalize(name);
+        let Some(entry) = self.get_entry(&name, false).await? else {
+            return Ok(None);
+        };
+        let committed = {
+            let view = self.views.load();
+            view.state
+                .get_streams(&[entry.stream_id])
+                .into_iter()
+                .next()
+        };
+        Ok(Some(to_meta_from_committed(
+            &name,
+            &entry,
+            committed.as_ref(),
+        )))
     }
 
     pub async fn list(
@@ -298,6 +340,7 @@ impl S3StreamService {
         };
         let deleted = self.kv_client.del_kv(&name).await?;
         self.entry_cache.lock().unwrap().remove(&name);
+        self.unindex_external_id(&entry);
         if deleted.is_none() {
             return Ok(false);
         }
@@ -455,6 +498,162 @@ impl S3StreamService {
         Ok(result)
     }
 
+    // ---- verbatim batch surface ----
+
+    /// Append a batch payload verbatim, patching each contained batch's
+    /// base-offset field to the assigned offset. Durable on return.
+    pub async fn append_batch(
+        &self,
+        command: AppendBatchCommand,
+    ) -> Result<AppendBatchResult, ServiceError> {
+        validate_batch_spans(&command)?;
+        let record_count = command.record_count();
+        let name = normalize(&command.name);
+        let gate = self.gate_of(&name);
+        let _op = gate.op.lock().await;
+
+        let Some(mut entry) = self.get_entry(&name, false).await? else {
+            return Err(ServiceError::kind(ErrorKind::NotFound));
+        };
+        if entry.closed {
+            return Err(ServiceError::kind(ErrorKind::Closed));
+        }
+        let stream_id = entry.stream_id;
+        let stream = self.ensure_open(stream_id).await?;
+        let log_start_offset = live_start_offset(stream.as_ref());
+        let now = now_ms();
+        self.recover_producers(&name, &mut entry, stream.as_ref(), &command, now)
+            .await?;
+        producer::expire_producers(&mut entry, now);
+
+        let accepted = match producer::admit(&mut entry, command.producer, record_count, now) {
+            Ok(Admission::Accepted(accepted)) => accepted,
+            Ok(Admission::Duplicate { base_offset }) => {
+                self.cache_entry(&name, touch_deadline(entry));
+                return Ok(AppendBatchResult {
+                    base_offset,
+                    duplicate: true,
+                    log_start_offset,
+                });
+            }
+            Err(error) => {
+                self.cache_entry(&name, touch_deadline(entry));
+                return Err(error);
+            }
+        };
+
+        // Submits happen only under this gate, so `next_offset` read here is
+        // exactly the base offset the submit below will be assigned. Patch
+        // the batch headers with it before the payload reaches the engine.
+        let base_offset = stream.next_offset();
+        let payload = patch_base_offsets(&command, base_offset);
+        let pending = match Arc::clone(&stream).submit_append(
+            AppendContext::default(),
+            RecordBatch::new(record_count, command.base_timestamp_ms, payload),
+        ) {
+            Ok(pending) => pending,
+            Err(e) => {
+                self.open_streams.lock().unwrap().remove(&stream_id);
+                return Err(ServiceError::durability(e));
+            }
+        };
+        debug_assert_eq!(pending.base_offset(), base_offset);
+
+        producer::record(&mut entry, accepted, base_offset, now);
+        // A failed checkpoint only lengthens the takeover rescan, so it
+        // must not fail the append.
+        let prev_offset = entry.producer_state_offset;
+        entry.producer_state_offset = stream.next_offset();
+        let entry = touch_deadline(entry);
+        self.cache_entry(&name, entry.clone());
+        if !entry.numeric_producers.is_empty()
+            && prev_offset / PRODUCER_CHECKPOINT_INTERVAL
+                != entry.producer_state_offset / PRODUCER_CHECKPOINT_INTERVAL
+        {
+            if let Err(error) = self.put_entry(&name, entry).await {
+                tracing::warn!(%error, stream = %name, "producer state checkpoint failed");
+            }
+        }
+
+        let notify_offset = stream.next_offset();
+        drop(_op);
+        if let Err(e) = await_durable(vec![pending]).await {
+            self.open_streams.lock().unwrap().remove(&stream_id);
+            return Err(ServiceError::durability(e));
+        }
+        self.waiters.notify_append(&name, notify_offset);
+        Ok(AppendBatchResult {
+            base_offset,
+            duplicate: false,
+            log_start_offset,
+        })
+    }
+
+    /// Read stored batches verbatim starting at the batch covering `from`.
+    /// No per-record decode and no gate: payloads stream out as the zero-copy
+    /// `Bytes` the engine returned.
+    pub async fn read_batches(
+        &self,
+        name: &str,
+        from: u64,
+        max_bytes: usize,
+    ) -> Result<BatchReadResult, ServiceError> {
+        let name = normalize(name);
+        let Some(entry) = self.get_entry(&name, false).await? else {
+            return Err(ServiceError::kind(ErrorKind::NotFound));
+        };
+        let stream = self.ensure_open(entry.stream_id).await?;
+        let high_watermark = stream.confirm_offset();
+        let log_start_offset = live_start_offset(stream.as_ref());
+        if from >= high_watermark {
+            return Ok(BatchReadResult {
+                batches: Vec::new(),
+                next_offset: from,
+                high_watermark,
+                log_start_offset,
+            });
+        }
+        let max_bytes = if max_bytes > 0 { max_bytes } else { usize::MAX };
+        // The engine returns the batch covering `from` even when `from`
+        // falls mid-batch. Clients skip leading records themselves.
+        let fetch = stream
+            .fetch(FetchContext::default(), from, high_watermark, max_bytes)
+            .await?;
+        let batches: Vec<StreamBatch> = fetch
+            .records
+            .into_iter()
+            .map(|batch| StreamBatch {
+                base_offset: batch.base_offset,
+                last_offset: batch.last_offset,
+                count: batch.count,
+                payload: batch.payload,
+            })
+            .collect();
+        let mut next = from;
+        for batch in &batches {
+            next = next.max(batch.last_offset);
+        }
+        Ok(BatchReadResult {
+            batches,
+            next_offset: next,
+            high_watermark,
+            log_start_offset,
+        })
+    }
+
+    /// Trim watermark and confirm offset, for Fetch and ListOffsets replies.
+    pub async fn watermarks(&self, name: &str) -> Result<StreamWatermarks, ServiceError> {
+        let name = normalize(name);
+        let Some(entry) = self.get_entry(&name, false).await? else {
+            return Err(ServiceError::kind(ErrorKind::NotFound));
+        };
+        let stream = self.ensure_open(entry.stream_id).await?;
+        Ok(StreamWatermarks {
+            log_start_offset: live_start_offset(stream.as_ref()),
+            high_watermark: stream.confirm_offset(),
+        })
+    }
+
     // ---- read ----
 
     pub async fn read(
@@ -537,6 +736,38 @@ impl S3StreamService {
             .map(|e| e.stream_id))
     }
 
+    /// Resolve a caller-assigned external id to its stream name. A cache
+    /// miss falls back to one registry scan and repopulates the index.
+    pub async fn lookup_by_external_id(
+        &self,
+        external_id: [u8; 16],
+    ) -> Result<Option<String>, ServiceError> {
+        if external_id == [0u8; 16] {
+            return Ok(None);
+        }
+        let cached = self.external_ids.lock().unwrap().get(&external_id).cloned();
+        if let Some(name) = cached {
+            // Verify: the stream may have been deleted and the id reassigned.
+            if let Some(entry) = self.get_entry(&name, false).await? {
+                if entry.external_id == external_id {
+                    return Ok(Some(name));
+                }
+            }
+            self.external_ids.lock().unwrap().remove(&external_id);
+        }
+        let entries = self.kv_client.list_kv("/").await?;
+        for kv in entries {
+            let Ok(entry) = RegistryEntry::decode(&kv.value) else {
+                continue;
+            };
+            self.index_external_id(&kv.key, &entry);
+            if entry.external_id == external_id {
+                return Ok(Some(kv.key));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn open_stream_snapshot(&self) -> Vec<Arc<dyn Stream>> {
         self.open_streams
             .lock()
@@ -548,9 +779,20 @@ impl S3StreamService {
 
     pub async fn shutdown(&self) {
         self.waiters.clear();
-        let streams = self.open_stream_snapshot();
-        for stream in streams {
-            let _ = stream.close().await;
+        // Each close may wait a WAL upload cycle, so a serial pass over many
+        // open streams would take hours.
+        let mut streams = self.open_stream_snapshot().into_iter();
+        let mut inflight = tokio::task::JoinSet::new();
+        loop {
+            while inflight.len() < 1024 {
+                let Some(stream) = streams.next() else { break };
+                inflight.spawn(async move {
+                    let _ = stream.close().await;
+                });
+            }
+            if inflight.join_next().await.is_none() {
+                break;
+            }
         }
         self.open_streams.lock().unwrap().clear();
     }
@@ -936,6 +1178,7 @@ impl S3StreamService {
                     return Ok(None);
                 };
                 let entry = RegistryEntry::decode(&value)?;
+                self.index_external_id(name, &entry);
                 self.entry_cache
                     .lock()
                     .unwrap()
@@ -962,6 +1205,7 @@ impl S3StreamService {
     async fn expire(&self, name: &str, entry: &RegistryEntry) {
         let _ = self.kv_client.del_kv(name).await;
         self.entry_cache.lock().unwrap().remove(name);
+        self.unindex_external_id(entry);
         self.destroy_stream(entry.stream_id).await;
         if let Some(gate) = self.gates.lock().unwrap().get(name) {
             gate.tail.lock().unwrap().reset();
@@ -1007,6 +1251,50 @@ impl S3StreamService {
         })
     }
 
+    /// Update the in-memory registry view without a durable write.
+    fn cache_entry(&self, name: &str, entry: RegistryEntry) {
+        self.index_external_id(name, &entry);
+        self.entry_cache
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), entry);
+    }
+
+    /// Rebuild producer spans from stored batch headers between the last
+    /// durable checkpoint and the confirmed tail.
+    async fn recover_producers(
+        &self,
+        name: &str,
+        entry: &mut RegistryEntry,
+        stream: &dyn Stream,
+        command: &AppendBatchCommand,
+        now: i64,
+    ) -> Result<(), ServiceError> {
+        if command.producer.is_none() && entry.numeric_producers.is_empty() {
+            return Ok(());
+        }
+        let confirm = stream.confirm_offset();
+        let mut cursor = entry.producer_state_offset.max(live_start_offset(stream));
+        if cursor >= confirm {
+            return Ok(());
+        }
+        while cursor < confirm {
+            let fetch = stream
+                .fetch(FetchContext::default(), cursor, confirm, 8 * 1024 * 1024)
+                .await?;
+            if fetch.records.is_empty() {
+                break;
+            }
+            for batch in fetch.records {
+                producer::fold_stored_batch(entry, &batch.payload, batch.base_offset, now);
+                cursor = cursor.max(batch.last_offset);
+            }
+        }
+        entry.producer_state_offset = confirm;
+        self.cache_entry(name, entry.clone());
+        Ok(())
+    }
+
     async fn put_entry(&self, name: &str, entry: RegistryEntry) -> Result<(), ServiceError> {
         self.kv_client
             .put_kv(KeyValue {
@@ -1014,11 +1302,27 @@ impl S3StreamService {
                 value: entry.encode(),
             })
             .await?;
+        self.index_external_id(name, &entry);
         self.entry_cache
             .lock()
             .unwrap()
             .insert(name.to_owned(), entry);
         Ok(())
+    }
+
+    fn index_external_id(&self, name: &str, entry: &RegistryEntry) {
+        if entry.external_id != [0u8; 16] {
+            self.external_ids
+                .lock()
+                .unwrap()
+                .insert(entry.external_id, name.to_owned());
+        }
+    }
+
+    fn unindex_external_id(&self, entry: &RegistryEntry) {
+        if entry.external_id != [0u8; 16] {
+            self.external_ids.lock().unwrap().remove(&entry.external_id);
+        }
     }
 
     async fn to_meta_live(
@@ -1288,6 +1592,55 @@ fn tail_read(
     }
 }
 
+fn validate_batch_spans(command: &AppendBatchCommand) -> Result<(), ServiceError> {
+    let bad = |message: &str| {
+        Err(ServiceError::with_message(
+            ErrorKind::BadRequest,
+            None,
+            false,
+            message,
+        ))
+    };
+    if command.payload.is_empty() || command.batches.is_empty() {
+        return bad("empty batch payload");
+    }
+    if command.producer.is_some() && command.batches.len() != 1 {
+        return bad("idempotent produce must carry exactly one batch");
+    }
+    let mut previous_end = 0usize;
+    for (i, span) in command.batches.iter().enumerate() {
+        if span.record_count == 0 {
+            return bad("batch with zero records");
+        }
+        if i == 0 && span.patch_at != 0 {
+            return bad("first batch must start at payload byte 0");
+        }
+        if i > 0 && span.patch_at < previous_end {
+            return bad("batch spans out of order");
+        }
+        let Some(end) = span.patch_at.checked_add(8) else {
+            return bad("batch span out of bounds");
+        };
+        if end > command.payload.len() {
+            return bad("batch span out of bounds");
+        }
+        previous_end = end;
+    }
+    Ok(())
+}
+
+/// Rewrite each contained batch's base-offset field to the assigned engine
+/// offsets. One copy of the payload, same as a real Kafka broker's rewrite.
+fn patch_base_offsets(command: &AppendBatchCommand, base_offset: u64) -> Bytes {
+    let mut payload = command.payload.to_vec();
+    let mut assigned = base_offset;
+    for span in &command.batches {
+        payload[span.patch_at..span.patch_at + 8].copy_from_slice(&(assigned as i64).to_be_bytes());
+        assigned += span.record_count as u64;
+    }
+    Bytes::from(payload)
+}
+
 /// `-1` sentinel as `u64::MAX` (snapshot-read fake opens).
 fn live_start_offset(stream: &dyn Stream) -> u64 {
     let start = stream.start_offset();
@@ -1342,13 +1695,10 @@ fn to_meta(name: &str, entry: &RegistryEntry, start: u64, next: u64, submitted: 
         next_offset: OffsetToken::of_record_offset(next),
         submitted_offset: OffsetToken::of_record_offset(submitted),
         closed: entry.closed,
+        external_id: entry.external_id,
     }
 }
 
-/// Await durability of submitted appends, in submit order.
-///
-/// Each request awaits its own pendings. WAL confirm order makes them
-/// resolve in submit order anyway, and all were already in flight together.
 async fn await_durable(pendings: Vec<PendingAppend>) -> Result<(), s3stream::Error> {
     for pending in pendings {
         pending.durable().await?;
@@ -1434,6 +1784,9 @@ mod tests {
             last_seq: None,
             producers: Default::default(),
             closed_by: None,
+            external_id: [0; 16],
+            numeric_producers: Default::default(),
+            producer_state_offset: 0,
         };
         let touched = touch_deadline(entry.clone());
         assert!(touched.deadline_ms > 0);

@@ -560,6 +560,7 @@ html {
 .vp-doc [class*="language-"] > button.copy,
 .vp-code-group,
 .vp-code-group .tabs,
+.plugin-tabs,
 .VPDocFooter .pager-link,
 .VPLocalNavOutlineDropdown .items,
 .VPLocalSearchBox .shell,

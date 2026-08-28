@@ -2,8 +2,9 @@
 # From this directory: docker compose -f compose.cluster.yml up --build
 #
 # Host clients: http://localhost:4437 (node 1) and http://localhost:4438 (node 2).
+# Kafka mode: bootstrap localhost:9092 (node 1) or localhost:9093 (node 2).
 # RustFS API http://localhost:9000, console http://localhost:9001.
-# Protocol: set PICO_PROTOCOL=pico|ds in .env (see .env.example).
+# Protocol: set PICO_PROTOCOL=pico|ds|kafka in .env (see .env.example).
 
 x-pico: &pico
   build:
@@ -13,9 +14,11 @@ x-pico: &pico
     - path: .env
       required: false
   environment: &pico-env
+    RUST_LOG: ${RUST_LOG:-info}
     PICO_PROTOCOL: ${PICO_PROTOCOL:-pico}
     PICO_LISTEN: 0.0.0.0:4437
     PICO_ADMIN_LISTEN: 0.0.0.0:9090
+    PICO_KAFKA_LISTEN: 0.0.0.0:9092
     # Dev default: auth off. Set PICO_AUTH=required and a bootstrap token to turn it on.
     PICO_AUTH: ${PICO_AUTH:-off}
     PICO_INSECURE_ALLOW_REMOTE: ${PICO_INSECURE_ALLOW_REMOTE:-true}
@@ -99,9 +102,11 @@ services:
       <<: *pico-env
       PICO_NODE_ID: "1"
       PICO_HTTP_ADDRESS: http://localhost:4437
+      PICO_KAFKA_ADVERTISE: localhost:9092
     ports:
       - "4437:4437"
       - "9090:9090"
+      - "9092:9092"
 
   pico2:
     <<: *pico
@@ -109,9 +114,11 @@ services:
       <<: *pico-env
       PICO_NODE_ID: "2"
       PICO_HTTP_ADDRESS: http://localhost:4438
+      PICO_KAFKA_ADVERTISE: localhost:9093
     ports:
       - "4438:4437"
       - "9091:9090"
+      - "9093:9092"
 
 volumes:
   pg-data:

@@ -41,6 +41,16 @@ impl MetadataState {
             .filter(|a| !a.is_empty())
     }
 
+    /// Advertised listener address of `protocol` (`None` when unregistered
+    /// or the node does not serve that protocol).
+    pub fn get_node_protocol_address(&self, node_id: i32, protocol: &str) -> Option<&str> {
+        self.nodes
+            .get(&node_id)
+            .and_then(|n| n.protocol_addresses.get(protocol))
+            .map(String::as_str)
+            .filter(|a| !a.is_empty())
+    }
+
     /// All objects (stream-set slices + stream objects) of `stream_id`
     /// overlapping `[start_offset, end_offset)`, sorted by range start and
     /// capped at `limit`. This is the fetch path's metadata query.
@@ -181,9 +191,15 @@ mod tests {
     /// Returns `(state, stream_id)`.
     fn populated() -> (MetadataState, u64) {
         let mut state = MetadataState::new();
-        for (node_id, node_epoch, addr) in
-            [(NODE_1, EPOCH_1, "http://n1:9090"), (NODE_2, EPOCH_2, "")]
-        {
+        for (node_id, node_epoch, addr, kafka) in [
+            (
+                NODE_1,
+                EPOCH_1,
+                "http://n1:9090",
+                Some("n1:9092".to_owned()),
+            ),
+            (NODE_2, EPOCH_2, "", None),
+        ] {
             apply(
                 &mut state,
                 &MetadataCommand::RegisterNode {
@@ -191,6 +207,11 @@ mod tests {
                     node_epoch,
                     http_address: addr.into(),
                     slots: 1,
+                    protocol_addresses: kafka
+                        .map(|address: String| {
+                            std::collections::BTreeMap::from([("kafka".to_owned(), address)])
+                        })
+                        .unwrap_or_default(),
                 },
             )
             .unwrap();
@@ -289,6 +310,12 @@ mod tests {
             None,
             "empty address is unadvertised"
         );
+        assert_eq!(
+            state.get_node_protocol_address(NODE_1, "kafka"),
+            Some("n1:9092")
+        );
+        assert_eq!(state.get_node_protocol_address(NODE_2, "kafka"), None);
+        assert_eq!(state.get_node_protocol_address(999, "kafka"), None);
     }
 
     #[test]

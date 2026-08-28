@@ -9,7 +9,7 @@ use std::sync::Arc;
 use pico_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
-use pico_frontend::{serve, Protocol, RoutingMode, ServeOptions};
+use pico_http::{serve, Protocol, RoutingMode, ServeOptions};
 use pico_server::PicoNode;
 
 fn full_stream_scope(prefix: &str, auto_prefix: bool) -> Scope {
@@ -29,7 +29,7 @@ fn full_stream_scope(prefix: &str, auto_prefix: bool) -> Scope {
 async fn gated_server(
     protocol: Protocol,
     scope: Scope,
-) -> (pico_frontend::RunningServer, String, Arc<PicoNode>) {
+) -> (pico_http::RunningServer, String, Arc<PicoNode>) {
     let node = common::start_node().await;
     let (token, verifier) = AccessToken::issue("it/tester").unwrap();
     node.tokens()

@@ -18,7 +18,8 @@ members = [
     "picomq/pico-metadata",
     "picomq/pico-sql",
     "picomq/pico-server",
-    "picomq/pico-frontend",
+    "picomq/pico-kafka",
+    "picomq/pico-http",
     "picomq/pico-runtime",
     "picomq/pico-client",
     "picomq/pico-cli",
@@ -44,7 +45,8 @@ pico-auth = { path = "picomq/pico-auth" }
 pico-metadata = { path = "picomq/pico-metadata" }
 pico-sql = { path = "picomq/pico-sql" }
 pico-server = { path = "picomq/pico-server" }
-pico-frontend = { path = "picomq/pico-frontend" }
+pico-kafka = { path = "picomq/pico-kafka" }
+pico-http = { path = "picomq/pico-http" }
 pico-runtime = { path = "picomq/pico-runtime" }
 pico-client = { path = "picomq/pico-client" }
 

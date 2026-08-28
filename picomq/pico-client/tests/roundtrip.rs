@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use pico_client::{connect, ErrorKind, Live, Protocol, ReadLimits};
-use pico_frontend::Protocol as ServeProtocol;
+use pico_http::Protocol as ServeProtocol;
 use pico_runtime::{MetaBackend, PicoServer, ServerConfig};
 
 struct Server {

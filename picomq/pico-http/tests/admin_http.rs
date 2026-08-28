@@ -6,7 +6,7 @@ mod common;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use pico_frontend::{serve, Protocol, ServeOptions};
+use pico_http::{serve, Protocol, ServeOptions};
 
 #[tokio::test]
 async fn health_and_ready() {

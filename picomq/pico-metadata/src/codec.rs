@@ -168,11 +168,13 @@ fn put_command_body(buf: &mut BytesMut, command: &MetadataCommand) {
             node_epoch,
             http_address,
             slots,
+            protocol_addresses,
         } => {
             buf.put_i32_le(*node_id);
             buf.put_i64_le(*node_epoch);
             put_str(buf, http_address);
             buf.put_u32_le(*slots);
+            put_str_map(buf, protocol_addresses);
         }
         MetadataCommand::CreateStream {
             node_id,
@@ -291,6 +293,11 @@ fn put_command_body(buf: &mut BytesMut, command: &MetadataCommand) {
             node_id,
             node_epoch,
             count,
+        }
+        | MetadataCommand::AllocateProducerIds {
+            node_id,
+            node_epoch,
+            count,
         } => {
             buf.put_i32_le(*node_id);
             buf.put_i64_le(*node_epoch);
@@ -373,11 +380,13 @@ fn get_command_body(buf: &mut &[u8]) -> Result<MetadataCommand, CodecError> {
             let node_epoch = get_i64(buf)?;
             let http_address = get_str(buf)?;
             let slots = get_u32(buf)?;
+            let protocol_addresses = get_str_map(buf)?;
             MetadataCommand::RegisterNode {
                 node_id,
                 node_epoch,
                 http_address,
                 slots,
+                protocol_addresses,
             }
         }
         11 => {
@@ -417,6 +426,11 @@ fn get_command_body(buf: &mut &[u8]) -> Result<MetadataCommand, CodecError> {
         19 => MetadataCommand::DeleteKvIfMatches {
             key: get_str(buf)?,
             expected: get_blob(buf)?,
+        },
+        20 => MetadataCommand::AllocateProducerIds {
+            node_id: get_i32(buf)?,
+            node_epoch: get_i64(buf)?,
+            count: get_u32(buf)?,
         },
         other => return Err(CodecError::UnknownCommand(other)),
     })
@@ -576,6 +590,25 @@ fn put_str(buf: &mut BytesMut, s: &str) {
     buf.put_slice(s.as_bytes());
 }
 
+fn put_str_map(buf: &mut BytesMut, map: &std::collections::BTreeMap<String, String>) {
+    buf.put_u32_le(map.len() as u32);
+    for (key, value) in map {
+        put_str(buf, key);
+        put_str(buf, value);
+    }
+}
+
+fn get_str_map(buf: &mut &[u8]) -> Result<std::collections::BTreeMap<String, String>, CodecError> {
+    let len = get_u32(buf)? as usize;
+    let mut map = std::collections::BTreeMap::new();
+    for _ in 0..len {
+        let key = get_str(buf)?;
+        let value = get_str(buf)?;
+        map.insert(key, value);
+    }
+    Ok(map)
+}
+
 fn get_str(buf: &mut &[u8]) -> Result<String, CodecError> {
     let len = get_u32(buf)? as usize;
     if buf.remaining() < len {
@@ -712,12 +745,17 @@ mod tests {
                 node_epoch: 100,
                 http_address: "http://127.0.0.1:8080".into(),
                 slots: 4,
+                protocol_addresses: std::collections::BTreeMap::from([(
+                    "kafka".to_owned(),
+                    "127.0.0.1:9092".to_owned(),
+                )]),
             },
             MetadataCommand::RegisterNode {
                 node_id: 7,
                 node_epoch: 100,
                 http_address: "".into(),
                 slots: 1,
+                protocol_addresses: Default::default(),
             },
             MetadataCommand::PlaceStream { stream_id: 42 },
             MetadataCommand::TransferStream {
@@ -733,6 +771,11 @@ mod tests {
                 node_id: 7,
                 node_epoch: 100,
                 count: 16,
+            },
+            MetadataCommand::AllocateProducerIds {
+                node_id: 7,
+                node_epoch: 100,
+                count: 8,
             },
             MetadataCommand::CleanDestroyedObjects {
                 object_ids: vec![1, 2, 3],
@@ -813,7 +856,7 @@ mod tests {
         ));
 
         // Unknown codes must be rejected, never misparsed.
-        for type_code in [0u8, 20, 200] {
+        for type_code in [0u8, 21, 200] {
             let bytes = [CODEC_VERSION, type_code];
             assert!(matches!(
                 decode_command(&bytes),
@@ -889,14 +932,24 @@ mod tests {
                         }
                     }
                 ),
-            (any::<i32>(), any::<i64>(), "[a-z/]{0,32}", 1u32..8).prop_map(
-                |(node_id, node_epoch, http_address, slots)| MetadataCommand::RegisterNode {
-                    node_id,
-                    node_epoch,
-                    http_address,
-                    slots,
-                }
-            ),
+            (
+                any::<i32>(),
+                any::<i64>(),
+                "[a-z/]{0,32}",
+                1u32..8,
+                proptest::collection::btree_map("[a-z]{1,8}", "[a-z:]{0,16}", 0..3)
+            )
+                .prop_map(
+                    |(node_id, node_epoch, http_address, slots, protocol_addresses)| {
+                        MetadataCommand::RegisterNode {
+                            node_id,
+                            node_epoch,
+                            http_address,
+                            slots,
+                            protocol_addresses,
+                        }
+                    }
+                ),
             any::<u64>().prop_map(|stream_id| MetadataCommand::PlaceStream { stream_id }),
             (any::<u64>(), any::<i32>(), any::<i32>()).prop_map(
                 |(stream_id, from_node, to_node)| MetadataCommand::TransferStream {
@@ -910,6 +963,13 @@ mod tests {
             }),
             (any::<i32>(), any::<i64>(), any::<u32>()).prop_map(|(node_id, node_epoch, count)| {
                 MetadataCommand::CreateStreams {
+                    node_id,
+                    node_epoch,
+                    count,
+                }
+            }),
+            (any::<i32>(), any::<i64>(), any::<u32>()).prop_map(|(node_id, node_epoch, count)| {
+                MetadataCommand::AllocateProducerIds {
                     node_id,
                     node_epoch,
                     count,

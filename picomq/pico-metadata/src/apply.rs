@@ -40,7 +40,15 @@ fn apply_inner(
             node_epoch,
             http_address,
             slots,
-        } => register_node(state, *node_id, *node_epoch, http_address, *slots),
+            protocol_addresses,
+        } => register_node(
+            state,
+            *node_id,
+            *node_epoch,
+            http_address,
+            *slots,
+            protocol_addresses,
+        ),
         MetadataCommand::PlaceStream { stream_id } => place_stream(state, *stream_id),
         MetadataCommand::CreateStream {
             node_id,
@@ -122,6 +130,11 @@ fn apply_inner(
             node_epoch,
             count,
         } => create_streams(state, *node_id, *node_epoch, *count),
+        MetadataCommand::AllocateProducerIds {
+            node_id,
+            node_epoch,
+            count,
+        } => allocate_producer_ids(state, *node_id, *node_epoch, *count),
     }
 }
 
@@ -133,6 +146,7 @@ fn register_node(
     node_epoch: i64,
     http_address: &str,
     slots: u32,
+    protocol_addresses: &std::collections::BTreeMap<String, String>,
 ) -> Result<MetadataResult, MetadataError> {
     if let Some(node) = state.nodes.get(&node_id) {
         if node.epoch > node_epoch {
@@ -154,6 +168,15 @@ fn register_node(
     } else {
         http_address.to_owned()
     };
+    let protocol_addresses = if protocol_addresses.is_empty() {
+        state
+            .nodes
+            .get(&node_id)
+            .map(|n| n.protocol_addresses.clone())
+            .unwrap_or_default()
+    } else {
+        protocol_addresses.clone()
+    };
     state.nodes.insert(
         node_id,
         NodeRow {
@@ -161,6 +184,7 @@ fn register_node(
             epoch: node_epoch,
             http_address,
             slots,
+            protocol_addresses,
         },
     );
     Ok(MetadataResult::Unit)
@@ -617,6 +641,33 @@ fn remove_placed_stream(state: &mut MetadataState, stream_id: u64) {
     for key in keys {
         state.placed_by_node.remove(&key);
     }
+}
+
+/// Bounds one log row.
+const MAX_ALLOCATE_PRODUCER_IDS: u32 = 4096;
+
+/// Lease `count` consecutive producer ids. Ids are consecutive starting at
+/// the returned first id and are never reclaimed.
+fn allocate_producer_ids(
+    state: &mut MetadataState,
+    node_id: i32,
+    node_epoch: i64,
+    count: u32,
+) -> Result<MetadataResult, MetadataError> {
+    node_epoch_check(state, node_id, node_epoch)?;
+    if count == 0 {
+        return Err(MetadataError::Unexpected {
+            message: "producer id count must be positive".into(),
+        });
+    }
+    if count > MAX_ALLOCATE_PRODUCER_IDS {
+        return Err(MetadataError::Unexpected {
+            message: format!("producer id count {count} exceeds {MAX_ALLOCATE_PRODUCER_IDS}"),
+        });
+    }
+    let first = state.next_producer_id;
+    state.next_producer_id += count as u64;
+    Ok(MetadataResult::Id(first))
 }
 
 // ---- object lifecycle ----
@@ -1130,6 +1181,7 @@ mod tests {
                 node_epoch,
                 http_address: String::new(),
                 slots,
+                protocol_addresses: Default::default(),
             },
         )
         .unwrap();
@@ -1254,10 +1306,122 @@ mod tests {
                 node_epoch: EPOCH_1,
                 http_address: String::new(),
                 slots: 1,
+                protocol_addresses: Default::default(),
             },
         )
         .unwrap_err();
         assert_eq!(err.code(), 5);
+    }
+
+    #[test]
+    fn register_node_keeps_protocol_addresses_unless_replaced() {
+        let addrs = |pairs: &[(&str, &str)]| -> std::collections::BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let mut state = MetadataState::new();
+        apply(
+            &mut state,
+            &MetadataCommand::RegisterNode {
+                node_id: NODE_1,
+                node_epoch: EPOCH_1,
+                http_address: "http://n1:9090".into(),
+                slots: 1,
+                protocol_addresses: addrs(&[("kafka", "n1:9092")]),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .nodes
+                .get(&NODE_1)
+                .unwrap()
+                .protocol_addresses
+                .get("kafka")
+                .map(String::as_str),
+            Some("n1:9092")
+        );
+
+        // An empty map keeps the stored addresses across a re-register.
+        apply(
+            &mut state,
+            &MetadataCommand::RegisterNode {
+                node_id: NODE_1,
+                node_epoch: EPOCH_1 + 1,
+                http_address: String::new(),
+                slots: 2,
+                protocol_addresses: Default::default(),
+            },
+        )
+        .unwrap();
+        let node = state.nodes.get(&NODE_1).unwrap();
+        assert_eq!(
+            node.protocol_addresses.get("kafka").map(String::as_str),
+            Some("n1:9092")
+        );
+        assert_eq!(node.http_address, "http://n1:9090");
+
+        // A non-empty map replaces the stored addresses wholesale.
+        apply(
+            &mut state,
+            &MetadataCommand::RegisterNode {
+                node_id: NODE_1,
+                node_epoch: EPOCH_1 + 2,
+                http_address: String::new(),
+                slots: 2,
+                protocol_addresses: addrs(&[("kafka", "n1:19092")]),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .nodes
+                .get(&NODE_1)
+                .unwrap()
+                .protocol_addresses
+                .get("kafka")
+                .map(String::as_str),
+            Some("n1:19092")
+        );
+    }
+
+    #[test]
+    fn allocate_producer_ids_advances_and_validates() {
+        let mut state = setup();
+        let allocate = |state: &mut MetadataState, count| {
+            apply(
+                state,
+                &MetadataCommand::AllocateProducerIds {
+                    node_id: NODE_1,
+                    node_epoch: EPOCH_1,
+                    count,
+                },
+            )
+        };
+        assert_eq!(allocate(&mut state, 3).unwrap(), MetadataResult::Id(0));
+        assert_eq!(allocate(&mut state, 1).unwrap(), MetadataResult::Id(3));
+        assert_eq!(state.next_producer_id, 4);
+
+        assert_eq!(allocate(&mut state, 0).unwrap_err().code(), 99);
+        assert_eq!(
+            allocate(&mut state, MAX_ALLOCATE_PRODUCER_IDS + 1)
+                .unwrap_err()
+                .code(),
+            99
+        );
+        let err = apply(
+            &mut state,
+            &MetadataCommand::AllocateProducerIds {
+                node_id: NODE_1,
+                node_epoch: EPOCH_1 + 1,
+                count: 1,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 5);
+        assert_eq!(state.next_producer_id, 4);
     }
 
     #[test]
@@ -1856,6 +2020,13 @@ mod tests {
                     node_id: n,
                     node_epoch: ne,
                     count: c,
+                }),
+                (node.clone(), 1u32..4).prop_map(|((n, ne), c)| {
+                    MetadataCommand::AllocateProducerIds {
+                        node_id: n,
+                        node_epoch: ne,
+                        count: c,
+                    }
                 }),
                 (node.clone(), 1u32..3, 0i64..100).prop_map(|((n, ne), c, now)| {
                     MetadataCommand::PrepareObject {

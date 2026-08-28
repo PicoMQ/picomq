@@ -47,8 +47,8 @@ The structure follows from that. A node can be stopped and replaced at any time 
 
 - **Zero-disk nodes.** Records are stored on S3-compatible storage, including the write-ahead log. A node keeps caches, nothing more.
 - **SQL as the control plane.** Cluster metadata is an ordered command log in Postgres, or SQLite for a single node. Nodes tail it and rebuild the same state.
-- **Two wire protocols.** The Pico protocol with record batches and numeric sequences, and the Durable Streams open protocol. Same engine underneath.
-- **Just HTTP.** Create with `PUT`, append with `POST`, read with `GET`, tail with long polling or SSE. Any HTTP client is a PicoMQ client.
+- **Three wire protocols.** The native Pico protocol, the Durable Streams open protocol, and the Kafka wire protocol for standard Kafka clients. Same engine underneath.
+- **Just HTTP.** Create with `PUT`, append with `POST`, read with `GET`, tail with long polling or SSE. Any HTTP client is a PicoMQ client, and any Kafka client is too.
 - **Live stream transfer.** Ownership of a stream moves between nodes without losing writes, with seconds of handoff.
 - **Fencing everywhere.** Node epochs and stream epochs keep zombie processes from corrupting anything.
 - **One binary.** `pico` is the server, the client, the admin CLI, and the benchmark tool. The admin dashboard is embedded in it.

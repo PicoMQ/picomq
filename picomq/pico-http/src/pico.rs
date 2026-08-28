@@ -237,6 +237,8 @@ impl PicoFrontend {
                 expires_at_ms,
                 closed: truthy(headers, H_CLOSED),
                 initial_payload: Bytes::new(),
+                external_id: None,
+                internal: false,
             })
             .await?;
         let meta = result.meta;

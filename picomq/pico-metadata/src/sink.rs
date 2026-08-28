@@ -104,6 +104,7 @@ mod tests {
             node_epoch,
             http_address: String::new(),
             slots: 1,
+            protocol_addresses: Default::default(),
         }
     }
 

@@ -1,9 +1,9 @@
-//! The PicoMQ wire protocol vocabulary, shared by the server frontends and
-//! the client SDK.
+//! Vocabulary of the native HTTP protocols, shared by `pico-http` and
+//! `pico-client`. Kafka's wire spec is external and lives with `pico-kafka`.
 //!
 //! - [`pico`]: Pico protocol header and content type constants.
 //! - [`ds`]: Durable Streams protocol header constants.
-//! - [`envelope`]: record envelopes, sequenced records, and the wire codecs.
+//! - [`envelope`]: the native record model and at-rest codecs.
 //! - [`error`]: the codec error type.
 
 pub mod ds;

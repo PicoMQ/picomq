@@ -1,6 +1,6 @@
 # HTTP API
 
-Reference for the Pico protocol and the admin endpoints.
+Reference for the Pico protocol and the admin endpoints. The Kafka listener is covered in [Kafka protocol](/docs/kafka).
 
 OpenAPI spec: <a href="/openapi.yaml" download>openapi.yaml</a>
 

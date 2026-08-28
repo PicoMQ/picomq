@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use pico_auth::AccessToken;
-use pico_frontend::Protocol;
+use pico_http::Protocol;
 use pico_runtime::{AuthMode, MetaBackend, RuntimeError, ServerConfig};
 
 fn loopback() -> SocketAddr {
@@ -115,6 +115,61 @@ async fn ds_protocol_over_a_started_process() {
     server.shutdown().await;
 }
 
+/// Kafka mode: the TCP listener answers ApiVersions, the HTTP data routers
+/// are not mounted, and the admin surface stays up.
+#[tokio::test]
+async fn kafka_protocol_over_a_started_process() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path(), Protocol::Kafka, 1);
+    config.kafka_listen = loopback();
+    let server = pico_runtime::start(config).await.unwrap();
+    let kafka_addr = server.kafka_addr().unwrap();
+
+    // ApiVersions v0 request, framed by hand: api_key, version,
+    // correlation id, null client id.
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&18i16.to_be_bytes());
+    frame.extend_from_slice(&0i16.to_be_bytes());
+    frame.extend_from_slice(&77i32.to_be_bytes());
+    frame.extend_from_slice(&(-1i16).to_be_bytes());
+    let mut request = (frame.len() as i32).to_be_bytes().to_vec();
+    request.extend_from_slice(&frame);
+
+    let mut socket = tokio::net::TcpStream::connect(kafka_addr).await.unwrap();
+    socket.write_all(&request).await.unwrap();
+    let mut len = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(2), socket.read_exact(&mut len))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut body = vec![0u8; i32::from_be_bytes(len) as usize];
+    socket.read_exact(&mut body).await.unwrap();
+    assert_eq!(&body[..4], &77i32.to_be_bytes());
+
+    let http = reqwest::Client::new();
+    let admin = format!("http://{}", server.admin_addr().unwrap());
+    let ready: serde_json::Value = http
+        .get(format!("{admin}/ready"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(ready["ready"], true);
+
+    let data = http
+        .get(format!("http://{}/streams/orders", server.local_addr()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(data.status(), 404, "no HTTP data router in kafka mode");
+
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn auth_off_refuses_non_loopback_binds() {
     let dir = tempfile::tempdir().unwrap();
@@ -129,6 +184,20 @@ async fn auth_off_refuses_non_loopback_binds() {
     refused_admin.admin_addr = Some(SocketAddr::from(([0, 0, 0, 0], 0)));
     assert!(matches!(
         pico_runtime::start(refused_admin).await,
+        Err(RuntimeError::InsecureBind { .. })
+    ));
+}
+
+/// The Kafka listener has no authentication, so a non-loopback bind needs
+/// the explicit opt-out even with auth required.
+#[tokio::test]
+async fn kafka_non_loopback_bind_refused_regardless_of_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut refused = config(dir.path(), Protocol::Kafka, 1);
+    refused.auth_mode = AuthMode::Required;
+    refused.kafka_listen = SocketAddr::from(([0, 0, 0, 0], 0));
+    assert!(matches!(
+        pico_runtime::start(refused).await,
         Err(RuntimeError::InsecureBind { .. })
     ));
 }

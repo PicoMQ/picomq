@@ -1,10 +1,10 @@
 # Overview
 
-A PicoMQ deployment has three components. Nodes serve HTTP and hold only caches. An object store holds every record. A SQL database holds the metadata log that coordinates the nodes.
+A PicoMQ deployment has three components. Nodes serve clients and hold only caches. An object store holds every record. A SQL database holds the metadata log that coordinates the nodes.
 
 ## Anatomy of a node
 
-Each node runs the same stack. A protocol listener speaks either the Pico protocol or Durable Streams. An admin listener serves the admin API and the dashboard. Behind them, an ownership router decides whether this node serves a stream or redirects, the stream service manages the registry of names and per-stream state, and the `s3stream` engine moves records to and from object storage.
+Each node runs the same stack. A protocol listener speaks the Pico protocol, Durable Streams, or Kafka. An admin listener serves the admin API and the dashboard. Behind them, an ownership router decides whether this node serves a stream or redirects, the stream service manages the registry of names and per-stream state, and the `s3stream` engine moves records to and from object storage.
 
 <div class="pico-diagram">
 <svg viewBox="60 0 620 420" width="620" role="img" aria-label="A node runs listeners, routing, the stream service, and the engine. The engine writes to object storage. The service proposes commands to the SQL metadata log.">
@@ -17,7 +17,7 @@ Each node runs the same stack. A protocol listener speaks either the Pico protoc
   <text x="166" y="42" class="sub">pico node</text>
   <rect x="180" y="56" width="180" height="52" class="box"/>
   <text x="270" y="79" text-anchor="middle" class="label">protocol listener</text>
-  <text x="270" y="96" text-anchor="middle" class="sub">Pico or Durable Streams</text>
+  <text x="270" y="96" text-anchor="middle" class="sub">Pico, Durable Streams, or Kafka</text>
   <rect x="380" y="56" width="160" height="52" class="box"/>
   <text x="460" y="79" text-anchor="middle" class="label">admin listener</text>
   <text x="460" y="96" text-anchor="middle" class="sub">API + dashboard</text>

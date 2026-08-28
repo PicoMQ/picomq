@@ -22,7 +22,7 @@ pico serve \
     --storage=-2@file://./objects
 ```
 
-The server listens on `http://127.0.0.1:4437` and the admin listener on `http://127.0.0.1:9090`. Every flag has a `PICO_*` environment variable equivalent.
+The server listens on `http://127.0.0.1:4437` and the admin listener on `http://127.0.0.1:9090`. Every flag has a `PICO_*` environment variable equivalent. `--protocol pico|ds|kafka` selects the client protocol, `pico` by default, and Kafka mode also takes `--kafka-listen`.
 
 Against real infrastructure the same command points at Postgres and an S3 bucket:
 
@@ -64,11 +64,17 @@ The compose nodes run with auth off for development. Setting `PICO_AUTH=required
 
 ## First stream
 
-The `pico` binary is also the client. If the node runs in compose and `pico` is not installed on the host, prefix the commands with `docker compose exec pico`, or use the [HTTP section](#the-same-over-http) below.
+Each tab assumes a node started with the matching `--protocol` (or `PICO_PROTOCOL` in the compose `.env`).
+
+:::tabs key:protocol
+
+== Pico
+
+The `pico` binary is also the client. If the node runs in compose and `pico` is not installed on the host, prefix the commands with `docker compose exec pico`.
 
 ```bash
 # example with Docker
-docker compose exec pico pico ls 
+docker compose exec pico pico ls
 ```
 
 ```bash
@@ -87,9 +93,7 @@ pico --endpoint http://node2.internal:4437 config set prod
 pico --profile prod ls
 ```
 
-## The same over HTTP
-
-Streams are URL paths, so any HTTP client works:
+Streams are URL paths, so any HTTP client works too:
 
 ```bash
 # create
@@ -104,6 +108,46 @@ curl 'http://localhost:4437/streams/orders?seq=0'
 ```
 
 Appends return the assigned sequence in the `Pico-Next-Seq` header. Reads accept `seq=now` to start at the tail, `live=long-poll` to wait for the next record, and `live=sse` to keep the response open as an event stream.
+
+== Durable Streams
+
+The protocol is plain HTTP on the [Durable Streams](/docs/design/protocols) wire vocabulary:
+
+```bash
+# create
+curl -X PUT -H 'Content-Type: text/plain' http://localhost:4437/streams/orders
+
+# append one record
+curl -X POST -H 'Content-Type: text/plain' -d 'order-1' \
+    http://localhost:4437/streams/orders
+
+# read from the start
+curl http://localhost:4437/streams/orders
+
+# follow from the tail
+curl -N 'http://localhost:4437/streams/orders?offset=now&live=sse'
+```
+
+Position state travels in `Stream-*` response headers, so a reader resumes from its last offset with `?offset=`.
+
+== Kafka
+
+Standard Kafka clients connect to the `--kafka-listen` address. Producing auto-creates the topic:
+
+```bash
+# produce
+printf 'order-1\norder-2\n' | kcat -P -b localhost:9092 -t orders
+
+# consume from the start
+kcat -C -b localhost:9092 -t orders -o beginning -e
+
+# consume with a group, offsets are committed and survive restarts
+kcat -G orders-group -b localhost:9092 -X auto.offset.reset=earliest orders
+```
+
+Topics map to streams one to one, detail in the [Kafka protocol](/docs/kafka) reference.
+
+:::
 
 ## Check the cluster
 

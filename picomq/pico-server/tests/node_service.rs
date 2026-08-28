@@ -54,6 +54,8 @@ fn create(name: &str, content_type: &str) -> CreateCommand {
         expires_at_ms: None,
         closed: false,
         initial_payload: Bytes::new(),
+        external_id: None,
+        internal: false,
     }
 }
 
@@ -689,6 +691,7 @@ async fn stale_transfer_completes_when_source_restarts() {
         node_id: 1,
         node_epoch: 1,
         http_address: "http://127.0.0.1:4001".into(),
+        protocol_addresses: Default::default(),
         slots: 1,
     })
     .await
@@ -795,6 +798,362 @@ async fn named_streams_survive_restart() {
         .unwrap();
     assert_eq!(read.records.len(), 1);
     assert_eq!(&read.records[0].payload[..], b"kept");
+
+    node.close().await;
+}
+
+/// A stand-in Kafka batch: 8-byte base-offset field (patched by the
+/// service) followed by opaque body bytes.
+fn fake_batch(body: &[u8]) -> Bytes {
+    let mut payload = vec![0u8; 8];
+    payload.extend_from_slice(body);
+    Bytes::from(payload)
+}
+
+fn one_batch(record_count: u32) -> Vec<pico_server::BatchSpan> {
+    vec![pico_server::BatchSpan {
+        patch_at: 0,
+        record_count,
+    }]
+}
+
+/// Kafka batch append/read/watermarks and idempotent producer dedup at the
+/// service layer.
+#[tokio::test]
+async fn kafka_batch_append_read_and_idempotency() {
+    use pico_server::{AppendBatchCommand, NumericProducer};
+
+    let node = local_node().await;
+    let services = node.service();
+    let external_id = *b"0123456789abcdef";
+    services
+        .create(CreateCommand {
+            name: "/topics/demo".into(),
+            content_type: "application/vnd.kafka.batch".into(),
+            external_id: Some(external_id),
+            ..create("/topics/demo", "application/vnd.kafka.batch")
+        })
+        .await
+        .unwrap();
+
+    let appended = services
+        .append_batch(AppendBatchCommand {
+            name: "/topics/demo".into(),
+            payload: fake_batch(b"kafka-batch-bytes"),
+            batches: one_batch(3),
+            producer: None,
+            base_timestamp_ms: 1,
+        })
+        .await
+        .unwrap();
+    assert!(!appended.duplicate);
+    assert_eq!(appended.base_offset, 0);
+    assert_eq!(appended.log_start_offset, 0);
+
+    let watermarks = services.watermarks("/topics/demo").await.unwrap();
+    assert_eq!(watermarks.log_start_offset, 0);
+    assert_eq!(watermarks.high_watermark, 3);
+
+    let from_start = services
+        .read_batches("/topics/demo", 0, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(from_start.batches.len(), 1);
+    assert_eq!(from_start.batches[0].base_offset, 0);
+    assert_eq!(from_start.batches[0].last_offset, 3);
+    assert_eq!(from_start.batches[0].count, 3);
+    // Stored verbatim except the patched base-offset field.
+    assert_eq!(&from_start.batches[0].payload[..8], &0i64.to_be_bytes());
+    assert_eq!(&from_start.batches[0].payload[8..], b"kafka-batch-bytes");
+    assert_eq!(from_start.next_offset, 3);
+
+    // Mid-batch fetch returns the covering batch verbatim.
+    let mid = services
+        .read_batches("/topics/demo", 1, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(mid.batches.len(), 1);
+    assert_eq!(mid.batches[0].base_offset, 0);
+    assert_eq!(mid.next_offset, 3);
+
+    // Topic UUID resolves back to the stream.
+    assert_eq!(
+        services.lookup_by_external_id(external_id).await.unwrap(),
+        Some("/topics/demo".to_owned())
+    );
+    assert_eq!(
+        services.lookup_by_external_id([7u8; 16]).await.unwrap(),
+        None
+    );
+
+    let producer = NumericProducer {
+        id: 1,
+        epoch: 0,
+        first_seq: 0,
+    };
+    let idem = services
+        .append_batch(AppendBatchCommand {
+            name: "/topics/demo".into(),
+            payload: fake_batch(b"idem"),
+            batches: one_batch(2),
+            producer: Some(producer),
+            base_timestamp_ms: 2,
+        })
+        .await
+        .unwrap();
+    assert!(!idem.duplicate);
+    assert_eq!(idem.base_offset, 3);
+
+    // The idempotent batch got its base offset patched to 3.
+    let second = services
+        .read_batches("/topics/demo", 3, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&second.batches[0].payload[..8], &3i64.to_be_bytes());
+
+    let dup = services
+        .append_batch(AppendBatchCommand {
+            name: "/topics/demo".into(),
+            payload: fake_batch(b"idem-retry"),
+            batches: one_batch(2),
+            producer: Some(producer),
+            base_timestamp_ms: 2,
+        })
+        .await
+        .unwrap();
+    assert!(dup.duplicate);
+    assert_eq!(dup.base_offset, 3);
+
+    let gap = services
+        .append_batch(AppendBatchCommand {
+            name: "/topics/demo".into(),
+            payload: fake_batch(b"gap"),
+            batches: one_batch(1),
+            producer: Some(NumericProducer {
+                id: 1,
+                epoch: 0,
+                first_seq: 3,
+            }),
+            base_timestamp_ms: 3,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(gap.kind, ErrorKind::SequenceGap);
+    assert_eq!((gap.expected_seq, gap.received_seq), (Some(2), Some(3)));
+
+    let bumped = services
+        .append_batch(AppendBatchCommand {
+            name: "/topics/demo".into(),
+            payload: fake_batch(b"epoch2"),
+            batches: one_batch(1),
+            producer: Some(NumericProducer {
+                id: 1,
+                epoch: 1,
+                first_seq: 0,
+            }),
+            base_timestamp_ms: 4,
+        })
+        .await
+        .unwrap();
+    assert!(!bumped.duplicate);
+    assert_eq!(bumped.base_offset, 5);
+
+    let fenced = services
+        .append_batch(AppendBatchCommand {
+            name: "/topics/demo".into(),
+            payload: fake_batch(b"stale"),
+            batches: one_batch(1),
+            producer: Some(NumericProducer {
+                id: 1,
+                epoch: 0,
+                first_seq: 1,
+            }),
+            base_timestamp_ms: 5,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(fenced.kind, ErrorKind::Fenced);
+    assert_eq!(fenced.producer_epoch, Some(1));
+
+    node.close().await;
+}
+
+/// A minimal but real Kafka v2 record batch header (61 bytes) plus an opaque
+/// body, so producer identity survives in the stored bytes.
+fn kafka_v2_batch(producer_id: i64, epoch: i16, base_seq: i32, count: u32) -> Bytes {
+    let mut payload = Vec::with_capacity(64);
+    payload.extend_from_slice(&0i64.to_be_bytes()); // base offset (patched)
+    payload.extend_from_slice(&53i32.to_be_bytes()); // batch length
+    payload.extend_from_slice(&(-1i32).to_be_bytes()); // partition leader epoch
+    payload.push(2); // magic
+    payload.extend_from_slice(&0i32.to_be_bytes()); // crc
+    payload.extend_from_slice(&0i16.to_be_bytes()); // attributes
+    payload.extend_from_slice(&(count as i32 - 1).to_be_bytes()); // last offset delta
+    payload.extend_from_slice(&1i64.to_be_bytes()); // base timestamp
+    payload.extend_from_slice(&1i64.to_be_bytes()); // max timestamp
+    payload.extend_from_slice(&producer_id.to_be_bytes());
+    payload.extend_from_slice(&epoch.to_be_bytes());
+    payload.extend_from_slice(&base_seq.to_be_bytes());
+    payload.extend_from_slice(&(count as i32).to_be_bytes());
+    payload.extend_from_slice(b"body");
+    Bytes::from(payload)
+}
+
+/// Producer spans are not durably written per append; after a restart they
+/// are rebuilt from the stored batch headers, so a retry of a pre-restart
+/// batch still replays as a duplicate with its original offset.
+#[tokio::test]
+async fn kafka_producer_state_survives_restart_via_rescan() {
+    use pico_server::{AppendBatchCommand, NumericProducer};
+
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let node = PicoNode::start(
+        NodeConfig {
+            node_id: 1,
+            node_epoch: 1,
+            ..Default::default()
+        },
+        sink.clone(),
+        views.clone(),
+        object_storage.clone(),
+        wal_storage.clone(),
+    )
+    .await
+    .unwrap();
+
+    let batch = |seq: i32, count: u32| AppendBatchCommand {
+        name: "/topics/replayed".into(),
+        payload: kafka_v2_batch(42, 0, seq, count),
+        batches: vec![pico_server::BatchSpan {
+            patch_at: 0,
+            record_count: count,
+        }],
+        producer: Some(NumericProducer {
+            id: 42,
+            epoch: 0,
+            first_seq: seq,
+        }),
+        base_timestamp_ms: 1,
+    };
+
+    node.service()
+        .create(create("/topics/replayed", "application/vnd.kafka.batch"))
+        .await
+        .unwrap();
+    let first = node.service().append_batch(batch(0, 3)).await.unwrap();
+    let second = node.service().append_batch(batch(3, 2)).await.unwrap();
+    assert_eq!((first.base_offset, second.base_offset), (0, 3));
+    node.close().await;
+
+    let node = PicoNode::start(
+        NodeConfig {
+            node_id: 1,
+            node_epoch: 2,
+            ..Default::default()
+        },
+        sink,
+        views,
+        object_storage,
+        wal_storage,
+    )
+    .await
+    .unwrap();
+
+    // Retry of the second batch dedupes against rescanned state.
+    let retry = node.service().append_batch(batch(3, 2)).await.unwrap();
+    assert!(retry.duplicate);
+    assert_eq!(retry.base_offset, 3);
+    // The next sequence continues where the pre-restart session left off.
+    let next = node.service().append_batch(batch(5, 1)).await.unwrap();
+    assert!(!next.duplicate);
+    assert_eq!(next.base_offset, 5);
+    // A sequence gap is still rejected.
+    let gap = node.service().append_batch(batch(9, 1)).await.unwrap_err();
+    assert_eq!(gap.kind, ErrorKind::SequenceGap);
+
+    node.close().await;
+}
+
+/// Multi-batch payloads span summed record counts, each batch header patched
+/// with its own assigned base offset. Producers require single batches, and
+/// client creates cannot claim the reserved subtree.
+#[tokio::test]
+async fn kafka_multi_batch_spans_and_reserved_names() {
+    use pico_server::{AppendBatchCommand, BatchSpan, NumericProducer};
+
+    let node = local_node().await;
+    let services = node.service();
+    services
+        .create(create("/topics/multi", "application/vnd.kafka.batch"))
+        .await
+        .unwrap();
+
+    // Two 12-byte fake batches back to back.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&fake_batch(b"one!"));
+    payload.extend_from_slice(&fake_batch(b"two!"));
+    let spans = vec![
+        BatchSpan {
+            patch_at: 0,
+            record_count: 2,
+        },
+        BatchSpan {
+            patch_at: 12,
+            record_count: 3,
+        },
+    ];
+    let appended = services
+        .append_batch(AppendBatchCommand {
+            name: "/topics/multi".into(),
+            payload: Bytes::from(payload.clone()),
+            batches: spans.clone(),
+            producer: None,
+            base_timestamp_ms: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(appended.base_offset, 0);
+    let watermarks = services.watermarks("/topics/multi").await.unwrap();
+    assert_eq!(watermarks.high_watermark, 5);
+
+    let read = services
+        .read_batches("/topics/multi", 0, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(read.batches.len(), 1);
+    let stored = &read.batches[0].payload;
+    assert_eq!(&stored[..8], &0i64.to_be_bytes());
+    assert_eq!(&stored[12..20], &2i64.to_be_bytes());
+
+    // Idempotent producers must send exactly one batch.
+    let rejected = services
+        .append_batch(AppendBatchCommand {
+            name: "/topics/multi".into(),
+            payload: Bytes::from(payload),
+            batches: spans,
+            producer: Some(NumericProducer {
+                id: 9,
+                epoch: 0,
+                first_seq: 0,
+            }),
+            base_timestamp_ms: 2,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.kind, ErrorKind::BadRequest);
+
+    // Reserved namespace is closed to client creates.
+    let reserved = services
+        .create(create("/_sys/groups/g1", "application/json"))
+        .await
+        .unwrap_err();
+    assert_eq!(reserved.kind, ErrorKind::BadRequest);
+    let mut internal = create("/_sys/groups/g1", "application/json");
+    internal.internal = true;
+    services.create(internal).await.unwrap();
 
     node.close().await;
 }

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use pico_client::{ClientConfig, Live, PicoClient, Protocol, ReadLimits, StreamApi};
-use pico_frontend::Protocol as ServeProtocol;
+use pico_http::Protocol as ServeProtocol;
 use pico_runtime::{MetaBackend, ServerConfig};
 
 async fn start(dir: &std::path::Path) -> (pico_runtime::PicoServer, String) {

@@ -18,7 +18,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY . .
-COPY --from=dashboard /src/picomq/pico-frontend/_dashboard /src/picomq/pico-frontend/_dashboard
+COPY --from=dashboard /src/picomq/pico-http/_dashboard /src/picomq/pico-http/_dashboard
 # target/ and cargo caches live on the BuildKit host so rebuilds stay incremental.
 RUN --mount=type=cache,id=picomq-target,sharing=locked,target=/src/target \
     --mount=type=cache,id=picomq-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
@@ -33,6 +33,6 @@ RUN apt-get update \
 
 COPY --from=build /src/pico /usr/local/bin/pico
 
-EXPOSE 4437 9090
+EXPOSE 4437 9090 9092
 ENTRYPOINT ["pico"]
 CMD ["serve"]

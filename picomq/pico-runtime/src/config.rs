@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use pico_common::now_ms;
-use pico_frontend::{Protocol, RoutingMode};
+use pico_http::{Protocol, RoutingMode};
 
 /// Where the metadata command log lives.
 ///
@@ -74,6 +74,10 @@ pub struct ServerConfig {
     pub admin_addr: Option<SocketAddr>,
     pub advertised_url: Option<String>,
     pub protocol: Protocol,
+    /// Only used when `protocol` is [`Protocol::Kafka`].
+    pub kafka_listen: SocketAddr,
+    /// Defaults to `kafka_listen`.
+    pub kafka_advertise: Option<String>,
     pub meta_backend: MetaBackend,
     pub storage_uri: String,
     /// WAL bucket URI. Defaults to the data bucket (with the next bucket id)
@@ -112,6 +116,8 @@ impl Default for ServerConfig {
             admin_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9090))),
             advertised_url: None,
             protocol: Protocol::Pico,
+            kafka_listen: SocketAddr::from(([127, 0, 0, 1], 9092)),
+            kafka_advertise: None,
             meta_backend: MetaBackend::Sqlite(Some(PathBuf::from("./data/meta.db"))),
             storage_uri: "-2@file://./objects".to_owned(),
             wal_uri: None,

@@ -1,6 +1,8 @@
 //! The metadata state: compact rows in persistent maps, plus the secondary
 //! indexes that make every query O(what it touches).
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use im::OrdMap;
 use s3stream::{CompactOperations, StreamMetadata, StreamState};
@@ -45,6 +47,10 @@ pub struct NodeRow {
     pub http_address: String,
     /// Placement weight for stream assignment. Default 1.
     pub slots: u32,
+    /// Advertised listener addresses of additional wire protocols, keyed by
+    /// protocol name (e.g. `"kafka"`). Absent when the node does not serve
+    /// that protocol.
+    pub protocol_addresses: BTreeMap<String, String>,
 }
 
 /// One in-flight ownership transfer.
@@ -96,6 +102,11 @@ pub struct MetadataState {
     pub placed_by_node: OrdMap<(i32, u64), ()>,
     /// In-flight ownership transfers keyed by stream id.
     pub pending_transfers: OrdMap<u64, PendingTransfer>,
+
+    /// Next numeric producer identity. Blocks are leased by
+    /// `AllocateProducerIds` and never reclaimed, so an id is unique for the
+    /// lifetime of the cluster regardless of which protocol handed it out.
+    pub next_producer_id: u64,
 
     pub next_object_id: u64,
     pub prepared: OrdMap<u64, i64>,

@@ -486,10 +486,10 @@ async fn remote_owner_redirects() {
     }
 
     let node = common::start_node().await;
-    let frontend = std::sync::Arc::new(pico_frontend::PicoFrontend::new(
+    let frontend = std::sync::Arc::new(pico_http::PicoFrontend::new(
         node.service(),
         std::sync::Arc::new(RemoteOwnership),
-        pico_frontend::RoutingMode::Redirect,
+        pico_http::RoutingMode::Redirect,
     ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());

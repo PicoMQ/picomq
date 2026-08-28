@@ -1,17 +1,12 @@
-//! Named-stream registry entry: the value stored in the metadata KV under the
-//! stream's path name.
-//!
-//! (+ its nested `ProducerState`,
-//! `ClosedBy`, `ProducerDecision`). The byte layout is kept byte-for-byte
-//!
-//! ```text
-//! u8  version (=1)
+//! Named-stream registry entry: the value stored in the metadata KV under
+//! the stream's path name.
 
 use std::collections::BTreeMap;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::{ErrorKind, ServiceError};
+use crate::producer::{NumericProducerEntry, ProducerSpan, PRODUCER_SPAN_WINDOW};
 use crate::types::Producer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +33,12 @@ pub struct RegistryEntry {
     pub last_seq: Option<String>,
     pub producers: BTreeMap<String, ProducerState>,
     pub closed_by: Option<ClosedBy>,
+    /// Caller-assigned external identity (e.g. the Kafka topic UUID), set at
+    /// create time. All zeros when the creating frontend has no such notion.
+    pub external_id: [u8; 16],
+    pub numeric_producers: BTreeMap<i64, NumericProducerEntry>,
+    /// Offset up to which `numeric_producers` is known complete.
+    pub producer_state_offset: u64,
 }
 
 impl RegistryEntry {
@@ -94,6 +95,20 @@ impl RegistryEntry {
             buf.put_i64(state.epoch as i64);
             buf.put_i64(state.last_seq as i64);
         }
+        buf.put_slice(&self.external_id);
+        buf.put_i32(self.numeric_producers.len() as i32);
+        for (id, entry) in &self.numeric_producers {
+            buf.put_i64(*id);
+            buf.put_i16(entry.epoch);
+            buf.put_i64(entry.last_touched_ms);
+            buf.put_u8(entry.spans.len() as u8);
+            for span in &entry.spans {
+                buf.put_i32(span.first_seq);
+                buf.put_i32(span.last_seq);
+                buf.put_i64(span.base_offset as i64);
+            }
+        }
+        buf.put_i64(self.producer_state_offset as i64);
         buf.freeze()
     }
 
@@ -136,6 +151,35 @@ impl RegistryEntry {
             let last_seq = get_i64(&mut buf)? as u64;
             producers.insert(id, ProducerState { epoch, last_seq });
         }
+        let mut external_id = [0u8; 16];
+        ensure(buf, 16)?;
+        external_id.copy_from_slice(&buf[..16]);
+        buf.advance(16);
+        let numeric_count = get_i32(&mut buf)?;
+        let mut numeric_producers = BTreeMap::new();
+        for _ in 0..numeric_count {
+            let id = get_i64(&mut buf)?;
+            let epoch = get_i16(&mut buf)?;
+            let last_touched_ms = get_i64(&mut buf)?;
+            let span_count = get_u8(&mut buf)? as usize;
+            let mut spans = Vec::with_capacity(span_count.min(PRODUCER_SPAN_WINDOW));
+            for _ in 0..span_count {
+                spans.push(ProducerSpan {
+                    first_seq: get_i32(&mut buf)?,
+                    last_seq: get_i32(&mut buf)?,
+                    base_offset: get_i64(&mut buf)? as u64,
+                });
+            }
+            numeric_producers.insert(
+                id,
+                NumericProducerEntry {
+                    epoch,
+                    spans,
+                    last_touched_ms,
+                },
+            );
+        }
+        let producer_state_offset = get_i64(&mut buf)? as u64;
         Ok(Self {
             stream_id,
             content_type,
@@ -146,6 +190,9 @@ impl RegistryEntry {
             last_seq,
             producers,
             closed_by,
+            external_id,
+            numeric_producers,
+            producer_state_offset,
         })
     }
 }
@@ -159,11 +206,6 @@ pub enum ProducerDecision {
     SequenceGap { expected: u64, received: u64 },
 }
 
-/// - unknown producer: seq must be 0, else INVALID_EPOCH_SEQ.
-/// - epoch < recorded: STALE_EPOCH(recorded).
-/// - epoch > recorded: seq must be 0 (new epoch restarts), else INVALID_EPOCH_SEQ.
-/// - same epoch: seq <= lastSeq → DUPLICATE. Seq == lastSeq+1 → ACCEPTED.
-///   Else SEQUENCE_GAP(lastSeq+1, seq).
 pub fn validate_producer(entry: &RegistryEntry, producer: &Producer) -> ProducerDecision {
     let Some(state) = entry.producers.get(&producer.producer_id) else {
         if producer.seq != 0 {
@@ -213,6 +255,11 @@ fn put_str(buf: &mut BytesMut, s: &str) {
 fn get_u8(buf: &mut &[u8]) -> Result<u8, ServiceError> {
     ensure(buf, 1)?;
     Ok(buf.get_u8())
+}
+
+fn get_i16(buf: &mut &[u8]) -> Result<i16, ServiceError> {
+    ensure(buf, 2)?;
+    Ok(buf.get_i16())
 }
 
 fn get_i32(buf: &mut &[u8]) -> Result<i32, ServiceError> {
@@ -282,6 +329,27 @@ mod tests {
                 epoch: 2,
                 seq: 41,
             }),
+            external_id: *b"0123456789abcdef",
+            numeric_producers: BTreeMap::from([(
+                9000_i64,
+                NumericProducerEntry {
+                    epoch: 3,
+                    spans: vec![
+                        ProducerSpan {
+                            first_seq: 0,
+                            last_seq: 4,
+                            base_offset: 100,
+                        },
+                        ProducerSpan {
+                            first_seq: 5,
+                            last_seq: 5,
+                            base_offset: 105,
+                        },
+                    ],
+                    last_touched_ms: 777,
+                },
+            )]),
+            producer_state_offset: 106,
         }
     }
 
@@ -296,6 +364,8 @@ mod tests {
                 closed_by: None,
                 producers: BTreeMap::new(),
                 closed: true,
+                external_id: [0; 16],
+                numeric_producers: BTreeMap::new(),
                 ..entry()
             },
         ] {

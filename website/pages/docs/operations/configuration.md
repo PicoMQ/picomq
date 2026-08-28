@@ -25,18 +25,20 @@ The node id is the one value worth care. Reusing an id for a different machine i
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--listen` | `127.0.0.1:4437` | The stream protocol listener. |
+| `--listen` | `127.0.0.1:4437` | The HTTP stream protocol listener. |
 | `--admin-listen` | `127.0.0.1:9090` | The admin API and dashboard. |
 | `--no-admin` | off | Disables the admin listener entirely. |
 | `--http-address` | `http://{listen}` | The public URL other nodes redirect clients to. |
+| `--kafka-listen` | `127.0.0.1:9092` | The Kafka listener, bound in `--protocol kafka` mode. |
+| `--kafka-advertise` | `{kafka-listen}` | The Kafka address registered in metadata and returned to clients. |
 | `--backlog` | `1024` | Listener accept queue depth. |
 | `--shutdown-drain-sec` | `0` | How long to fail readiness before closing listeners on shutdown. |
 
-`--http-address` matters in any multi-node deployment. It is registered in the metadata state and used verbatim in redirects, so it must be a URL clients can actually reach, not a bind address. The default only works single-node on localhost.
+`--protocol` is a global flag rather than a serve flag, selecting the client protocol this node serves: `pico`, `ds`, or `kafka`. In Kafka mode the HTTP listener carries only the admin surface, and the Kafka listener serves the data. The [Kafka protocol](/docs/kafka) page covers what that mode supports.
 
-Binding either listener to anything but loopback requires `--auth required`. A node asked to expose an unauthenticated listener refuses to start, unless `--insecure-allow-remote` deliberately opts out for deployments that bring their own network boundary.
+`--http-address` and `--kafka-advertise` matter in any multi-node deployment. Both are registered in the metadata state and handed to clients verbatim, in redirects for HTTP and in metadata responses for Kafka, so they must be addresses clients can actually reach, not bind addresses. The defaults only work single-node on localhost.
 
-`--protocol` is a global flag rather than a serve flag, selecting whether this listener speaks `pico` or `ds`.
+Binding an unauthenticated listener to anything but loopback fails startup unless `--insecure-allow-remote` deliberately opts out for deployments that bring their own network boundary. For the HTTP listeners, `--auth required` is the authenticated alternative. The Kafka listener has no authentication, so exposing it always takes the explicit opt-out.
 
 ## Metadata
 

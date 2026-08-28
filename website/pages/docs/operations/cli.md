@@ -1,6 +1,6 @@
 # CLI
 
-Everything ships in one binary. `pico` runs a node, acts as a client for both protocols, administers a cluster, and benchmarks it. Client commands print data to stdout and everything else to stderr, so output pipes cleanly.
+Everything ships in one binary. `pico` runs a node, acts as a client for both HTTP protocols, administers a cluster, and benchmarks it. Client commands print data to stdout and everything else to stderr, so output pipes cleanly.
 
 ## Connecting
 
@@ -12,7 +12,7 @@ pico --protocol ds read /streams/orders
 pico --http2 append /streams/orders
 ```
 
-`--endpoint` (`PICO_ENDPOINT`) is the server base URL, defaulting to `http://127.0.0.1:4437`. `--protocol` (`PICO_PROTOCOL`) selects `pico` or `ds`, since the two protocols differ on the wire. `--http2` (`PICO_HTTP2`) speaks HTTP/2 over cleartext, which multiplexes many concurrent appends over one connection.
+`--endpoint` (`PICO_ENDPOINT`) is the server base URL, defaulting to `http://127.0.0.1:4437`. `--protocol` (`PICO_PROTOCOL`) selects `pico` or `ds`, since the two protocols differ on the wire. `kafka` is valid only for `serve`, because [Kafka clients](/docs/kafka) come from the Kafka ecosystem. `--http2` (`PICO_HTTP2`) speaks HTTP/2 over cleartext, which multiplexes many concurrent appends over one connection.
 
 `--token` (`PICO_TOKEN`) is the bearer credential for a server running with auth required, and it rarely belongs on the command line. `pico auth login` stores it instead, in the OS keyring or a private `credentials.toml` next to the config when no keyring is available (`PICO_NO_KEYRING=1` forces the file, the right setting for CI), and every command attaches the stored credential automatically. An explicit flag or variable wins over storage. `pico auth status` shows where the credential lives, its id, and whether the endpoint accepts it, and `pico auth logout` removes it. Getting a token in the first place is covered in [Authentication](/docs/operations/auth).
 

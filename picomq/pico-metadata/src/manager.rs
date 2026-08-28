@@ -59,6 +59,7 @@ impl MetadataNodeHandle {
                 node_epoch: self.node_epoch,
                 http_address: http_address.to_owned(),
                 slots: 1,
+                protocol_addresses: Default::default(),
             })
             .await?;
         Ok(())
@@ -88,6 +89,7 @@ impl MetadataNodeHandle {
         &self,
         http_address: &str,
         slots: u32,
+        protocol_addresses: std::collections::BTreeMap<String, String>,
     ) -> Result<(), MetadataError> {
         self.sink
             .propose(MetadataCommand::RegisterNode {
@@ -95,9 +97,29 @@ impl MetadataNodeHandle {
                 node_epoch: self.node_epoch,
                 http_address: http_address.to_owned(),
                 slots,
+                protocol_addresses,
             })
             .await?;
         Ok(())
+    }
+
+    /// Lease a block of `count` numeric producer ids, returning the first.
+    pub async fn allocate_producer_ids(&self, count: u32) -> Result<u64, MetadataError> {
+        match self
+            .sink
+            .propose(MetadataCommand::AllocateProducerIds {
+                node_id: self.node_id,
+                node_epoch: self.node_epoch,
+                count,
+            })
+            .await?
+            .result
+        {
+            MetadataResult::Id(first) => Ok(first),
+            other => Err(MetadataError::Unexpected {
+                message: format!("unexpected allocate result {other:?}"),
+            }),
+        }
     }
 
     /// Refresh a registered node's placement weight at its current epoch.
@@ -114,6 +136,7 @@ impl MetadataNodeHandle {
                 node_epoch,
                 http_address: String::new(),
                 slots,
+                protocol_addresses: Default::default(),
             })
             .await?;
         Ok(())

@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 s3stream = { workspace = true }
 pico-auth = { workspace = true }
-pico-frontend = { workspace = true }
+pico-http = { workspace = true }
 pico-runtime = { workspace = true }
 pico-client = { workspace = true }
 bytes = { workspace = true }

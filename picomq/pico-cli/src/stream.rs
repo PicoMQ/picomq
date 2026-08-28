@@ -94,22 +94,29 @@ pub enum ProtocolArg {
     Pico,
     /// The Durable Streams open protocol: raw bodies, opaque offsets.
     Ds,
+    /// The Kafka wire protocol. Serve only: client commands use Kafka tooling.
+    Kafka,
 }
 
-impl From<ProtocolArg> for Protocol {
-    fn from(value: ProtocolArg) -> Self {
-        match value {
-            ProtocolArg::Pico => Self::Pico,
-            ProtocolArg::Ds => Self::Ds,
+impl ProtocolArg {
+    /// The client wire for stream commands. Kafka has no CLI client.
+    pub fn client_protocol(self) -> Result<Protocol, ClientError> {
+        match self {
+            Self::Pico => Ok(Protocol::Pico),
+            Self::Ds => Ok(Protocol::Ds),
+            Self::Kafka => Err(ClientError::unsupported(
+                "kafka has no CLI client; use kcat or a Kafka client library",
+            )),
         }
     }
 }
 
-impl From<ProtocolArg> for pico_frontend::Protocol {
+impl From<ProtocolArg> for pico_http::Protocol {
     fn from(value: ProtocolArg) -> Self {
         match value {
             ProtocolArg::Pico => Self::Pico,
             ProtocolArg::Ds => Self::Ds,
+            ProtocolArg::Kafka => Self::Kafka,
         }
     }
 }
@@ -170,7 +177,7 @@ pub enum StreamCommand {
 }
 
 pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, ClientError> {
-    let protocol = Protocol::from(endpoint.protocol);
+    let protocol = endpoint.protocol.client_protocol()?;
     let client =
         pico_client::connect_with(protocol, &endpoint.endpoint, &endpoint.client_config())?;
 
