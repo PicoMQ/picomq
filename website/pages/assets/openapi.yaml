@@ -606,7 +606,28 @@ components:
         appliedIndex: { type: integer }
         streamCount: { type: integer }
         objectCount: { type: integer }
-        destroyedObjectBacklog: { type: integer }
+        streamSetObjectCount: { type: integer }
+        streamObjectCount: { type: integer }
+        preparedObjectCount: { type: integer }
+        kvEntryCount: { type: integer }
+        kvBytes: { type: integer }
+        gc:
+          type: object
+          description: Destroyed-object cleanup backlog.
+          properties:
+            backlog: { type: integer }
+            oldestSeq: { type: [integer, "null"] }
+            nextSeq: { type: integer }
+        snapshot:
+          type: object
+          description: Metadata snapshot cycle stats.
+          properties:
+            lastAppliedIndex: { type: integer }
+            lastBytes: { type: integer }
+            lastDurationMs: { type: integer }
+            lastAtMs: { type: integer }
+            taken: { type: integer }
+            failed: { type: integer }
         leaseHolder:
           type: [boolean, "null"]
           description: Whether this node holds the maintenance lease. Null when unknown.

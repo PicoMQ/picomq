@@ -24,6 +24,7 @@ fn config() -> SqlSinkConfig {
     SqlSinkConfig {
         poll_interval: Duration::from_millis(1),
         snapshot_every: SNAPSHOT_EVERY,
+        snapshot_min_interval: Duration::ZERO,
         ..SqlSinkConfig::default()
     }
 }

@@ -210,6 +210,7 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
         if buf.remaining() < len {
             return Err(SnapshotError::Corrupt("kv value truncated".into()));
         }
+        state.kv_bytes += (key.len() + len) as u64;
         state.kv.insert(key, Bytes::copy_from_slice(&buf[..len]));
         buf.advance(len);
     }

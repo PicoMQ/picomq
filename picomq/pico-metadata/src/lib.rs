@@ -23,6 +23,6 @@ pub use lifecycle::{MetadataLifecycle, ObjectCleaner};
 pub use manager::{
     MetadataKvClient, MetadataNodeHandle, MetadataObjectManager, MetadataStreamManager,
 };
-pub use sink::{CommandSink, LocalSink};
-pub use state::MetadataState;
+pub use sink::{CommandSink, LocalSink, SinkStats, SnapshotStats};
+pub use state::{MetadataState, StreamOffsetKey};
 pub use view::{MetadataView, ViewPublisher};

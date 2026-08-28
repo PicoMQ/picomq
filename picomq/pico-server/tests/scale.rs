@@ -101,6 +101,19 @@ async fn run_gate(total: u64) {
         (create_rss - base_rss) * 1024.0 / total as f64
     );
 
+    // One registry entry + one `idx/sid/` record per stream.
+    {
+        let view = node.views().load();
+        assert_eq!(view.state.kv.len() as u64, 2 * total);
+        assert!(view.state.kv_bytes > 0);
+        println!(
+            "kv entries: {}, kv bytes: {} ({:.0} B/stream)",
+            view.state.kv.len(),
+            view.state.kv_bytes,
+            view.state.kv_bytes as f64 / total as f64
+        );
+    }
+
     // Phase 2: publish one durable record to every stream.
     let started = Instant::now();
     let append_service = service.clone();

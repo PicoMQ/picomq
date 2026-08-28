@@ -18,7 +18,11 @@ use pico_sql::{LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkCon
 fn config() -> SqlSinkConfig {
     SqlSinkConfig {
         poll_interval: Duration::from_millis(5),
-        snapshot_every: 16,
+        // Rows, not commands: group commit can pack all 60 creates into one
+        // row per sink. 2 sequential registers + 1 row per sink is the
+        // guaranteed minimum, so 4 is always reached.
+        snapshot_every: 4,
+        snapshot_min_interval: Duration::ZERO,
         ..SqlSinkConfig::default()
     }
 }

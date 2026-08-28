@@ -122,5 +122,16 @@ pub trait StreamClient: Send + Sync {
     /// Retrieve an already-open stream.
     fn get_stream(&self, stream_id: u64) -> Option<std::sync::Arc<dyn Stream>>;
 
+    /// Run one compaction pass right now. A no-op when the stream is not
+    /// open in this process.
+    async fn compact_stream(
+        &self,
+        stream_id: u64,
+        level: crate::compact::CompactionLevel,
+    ) -> Result<(), StreamError> {
+        let _ = (stream_id, level);
+        Ok(())
+    }
+
     async fn shutdown(&self);
 }

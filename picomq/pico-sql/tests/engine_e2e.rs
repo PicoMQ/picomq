@@ -32,6 +32,7 @@ fn sink_config() -> SqlSinkConfig {
         poll_interval: Duration::from_millis(1),
         // Low threshold so the cycle actually runs under this test's traffic.
         snapshot_every: 8,
+        snapshot_min_interval: Duration::ZERO,
         ..SqlSinkConfig::default()
     }
 }

@@ -249,6 +249,7 @@ async fn cluster(State(state): State<AdminState>, headers: HeaderMap) -> Respons
     }
     let config = state.node.config();
     let view = state.node.views().load();
+    let snapshot = &state.node.metadata().sink_stats().snapshot;
     let body = json!({
         "clusterId": config.cluster_id,
         "nodeId": config.node_id,
@@ -258,9 +259,27 @@ async fn cluster(State(state): State<AdminState>, headers: HeaderMap) -> Respons
         "appliedIndex": view.applied_index,
         "streamCount": view.state.streams.len(),
         "objectCount": view.state.stream_set_objects.len() + view.state.stream_objects.len(),
-        "destroyedObjectBacklog": view.state.mark_destroyed.len(),
+        "streamSetObjectCount": view.state.stream_set_objects.len(),
+        "streamObjectCount": view.state.stream_objects.len(),
+        "preparedObjectCount": view.state.prepared.len(),
+        // A head that does not advance while depth grows means a stuck cleaner.
+        "gc": {
+            "backlog": view.state.mark_destroyed.len(),
+            "oldestSeq": view.state.mark_destroyed.keys().next().copied(),
+            "nextSeq": view.state.next_destroyed_seq,
+        },
+        "kvEntryCount": view.state.kv.len(),
+        "kvBytes": view.state.kv_bytes,
         "pendingTransfers": pending_transfers_json(&view.state),
         "leaseHolder": state.lease_holder(),
+        "snapshot": {
+            "lastAppliedIndex": snapshot.last_applied_index.load(Ordering::Relaxed),
+            "lastBytes": snapshot.last_bytes.load(Ordering::Relaxed),
+            "lastDurationMs": snapshot.last_duration_ms.load(Ordering::Relaxed),
+            "lastAtMs": snapshot.last_at_ms.load(Ordering::Relaxed),
+            "taken": snapshot.taken.load(Ordering::Relaxed),
+            "failed": snapshot.failed.load(Ordering::Relaxed),
+        },
     });
     (StatusCode::OK, Json(body)).into_response()
 }

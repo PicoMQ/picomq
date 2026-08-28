@@ -208,8 +208,16 @@ async fn clean_loop(cleaner: Arc<ObjectCleaner>, leader: Arc<AtomicBool>, tick: 
         if !leader.load(Ordering::SeqCst) {
             return;
         }
-        if let Err(error) = cleaner.clean(MAX_DELETE_BATCH_COUNT).await {
-            tracing::warn!(%error, "object cleaner failed, destroyed marks retained");
+        match cleaner.clean(MAX_DELETE_BATCH_COUNT).await {
+            Err(error) => {
+                tracing::warn!(%error, "object cleaner failed, destroyed marks retained")
+            }
+            Ok(_) => {
+                let backlog = cleaner.views.load().state.mark_destroyed.len();
+                if backlog > MAX_DELETE_BATCH_COUNT {
+                    tracing::warn!(backlog, "gc backlog exceeds one clean batch; falling behind");
+                }
+            }
         }
     }
 }

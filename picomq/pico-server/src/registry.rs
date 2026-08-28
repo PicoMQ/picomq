@@ -13,6 +13,7 @@ use crate::types::Producer;
 pub struct ProducerState {
     pub epoch: u64,
     pub last_seq: u64,
+    pub last_touched_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,12 +61,13 @@ impl RegistryEntry {
         self
     }
 
-    pub fn with_producer(mut self, id: String, epoch: u64, seq: u64) -> Self {
+    pub fn with_producer(mut self, id: String, epoch: u64, seq: u64, now_ms: i64) -> Self {
         self.producers.insert(
             id,
             ProducerState {
                 epoch,
                 last_seq: seq,
+                last_touched_ms: now_ms,
             },
         );
         self
@@ -94,6 +96,7 @@ impl RegistryEntry {
             put_str(&mut buf, id);
             buf.put_i64(state.epoch as i64);
             buf.put_i64(state.last_seq as i64);
+            buf.put_i64(state.last_touched_ms);
         }
         buf.put_slice(&self.external_id);
         buf.put_i32(self.numeric_producers.len() as i32);
@@ -149,7 +152,15 @@ impl RegistryEntry {
             let id = get_str(&mut buf)?;
             let epoch = get_i64(&mut buf)? as u64;
             let last_seq = get_i64(&mut buf)? as u64;
-            producers.insert(id, ProducerState { epoch, last_seq });
+            let last_touched_ms = get_i64(&mut buf)?;
+            producers.insert(
+                id,
+                ProducerState {
+                    epoch,
+                    last_seq,
+                    last_touched_ms,
+                },
+            );
         }
         let mut external_id = [0u8; 16];
         ensure(buf, 16)?;
@@ -314,6 +325,7 @@ mod tests {
                     ProducerState {
                         epoch: 2,
                         last_seq: 41,
+                        last_touched_ms: 500,
                     },
                 ),
                 (
@@ -321,6 +333,7 @@ mod tests {
                     ProducerState {
                         epoch: 0,
                         last_seq: 0,
+                        last_touched_ms: 600,
                     },
                 ),
             ]),
@@ -414,6 +427,7 @@ mod tests {
             ProducerState {
                 epoch: 3,
                 last_seq: 5,
+                last_touched_ms: 0,
             },
         );
         // Stale epoch.

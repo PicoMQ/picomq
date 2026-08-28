@@ -8,7 +8,7 @@ use pico_metadata::sink::Proposed;
 use pico_metadata::snapshot::SnapshotError;
 use pico_metadata::{
     apply, codec, CommandSink, MetadataCommand, MetadataError, MetadataResult, MetadataState,
-    MetadataView, ViewPublisher,
+    MetadataView, SinkStats, ViewPublisher,
 };
 use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -44,12 +44,12 @@ pub struct SqlSinkConfig {
     /// `propose` awaits a slot instead of growing memory without bound.
     pub queue_depth: usize,
     /// Snapshot + truncate every N applied log rows (0 disables). Bounds the
-    /// log table and cold-start replay. The snapshot itself is an O(1) state
-    /// fork, so the apply loop never pauses for it.
-    ///
-    /// `MetadataStateMachine#onSnapshotSave`, row-count-based here so tests
-    /// and behavior are deterministic.
+    /// log table and cold-start replay.
     pub snapshot_every: u64,
+    /// Minimum time between snapshot cycles. Rows say a snapshot is due,
+    /// time keeps a busy cluster from re-shipping the full state every few
+    /// seconds. Zero snapshots on rows alone (deterministic tests).
+    pub snapshot_min_interval: Duration,
 }
 
 impl Default for SqlSinkConfig {
@@ -60,6 +60,7 @@ impl Default for SqlSinkConfig {
             fetch_limit: 1024,
             queue_depth: 4096,
             snapshot_every: 1024,
+            snapshot_min_interval: Duration::from_secs(30),
         }
     }
 }
@@ -84,6 +85,7 @@ struct Shared {
     last_seen: AtomicU64,
     /// Wakes the tailer immediately after a local append (skips one poll).
     nudge: Notify,
+    stats: Arc<SinkStats>,
 }
 
 type ProposeRequest = (
@@ -151,17 +153,13 @@ impl SqlSink {
             pending: std::sync::Mutex::new(Pending::default()),
             last_seen: AtomicU64::new(applied),
             nudge: Notify::new(),
+            stats: Arc::new(SinkStats::default()),
         });
 
         let (queue, queue_rx) = mpsc::channel(config.queue_depth);
         let tasks = vec![
-            tokio::spawn(tailer_task(
-                shared.clone(),
-                state,
-                applied,
-                snapshot_base,
-                config.clone(),
-            )),
+            tokio::spawn(tailer_task(shared.clone(), state, applied, config.clone())),
+            tokio::spawn(snapshot_task(shared.clone(), snapshot_base, config.clone())),
             tokio::spawn(flusher_task(shared.clone(), queue_rx, config)),
         ];
         Ok((
@@ -204,6 +202,10 @@ impl CommandSink for SqlSink {
             message: "sql sink dropped the proposal (shutdown or log corruption)".into(),
         })?
     }
+
+    fn stats(&self) -> Arc<SinkStats> {
+        self.shared.stats.clone()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +216,6 @@ async fn tailer_task(
     shared: Arc<Shared>,
     mut state: MetadataState,
     mut applied: u64,
-    mut last_snapshot: u64,
     config: SqlSinkConfig,
 ) {
     'tail: loop {
@@ -227,6 +228,22 @@ async fn tailer_task(
             }
         };
         if rows.is_empty() {
+            // An empty tail is ambiguous: nothing new, or the rows we need
+            // were folded into a snapshot and truncated away by another
+            // node. The snapshot index (payload-free) disambiguates.
+            if let Ok(Some(snap_idx)) = shared.store.snapshot_idx().await {
+                if snap_idx > applied {
+                    match restore_from_snapshot(&shared, applied).await {
+                        Restore::Installed(snap_idx, snap_state) => {
+                            state = *snap_state;
+                            applied = snap_idx;
+                        }
+                        Restore::Retry => tokio::time::sleep(config.poll_interval).await,
+                        Restore::Poisoned => return,
+                    }
+                    continue;
+                }
+            }
             // Nudge (same-process append) or poll (other writers).
             tokio::select! {
                 _ = shared.nudge.notified() => {}
@@ -243,7 +260,6 @@ async fn tailer_task(
                     Restore::Installed(snap_idx, snap_state) => {
                         state = *snap_state;
                         applied = snap_idx;
-                        last_snapshot = snap_idx;
                     }
                     Restore::Retry => tokio::time::sleep(config.poll_interval).await,
                     Restore::Poisoned => return,
@@ -285,25 +301,66 @@ async fn tailer_task(
                 let _ = waiter.send(results);
             }
         }
-        // Snapshot cycle: persist the state and drop the covered log prefix.
-        // Any node may run it. `store_snapshot` never regresses, and
-        // truncation only removes rows at or below OUR snapshot. Errors are
-        // retried next round (extra log rows are harmless).
-        if config.snapshot_every > 0 && applied - last_snapshot >= config.snapshot_every {
-            let payload = pico_metadata::snapshot::encode(&state);
-            match shared.store.store_snapshot(applied, &payload).await {
-                Ok(()) => {
-                    last_snapshot = applied;
-                    if let Err(error) = shared.store.truncate_log(applied).await {
-                        tracing::warn!(%error, "log truncation failed; retrying next cycle");
-                    }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Snapshotter: persists published views and drops the covered log prefix.
+// ---------------------------------------------------------------------------
+
+/// Runs beside the tailer, never on its path: it observes published views and
+/// snapshots when `snapshot_every` rows have accumulated AND
+/// `snapshot_min_interval` has elapsed since the last cycle. Any node may
+/// snapshot: `store_snapshot` never regresses and truncation only removes
+/// rows at or below the index we stored. Errors are retried next cycle
+/// (extra log rows are harmless).
+async fn snapshot_task(shared: Arc<Shared>, mut last_snapshot: u64, config: SqlSinkConfig) {
+    if config.snapshot_every == 0 {
+        return;
+    }
+    loop {
+        shared
+            .views
+            .wait_applied(last_snapshot + config.snapshot_every)
+            .await;
+        // Fork the newest view, not the one that woke us: rows applied while
+        // we slept come along for free.
+        let view = shared.views.load();
+        let applied = view.applied_index;
+        let started = std::time::Instant::now();
+        // Encode scales with state size; keep it off the async workers.
+        let state = view.state.clone();
+        let payload = tokio::task::spawn_blocking(move || pico_metadata::snapshot::encode(&state))
+            .await
+            .expect("snapshot encode panicked");
+        match shared.store.store_snapshot(applied, &payload).await {
+            Ok(()) => {
+                last_snapshot = applied;
+                shared.stats.snapshot.record_success(
+                    applied,
+                    payload.len() as u64,
+                    started.elapsed().as_millis() as u64,
+                    unix_ms(),
+                );
+                if let Err(error) = shared.store.truncate_log(applied).await {
+                    tracing::warn!(%error, "log truncation failed; retrying next cycle");
                 }
-                Err(error) => {
-                    tracing::warn!(%error, "snapshot store failed; retrying next cycle");
-                }
+                tokio::time::sleep(config.snapshot_min_interval).await;
+            }
+            Err(error) => {
+                shared.stats.snapshot.record_failure();
+                tracing::warn!(%error, "snapshot store failed; retrying next cycle");
+                tokio::time::sleep(config.poll_interval).await;
             }
         }
     }
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Outcome of gap recovery (see [`restore_from_snapshot`]).
@@ -484,6 +541,7 @@ mod tests {
     fn fast_config() -> SqlSinkConfig {
         SqlSinkConfig {
             poll_interval: Duration::from_millis(1),
+            snapshot_min_interval: Duration::ZERO,
             ..SqlSinkConfig::default()
         }
     }
@@ -491,6 +549,101 @@ mod tests {
     async fn memory_sink() -> (SqlSink, Arc<ViewPublisher>) {
         let store = Arc::new(SqliteStore::memory().await.unwrap());
         SqlSink::open(store, fast_config()).await.unwrap()
+    }
+
+    /// Delegating store whose `store_snapshot` parks until released.
+    struct GatedSnapshotStore {
+        inner: SqliteStore,
+        release: tokio::sync::watch::Receiver<bool>,
+    }
+
+    #[async_trait]
+    impl MetaStore for GatedSnapshotStore {
+        async fn append(&self, idx: u64, payload: &[u8]) -> Result<bool, StoreError> {
+            self.inner.append(idx, payload).await
+        }
+        async fn last_idx(&self) -> Result<u64, StoreError> {
+            self.inner.last_idx().await
+        }
+        async fn fetch_after(
+            &self,
+            after: u64,
+            limit: u32,
+        ) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
+            self.inner.fetch_after(after, limit).await
+        }
+        async fn load_snapshot(&self) -> Result<Option<(u64, Vec<u8>)>, StoreError> {
+            self.inner.load_snapshot().await
+        }
+        async fn snapshot_idx(&self) -> Result<Option<u64>, StoreError> {
+            self.inner.snapshot_idx().await
+        }
+        async fn store_snapshot(&self, applied_idx: u64, payload: &[u8]) -> Result<(), StoreError> {
+            let mut release = self.release.clone();
+            release
+                .wait_for(|open| *open)
+                .await
+                .expect("release sender dropped");
+            self.inner.store_snapshot(applied_idx, payload).await
+        }
+        async fn truncate_log(&self, up_to: u64) -> Result<(), StoreError> {
+            self.inner.truncate_log(up_to).await
+        }
+        async fn acquire_lease(
+            &self,
+            holder: &str,
+            prev_epoch: Option<u64>,
+            now_ms: i64,
+            ttl_ms: i64,
+        ) -> Result<Option<u64>, StoreError> {
+            self.inner.acquire_lease(holder, prev_epoch, now_ms, ttl_ms).await
+        }
+        async fn release_lease(&self, holder: &str, epoch: u64) -> Result<(), StoreError> {
+            self.inner.release_lease(holder, epoch).await
+        }
+    }
+
+    /// Proposals keep applying while a snapshot store hangs.
+    #[tokio::test]
+    async fn apply_never_waits_on_snapshot_store() {
+        let (release, gate) = tokio::sync::watch::channel(false);
+        let store = Arc::new(GatedSnapshotStore {
+            inner: SqliteStore::memory().await.unwrap(),
+            release: gate,
+        });
+        let config = SqlSinkConfig {
+            snapshot_every: 5,
+            ..fast_config()
+        };
+        let (sink, views) = SqlSink::open(store.clone(), config).await.unwrap();
+
+        sink.propose(register(1, 10)).await.unwrap();
+        for _ in 0..30 {
+            sink.propose(MetadataCommand::CreateStream {
+                node_id: 1,
+                node_epoch: 10,
+            })
+            .await
+            .unwrap();
+        }
+        let applied = views.load().applied_index;
+        assert!(applied >= 31, "apply stalled at {applied}");
+        assert_eq!(store.inner.snapshot_idx().await.unwrap(), None);
+
+        release.send(true).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshotted = store.inner.snapshot_idx().await.unwrap().is_some();
+            let rows = store.inner.fetch_after(0, 1024).await.unwrap();
+            if snapshotted && (rows.len() as u64) < applied {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "released snapshot cycle never completed"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     fn register(node_id: i32, node_epoch: i64) -> MetadataCommand {

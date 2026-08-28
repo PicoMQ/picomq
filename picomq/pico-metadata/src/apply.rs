@@ -1118,7 +1118,10 @@ fn put_kv(
     key: &str,
     value: &bytes::Bytes,
 ) -> Result<MetadataResult, MetadataError> {
-    state.kv.insert(key.to_owned(), value.clone());
+    if let Some(old) = state.kv.insert(key.to_owned(), value.clone()) {
+        state.kv_bytes -= (key.len() + old.len()) as u64;
+    }
+    state.kv_bytes += (key.len() + value.len()) as u64;
     Ok(MetadataResult::Value(Some(value.clone())))
 }
 
@@ -1131,11 +1134,16 @@ fn put_kv_if_absent(
         return Ok(MetadataResult::Value(Some(existing.clone())));
     }
     state.kv.insert(key.to_owned(), value.clone());
+    state.kv_bytes += (key.len() + value.len()) as u64;
     Ok(MetadataResult::Value(Some(value.clone())))
 }
 
 fn delete_kv(state: &mut MetadataState, key: &str) -> Result<MetadataResult, MetadataError> {
-    Ok(MetadataResult::Value(state.kv.remove(key)))
+    let removed = state.kv.remove(key);
+    if let Some(old) = &removed {
+        state.kv_bytes -= (key.len() + old.len()) as u64;
+    }
+    Ok(MetadataResult::Value(removed))
 }
 
 fn delete_kv_if_matches(
@@ -1144,7 +1152,13 @@ fn delete_kv_if_matches(
     expected: &bytes::Bytes,
 ) -> Result<MetadataResult, MetadataError> {
     match state.kv.get(key) {
-        Some(current) if current == expected => Ok(MetadataResult::Value(state.kv.remove(key))),
+        Some(current) if current == expected => {
+            let removed = state.kv.remove(key);
+            if let Some(old) = &removed {
+                state.kv_bytes -= (key.len() + old.len()) as u64;
+            }
+            Ok(MetadataResult::Value(removed))
+        }
         _ => Err(MetadataError::Redundant {
             message: format!("kv key {key} missing or value mismatch"),
         }),

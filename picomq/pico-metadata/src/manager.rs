@@ -77,6 +77,10 @@ impl MetadataNodeHandle {
         MetadataKvClient { node: self.clone() }
     }
 
+    pub fn sink_stats(&self) -> Arc<crate::sink::SinkStats> {
+        self.sink.stats()
+    }
+
     pub fn node_id(&self) -> i32 {
         self.node_id
     }

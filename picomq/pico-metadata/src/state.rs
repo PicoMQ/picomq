@@ -132,6 +132,8 @@ pub struct MetadataState {
     /// Sorted map so `list_kv(prefix)` (and future
     /// `start_after`/`limit` pagination) is a bounded range scan.
     pub kv: OrdMap<String, Bytes>,
+    /// Sum of `key.len() + value.len()` over `kv`, maintained by `apply`.
+    pub kv_bytes: u64,
 }
 
 impl MetadataState {

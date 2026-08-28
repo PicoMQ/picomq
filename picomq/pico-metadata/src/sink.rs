@@ -10,6 +10,7 @@
 //! Delivery concerns (leader forwarding, the SQL sink's append
 //! conflict-retry) belong to the sink implementation, never to callers.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -29,6 +30,37 @@ pub struct Proposed {
     pub result: MetadataResult,
 }
 
+/// Per-sink lifetime counters, handed out by [`CommandSink::stats`].
+#[derive(Debug, Default)]
+pub struct SinkStats {
+    pub snapshot: SnapshotStats,
+}
+
+#[derive(Debug, Default)]
+pub struct SnapshotStats {
+    pub last_applied_index: AtomicU64,
+    pub last_bytes: AtomicU64,
+    pub last_duration_ms: AtomicU64,
+    /// Unix ms.
+    pub last_at_ms: AtomicU64,
+    pub taken: AtomicU64,
+    pub failed: AtomicU64,
+}
+
+impl SnapshotStats {
+    pub fn record_success(&self, applied_index: u64, bytes: u64, duration_ms: u64, at_ms: u64) {
+        self.last_applied_index.store(applied_index, Ordering::Relaxed);
+        self.last_bytes.store(bytes, Ordering::Relaxed);
+        self.last_duration_ms.store(duration_ms, Ordering::Relaxed);
+        self.last_at_ms.store(at_ms, Ordering::Relaxed);
+        self.taken.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_failure(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Where commands are proposed and (once committed) applied.
 ///
 /// Contract: `propose` returns only after the command is durably committed,
@@ -39,6 +71,13 @@ pub struct Proposed {
 #[async_trait]
 pub trait CommandSink: Send + Sync {
     async fn propose(&self, command: MetadataCommand) -> Result<Proposed, MetadataError>;
+
+    /// Default is a shared all-zero unit: correct for sinks with no
+    /// background work (`LocalSink`, test doubles).
+    fn stats(&self) -> Arc<SinkStats> {
+        static ZERO: std::sync::OnceLock<Arc<SinkStats>> = std::sync::OnceLock::new();
+        ZERO.get_or_init(|| Arc::new(SinkStats::default())).clone()
+    }
 }
 
 /// In-process sink: commands are applied serially under a mutex and every

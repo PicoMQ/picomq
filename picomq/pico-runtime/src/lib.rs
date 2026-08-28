@@ -57,6 +57,8 @@ pub struct PicoServer {
     lease: LeaseKeeper,
     lifecycle: tokio::task::JoinHandle<()>,
     token_expiry: tokio::task::JoinHandle<()>,
+    ttl_sweep: tokio::task::JoinHandle<()>,
+    compaction_check: tokio::task::JoinHandle<()>,
     /// Kept alive for the process lifetime: dropping it aborts the log's
     /// flusher/tailer tasks, so it must outlive the node.
     sink: Arc<SqlSink>,
@@ -165,6 +167,10 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     let token_expiry = node
         .tokens()
         .spawn_expiry_loop(lease.leadership(), LIFECYCLE_TICK);
+    let ttl_sweep = node
+        .service()
+        .spawn_ttl_sweep(lease.leadership(), LIFECYCLE_TICK);
+    let compaction_check = node.service().spawn_compaction_check(LIFECYCLE_TICK);
 
     let kafka = if let Some((listener, bound)) = kafka_listener {
         let broker = Arc::new(pico_kafka::BrokerContext::new(
@@ -225,6 +231,8 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         lease,
         lifecycle,
         token_expiry,
+        ttl_sweep,
+        compaction_check,
         sink,
     })
 }
@@ -314,6 +322,8 @@ impl PicoServer {
         self.server.shutdown().await;
         self.lifecycle.abort();
         self.token_expiry.abort();
+        self.ttl_sweep.abort();
+        self.compaction_check.abort();
         self.lease.shutdown().await;
         drop(self.sink);
     }
