@@ -9,7 +9,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{PgPool, Row, SqlitePool};
 
-/// `MetadataLifecycle` cadence). 10 s tolerates pauses without flapping.
+/// Default maintenance-lease TTL. 10 s tolerates pauses without flapping.
 pub const DEFAULT_LEASE_TTL_MS: i64 = 10_000;
 
 /// Store failures. `Corrupt` covers impossible shapes (negative indexes,
@@ -94,10 +94,6 @@ fn insert_outcome(result: Result<(), sqlx::Error>) -> Result<bool, StoreError> {
         Err(e) => Err(e.into()),
     }
 }
-
-// ---------------------------------------------------------------------------
-// SQLite (lite / single-node posture)
-// ---------------------------------------------------------------------------
 
 /// SQLite-backed store. WAL journal + `synchronous=FULL`: an acked append
 pub struct SqliteStore {
@@ -304,10 +300,6 @@ impl MetaStore for SqliteStore {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Postgres (clustered / managed-cloud posture)
-// ---------------------------------------------------------------------------
-
 /// Postgres-backed store. Identical contract.`BYTEA` payloads, `$n`
 /// placeholders, default `synchronous_commit=on` durability.
 pub struct PgStore {
@@ -496,10 +488,6 @@ impl MetaStore for PgStore {
         Ok(())
     }
 }
-
-// ---------------------------------------------------------------------------
-// Contract test suite: every backend must pass the same behaviors.
-// ---------------------------------------------------------------------------
 
 /// Behavioral contract, run against every backend (SQLite always, Postgres
 /// when `PICOMQ_PG_URL` is set. See `tests/pg_contract.rs`).

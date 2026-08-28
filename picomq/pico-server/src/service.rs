@@ -148,8 +148,6 @@ impl S3StreamService {
         self.waiters.clone()
     }
 
-    // ---- stream lifecycle ----
-
     pub async fn create(&self, command: CreateCommand) -> Result<CreateResult, ServiceError> {
         command.validate()?;
         let name = normalize(&command.name);
@@ -386,8 +384,6 @@ impl S3StreamService {
         Ok(live_start_offset(stream.as_ref()))
     }
 
-    // ---- append ----
-
     /// Appends records and returns only after they are durable.
     pub async fn append(&self, command: AppendCommand) -> Result<AppendResult, ServiceError> {
         let command = command.normalized();
@@ -507,8 +503,6 @@ impl S3StreamService {
         self.waiters.notify_append(&name, notify_offset);
         Ok(result)
     }
-
-    // ---- verbatim batch surface ----
 
     /// Append a batch payload verbatim, patching each contained batch's
     /// base-offset field to the assigned offset. Durable on return.
@@ -664,8 +658,6 @@ impl S3StreamService {
         })
     }
 
-    // ---- read ----
-
     pub async fn read(
         &self,
         name: &str,
@@ -734,10 +726,6 @@ impl S3StreamService {
         }
         Ok(self.waiters.wait(&name, from, timeout).await)
     }
-
-    // -----------------------------------------------------------------
-    // Host surface
-    // -----------------------------------------------------------------
 
     pub async fn lookup_stream_id(&self, name: &str) -> Result<Option<u64>, ServiceError> {
         Ok(self
@@ -889,10 +877,6 @@ impl S3StreamService {
             }
         })
     }
-
-    // -----------------------------------------------------------------
-    // Internals
-    // -----------------------------------------------------------------
 
     fn gate_of(&self, name: &str) -> Arc<Gate> {
         self.gates
@@ -1456,8 +1440,6 @@ impl S3StreamService {
         &self.node
     }
 }
-
-// ---- helpers ----
 
 pub(crate) fn normalize(name: &str) -> String {
     if name.is_empty() {

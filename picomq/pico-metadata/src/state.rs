@@ -76,20 +76,14 @@ pub struct StreamObjectRow {
     pub object: s3stream::S3ObjectMetadata,
 }
 
-/// Composite key for offset-sorted per-stream object indexes.
-///
-/// Ordering `(stream_id, start_offset, object_id)` means "objects of stream S
-/// overlapping [a, b)" is one bounded range scan. `object_id` disambiguates
-/// equal start offsets (post-compaction) and makes keys unique.
+/// Composite key for offset-sorted per-stream object indexes. Ordering
+/// `(stream_id, start_offset, object_id)` makes "objects of stream S
+/// overlapping [a, b)" one bounded range scan; `object_id` keeps keys unique.
 pub type StreamOffsetKey = (u64, u64, u64);
 
-/// The full replicated metadata state.
-///
-/// Mutated ONLY by [`crate::apply::apply`] (single writer). Read through O(1)
-/// forks ([`Self::clone`]) published as [`crate::view::MetadataView`].
-///
-/// `PartialEq` exists for tests (determinism/atomicity assertions). It is a deep
-/// compare. Do not use it on hot paths.
+/// The full replicated metadata state. Mutated only by
+/// [`crate::apply::apply`] (single writer); read through O(1) forks published
+/// as [`crate::view::MetadataView`]. `PartialEq` is a deep compare for tests.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MetadataState {
     pub next_stream_id: u64,

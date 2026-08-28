@@ -113,7 +113,6 @@ async fn create_append_read_close_via_services() {
             .closed
     );
 
-    // ---- atomicBatchAppendReadAndTrim ----
     services
         .create(create("/streams/batch", "application/octet-stream"))
         .await
@@ -248,7 +247,6 @@ async fn list_and_match_seq_via_services() {
         services.create(create(name, "text/plain")).await.unwrap();
     }
 
-    // ---- listByPrefix ----
     let all = services.list("/list/", None, 0).await.unwrap();
     let names: Vec<&str> = all.streams.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, ["/list/a", "/list/b", "/list/c"]);
@@ -264,7 +262,6 @@ async fn list_and_match_seq_via_services() {
     assert_eq!(names, ["/list/c"]);
     assert!(!rest.has_more);
 
-    // ---- matchSeq ----
     let at = |payload: &[u8], match_seq: u64| AppendCommand {
         match_seq: Some(match_seq),
         ..append("/list/a", &[payload], "text/plain")

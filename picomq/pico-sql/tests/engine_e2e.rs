@@ -159,9 +159,7 @@ async fn engine_end_to_end_on_sql_metadata_plane() {
 
     engine.shutdown().await;
 
-    // ---------------------------------------------------------------
     // Lease-driven lifecycle: win the election, expire a lapsed prepare.
-    // ---------------------------------------------------------------
     sink.propose(MetadataCommand::PrepareObject {
         node_id: NODE_ID,
         node_epoch: NODE_EPOCH,
@@ -204,9 +202,7 @@ async fn engine_end_to_end_on_sql_metadata_plane() {
     driver.abort();
     keeper.shutdown().await;
 
-    // ---------------------------------------------------------------
     // Restart: a fresh sink over the same DB restores everything.
-    // ---------------------------------------------------------------
     let snapshot_state = views.load().state.clone();
     drop(handle);
     drop(sink);

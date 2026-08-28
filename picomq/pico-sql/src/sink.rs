@@ -65,12 +65,10 @@ impl Default for SqlSinkConfig {
     }
 }
 
-/// Result-delivery registrations, keyed by log index.
-///
-/// `poisoned` flips when the tailer hits an unrecoverable log error (corrupt
-/// row): registrations are dropped (waiters observe a closed channel) and all
-/// later proposes fail fast. One mutex covers flag + map so the check-then-
-/// register path has no race with poisoning.
+/// Result-delivery registrations, keyed by log index. `poisoned` flips when
+/// the tailer hits an unrecoverable log error: registrations drop and later
+/// proposes fail fast. One mutex covers flag + map so registration cannot
+/// race poisoning.
 #[derive(Default)]
 struct Pending {
     poisoned: bool,
@@ -208,9 +206,7 @@ impl CommandSink for SqlSink {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tailer: the single applier. Log rows in, views + results out.
-// ---------------------------------------------------------------------------
 
 async fn tailer_task(
     shared: Arc<Shared>,
@@ -304,16 +300,10 @@ async fn tailer_task(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Snapshotter: persists published views and drops the covered log prefix.
-// ---------------------------------------------------------------------------
-
-/// Runs beside the tailer, never on its path: it observes published views and
-/// snapshots when `snapshot_every` rows have accumulated AND
-/// `snapshot_min_interval` has elapsed since the last cycle. Any node may
-/// snapshot: `store_snapshot` never regresses and truncation only removes
-/// rows at or below the index we stored. Errors are retried next cycle
-/// (extra log rows are harmless).
+/// Runs beside the tailer, never on its path: snapshots when `snapshot_every`
+/// rows have accumulated and `snapshot_min_interval` has elapsed. Any node
+/// may snapshot: `store_snapshot` never regresses and truncation only removes
+/// covered rows. Errors are retried next cycle.
 async fn snapshot_task(shared: Arc<Shared>, mut last_snapshot: u64, config: SqlSinkConfig) {
     if config.snapshot_every == 0 {
         return;
@@ -374,11 +364,10 @@ enum Restore {
     Poisoned,
 }
 
-/// Reinstall state from the stored snapshot after a truncation gap. Publishes
-/// the snapshot view and drops any pending registrations it covers (those
-/// batches committed and applied globally, but this node can no longer compute
-/// their per-command results. The proposer gets an "outcome unknown" error,
-/// like a raft client whose leader changed mid-commit).
+/// Reinstall state from the stored snapshot after a truncation gap. Pending
+/// registrations it covers are dropped: those batches committed globally but
+/// this node can no longer compute their results, so the proposer gets an
+/// "outcome unknown" error.
 async fn restore_from_snapshot(shared: &Shared, applied: u64) -> Restore {
     let poison = |message: &str| {
         tracing::error!(applied, message, "halting sink");
@@ -422,9 +411,8 @@ async fn restore_from_snapshot(shared: &Shared, applied: u64) -> Restore {
     Restore::Installed(snap_idx, Box::new(state))
 }
 
-// ---------------------------------------------------------------------------
-// Flusher: group commit. Drain the queue, one row per batch, retry on
-// ---------------------------------------------------------------------------
+// Flusher: group commit. Drains the queue, one row per batch, retries on
+// index conflicts.
 
 async fn flusher_task(
     shared: Arc<Shared>,

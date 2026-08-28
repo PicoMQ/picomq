@@ -138,8 +138,6 @@ fn apply_inner(
     }
 }
 
-// ---- node lifecycle ----
-
 fn register_node(
     state: &mut MetadataState,
     node_id: i32,
@@ -670,8 +668,6 @@ fn allocate_producer_ids(
     Ok(MetadataResult::Id(first))
 }
 
-// ---- object lifecycle ----
-
 fn prepare_object(
     state: &mut MetadataState,
     node_id: i32,
@@ -1110,8 +1106,6 @@ fn clean_destroyed_objects(
     }
     Ok(MetadataResult::Unit)
 }
-
-// ---- kv ----
 
 fn put_kv(
     state: &mut MetadataState,
@@ -1889,9 +1883,7 @@ mod tests {
         assert_eq!(run(424242), run(424242));
     }
 
-    // -----------------------------------------------------------------------
     // Property tests: index consistency + atomicity over random command runs.
-    // -----------------------------------------------------------------------
 
     /// Every secondary index must be exactly derivable from its primary. The
     /// invariant that lets snapshots skip indexes and rebuild on restore.

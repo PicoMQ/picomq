@@ -1,14 +1,10 @@
 //! The write boundary: where commands enter the replicated log.
 //!
-//! The same manager/KV implementations work over any log:
-//!
-//! - [`LocalSink`]: apply in-process (single node, tests).
-//! - `SqlSink` (crate `pico-sql`): the durable log is an append-only SQL
-//!   table. Concurrent proposes coalesce into one log row, which is what
-//!   keeps `CommitStreamSetObject` storms cheap.
-//!
-//! Delivery concerns (leader forwarding, the SQL sink's append
-//! conflict-retry) belong to the sink implementation, never to callers.
+//! The same manager/KV implementations work over any log: [`LocalSink`]
+//! applies in-process (single node, tests); `SqlSink` (crate `pico-sql`)
+//! appends to a durable SQL table and coalesces concurrent proposes into one
+//! row. Delivery concerns (leader forwarding, conflict retry) belong to the
+//! sink, never to callers.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -64,11 +60,10 @@ impl SnapshotStats {
 
 /// Where commands are proposed and (once committed) applied.
 ///
-/// Contract: `propose` returns only after the command is durably committed,
-/// applied, AND its resulting view published. A caller that reads
-/// `views.load()` right after a successful propose sees its own write.
-/// `Err(Redundant)` means "already applied". Whether that is success is the
-/// commit commands).
+/// `propose` returns only after the command is durably committed, applied,
+/// and its resulting view published, so a caller that reads `views.load()`
+/// right after a successful propose sees its own write. `Err(Redundant)`
+/// means "already applied".
 #[async_trait]
 pub trait CommandSink: Send + Sync {
     async fn propose(&self, command: MetadataCommand) -> Result<Proposed, MetadataError>;
@@ -81,14 +76,9 @@ pub trait CommandSink: Send + Sync {
     }
 }
 
-/// In-process sink: commands are applied serially under a mutex and every
-/// successful apply publishes a view. No durability. State lives and dies with
-/// the process (recovery is the raft/snapshot layer's job).
-///
-/// Failed applies do NOT consume an index. `applied_index` counts
-/// state-changing commands only. (Redundant errors also changed nothing, by the
-/// atomic-apply guarantee.) A raft sink numbers by log index instead. Callers
-/// only rely on monotonicity.
+/// In-process sink: commands apply serially under a mutex, every successful
+/// apply publishes a view. No durability. Failed applies do not consume an
+/// index; callers only rely on `applied_index` monotonicity.
 pub struct LocalSink {
     state: tokio::sync::Mutex<(MetadataState, u64)>,
     views: Arc<ViewPublisher>,
