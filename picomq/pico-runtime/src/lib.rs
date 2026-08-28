@@ -73,7 +73,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         let auth_off = config.auth_mode == AuthMode::Off;
         for addr in [
             auth_off.then_some(config.addr),
-            auth_off.then(|| config.admin_addr).flatten(),
+            auth_off.then_some(config.admin_addr).flatten(),
             kafka.then_some(config.kafka_listen),
         ]
         .into_iter()

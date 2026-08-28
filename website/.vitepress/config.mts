@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitepress';
+import { tabsMarkdownPlugin } from 'vitepress-plugin-tabs';
 
 const docsSidebar = [
   {
@@ -8,6 +9,10 @@ const docsSidebar = [
       { text: 'Quick start', link: '/docs/quick-start' },
       { text: 'Playground', link: '/docs/playground' },
     ],
+  },
+  {
+    text: 'FAQ',
+    items: [{ text: 'Why not Kafka?', link: '/docs/faq/why-not-kafka' }],
   },
   {
     text: 'Design',
@@ -52,12 +57,14 @@ const docsSidebar = [
     ],
   },
   {
-    text: 'FAQ',
-    items: [{ text: 'Why not Kafka?', link: '/docs/faq/why-not-kafka' }],
-  },
-  {
     text: 'Community',
-    items: [{ text: 'Contribute', link: '/docs/contribute' }],
+    items: [
+      { text: 'Contribute', link: '/docs/contribute' },
+      {
+        text: 'Hacker News',
+        link: 'https://news.ycombinator.com/item?id=49421806',
+      },
+    ],
   },
 ];
 
@@ -79,6 +86,9 @@ export default defineConfig({
   },
   markdown: {
     theme: 'github-light',
+    config(md) {
+      md.use(tabsMarkdownPlugin);
+    },
   },
   head: [
     ['link', { rel: 'icon', href: '/images/favicon.ico', sizes: 'any' }],

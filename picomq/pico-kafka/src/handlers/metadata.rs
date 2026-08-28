@@ -68,7 +68,7 @@ pub async fn handle(
             response_topics.push(topic_error(&topic, INVALID_REQUEST));
             continue;
         }
-        match ctx.service.head(&name).await {
+        match ctx.service.describe(&name).await {
             Ok(Some(_)) => {}
             Ok(None) if request.allow_auto_topic_creation => {
                 if let Err(error) = create_topic(ctx, &name).await {
@@ -135,7 +135,7 @@ async fn build_topic(
 ) -> Result<MetadataResponseTopic, i16> {
     let meta = ctx
         .service
-        .head(name)
+        .describe(name)
         .await
         .map_err(|error| service_error_code(&error))?
         .ok_or(UNKNOWN_TOPIC_OR_PARTITION)?;

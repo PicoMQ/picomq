@@ -104,7 +104,10 @@ async fn produce_partition(
     stream: &str,
     records: Bytes,
 ) -> Result<(i64, i64), i16> {
-    let batches = decode_batches(&records).map_err(|_| CORRUPT_MESSAGE)?;
+    let batches = decode_batches(&records).map_err(|error| {
+        tracing::debug!(%error, stream, "rejected produce payload");
+        CORRUPT_MESSAGE
+    })?;
     if batches
         .iter()
         .any(|batch| batch.info.transactional || batch.info.control)
@@ -140,6 +143,9 @@ async fn produce_partition(
             base_timestamp_ms,
         })
         .await
-        .map_err(|error| service_error_code(&error))?;
+        .map_err(|error| {
+            tracing::debug!(%error, stream, "append failed");
+            service_error_code(&error)
+        })?;
     Ok((result.base_offset as i64, result.log_start_offset as i64))
 }

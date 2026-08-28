@@ -238,6 +238,27 @@ impl S3StreamService {
         }
     }
 
+    /// Registry-backed metadata without opening the stream, so it answers
+    /// for streams owned by other nodes. Offsets are the committed values.
+    pub async fn describe(&self, name: &str) -> Result<Option<StreamMeta>, ServiceError> {
+        let name = normalize(name);
+        let Some(entry) = self.get_entry(&name, false).await? else {
+            return Ok(None);
+        };
+        let committed = {
+            let view = self.views.load();
+            view.state
+                .get_streams(&[entry.stream_id])
+                .into_iter()
+                .next()
+        };
+        Ok(Some(to_meta_from_committed(
+            &name,
+            &entry,
+            committed.as_ref(),
+        )))
+    }
+
     pub async fn list(
         &self,
         prefix: &str,

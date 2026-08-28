@@ -5,23 +5,24 @@ pub struct SupportedApi {
     pub max_version: i16,
 }
 
-/// Advertised API ranges. Exactly what the handlers implement.
+/// Advertised API ranges. librdkafka needs the floors at Produce 3, Fetch 4,
+/// and ListOffsets 1 or it falls back to the v0 message format.
 pub fn supported_apis() -> &'static [SupportedApi] {
     use kafka_protocol::messages::ApiKey;
     const APIS: &[SupportedApi] = &[
         SupportedApi {
             api_key: ApiKey::Produce as i16,
-            min_version: 9,
+            min_version: 3,
             max_version: 10,
         },
         SupportedApi {
             api_key: ApiKey::Fetch as i16,
-            min_version: 13,
+            min_version: 4,
             max_version: 16,
         },
         SupportedApi {
             api_key: ApiKey::ListOffsets as i16,
-            min_version: 5,
+            min_version: 1,
             max_version: 7,
         },
         SupportedApi {

@@ -260,7 +260,9 @@ fn partition_data(
         .with_last_stable_offset(watermarks.high_watermark as i64)
         .with_log_start_offset(watermarks.log_start_offset as i64)
         .with_aborted_transactions(None)
-        .with_records(records)
+        // Empty, not null. librdkafka only raises partition EOF on an empty
+        // record set.
+        .with_records(Some(records.unwrap_or_default()))
 }
 
 fn error_partition(partition_index: i32, error_code: i16) -> PartitionRead {

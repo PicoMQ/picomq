@@ -33,6 +33,6 @@ RUN apt-get update \
 
 COPY --from=build /src/pico /usr/local/bin/pico
 
-EXPOSE 4437 9090
+EXPOSE 4437 9090 9092
 ENTRYPOINT ["pico"]
 CMD ["serve"]
