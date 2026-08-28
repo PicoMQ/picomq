@@ -280,9 +280,9 @@ impl S3StreamService {
             .map(str::to_owned);
         let mut selected: Vec<(String, RegistryEntry)> = Vec::new();
         'pages: loop {
-            let page = view
-                .state
-                .list_kv_page(&prefix, cursor.as_deref(), max + 1 - selected.len());
+            let page =
+                view.state
+                    .list_kv_page(&prefix, cursor.as_deref(), max + 1 - selected.len());
             let exhausted = page.len() < max + 1 - selected.len();
             for (key, value) in page {
                 cursor = Some(key.clone());
@@ -755,7 +755,11 @@ impl S3StreamService {
         if external_id == [0u8; 16] {
             return Ok(None);
         }
-        let Some(value) = self.kv_client.get_kv(&external_id_key(&external_id)).await? else {
+        let Some(value) = self
+            .kv_client
+            .get_kv(&external_id_key(&external_id))
+            .await?
+        else {
             return Ok(None);
         };
         let Ok(name) = String::from_utf8(value.to_vec()) else {

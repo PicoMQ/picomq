@@ -49,7 +49,8 @@ pub struct SnapshotStats {
 
 impl SnapshotStats {
     pub fn record_success(&self, applied_index: u64, bytes: u64, duration_ms: u64, at_ms: u64) {
-        self.last_applied_index.store(applied_index, Ordering::Relaxed);
+        self.last_applied_index
+            .store(applied_index, Ordering::Relaxed);
         self.last_bytes.store(bytes, Ordering::Relaxed);
         self.last_duration_ms.store(duration_ms, Ordering::Relaxed);
         self.last_at_ms.store(at_ms, Ordering::Relaxed);

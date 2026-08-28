@@ -1174,7 +1174,10 @@ async fn external_id_lookup_uses_replicated_index() {
         Some("/topics/indexed".to_owned())
     );
     assert_eq!(
-        services.lookup_by_external_id(*b"ffffffffffffffff").await.unwrap(),
+        services
+            .lookup_by_external_id(*b"ffffffffffffffff")
+            .await
+            .unwrap(),
         None
     );
 
@@ -1185,7 +1188,9 @@ async fn external_id_lookup_uses_replicated_index() {
         .unwrap();
     let view = node.views().load();
     assert_eq!(
-        view.state.get_kv(&format!("idx/sid/{stream_id}")).as_deref(),
+        view.state
+            .get_kv(&format!("idx/sid/{stream_id}"))
+            .as_deref(),
         Some(b"/topics/indexed".as_slice())
     );
     assert!(view
@@ -1218,13 +1223,24 @@ async fn ttl_sweep_expires_untouched_streams() {
     let mut command = create("/streams/ephemeral", "text/plain");
     command.ttl_seconds = Some(1);
     services.create(command).await.unwrap();
-    assert!(node.views().load().state.get_kv("/streams/ephemeral").is_some());
+    assert!(node
+        .views()
+        .load()
+        .state
+        .get_kv("/streams/ephemeral")
+        .is_some());
 
     let (tx, rx) = tokio::sync::watch::channel(true);
     let sweep = services.spawn_ttl_sweep(rx, Duration::from_millis(20));
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while node.views().load().state.get_kv("/streams/ephemeral").is_some() {
+    while node
+        .views()
+        .load()
+        .state
+        .get_kv("/streams/ephemeral")
+        .is_some()
+    {
         assert!(
             tokio::time::Instant::now() < deadline,
             "sweep never expired the stream"
@@ -1251,21 +1267,32 @@ async fn list_paginates_with_start_after() {
 
     let first = services.list("/page/", None, 2).await.unwrap();
     assert_eq!(
-        first.streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        first
+            .streams
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
         vec!["/page/0", "/page/1"]
     );
     assert!(first.has_more);
 
     let second = services.list("/page/", Some("/page/1"), 2).await.unwrap();
     assert_eq!(
-        second.streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        second
+            .streams
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
         vec!["/page/2", "/page/3"]
     );
     assert!(second.has_more);
 
     let last = services.list("/page/", Some("/page/3"), 2).await.unwrap();
     assert_eq!(
-        last.streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        last.streams
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
         vec!["/page/4"]
     );
     assert!(!last.has_more);

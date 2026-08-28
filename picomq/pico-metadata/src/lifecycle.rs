@@ -215,7 +215,10 @@ async fn clean_loop(cleaner: Arc<ObjectCleaner>, leader: Arc<AtomicBool>, tick: 
             Ok(_) => {
                 let backlog = cleaner.views.load().state.mark_destroyed.len();
                 if backlog > MAX_DELETE_BATCH_COUNT {
-                    tracing::warn!(backlog, "gc backlog exceeds one clean batch; falling behind");
+                    tracing::warn!(
+                        backlog,
+                        "gc backlog exceeds one clean batch; falling behind"
+                    );
                 }
             }
         }

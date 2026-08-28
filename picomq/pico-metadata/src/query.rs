@@ -193,9 +193,7 @@ impl MetadataState {
         limit: usize,
     ) -> Vec<(String, bytes::Bytes)> {
         let from = match start_after {
-            Some(after) if after >= prefix => {
-                std::ops::Bound::Excluded(after.to_owned())
-            }
+            Some(after) if after >= prefix => std::ops::Bound::Excluded(after.to_owned()),
             _ => std::ops::Bound::Included(prefix.to_owned()),
         };
         self.kv

@@ -596,7 +596,9 @@ mod tests {
             now_ms: i64,
             ttl_ms: i64,
         ) -> Result<Option<u64>, StoreError> {
-            self.inner.acquire_lease(holder, prev_epoch, now_ms, ttl_ms).await
+            self.inner
+                .acquire_lease(holder, prev_epoch, now_ms, ttl_ms)
+                .await
         }
         async fn release_lease(&self, holder: &str, epoch: u64) -> Result<(), StoreError> {
             self.inner.release_lease(holder, epoch).await
