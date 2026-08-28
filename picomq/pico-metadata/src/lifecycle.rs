@@ -1,13 +1,9 @@
 //! Leader-gated background maintenance: prepared-object expiry + object GC.
 //!
 //! Loops start on leader election, stop on step-down, and re-check leadership
-//! before every tick. Leadership comes from whatever the host provides (the
-//! SQL lease keeper's `watch<bool>` in `pico-sql`, trivially `true` for a
-//! single node). The loops are tokio tasks gated on an `AtomicBool`.
-//! [`MetadataLifecycle::drive`] adapts a leadership watch channel to
-//! `on_leader_start`/`on_leader_stop`. The tick bodies are sink-agnostic:
-//! they only need a [`CommandSink`] and a [`ViewPublisher`], so the same
-//! lifecycle runs over `LocalSink` and `SqlSink`.
+//! before every tick. The tick bodies only need a [`CommandSink`] and a
+//! [`ViewPublisher`], so the same lifecycle runs over `LocalSink` and
+//! `SqlSink`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -208,8 +204,19 @@ async fn clean_loop(cleaner: Arc<ObjectCleaner>, leader: Arc<AtomicBool>, tick: 
         if !leader.load(Ordering::SeqCst) {
             return;
         }
-        if let Err(error) = cleaner.clean(MAX_DELETE_BATCH_COUNT).await {
-            tracing::warn!(%error, "object cleaner failed, destroyed marks retained");
+        match cleaner.clean(MAX_DELETE_BATCH_COUNT).await {
+            Err(error) => {
+                tracing::warn!(%error, "object cleaner failed, destroyed marks retained")
+            }
+            Ok(_) => {
+                let backlog = cleaner.views.load().state.mark_destroyed.len();
+                if backlog > MAX_DELETE_BATCH_COUNT {
+                    tracing::warn!(
+                        backlog,
+                        "gc backlog exceeds one clean batch; falling behind"
+                    );
+                }
+            }
         }
     }
 }

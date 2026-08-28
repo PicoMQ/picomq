@@ -1,15 +1,12 @@
 //! The write boundary: where commands enter the replicated log.
 //!
-//! The same manager/KV implementations work over any log:
-//!
-//! - [`LocalSink`]: apply in-process (single node, tests).
-//! - `SqlSink` (crate `pico-sql`): the durable log is an append-only SQL
-//!   table. Concurrent proposes coalesce into one log row, which is what
-//!   keeps `CommitStreamSetObject` storms cheap.
-//!
-//! Delivery concerns (leader forwarding, the SQL sink's append
-//! conflict-retry) belong to the sink implementation, never to callers.
+//! The same manager/KV implementations work over any log: [`LocalSink`]
+//! applies in-process (single node, tests); `SqlSink` (crate `pico-sql`)
+//! appends to a durable SQL table and coalesces concurrent proposes into one
+//! row. Delivery concerns (leader forwarding, conflict retry) belong to the
+//! sink, never to callers.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -29,26 +26,59 @@ pub struct Proposed {
     pub result: MetadataResult,
 }
 
+/// Per-sink lifetime counters, handed out by [`CommandSink::stats`].
+#[derive(Debug, Default)]
+pub struct SinkStats {
+    pub snapshot: SnapshotStats,
+}
+
+#[derive(Debug, Default)]
+pub struct SnapshotStats {
+    pub last_applied_index: AtomicU64,
+    pub last_bytes: AtomicU64,
+    pub last_duration_ms: AtomicU64,
+    /// Unix ms.
+    pub last_at_ms: AtomicU64,
+    pub taken: AtomicU64,
+    pub failed: AtomicU64,
+}
+
+impl SnapshotStats {
+    pub fn record_success(&self, applied_index: u64, bytes: u64, duration_ms: u64, at_ms: u64) {
+        self.last_applied_index
+            .store(applied_index, Ordering::Relaxed);
+        self.last_bytes.store(bytes, Ordering::Relaxed);
+        self.last_duration_ms.store(duration_ms, Ordering::Relaxed);
+        self.last_at_ms.store(at_ms, Ordering::Relaxed);
+        self.taken.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_failure(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Where commands are proposed and (once committed) applied.
 ///
-/// Contract: `propose` returns only after the command is durably committed,
-/// applied, AND its resulting view published. A caller that reads
-/// `views.load()` right after a successful propose sees its own write.
-/// `Err(Redundant)` means "already applied". Whether that is success is the
-/// commit commands).
+/// `propose` returns only after the command is durably committed, applied,
+/// and its resulting view published, so a caller that reads `views.load()`
+/// right after a successful propose sees its own write. `Err(Redundant)`
+/// means "already applied".
 #[async_trait]
 pub trait CommandSink: Send + Sync {
     async fn propose(&self, command: MetadataCommand) -> Result<Proposed, MetadataError>;
+
+    /// Default is a shared all-zero unit: correct for sinks with no
+    /// background work (`LocalSink`, test doubles).
+    fn stats(&self) -> Arc<SinkStats> {
+        static ZERO: std::sync::OnceLock<Arc<SinkStats>> = std::sync::OnceLock::new();
+        ZERO.get_or_init(|| Arc::new(SinkStats::default())).clone()
+    }
 }
 
-/// In-process sink: commands are applied serially under a mutex and every
-/// successful apply publishes a view. No durability. State lives and dies with
-/// the process (recovery is the raft/snapshot layer's job).
-///
-/// Failed applies do NOT consume an index. `applied_index` counts
-/// state-changing commands only. (Redundant errors also changed nothing, by the
-/// atomic-apply guarantee.) A raft sink numbers by log index instead. Callers
-/// only rely on monotonicity.
+/// In-process sink: commands apply serially under a mutex, every successful
+/// apply publishes a view. No durability. Failed applies do not consume an
+/// index; callers only rely on `applied_index` monotonicity.
 pub struct LocalSink {
     state: tokio::sync::Mutex<(MetadataState, u64)>,
     views: Arc<ViewPublisher>,

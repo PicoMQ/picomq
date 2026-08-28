@@ -9,7 +9,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{PgPool, Row, SqlitePool};
 
-/// `MetadataLifecycle` cadence). 10 s tolerates pauses without flapping.
+/// Default maintenance-lease TTL. 10 s tolerates pauses without flapping.
 pub const DEFAULT_LEASE_TTL_MS: i64 = 10_000;
 
 /// Store failures. `Corrupt` covers impossible shapes (negative indexes,
@@ -44,6 +44,11 @@ pub trait MetaStore: Send + Sync {
 
     /// The current snapshot `(applied_idx, payload)`, if any.
     async fn load_snapshot(&self) -> Result<Option<(u64, Vec<u8>)>, StoreError>;
+
+    /// The current snapshot's applied index without its payload. Lets a
+    /// tailer that sees an empty log tail tell "nothing new" apart from
+    /// "the tail was folded into a snapshot and truncated away".
+    async fn snapshot_idx(&self) -> Result<Option<u64>, StoreError>;
 
     /// Overwrite the snapshot row. But never regress: if the stored snapshot
     /// already covers `applied_idx` or beyond, this is a no-op (two nodes may
@@ -89,10 +94,6 @@ fn insert_outcome(result: Result<(), sqlx::Error>) -> Result<bool, StoreError> {
         Err(e) => Err(e.into()),
     }
 }
-
-// ---------------------------------------------------------------------------
-// SQLite (lite / single-node posture)
-// ---------------------------------------------------------------------------
 
 /// SQLite-backed store. WAL journal + `synchronous=FULL`: an acked append
 pub struct SqliteStore {
@@ -213,6 +214,14 @@ impl MetaStore for SqliteStore {
         .transpose()
     }
 
+    async fn snapshot_idx(&self) -> Result<Option<u64>, StoreError> {
+        let row = sqlx::query("SELECT applied_idx FROM meta_snapshot WHERE id = 0")
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| to_u64(row.get("applied_idx"), "snapshot idx"))
+            .transpose()
+    }
+
     async fn store_snapshot(&self, applied_idx: u64, payload: &[u8]) -> Result<(), StoreError> {
         let applied_idx = to_i64(applied_idx, "snapshot idx")?;
         sqlx::query(
@@ -291,10 +300,6 @@ impl MetaStore for SqliteStore {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Postgres (clustered / managed-cloud posture)
-// ---------------------------------------------------------------------------
-
 /// Postgres-backed store. Identical contract.`BYTEA` payloads, `$n`
 /// placeholders, default `synchronous_commit=on` durability.
 pub struct PgStore {
@@ -311,31 +316,38 @@ impl PgStore {
     }
 
     async fn migrate(&self) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        // Concurrent `CREATE TABLE IF NOT EXISTS` races in Postgres (duplicate
+        // pg_type). One advisory lock serializes first boot across nodes.
+        sqlx::query("SELECT pg_advisory_xact_lock(x'7069636f'::int8)")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS meta_log (\
                  idx BIGINT PRIMARY KEY, payload BYTEA NOT NULL)",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS meta_snapshot (\
                  id BIGINT PRIMARY KEY, applied_idx BIGINT NOT NULL, payload BYTEA NOT NULL)",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS meta_lease (\
                  id BIGINT PRIMARY KEY, holder TEXT NOT NULL, \
                  epoch BIGINT NOT NULL, expires_at_ms BIGINT NOT NULL)",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         sqlx::query(
             "INSERT INTO meta_lease (id, holder, epoch, expires_at_ms) \
              VALUES (0, '', 0, 0) ON CONFLICT (id) DO NOTHING",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -390,6 +402,14 @@ impl MetaStore for PgStore {
             ))
         })
         .transpose()
+    }
+
+    async fn snapshot_idx(&self) -> Result<Option<u64>, StoreError> {
+        let row = sqlx::query("SELECT applied_idx FROM meta_snapshot WHERE id = 0")
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| to_u64(row.get("applied_idx"), "snapshot idx"))
+            .transpose()
     }
 
     async fn store_snapshot(&self, applied_idx: u64, payload: &[u8]) -> Result<(), StoreError> {
@@ -469,10 +489,6 @@ impl MetaStore for PgStore {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Contract test suite: every backend must pass the same behaviors.
-// ---------------------------------------------------------------------------
-
 /// Behavioral contract, run against every backend (SQLite always, Postgres
 /// when `PICOMQ_PG_URL` is set. See `tests/pg_contract.rs`).
 #[doc(hidden)]
@@ -481,6 +497,7 @@ pub async fn contract_suite(store: &dyn MetaStore) {
     assert_eq!(store.last_idx().await.unwrap(), 0);
     assert_eq!(store.fetch_after(0, 100).await.unwrap(), vec![]);
     assert_eq!(store.load_snapshot().await.unwrap(), None);
+    assert_eq!(store.snapshot_idx().await.unwrap(), None);
 
     // Append + ordering + opaque bytes (include 0x00 and high bytes).
     assert!(store.append(1, b"one").await.unwrap());
@@ -519,6 +536,7 @@ pub async fn contract_suite(store: &dyn MetaStore) {
         store.load_snapshot().await.unwrap(),
         Some((3, b"snap-v2".to_vec()))
     );
+    assert_eq!(store.snapshot_idx().await.unwrap(), Some(3));
     store.truncate_log(3).await.unwrap();
     assert_eq!(store.fetch_after(0, 100).await.unwrap(), vec![]);
     assert_eq!(

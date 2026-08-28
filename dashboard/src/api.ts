@@ -13,7 +13,7 @@ export interface ClusterInfo {
   appliedIndex: number
   streamCount: number
   objectCount: number
-  destroyedObjectBacklog: number
+  gc: { backlog: number; oldestSeq: number | null; nextSeq: number }
   pendingTransfers: PendingTransfer[]
   leaseHolder: boolean | null
 }

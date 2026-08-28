@@ -21,6 +21,11 @@ pub const PRODUCER_SPAN_WINDOW: usize = 5;
 /// Idle expiry, matching Kafka's `producer.id.expiration.ms` default.
 pub const PRODUCER_EXPIRY_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// Hard cap per producer map. Every tracked producer rides along in the
+/// registry entry on each rewrite, so an unbounded map lets one stream's
+/// producer churn inflate every future KV write.
+pub const MAX_TRACKED_PRODUCERS: usize = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NumericProducerEntry {
     pub epoch: i16,
@@ -42,10 +47,32 @@ impl NumericProducerEntry {
     }
 }
 
+/// Drop producers idle past [`PRODUCER_EXPIRY_MS`], then enforce
+/// [`MAX_TRACKED_PRODUCERS`] by evicting the stalest. Applies uniformly to
+/// both producer maps.
 pub fn expire_producers(entry: &mut RegistryEntry, now_ms: i64) {
     entry
         .numeric_producers
         .retain(|_, state| now_ms - state.last_touched_ms <= PRODUCER_EXPIRY_MS);
+    entry
+        .producers
+        .retain(|_, state| now_ms - state.last_touched_ms <= PRODUCER_EXPIRY_MS);
+    cap_stalest(&mut entry.numeric_producers, |state| state.last_touched_ms);
+    cap_stalest(&mut entry.producers, |state| state.last_touched_ms);
+}
+
+fn cap_stalest<K: Ord + Clone, V>(
+    map: &mut std::collections::BTreeMap<K, V>,
+    touched: impl Fn(&V) -> i64,
+) {
+    while map.len() > MAX_TRACKED_PRODUCERS {
+        let stalest = map
+            .iter()
+            .min_by_key(|(_, state)| touched(state))
+            .map(|(id, _)| id.clone())
+            .expect("map is non-empty");
+        map.remove(&stalest);
+    }
 }
 
 /// `(producer_id, epoch, base_sequence, record_count)` from a stored batch
@@ -378,6 +405,63 @@ mod tests {
         expire_producers(&mut e, PRODUCER_EXPIRY_MS + 500);
         assert!(e.numeric_producers.contains_key(&1));
         assert!(!e.numeric_producers.contains_key(&2));
+    }
+
+    #[test]
+    fn expiry_covers_string_producers() {
+        let mut e = entry();
+        e.producers.insert(
+            "fresh".into(),
+            crate::registry::ProducerState {
+                epoch: 1,
+                last_seq: 1,
+                last_touched_ms: 1_000,
+            },
+        );
+        e.producers.insert(
+            "stale".into(),
+            crate::registry::ProducerState {
+                epoch: 1,
+                last_seq: 1,
+                last_touched_ms: 0,
+            },
+        );
+
+        expire_producers(&mut e, PRODUCER_EXPIRY_MS + 500);
+        assert!(e.producers.contains_key("fresh"));
+        assert!(!e.producers.contains_key("stale"));
+    }
+
+    #[test]
+    fn caps_evict_stalest_from_both_maps() {
+        let mut e = entry();
+        let over = MAX_TRACKED_PRODUCERS + 10;
+        for i in 0..over {
+            e.producers.insert(
+                format!("p{i:05}"),
+                crate::registry::ProducerState {
+                    epoch: 0,
+                    last_seq: 0,
+                    last_touched_ms: i as i64,
+                },
+            );
+            e.numeric_producers.insert(
+                i as i64,
+                NumericProducerEntry {
+                    epoch: 0,
+                    spans: Vec::new(),
+                    last_touched_ms: i as i64,
+                },
+            );
+        }
+
+        expire_producers(&mut e, over as i64);
+        assert_eq!(e.producers.len(), MAX_TRACKED_PRODUCERS);
+        assert_eq!(e.numeric_producers.len(), MAX_TRACKED_PRODUCERS);
+        assert!(!e.producers.contains_key("p00009"));
+        assert!(e.producers.contains_key("p00010"));
+        assert!(!e.numeric_producers.contains_key(&9));
+        assert!(e.numeric_producers.contains_key(&10));
     }
 
     #[test]

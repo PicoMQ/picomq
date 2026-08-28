@@ -21,11 +21,8 @@ pub enum SnapshotError {
     Corrupt(String),
 }
 
-/// Serialize the full state (version byte + body).
-///
-/// Deterministic: equal states produce
-/// equal bytes (all maps iterate in key order, the destroyed FIFO in sequence
-/// order). Replicas can compare snapshot hashes.
+/// Serialize the full state (version byte + body). Deterministic: equal
+/// states produce equal bytes, so replicas can compare snapshot hashes.
 pub fn encode(state: &MetadataState) -> Bytes {
     let mut buf = BytesMut::new();
     buf.put_u8(SNAPSHOT_VERSION);
@@ -210,6 +207,7 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
         if buf.remaining() < len {
             return Err(SnapshotError::Corrupt("kv value truncated".into()));
         }
+        state.kv_bytes += (key.len() + len) as u64;
         state.kv.insert(key, Bytes::copy_from_slice(&buf[..len]));
         buf.advance(len);
     }

@@ -155,10 +155,8 @@ pub fn decode_result(bytes: &[u8]) -> Result<MetadataResult, CodecError> {
     Ok(result)
 }
 
-// ---------------------------------------------------------------------------
-// Command bodies (type byte + fields, no version prefix, shared by the single
-// and batch encodings).
-// ---------------------------------------------------------------------------
+// Command bodies: type byte + fields, no version prefix, shared by the single
+// and batch encodings.
 
 fn put_command_body(buf: &mut BytesMut, command: &MetadataCommand) {
     buf.put_u8(command.type_code());
@@ -562,10 +560,7 @@ fn get_compact_request(buf: &mut &[u8]) -> Result<CompactStreamObjectRequest, Co
     })
 }
 
-// ---------------------------------------------------------------------------
-// Primitive helpers (same posture as the snapshot codec: every read is
-// bounds-checked. Truncation is an error, never a panic).
-// ---------------------------------------------------------------------------
+// Primitive helpers: every read is bounds-checked, truncation is an error.
 
 fn check_version(buf: &mut &[u8]) -> Result<(), CodecError> {
     let version = get_u8(buf)?;

@@ -138,8 +138,6 @@ fn apply_inner(
     }
 }
 
-// ---- node lifecycle ----
-
 fn register_node(
     state: &mut MetadataState,
     node_id: i32,
@@ -670,8 +668,6 @@ fn allocate_producer_ids(
     Ok(MetadataResult::Id(first))
 }
 
-// ---- object lifecycle ----
-
 fn prepare_object(
     state: &mut MetadataState,
     node_id: i32,
@@ -1111,14 +1107,15 @@ fn clean_destroyed_objects(
     Ok(MetadataResult::Unit)
 }
 
-// ---- kv ----
-
 fn put_kv(
     state: &mut MetadataState,
     key: &str,
     value: &bytes::Bytes,
 ) -> Result<MetadataResult, MetadataError> {
-    state.kv.insert(key.to_owned(), value.clone());
+    if let Some(old) = state.kv.insert(key.to_owned(), value.clone()) {
+        state.kv_bytes -= (key.len() + old.len()) as u64;
+    }
+    state.kv_bytes += (key.len() + value.len()) as u64;
     Ok(MetadataResult::Value(Some(value.clone())))
 }
 
@@ -1131,11 +1128,16 @@ fn put_kv_if_absent(
         return Ok(MetadataResult::Value(Some(existing.clone())));
     }
     state.kv.insert(key.to_owned(), value.clone());
+    state.kv_bytes += (key.len() + value.len()) as u64;
     Ok(MetadataResult::Value(Some(value.clone())))
 }
 
 fn delete_kv(state: &mut MetadataState, key: &str) -> Result<MetadataResult, MetadataError> {
-    Ok(MetadataResult::Value(state.kv.remove(key)))
+    let removed = state.kv.remove(key);
+    if let Some(old) = &removed {
+        state.kv_bytes -= (key.len() + old.len()) as u64;
+    }
+    Ok(MetadataResult::Value(removed))
 }
 
 fn delete_kv_if_matches(
@@ -1144,7 +1146,13 @@ fn delete_kv_if_matches(
     expected: &bytes::Bytes,
 ) -> Result<MetadataResult, MetadataError> {
     match state.kv.get(key) {
-        Some(current) if current == expected => Ok(MetadataResult::Value(state.kv.remove(key))),
+        Some(current) if current == expected => {
+            let removed = state.kv.remove(key);
+            if let Some(old) = &removed {
+                state.kv_bytes -= (key.len() + old.len()) as u64;
+            }
+            Ok(MetadataResult::Value(removed))
+        }
         _ => Err(MetadataError::Redundant {
             message: format!("kv key {key} missing or value mismatch"),
         }),
@@ -1875,9 +1883,7 @@ mod tests {
         assert_eq!(run(424242), run(424242));
     }
 
-    // -----------------------------------------------------------------------
     // Property tests: index consistency + atomicity over random command runs.
-    // -----------------------------------------------------------------------
 
     /// Every secondary index must be exactly derivable from its primary. The
     /// invariant that lets snapshots skip indexes and rebuild on restore.

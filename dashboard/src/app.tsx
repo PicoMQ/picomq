@@ -175,8 +175,8 @@ export function App() {
               <td class="mono">{cluster ? String(cluster.registered) : '—'}</td>
             </tr>
             <tr>
-              <th>Destroyed object backlog</th>
-              <td class="mono">{cluster?.destroyedObjectBacklog ?? '—'}</td>
+              <th>GC backlog</th>
+              <td class="mono">{cluster?.gc?.backlog ?? '—'}</td>
             </tr>
           </tbody>
         </table>

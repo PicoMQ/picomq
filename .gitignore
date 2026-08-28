@@ -21,8 +21,8 @@ website/.vitepress/dist/
 
 # Dashboard (Vite)
 dashboard/node_modules/
-picomq/pico-frontend/_dashboard/*
-!picomq/pico-frontend/_dashboard/.gitkeep
+picomq/pico-http/_dashboard/*
+!picomq/pico-http/_dashboard/.gitkeep
 
 # Env / secrets
 .env

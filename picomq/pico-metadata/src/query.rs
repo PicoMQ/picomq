@@ -149,6 +149,24 @@ impl MetadataState {
         self.mark_destroyed.values().take(limit).copied().collect()
     }
 
+    /// One page of stream object keys strictly after `start_after`. Keys are
+    /// stream-sorted, so callers can count per-stream objects across pages.
+    pub fn stream_object_keys_page(
+        &self,
+        start_after: Option<crate::state::StreamOffsetKey>,
+        limit: usize,
+    ) -> Vec<crate::state::StreamOffsetKey> {
+        let from = match start_after {
+            Some(key) => std::ops::Bound::Excluded(key),
+            None => std::ops::Bound::Unbounded,
+        };
+        self.stream_objects
+            .range((from, std::ops::Bound::Unbounded))
+            .take(limit)
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
     /// `Bytes` clone is O(1). No defensive copy
     /// needed (values are immutable).
     pub fn get_kv(&self, key: &str) -> Option<bytes::Bytes> {
@@ -161,6 +179,27 @@ impl MetadataState {
         self.kv
             .range(prefix.to_owned()..)
             .take_while(|(key, _)| key.starts_with(prefix))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    /// One page of `prefix` entries: up to `limit` keys strictly after
+    /// `start_after` (or from the prefix start), key-sorted. Fewer than
+    /// `limit` results means the prefix is exhausted.
+    pub fn list_kv_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> Vec<(String, bytes::Bytes)> {
+        let from = match start_after {
+            Some(after) if after >= prefix => std::ops::Bound::Excluded(after.to_owned()),
+            _ => std::ops::Bound::Included(prefix.to_owned()),
+        };
+        self.kv
+            .range((from, std::ops::Bound::Unbounded))
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .take(limit)
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
@@ -411,5 +450,16 @@ mod tests {
         assert_eq!(listed, vec!["a", "ab"]);
         assert_eq!(state.list_kv("").len(), 3);
         assert!(state.list_kv("z").is_empty());
+    }
+
+    #[test]
+    fn stream_object_keys_page_walks_the_catalog() {
+        let (state, stream_id) = populated();
+        let all = state.stream_object_keys_page(None, 100);
+        assert_eq!(all, vec![(stream_id, 0, 1)]);
+        assert!(state
+            .stream_object_keys_page(Some((stream_id, 0, 1)), 100)
+            .is_empty());
+        assert!(state.stream_object_keys_page(None, 0).is_empty());
     }
 }

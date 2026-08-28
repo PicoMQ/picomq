@@ -45,10 +45,6 @@ fn malformed(message: impl Into<String>) -> CodecError {
     CodecError::new(message)
 }
 
-// ---------------------------------------------------------------------------
-// RecordEnvelopeCodec
-// ---------------------------------------------------------------------------
-
 pub fn encode_envelope(envelope: &RecordEnvelope) -> Bytes {
     let mut buf =
         BytesMut::with_capacity(1 + 8 + headers_size(&envelope.headers) + envelope.body.len());
@@ -104,10 +100,6 @@ fn get_headers(buf: &mut &[u8]) -> Result<BTreeMap<String, String>, CodecError> 
     }
     Ok(headers)
 }
-
-// ---------------------------------------------------------------------------
-// BatchCodec (binary)
-// ---------------------------------------------------------------------------
 
 pub fn encode_batch_append(records: &[RecordEnvelope]) -> Bytes {
     let size: usize = 5 + records
@@ -173,10 +165,6 @@ pub fn decode_batch_read(payload: &[u8]) -> Result<Vec<SequencedRecord>, CodecEr
     }
     Ok(records)
 }
-
-// ---------------------------------------------------------------------------
-// JsonCodec
-// ---------------------------------------------------------------------------
 
 pub fn encode_json_read(records: &[SequencedRecord]) -> Bytes {
     let array: Vec<Value> = records
@@ -249,8 +237,6 @@ fn json_headers(node: &Value) -> BTreeMap<String, String> {
         })
         .collect()
 }
-
-// ---- decode helpers ----
 
 fn check_version(buf: &mut &[u8], expected: u8, what: &str) -> Result<(), CodecError> {
     if buf.is_empty() {

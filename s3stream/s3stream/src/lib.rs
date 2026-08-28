@@ -33,7 +33,7 @@ pub use s3stream_core::manager::{
 // Metadata-plane host surface: everything a `StreamManager`/`ObjectManager`/`KVClient`
 // implementation (e.g. pico-metadata) needs, so hosts depend only on this
 // facade and never on engine internals.
-pub use s3stream_core::compact::CompactOperations;
+pub use s3stream_core::compact::{CompactOperations, CompactionLevel};
 pub use s3stream_core::index::LocalStreamRangeIndexCache;
 pub use s3stream_core::manager::{
     ObjectManager as ObjectManagerTrait, StreamManager as StreamManagerTrait, StreamState,

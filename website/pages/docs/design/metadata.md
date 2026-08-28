@@ -61,7 +61,9 @@ This is what makes a slow metadata database tolerable. Reads keep their latency 
 
 ## Snapshots
 
-The log would otherwise grow without bound, so every `1024` applied rows a node encodes the whole state into a single snapshot row and truncates the log below it. There is one snapshot row per cluster, not an archive. Any node may run the cycle, whichever crosses the interval first.
+The log would otherwise grow without bound, so a node periodically encodes the whole state into a single snapshot row and truncates the log below it. There is one snapshot row per cluster, not an archive. Any node may run the cycle, whichever crosses the interval first.
+
+The cycle runs on its own task, never on the apply path: it forks the latest published view (an O(1) clone of the persistent maps) and encodes off the async workers, so appliers and readers never wait on a snapshot regardless of state size. A snapshot is due when `1024` rows have accumulated since the last one and a minimum interval (default 30 s) has elapsed, so a busy cluster is not re-shipping its full state every few seconds.
 
 <div class="pico-diagram">
 <svg viewBox="-7 15 707 188" width="707" role="img" aria-label="A snapshot row covers the log prefix, which is truncated. A cold start loads the snapshot and replays the remaining tail.">
@@ -93,6 +95,14 @@ The log would otherwise grow without bound, so every `1024` applied rows a node 
 </svg>
 </div>
 
-A starting node decodes the snapshot and replays the tail, so recovery time is bounded by the interval rather than the cluster's history. A node that lags so far behind that its next row was truncated detects the gap and reinstalls from the newer snapshot instead of continuing from a fork.
+A starting node decodes the snapshot and replays the tail, so recovery time is bounded by the interval rather than the cluster's history. A node that lags so far behind that its next row was truncated detects the gap and reinstalls from the newer snapshot instead of continuing from a fork. An empty log tail is ambiguous — nothing new, or the tail was folded into a snapshot — so a tailer that fetches nothing also checks the stored snapshot index and reinstalls when it has fallen behind it.
 
 A log row that fails to decode is treated as unrecoverable. Skipping it would silently fork that node from every other reader, so the sink stops, fails all waiting proposals, and the node stops accepting metadata writes.
+
+## Growth bounds
+
+Snapshots bound the log. Two more mechanisms bound the state itself.
+
+Each node pages through the object catalog in the background and triggers a compaction pass for any stream holding more than `64` live objects. Streams open on another node are ignored by the engine, so no ownership tracking is needed. The catalog stays proportional to live streams, not to write history.
+
+Deleted and compacted objects queue in a FIFO until the maintenance lease holder removes them from object storage. `/admin/cluster` reports the backlog depth and head sequence. A head that does not advance while the depth grows means the cleaner is stuck.

@@ -35,6 +35,8 @@ const TRANSFER_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSFER_SETTLE_POLL: Duration = Duration::from_millis(50);
 /// Records between durable producer-state checkpoints.
 const PRODUCER_CHECKPOINT_INTERVAL: u64 = 4096;
+/// Live objects a stream may accumulate before an out-of-schedule compaction.
+const COMPACTION_LIVE_OBJECT_THRESHOLD: usize = 64;
 
 /// Recent appended records kept in memory so tail reads skip the engine fetch.
 #[derive(Default)]
@@ -111,8 +113,6 @@ pub struct S3StreamService {
     local_epochs: Mutex<HashMap<u64, u64>>,
     gates: Mutex<HashMap<String, Arc<Gate>>>,
     entry_cache: Mutex<HashMap<String, RegistryEntry>>,
-    /// External id -> stream name, rebuilt lazily from the registry on miss.
-    external_ids: Mutex<HashMap<[u8; 16], String>>,
     open_lock: tokio::sync::Mutex<()>,
 }
 
@@ -140,7 +140,6 @@ impl S3StreamService {
             local_epochs: Mutex::new(HashMap::new()),
             gates: Mutex::new(HashMap::new()),
             entry_cache: Mutex::new(HashMap::new()),
-            external_ids: Mutex::new(HashMap::new()),
             open_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -148,8 +147,6 @@ impl S3StreamService {
     pub fn waiters(&self) -> Arc<StreamWaiterRegistry> {
         self.waiters.clone()
     }
-
-    // ---- stream lifecycle ----
 
     pub async fn create(&self, command: CreateCommand) -> Result<CreateResult, ServiceError> {
         command.validate()?;
@@ -204,7 +201,7 @@ impl S3StreamService {
             .lock()
             .unwrap()
             .insert(name.clone(), current.clone());
-        self.index_external_id(&name, &current);
+        self.write_stream_index(&name, &current).await?;
 
         if current.stream_id != candidate.stream_id {
             return self
@@ -270,24 +267,35 @@ impl S3StreamService {
         } else {
             DEFAULT_LIST_LIMIT
         };
-        let entries = self.kv_client.list_kv(&normalize(prefix)).await?;
+        let prefix = normalize(prefix);
         let now = now_ms();
 
+        // Bounded pages from one view snapshot: cost tracks the response
+        // size, not the registry size.
+        let view = self.views.load();
+        let mut cursor = start_after
+            .filter(|after| !after.is_empty())
+            .map(str::to_owned);
         let mut selected: Vec<(String, RegistryEntry)> = Vec::new();
-        for kv in entries {
-            if let Some(after) = start_after {
-                if !after.is_empty() && kv.key.as_str() <= after {
+        'pages: loop {
+            let page =
+                view.state
+                    .list_kv_page(&prefix, cursor.as_deref(), max + 1 - selected.len());
+            let exhausted = page.len() < max + 1 - selected.len();
+            for (key, value) in page {
+                cursor = Some(key.clone());
+                let Ok(entry) = RegistryEntry::decode(&value) else {
+                    continue;
+                };
+                if entry.deadline_ms > 0 && now > entry.deadline_ms {
                     continue;
                 }
+                selected.push((key, entry));
+                if selected.len() > max {
+                    break 'pages;
+                }
             }
-            let Ok(entry) = RegistryEntry::decode(&kv.value) else {
-                continue;
-            };
-            if entry.deadline_ms > 0 && now > entry.deadline_ms {
-                continue;
-            }
-            selected.push((kv.key, entry));
-            if selected.len() > max {
+            if exhausted {
                 break;
             }
         }
@@ -340,10 +348,10 @@ impl S3StreamService {
         };
         let deleted = self.kv_client.del_kv(&name).await?;
         self.entry_cache.lock().unwrap().remove(&name);
-        self.unindex_external_id(&entry);
         if deleted.is_none() {
             return Ok(false);
         }
+        self.remove_stream_index(&entry).await;
         self.destroy_stream(entry.stream_id).await;
         gate.tail.lock().unwrap().reset();
         self.waiters.notify_closed(&name);
@@ -375,8 +383,6 @@ impl S3StreamService {
         }
         Ok(live_start_offset(stream.as_ref()))
     }
-
-    // ---- append ----
 
     /// Appends records and returns only after they are durable.
     pub async fn append(&self, command: AppendCommand) -> Result<AppendResult, ServiceError> {
@@ -497,8 +503,6 @@ impl S3StreamService {
         self.waiters.notify_append(&name, notify_offset);
         Ok(result)
     }
-
-    // ---- verbatim batch surface ----
 
     /// Append a batch payload verbatim, patching each contained batch's
     /// base-offset field to the assigned offset. Durable on return.
@@ -654,8 +658,6 @@ impl S3StreamService {
         })
     }
 
-    // ---- read ----
-
     pub async fn read(
         &self,
         name: &str,
@@ -725,10 +727,6 @@ impl S3StreamService {
         Ok(self.waiters.wait(&name, from, timeout).await)
     }
 
-    // -----------------------------------------------------------------
-    // Host surface
-    // -----------------------------------------------------------------
-
     pub async fn lookup_stream_id(&self, name: &str) -> Result<Option<u64>, ServiceError> {
         Ok(self
             .get_entry(&normalize(name), false)
@@ -736,8 +734,8 @@ impl S3StreamService {
             .map(|e| e.stream_id))
     }
 
-    /// Resolve a caller-assigned external id to its stream name. A cache
-    /// miss falls back to one registry scan and repopulates the index.
+    /// Resolve a caller-assigned external id to its stream name via the
+    /// `idx/extid/` record: one point read plus one entry verification.
     pub async fn lookup_by_external_id(
         &self,
         external_id: [u8; 16],
@@ -745,27 +743,20 @@ impl S3StreamService {
         if external_id == [0u8; 16] {
             return Ok(None);
         }
-        let cached = self.external_ids.lock().unwrap().get(&external_id).cloned();
-        if let Some(name) = cached {
-            // Verify: the stream may have been deleted and the id reassigned.
-            if let Some(entry) = self.get_entry(&name, false).await? {
-                if entry.external_id == external_id {
-                    return Ok(Some(name));
-                }
-            }
-            self.external_ids.lock().unwrap().remove(&external_id);
+        let Some(value) = self
+            .kv_client
+            .get_kv(&external_id_key(&external_id))
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Ok(name) = String::from_utf8(value.to_vec()) else {
+            return Ok(None);
+        };
+        match self.get_entry(&name, false).await? {
+            Some(entry) if entry.external_id == external_id => Ok(Some(name)),
+            _ => Ok(None),
         }
-        let entries = self.kv_client.list_kv("/").await?;
-        for kv in entries {
-            let Ok(entry) = RegistryEntry::decode(&kv.value) else {
-                continue;
-            };
-            self.index_external_id(&kv.key, &entry);
-            if entry.external_id == external_id {
-                return Ok(Some(kv.key));
-            }
-        }
-        Ok(None)
     }
 
     pub fn open_stream_snapshot(&self) -> Vec<Arc<dyn Stream>> {
@@ -797,9 +788,95 @@ impl S3StreamService {
         self.open_streams.lock().unwrap().clear();
     }
 
-    // -----------------------------------------------------------------
-    // Internals
-    // -----------------------------------------------------------------
+    /// Walks the object catalog one page per tick and compacts streams past
+    /// [`COMPACTION_LIVE_OBJECT_THRESHOLD`]. The engine no-ops for streams
+    /// not open on this node. One trigger per tick, cursor skips a triggered
+    /// stream until the next full rotation.
+    pub fn spawn_compaction_check(
+        self: &Arc<Self>,
+        tick: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        const PAGE: usize = 4096;
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut cursor: Option<pico_metadata::StreamOffsetKey> = None;
+            let mut run: (u64, usize) = (u64::MAX, 0);
+            loop {
+                tokio::time::sleep(tick).await;
+                let page = service
+                    .views
+                    .load()
+                    .state
+                    .stream_object_keys_page(cursor, PAGE);
+                let exhausted = page.len() < PAGE;
+                for key in page {
+                    let (stream_id, _, _) = key;
+                    if stream_id != run.0 {
+                        run = (stream_id, 0);
+                    }
+                    run.1 += 1;
+                    cursor = Some(key);
+                    if run.1 >= COMPACTION_LIVE_OBJECT_THRESHOLD {
+                        if let Err(error) = service
+                            .stream_client
+                            .compact_stream(stream_id, s3stream::CompactionLevel::MinorV1)
+                            .await
+                        {
+                            tracing::debug!(%error, stream_id, "triggered compaction failed");
+                        }
+                        cursor = Some((stream_id, u64::MAX, u64::MAX));
+                        run = (u64::MAX, 0);
+                        break;
+                    }
+                }
+                if exhausted {
+                    cursor = None;
+                    run = (u64::MAX, 0);
+                }
+            }
+        })
+    }
+
+    /// Lease-holder backstop for TTL'd streams nothing touches: walks the
+    /// registry one bounded page per tick and expires lapsed entries. Lazy
+    /// expiry on access stays the fast path; this reclaims the idle rest at
+    /// flat per-tick cost regardless of registry size.
+    pub fn spawn_ttl_sweep(
+        self: &Arc<Self>,
+        mut leadership: tokio::sync::watch::Receiver<bool>,
+        tick: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        const PAGE: usize = 256;
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut cursor: Option<String> = None;
+            loop {
+                tokio::time::sleep(tick).await;
+                if leadership.has_changed().is_err() {
+                    return;
+                }
+                if !*leadership.borrow_and_update() {
+                    continue;
+                }
+                let page = service
+                    .views
+                    .load()
+                    .state
+                    .list_kv_page("/", cursor.as_deref(), PAGE);
+                // An empty or short page wraps the walk to the start.
+                cursor = page.last().map(|(key, _)| key.clone());
+                let now = now_ms();
+                for (name, value) in page {
+                    let Ok(entry) = RegistryEntry::decode(&value) else {
+                        continue;
+                    };
+                    if entry.deadline_ms > 0 && now > entry.deadline_ms {
+                        service.expire(&name).await;
+                    }
+                }
+            }
+        })
+    }
 
     fn gate_of(&self, name: &str) -> Arc<Gate> {
         self.gates
@@ -1125,26 +1202,17 @@ impl S3StreamService {
         Ok(Some(epoch))
     }
 
-    /// Reverse registry lookup. Transfers are rare, so the fallback scan over
-    /// the KV plane is acceptable.
+    /// Reverse registry lookup via the `idx/sid/` record, verified against
+    /// the entry it names.
     async fn name_of(&self, stream_id: u64) -> Option<String> {
-        let cached = self
-            .entry_cache
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(_, entry)| entry.stream_id == stream_id)
-            .map(|(name, _)| name.clone());
-        if cached.is_some() {
-            return cached;
-        }
-        let entries = self.kv_client.list_kv("/").await.ok()?;
-        entries
-            .into_iter()
-            .find(|kv| {
-                RegistryEntry::decode(&kv.value).is_ok_and(|entry| entry.stream_id == stream_id)
-            })
-            .map(|kv| kv.key)
+        let value = self
+            .kv_client
+            .get_kv(&stream_id_key(stream_id))
+            .await
+            .ok()??;
+        let name = String::from_utf8(value.to_vec()).ok()?;
+        let entry = self.get_entry(&name, false).await.ok()??;
+        (entry.stream_id == stream_id).then_some(name)
     }
 
     fn next_epoch(&self, stream_id: u64) -> u64 {
@@ -1178,7 +1246,6 @@ impl S3StreamService {
                     return Ok(None);
                 };
                 let entry = RegistryEntry::decode(&value)?;
-                self.index_external_id(name, &entry);
                 self.entry_cache
                     .lock()
                     .unwrap()
@@ -1187,7 +1254,7 @@ impl S3StreamService {
             }
         };
         if entry.deadline_ms > 0 && now_ms() > entry.deadline_ms {
-            self.expire(name, &entry).await;
+            self.expire(name).await;
             return Ok(None);
         }
         if touch {
@@ -1200,12 +1267,25 @@ impl S3StreamService {
         Ok(Some(entry))
     }
 
-    /// TTL lapsed: drop the KV entry, destroy the stream,
-    /// reset the tail, wake waiters.
-    async fn expire(&self, name: &str, entry: &RegistryEntry) {
-        let _ = self.kv_client.del_kv(name).await;
+    /// TTL lapsed: conditionally drop the KV entry, destroy the stream,
+    /// reset the tail, wake waiters. Rechecks the stored bytes and deletes
+    /// only if they still match, so a concurrent touch (which rewrites the
+    /// entry with a newer deadline) always wins over a stale observation.
+    async fn expire(&self, name: &str) {
         self.entry_cache.lock().unwrap().remove(name);
-        self.unindex_external_id(entry);
+        let Ok(Some(stored)) = self.kv_client.get_kv(name).await else {
+            return;
+        };
+        let Ok(entry) = RegistryEntry::decode(&stored) else {
+            return;
+        };
+        if entry.deadline_ms == 0 || now_ms() <= entry.deadline_ms {
+            return;
+        }
+        let Ok(Some(_)) = self.kv_client.del_kv_if(name, &stored).await else {
+            return;
+        };
+        self.remove_stream_index(&entry).await;
         self.destroy_stream(entry.stream_id).await;
         if let Some(gate) = self.gates.lock().unwrap().get(name) {
             gate.tail.lock().unwrap().reset();
@@ -1253,7 +1333,6 @@ impl S3StreamService {
 
     /// Update the in-memory registry view without a durable write.
     fn cache_entry(&self, name: &str, entry: RegistryEntry) {
-        self.index_external_id(name, &entry);
         self.entry_cache
             .lock()
             .unwrap()
@@ -1302,7 +1381,6 @@ impl S3StreamService {
                 value: entry.encode(),
             })
             .await?;
-        self.index_external_id(name, &entry);
         self.entry_cache
             .lock()
             .unwrap()
@@ -1310,18 +1388,41 @@ impl S3StreamService {
         Ok(())
     }
 
-    fn index_external_id(&self, name: &str, entry: &RegistryEntry) {
+    /// Write the reverse-lookup records for a settled registry entry. Puts
+    /// are idempotent, so racing creators that adopted the same winner write
+    /// the same records.
+    async fn write_stream_index(
+        &self,
+        name: &str,
+        entry: &RegistryEntry,
+    ) -> Result<(), ServiceError> {
+        let value = Bytes::copy_from_slice(name.as_bytes());
+        self.kv_client
+            .put_kv(KeyValue {
+                key: stream_id_key(entry.stream_id),
+                value: value.clone(),
+            })
+            .await?;
         if entry.external_id != [0u8; 16] {
-            self.external_ids
-                .lock()
-                .unwrap()
-                .insert(entry.external_id, name.to_owned());
+            self.kv_client
+                .put_kv(KeyValue {
+                    key: external_id_key(&entry.external_id),
+                    value,
+                })
+                .await?;
         }
+        Ok(())
     }
 
-    fn unindex_external_id(&self, entry: &RegistryEntry) {
+    /// Best-effort: a record left behind fails verification on read, so it
+    /// is a miss, never a wrong answer.
+    async fn remove_stream_index(&self, entry: &RegistryEntry) {
+        let _ = self.kv_client.del_kv(&stream_id_key(entry.stream_id)).await;
         if entry.external_id != [0u8; 16] {
-            self.external_ids.lock().unwrap().remove(&entry.external_id);
+            let _ = self
+                .kv_client
+                .del_kv(&external_id_key(&entry.external_id))
+                .await;
         }
     }
 
@@ -1340,14 +1441,31 @@ impl S3StreamService {
     }
 }
 
-// ---- helpers ----
-
 pub(crate) fn normalize(name: &str) -> String {
     if name.is_empty() {
         "/".to_owned()
     } else {
         name.to_owned()
     }
+}
+
+// Reverse-lookup index records live beside registry entries in the KV plane:
+// `idx/sid/<stream id>` and `idx/extid/<hex>` map back to the stream name.
+// Stream names start with `/` and auth state with `auth/`, so `idx/` cannot
+// collide. Readers verify the resolved entry before trusting a record.
+
+fn stream_id_key(stream_id: u64) -> String {
+    format!("idx/sid/{stream_id}")
+}
+
+fn external_id_key(id: &[u8; 16]) -> String {
+    use std::fmt::Write;
+    let mut key = String::with_capacity(42);
+    key.push_str("idx/extid/");
+    for byte in id {
+        write!(key, "{byte:02x}").expect("write to String");
+    }
+    key
 }
 
 fn config_matches(entry: &RegistryEntry, command: &CreateCommand) -> bool {
@@ -1494,7 +1612,14 @@ fn apply_append_state(
     }
     if let (Some(ProducerDecision::Accepted { .. }), Some(producer)) = (decision, &command.producer)
     {
-        updated = updated.with_producer(producer.producer_id.clone(), producer.epoch, producer.seq);
+        let now = now_ms();
+        updated = updated.with_producer(
+            producer.producer_id.clone(),
+            producer.epoch,
+            producer.seq,
+            now,
+        );
+        producer::expire_producers(&mut updated, now);
     }
     updated
 }

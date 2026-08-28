@@ -270,6 +270,14 @@ impl StreamClient for S3StreamClient {
             .map(|s| Arc::clone(&s.stream) as Arc<dyn Stream>)
     }
 
+    async fn compact_stream(
+        &self,
+        stream_id: u64,
+        level: CompactionLevel,
+    ) -> Result<(), StreamError> {
+        self.compact_stream_object(stream_id, level).await
+    }
+
     async fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
         if let Some(handle) = self.scheduler.lock().expect("scheduler poisoned").take() {

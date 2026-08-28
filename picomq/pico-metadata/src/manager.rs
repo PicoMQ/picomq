@@ -1,11 +1,7 @@
-//! Engine-facing manager implementations over a [`CommandSink`] + published views.
-//!
-//! `raft.RaftObjectManager`, `raft.RaftKVClient`.
-//! The adapters that make the metadata plane look like the engine's
+//! Engine-facing manager implementations over a [`CommandSink`] + published
+//! views: the adapters that make the metadata plane look like the engine's
 //! `StreamManager` / `ObjectManager` / `KVClient` traits. Writes become
-//! `System.currentTimeMillis()` at propose). Reads run on the latest published
-//! [`crate::view::MetadataView`].
-//!
+//! proposed commands; reads run on the latest published view.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,10 +19,8 @@ use crate::error::MetadataError;
 use crate::sink::CommandSink;
 use crate::view::ViewPublisher;
 
-/// This node's identity plus its channels to the metadata plane. Cheap to clone.
-/// The factory for all three manager adapters.
-///
-/// `nodeEpoch()`, `client()`, `stateMachine()`).
+/// This node's identity plus its channels to the metadata plane. Cheap to
+/// clone. The factory for all three manager adapters.
 #[derive(Clone)]
 pub struct MetadataNodeHandle {
     node_id: i32,
@@ -75,6 +69,10 @@ impl MetadataNodeHandle {
 
     pub fn kv_client(&self) -> MetadataKvClient {
         MetadataKvClient { node: self.clone() }
+    }
+
+    pub fn sink_stats(&self) -> Arc<crate::sink::SinkStats> {
+        self.sink.stats()
     }
 
     pub fn node_id(&self) -> i32 {

@@ -88,10 +88,10 @@ pub async fn run(args: AdminArgs) -> Result<i32, String> {
                 body["appliedIndex"],
             );
             println!(
-                "streams={} objects={} destroyedBacklog={} leaseHolder={}",
+                "streams={} objects={} gcBacklog={} leaseHolder={}",
                 body["streamCount"],
                 body["objectCount"],
-                body["destroyedObjectBacklog"],
+                body["gc"]["backlog"],
                 body["leaseHolder"],
             );
             for pending in body["pendingTransfers"].as_array().into_iter().flatten() {
