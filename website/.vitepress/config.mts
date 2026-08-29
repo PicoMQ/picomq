@@ -24,6 +24,7 @@ const docsSidebar = [
       { text: 'Interactive cluster', link: '/docs/design/simulator' },
       { text: 'Metadata', link: '/docs/design/metadata' },
       { text: 'Streams', link: '/docs/design/streams' },
+      { text: 'Catalog changelog', link: '/docs/design/catalog' },
       { text: 'Writes', link: '/docs/design/writes' },
       { text: 'Reads', link: '/docs/design/reads' },
       { text: 'Ownership & routing', link: '/docs/design/ownership' },

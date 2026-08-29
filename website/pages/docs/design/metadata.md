@@ -61,7 +61,7 @@ This is what makes a slow metadata database tolerable. Reads keep their latency 
 
 ## Snapshots
 
-The log would otherwise grow without bound, so a node periodically encodes the whole state into a single snapshot row and truncates the log below it. There is one snapshot row per cluster, not an archive. Any node may run the cycle, whichever crosses the interval first.
+The log would otherwise grow without bound, so a node periodically encodes the whole state into a single snapshot row and truncates the log below it. Truncation stops at a flushable watermark raised by lease-holder projectors such as the [catalog changelog](/docs/design/catalog), so unprojected rows are never deleted. There is one snapshot row per cluster, not an archive. Any node may run the cycle, whichever crosses the interval first.
 
 The cycle runs on its own task, never on the apply path: it forks the latest published view (an O(1) clone of the persistent maps) and encodes off the async workers, so appliers and readers never wait on a snapshot regardless of state size. A snapshot is due when `1024` rows have accumulated since the last one and a minimum interval (default 30 s) has elapsed, so a busy cluster is not re-shipping its full state every few seconds.
 

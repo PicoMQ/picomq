@@ -29,7 +29,13 @@ The TTL is `10` seconds and each node tries to acquire or renew every quarter of
 
 ## What leadership gates
 
-The leadership state feeds a watch channel, and the maintenance loops follow it: they start when the node becomes the holder and stop when it is not. Under the lease run the expiry tick, which reclaims object ids whose upload never committed, and the object cleaner, which deletes destroyed objects from storage, both described in [Garbage collection](/docs/design/gc).
+The leadership state feeds a watch channel, and the maintenance loops follow it. They start when the node becomes the holder and stop when it is not. Under the lease run:
+
+- the expiry tick, which reclaims object ids whose upload never committed
+- the object cleaner, which deletes destroyed objects from storage
+- the [catalog changelog](/docs/design/catalog) projector
+
+The first two are described in [Garbage collection](/docs/design/gc).
 
 Losing the lease is not an event worth reacting to beyond stopping the loops. The work is queued in the replicated state, not in the holder's memory, so the next holder picks up exactly where the last one stopped.
 

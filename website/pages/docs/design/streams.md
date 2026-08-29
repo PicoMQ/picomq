@@ -52,7 +52,7 @@ Offsets are assigned at append time by the owning node and never change. A recor
 
 A stream is opened lazily, on the first request that needs it rather than at creation. It stays open on its owner until it is closed, either explicitly, by a TTL expiring, or as part of an ownership change. Closing flushes buffered data and marks the internal stream closed in the metadata state. A later request reopens it at the next epoch, possibly on a different node.
 
-Deleting a stream removes the registry entry, so the name is immediately reusable, and marks the stream's objects for garbage collection. Deletion of the data itself is asynchronous, handled by the cleanup pass described in [Garbage collection](/docs/design/gc).
+Deleting a stream removes the registry entry, so the name is immediately reusable, and marks the stream's objects for garbage collection. Deletion of the data itself is asynchronous, handled by the cleanup pass described in [Garbage collection](/docs/design/gc). Registry changes are published to the [catalog changelog](/docs/design/catalog).
 
 ## Producers
 
