@@ -636,6 +636,13 @@ html {
   padding-bottom: 4px !important;
 }
 
+.VPSidebarItem.level-0 > .item > .text {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.8125rem;
+  font-weight: 400;
+  text-transform: uppercase;
+}
+
 .VPSidebarItem.level-0.is-link .text {
   font-weight: 500;
   color: var(--vp-c-text-2);
