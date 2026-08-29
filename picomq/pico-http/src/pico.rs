@@ -5,6 +5,7 @@
 //! - `POST /name`         append (single body, JSON batch, or binary batch) or
 //!   trim when `Pico-Trim-Seq` is set
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -296,7 +297,7 @@ impl PicoFrontend {
             if !body.is_empty() {
                 return Err(bad_request("trim takes no body"));
             }
-            let start = self.service.trim(name, trim_seq).await?;
+            let start = self.service.trim(name, trim_seq, false).await?;
             let mut response = respond(200, None, false);
             set_header(&mut response, H_START_SEQ, &start.to_string());
             return Ok(response);
@@ -539,7 +540,7 @@ impl PicoFrontend {
                 if !read.records.is_empty() {
                     seq = read.next_offset;
                     let closed_at_tail = read.closed && read.up_to_date;
-                    let records = match to_sequenced(&read.records) {
+                    let records = match to_sequenced(&read.records, &read.content_type) {
                         Ok(records) => records,
                         Err(_) => return,
                     };
@@ -650,7 +651,7 @@ impl PicoFrontend {
             return Ok(response);
         }
 
-        let records = to_sequenced(&out.records)?;
+        let records = to_sequenced(&out.records, &out.content_type)?;
         match format.as_str() {
             "json" => {
                 set_header(&mut response, header::CONTENT_TYPE.as_str(), CT_JSON);
@@ -803,14 +804,23 @@ pub fn engine_ct(user_ct: &str) -> String {
 }
 
 pub fn user_ct_of(engine_ct: &str) -> String {
-    let Some((_, params)) = engine_ct.split_once(';') else {
-        return DEFAULT_CT.to_owned();
-    };
-    let params = params.trim();
-    match params.strip_prefix(&format!("{CT_CORE_PARAM}=")) {
-        Some(user) => user.to_owned(),
-        None => DEFAULT_CT.to_owned(),
+    if let Some(rest) = engine_ct.strip_prefix(CT_CORE) {
+        let rest = rest.trim_start();
+        if let Some(user) = rest.strip_prefix(&format!("; {CT_CORE_PARAM}=")) {
+            return user.to_owned();
+        }
+        if rest.is_empty() {
+            return DEFAULT_CT.to_owned();
+        }
     }
+    if engine_ct.is_empty() {
+        return DEFAULT_CT.to_owned();
+    }
+    engine_ct.to_owned()
+}
+
+fn stores_envelopes(content_type: &str) -> bool {
+    content_type == CT_CORE || content_type.starts_with(&format!("{CT_CORE};"))
 }
 
 fn write_meta(response: &mut Response, meta: &StreamMeta) {
@@ -834,13 +844,19 @@ fn write_meta(response: &mut Response, meta: &StreamMeta) {
 
 fn to_sequenced(
     records: &[pico_server::StreamRecord],
+    content_type: &str,
 ) -> Result<Vec<SequencedRecord>, ServiceError> {
     records
         .iter()
         .map(|record| {
+            let envelope = if stores_envelopes(content_type) {
+                decode_envelope(&record.payload).map_err(codec_error)?
+            } else {
+                RecordEnvelope::new(0, BTreeMap::new(), record.payload.clone())
+            };
             Ok(SequencedRecord {
                 seq: record.offset.record_offset(),
-                envelope: decode_envelope(&record.payload).map_err(codec_error)?,
+                envelope,
             })
         })
         .collect()

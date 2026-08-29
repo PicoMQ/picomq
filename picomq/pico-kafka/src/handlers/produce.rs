@@ -14,7 +14,7 @@ use crate::handlers::common::{
     INVALID_REQUEST, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
-use crate::topic::{stream_name, validate_topic_name};
+use crate::topic::{is_catalog_name, stream_name, validate_topic_name};
 
 pub async fn handle(
     ctx: &BrokerContext,
@@ -34,25 +34,13 @@ pub async fn handle(
     let mut topic_responses = Vec::with_capacity(request.topic_data.len());
     for topic in request.topic_data {
         let topic_name_str = topic.name.to_string();
-        if !validate_topic_name(&topic_name_str) {
-            topic_responses.push(
-                TopicProduceResponse::default()
-                    .with_name(topic_name(&topic_name_str))
-                    .with_partition_responses(vec![PartitionProduceResponse::default()
-                        .with_index(0)
-                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)]),
-            );
+        if let Err(code) = writable(&topic_name_str) {
+            topic_responses.push(topic_error(&topic_name_str, code));
             continue;
         }
         let stream = stream_name(&topic_name_str);
         if let Err(code) = ensure_local_leader(ctx, &stream).await {
-            topic_responses.push(
-                TopicProduceResponse::default()
-                    .with_name(topic_name(&topic_name_str))
-                    .with_partition_responses(vec![PartitionProduceResponse::default()
-                        .with_index(0)
-                        .with_error_code(code)]),
-            );
+            topic_responses.push(topic_error(&topic_name_str, code));
             continue;
         }
 
@@ -96,6 +84,24 @@ pub async fn handle(
         req.api_version,
         &response,
     )))
+}
+
+fn writable(topic: &str) -> Result<(), i16> {
+    if !validate_topic_name(topic) {
+        return Err(UNKNOWN_TOPIC_OR_PARTITION);
+    }
+    if is_catalog_name(topic) {
+        return Err(INVALID_REQUEST);
+    }
+    Ok(())
+}
+
+fn topic_error(topic: &str, code: i16) -> TopicProduceResponse {
+    TopicProduceResponse::default()
+        .with_name(topic_name(topic))
+        .with_partition_responses(vec![PartitionProduceResponse::default()
+            .with_index(0)
+            .with_error_code(code)])
 }
 
 /// Returns `(base_offset, log_start_offset)` or a Kafka partition error code.

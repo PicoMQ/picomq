@@ -15,7 +15,8 @@ use crate::handlers::common::{
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 use crate::topic::{
-    is_internal_topic, kafka_content_type, stream_name, topic_from_stream, validate_topic_name,
+    is_catalog_name, is_internal_topic, kafka_content_type, stream_name, topic_from_stream,
+    validate_topic_name, CATALOG_TOPIC,
 };
 
 pub async fn handle(
@@ -64,13 +65,13 @@ pub async fn handle(
             continue;
         }
         let name = stream_name(&topic);
-        if reject_sys_create(&name).is_err() {
+        if !is_catalog_name(&topic) && reject_sys_create(&name).is_err() {
             response_topics.push(topic_error(&topic, INVALID_REQUEST));
             continue;
         }
         match ctx.service.describe(&name).await {
             Ok(Some(_)) => {}
-            Ok(None) if request.allow_auto_topic_creation => {
+            Ok(None) if request.allow_auto_topic_creation && !is_catalog_name(&topic) => {
                 if let Err(error) = create_topic(ctx, &name).await {
                     response_topics.push(topic_error(&topic, service_error_code(&error)));
                     continue;
@@ -105,15 +106,24 @@ pub async fn handle(
 }
 
 /// All Kafka topic streams: kafka content type, single-segment `/{topic}`
-/// names, reserved subtree excluded.
+/// names, reserved subtree excluded, plus the catalog topic when it exists.
 async fn list_topic_names(ctx: &BrokerContext) -> Result<Vec<String>, HandlerError> {
     let list = ctx.service.list("/", None, 10_000).await?;
-    Ok(list
+    let mut names: Vec<String> = list
         .streams
         .into_iter()
         .filter(|stream| stream.content_type == kafka_content_type())
         .filter_map(|stream| topic_from_stream(&stream.name).map(str::to_owned))
-        .collect())
+        .collect();
+    if ctx
+        .service
+        .head(pico_server::CATALOG_STREAM)
+        .await?
+        .is_some()
+    {
+        names.push(CATALOG_TOPIC.to_owned());
+    }
+    Ok(names)
 }
 
 async fn create_topic(ctx: &BrokerContext, name: &str) -> Result<(), pico_server::ServiceError> {
@@ -139,7 +149,7 @@ async fn build_topic(
         .await
         .map_err(|error| service_error_code(&error))?
         .ok_or(UNKNOWN_TOPIC_OR_PARTITION)?;
-    if meta.content_type != kafka_content_type() {
+    if meta.content_type != kafka_content_type() && !is_catalog_name(topic) {
         // A stream created by another frontend is not a Kafka topic.
         return Err(INVALID_REQUEST);
     }

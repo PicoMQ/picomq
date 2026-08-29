@@ -522,3 +522,61 @@ async fn remote_owner_redirects() {
     let list = http.get(format!("{base_url}/")).send().await.unwrap();
     assert_eq!(list.status(), 200);
 }
+
+#[tokio::test]
+async fn catalog_json_is_readable() {
+    use pico_server::{AppendCommand, CreateCommand, CATALOG_EXTERNAL_ID, CATALOG_STREAM};
+
+    let server = pico_server().await;
+    server
+        .node
+        .service()
+        .create(CreateCommand {
+            name: CATALOG_STREAM.into(),
+            content_type: "application/json".into(),
+            ttl_seconds: None,
+            expires_at_ms: None,
+            closed: false,
+            initial_payload: Bytes::new(),
+            external_id: Some(CATALOG_EXTERNAL_ID),
+            internal: true,
+        })
+        .await
+        .unwrap();
+    server
+        .node
+        .service()
+        .append(AppendCommand {
+            name: CATALOG_STREAM.into(),
+            payloads: vec![Bytes::from_static(
+                br#"{"op":"create","name":"/cdc/orders","stream_id":1}"#,
+            )],
+            content_type: Some("application/json".into()),
+            internal: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let http = client();
+    let read = http
+        .get(format!("{}/_sys/catalog?seq=0", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.status(), 200);
+    let body: Value = read.json().await.unwrap();
+    assert_eq!(body[0]["seq"], 0);
+    assert!(body[0]["body"]
+        .as_str()
+        .unwrap()
+        .contains(r#""name":"/cdc/orders""#));
+
+    let trim = http
+        .post(format!("{}/_sys/catalog", server.base_url))
+        .header("Pico-Trim-Seq", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(trim.status(), 400);
+}

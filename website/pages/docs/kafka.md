@@ -31,6 +31,7 @@ Record batches are stored verbatim. The broker patches each batch's base-offset 
 | Fetch | Long-polling with `fetch.min.bytes` and `fetch.max.wait.ms`, served from the same event-driven waiters as HTTP long polls. |
 | Topics | `CreateTopics` and `DeleteTopics` for single-partition topics, plus metadata auto-creation when the client enables it. Requests for more than one partition are rejected. |
 | Offsets | `ListOffsets` for earliest, latest, and by timestamp. |
+| Catalog | The [catalog changelog](/docs/design/catalog) is the read-only internal topic `__catalog`. |
 | Consumer groups | The classic group protocol: `FindCoordinator`, join/sync/heartbeat/leave, offset commit and fetch, describe and list. Rebalances, generations, and fencing follow Kafka's state machine. |
 | Not supported | Transactions and control batches (rejected as invalid), multiple partitions per topic, the KIP-848 consumer protocol, and SASL (see the note on exposure below). |
 

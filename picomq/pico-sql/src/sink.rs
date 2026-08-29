@@ -1080,6 +1080,14 @@ mod tests {
         assert_eq!(before, 21, "log must stay intact at watermark 0");
 
         sink.set_flushable_idx(u64::MAX);
+        for _ in 0..5 {
+            sink.propose(MetadataCommand::CreateStream {
+                node_id: 1,
+                node_epoch: 10,
+            })
+            .await
+            .unwrap();
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             if store.fetch_after(0, 10_000).await.unwrap().len() < before {

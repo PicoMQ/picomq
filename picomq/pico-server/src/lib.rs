@@ -14,7 +14,7 @@ pub mod types;
 pub mod waiter;
 
 pub use auth::{KvTokenStore, TokenService, TOKEN_KEY_PREFIX};
-pub use catalog::{CatalogSource, CATALOG_STREAM};
+pub use catalog::{CatalogSource, CATALOG_EXTERNAL_ID, CATALOG_STREAM};
 pub use error::{ErrorKind, ServiceError};
 pub use node::{NodeConfig, PicoNode};
 pub use ownership::{MetadataOwnershipService, OwnershipService};

@@ -18,7 +18,7 @@ use crate::handlers::common::{
     OFFSET_OUT_OF_RANGE, UNKNOWN_TOPIC_ID, UNKNOWN_TOPIC_OR_PARTITION,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
-use crate::topic::{stream_name, topic_from_stream, validate_topic_name};
+use crate::topic::{stores_batches, stream_name, topic_from_stream, validate_topic_name};
 
 /// Topics are addressed by name below v13 and by UUID from v13 on.
 const FETCH_TOPIC_ID_VERSION: i16 = 13;
@@ -227,6 +227,9 @@ async fn read_partition(
             wait: Some((stream.to_owned(), watermarks.high_watermark)),
         };
     }
+    if !stores_batches(stream) {
+        return read_raw(ctx, stream, from, max_bytes, &watermarks).await;
+    }
     match ctx.service.read_batches(stream, from, max_bytes).await {
         Ok(read) => {
             let payload = concat_batches(&read.batches);
@@ -245,6 +248,31 @@ async fn read_partition(
             }
         }
         Err(error) => error_partition(0, service_error_code(&error)),
+    }
+}
+
+/// Wraps raw records into one synthesized batch.
+async fn read_raw(
+    ctx: &BrokerContext,
+    stream: &str,
+    from: u64,
+    max_bytes: usize,
+    watermarks: &pico_server::StreamWatermarks,
+) -> PartitionRead {
+    let read = match ctx
+        .service
+        .read(stream, OffsetToken::of_record_offset(from), max_bytes, 1024)
+        .await
+    {
+        Ok(read) => read,
+        Err(error) => return error_partition(0, service_error_code(&error)),
+    };
+    let payload = crate::batch::encode_records(&read.records);
+    let bytes = payload.len();
+    PartitionRead {
+        data: partition_data(NO_ERROR, watermarks, Some(payload)),
+        bytes,
+        wait: Some((stream.to_owned(), watermarks.high_watermark)),
     }
 }
 

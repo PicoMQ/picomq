@@ -369,8 +369,21 @@ impl S3StreamService {
         Ok(true)
     }
 
-    pub async fn trim(&self, name: &str, new_start_offset: u64) -> Result<u64, ServiceError> {
+    pub async fn trim(
+        &self,
+        name: &str,
+        new_start_offset: u64,
+        internal: bool,
+    ) -> Result<u64, ServiceError> {
         let name = normalize(name);
+        if is_reserved_name(&name) && !internal {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "the /_sys/ prefix is reserved",
+            ));
+        }
         let gate = self.gate_of(&name);
         let _op = gate.op.lock().await;
 

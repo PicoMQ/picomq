@@ -580,7 +580,7 @@ impl GroupCoordinator {
             return;
         };
         let newest = appended.next_offset.record_offset().saturating_sub(1);
-        if self.service.trim(stream, newest).await.is_ok() {
+        if self.service.trim(stream, newest, true).await.is_ok() {
             state.appends_since_snapshot = 0;
         }
     }

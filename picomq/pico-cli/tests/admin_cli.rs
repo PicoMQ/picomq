@@ -26,7 +26,19 @@ async fn admin_commands() {
 
     let cluster = admin(&server, &["cluster"]).ok();
     assert!(cluster.stdout.contains("node=1"), "{}", cluster.stdout);
-    assert!(cluster.stdout.contains("streams=2"), "{}", cluster.stdout);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let cluster = admin(&server, &["cluster"]).ok();
+        if cluster.stdout.contains("streams=2") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "catalog stream never appeared: {}",
+            cluster.stdout
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 
     let as_json = admin(&server, &["--json", "cluster"]).ok();
     let parsed: serde_json::Value = serde_json::from_str(&as_json.stdout).unwrap();

@@ -159,7 +159,7 @@ async fn create_append_read_close_via_services() {
     assert_eq!(limited.next_offset.record_offset(), 2);
     assert!(!limited.up_to_date);
 
-    let effective = services.trim("/streams/batch", 2).await.unwrap();
+    let effective = services.trim("/streams/batch", 2, false).await.unwrap();
     assert!(effective <= 2, "effective trim {effective}");
     assert_eq!(
         services

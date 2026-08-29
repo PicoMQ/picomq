@@ -250,6 +250,103 @@ async fn metadata_create_produce_and_fetch_roundtrip() {
 }
 
 #[tokio::test]
+async fn catalog_topic_is_read_only_and_fetchable() {
+    use kafka_protocol::messages::{FetchResponse, MetadataResponse, ProduceResponse};
+    use kafka_protocol::records::RecordBatchDecoder;
+    use pico_server::{AppendCommand, CreateCommand, CATALOG_EXTERNAL_ID, CATALOG_STREAM};
+
+    let broker = test_broker().await;
+    broker
+        .service
+        .create(CreateCommand {
+            name: CATALOG_STREAM.into(),
+            content_type: "application/json".into(),
+            ttl_seconds: None,
+            expires_at_ms: None,
+            closed: false,
+            initial_payload: Bytes::new(),
+            external_id: Some(CATALOG_EXTERNAL_ID),
+            internal: true,
+        })
+        .await
+        .unwrap();
+    broker
+        .service
+        .append(AppendCommand {
+            name: CATALOG_STREAM.into(),
+            payloads: vec![
+                Bytes::from_static(br#"{"type":"created"}"#),
+                Bytes::from_static(br#"{"type":"deleted"}"#),
+            ],
+            content_type: Some("application/json".into()),
+            internal: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let list_req = encode_request(ApiKey::Metadata, 12, 1, &MetadataRequest::default());
+    let mut buf = response_body(&broker, &list_req).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let listed = MetadataResponse::decode(&mut buf, 12).unwrap();
+    let topic = listed
+        .topics
+        .iter()
+        .find(|t| t.name.as_deref().map(|n| n.as_str()) == Some("__catalog"))
+        .unwrap();
+    assert_eq!(topic.error_code, 0);
+    assert!(topic.is_internal);
+    assert_eq!(topic.topic_id, uuid::Uuid::from_bytes(CATALOG_EXTERNAL_ID));
+    let topic_id = topic.topic_id;
+
+    let fetch_req = encode_request(
+        ApiKey::Fetch,
+        13,
+        2,
+        &FetchRequest::default()
+            .with_max_wait_ms(0)
+            .with_min_bytes(1)
+            .with_topics(vec![FetchTopic::default()
+                .with_topic_id(topic_id)
+                .with_partitions(vec![FetchPartition::default()
+                    .with_partition(0)
+                    .with_fetch_offset(0)])]),
+    );
+    let mut buf = response_body(&broker, &fetch_req).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let fetched = FetchResponse::decode(&mut buf, 13).unwrap();
+    let partition = &fetched.responses[0].partitions[0];
+    assert_eq!(partition.error_code, 0);
+    assert_eq!(partition.high_watermark, 2);
+    let mut records_buf = partition.records.clone().unwrap();
+    let sets = RecordBatchDecoder::decode_all(&mut records_buf).unwrap();
+    let records: Vec<_> = sets.iter().flat_map(|set| set.records.iter()).collect();
+    assert_eq!(records[0].offset, 0);
+    assert_eq!(records[1].offset, 1);
+    assert_eq!(
+        records[0].value.as_deref(),
+        Some(br#"{"type":"created"}"#.as_slice())
+    );
+
+    let produce_req = encode_request(
+        ApiKey::Produce,
+        10,
+        3,
+        &ProduceRequest::default()
+            .with_acks(1)
+            .with_topic_data(vec![TopicProduceData::default()
+                .with_name(tn("__catalog"))
+                .with_partition_data(vec![PartitionProduceData::default()
+                    .with_index(0)
+                    .with_records(Some(kafka_batch(b"nope")))])]),
+    );
+    let mut buf = response_body(&broker, &produce_req).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let produced = ProduceResponse::decode(&mut buf, 10).unwrap();
+    assert_eq!(produced.responses[0].partition_responses[0].error_code, 42);
+}
+
+#[tokio::test]
 async fn listener_serves_api_versions() {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -1,8 +1,13 @@
 //! Kafka record-batch payload inspection: header fields plus the byte
 //! positions the service needs for the base-offset rewrite on append.
 
-use bytes::Bytes;
-use kafka_protocol::records::{BatchDecodeInfo, RecordBatchDecoder};
+use bytes::{Bytes, BytesMut};
+use kafka_protocol::records::{
+    BatchDecodeInfo, Compression, Record, RecordBatchDecoder, RecordBatchEncoder,
+    RecordEncodeOptions, TimestampType, NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH,
+    NO_PRODUCER_ID, NO_SEQUENCE, NO_TIMESTAMP,
+};
+use pico_server::StreamRecord;
 use thiserror::Error;
 
 /// Bytes before a batch's `batchLength` field: the 8-byte base offset.
@@ -71,4 +76,37 @@ pub fn decode_batches(records: &Bytes) -> Result<Vec<PayloadBatch>, BatchParseEr
             info,
         })
         .collect())
+}
+
+/// One v2 batch with the records at their stream offsets.
+pub fn encode_records(records: &[StreamRecord]) -> Bytes {
+    let records: Vec<Record> = records
+        .iter()
+        .map(|record| Record {
+            transactional: false,
+            control: false,
+            delete_horizon: false,
+            partition_leader_epoch: NO_PARTITION_LEADER_EPOCH,
+            producer_id: NO_PRODUCER_ID,
+            producer_epoch: NO_PRODUCER_EPOCH,
+            timestamp_type: TimestampType::Creation,
+            offset: record.offset.record_offset() as i64,
+            sequence: NO_SEQUENCE,
+            timestamp: NO_TIMESTAMP,
+            key: None,
+            value: Some(record.payload.clone()),
+            headers: Default::default(),
+        })
+        .collect();
+    let mut out = BytesMut::new();
+    RecordBatchEncoder::encode(
+        &mut out,
+        &records,
+        &RecordEncodeOptions {
+            version: 2,
+            compression: Compression::None,
+        },
+    )
+    .expect("record batch encode");
+    out.freeze()
 }
