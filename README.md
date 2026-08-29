@@ -13,7 +13,11 @@ PicoMQ is durable, real-time streams over HTTP, built on S3-compatible object st
 cargo install --path picomq/pico-cli
 ```
 
-This puts the `pico` binary in `~/.cargo/bin`. Or run it in place with `cargo run -p pico-cli -- <args>`.
+This puts the `pico` binary in `~/.cargo/bin`. Or run it in place with `cargo run -p pico-cli -- <args>`. If another `pico` is first on `PATH`:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+```
 
 ## Run a node
 
