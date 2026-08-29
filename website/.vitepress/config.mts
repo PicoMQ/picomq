@@ -4,6 +4,7 @@ import { tabsMarkdownPlugin } from 'vitepress-plugin-tabs';
 const docsSidebar = [
   {
     text: 'Getting started',
+    collapsed: false,
     items: [
       { text: 'Introduction', link: '/docs/' },
       { text: 'Quick start', link: '/docs/quick-start' },
@@ -12,10 +13,12 @@ const docsSidebar = [
   },
   {
     text: 'FAQ',
+    collapsed: true,
     items: [{ text: 'Why not Kafka?', link: '/docs/faq/why-not-kafka' }],
   },
   {
     text: 'Design',
+    collapsed: true,
     items: [
       { text: 'Overview', link: '/docs/design/overview' },
       { text: 'Interactive cluster', link: '/docs/design/simulator' },
@@ -33,12 +36,14 @@ const docsSidebar = [
   },
   {
     text: 'Operations',
+    collapsed: true,
     items: [
       { text: 'CLI', link: '/docs/operations/cli' },
       { text: 'Configuration', link: '/docs/operations/configuration' },
       { text: 'Authentication', link: '/docs/operations/auth' },
       {
         text: 'Deployment',
+        collapsed: true,
         items: [
           { text: 'Docker', link: '/docs/operations/deployment/docker' },
           { text: 'Fly', link: '/docs/operations/deployment/fly' },
@@ -51,6 +56,7 @@ const docsSidebar = [
   },
   {
     text: 'API reference',
+    collapsed: true,
     items: [
       { text: 'HTTP API', link: '/docs/api' },
       { text: 'Kafka protocol', link: '/docs/kafka' },
@@ -59,8 +65,10 @@ const docsSidebar = [
   },
   {
     text: 'Community',
+    collapsed: true,
     items: [
       { text: 'Contribute', link: '/docs/contribute' },
+      { text: 'Discord', link: 'https://discord.gg/qsMy5sSpYX' },
       {
         text: 'Hacker News',
         link: 'https://news.ycombinator.com/item?id=49421806',
@@ -110,9 +118,9 @@ export default defineConfig({
   themeConfig: {
     siteTitle: false,
     nav: [
-      { text: 'Home', link: '/' },
       { text: 'Docs', link: '/docs' },
       { text: 'Contribute', link: '/docs/contribute' },
+      { text: 'Discord', link: 'https://discord.gg/qsMy5sSpYX' },
       { text: 'GitHub', link: 'https://github.com/picomq/picomq' },
     ],
     sidebar: docsSidebar,
