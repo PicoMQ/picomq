@@ -70,11 +70,14 @@ Each tab assumes a node started with the matching `--protocol` (or `PICO_PROTOCO
 
 == Pico
 
-The `pico` binary is also the client. If the node runs in compose and `pico` is not installed on the host, prefix the commands with `docker compose exec pico`.
+The `pico` binary is also the client. If the node runs in compose and `pico` is not installed on the host, prefix the commands with `docker compose exec <service>`. The single-node file names the service `pico`. The cluster file names them `pico1` and `pico2`.
 
 ```bash
-# example with Docker
+# single-node compose.yml
 docker compose exec pico pico ls
+
+# cluster compose.cluster.yml
+docker compose -f compose.cluster.yml exec pico1 pico ls
 ```
 
 ```bash
