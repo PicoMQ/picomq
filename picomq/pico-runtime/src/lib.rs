@@ -5,10 +5,11 @@ pub mod config;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use pico_auth::{AccessToken, Scope, TokenRecord, TokenStore, Verifier};
 use pico_http::{RunningServer, ServeOptions};
 use pico_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
-use pico_server::{KvTokenStore, NodeConfig, PicoNode};
+use pico_server::{CatalogSource, KvTokenStore, NodeConfig, PicoNode};
 use pico_sql::{LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig, SqliteStore};
 use s3stream::{IdUri, ObjectStorageTrait, ObjectStoreAdapter};
 
@@ -49,6 +50,22 @@ pub enum RuntimeError {
     BootstrapConflict { id: String },
 }
 
+struct SqlCatalog(Arc<SqlSink>);
+
+#[async_trait]
+impl CatalogSource for SqlCatalog {
+    async fn fetch_after(&self, after: u64, limit: u32) -> Result<Vec<(u64, Vec<u8>)>, String> {
+        self.0
+            .fetch_after(after, limit)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn set_flushable_idx(&self, idx: u64) {
+        self.0.set_flushable_idx(idx);
+    }
+}
+
 /// A running PicoMQ process: metadata log, node, background maintenance and
 /// the HTTP listeners.
 pub struct PicoServer {
@@ -58,6 +75,7 @@ pub struct PicoServer {
     lifecycle: tokio::task::JoinHandle<()>,
     token_expiry: tokio::task::JoinHandle<()>,
     ttl_sweep: tokio::task::JoinHandle<()>,
+    catalog: tokio::task::JoinHandle<()>,
     compaction_check: tokio::task::JoinHandle<()>,
     /// Kept alive for the process lifetime: dropping it aborts the log's
     /// flusher/tailer tasks, so it must outlive the node.
@@ -170,6 +188,9 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     let ttl_sweep = node
         .service()
         .spawn_ttl_sweep(lease.leadership(), LIFECYCLE_TICK);
+    let catalog = node
+        .service()
+        .spawn_catalog_loop(Arc::new(SqlCatalog(sink.clone())), lease.leadership());
     let compaction_check = node.service().spawn_compaction_check(LIFECYCLE_TICK);
 
     let kafka = if let Some((listener, bound)) = kafka_listener {
@@ -232,6 +253,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         lifecycle,
         token_expiry,
         ttl_sweep,
+        catalog,
         compaction_check,
         sink,
     })
@@ -323,6 +345,7 @@ impl PicoServer {
         self.lifecycle.abort();
         self.token_expiry.abort();
         self.ttl_sweep.abort();
+        self.catalog.abort();
         self.compaction_check.abort();
         self.lease.shutdown().await;
         drop(self.sink);

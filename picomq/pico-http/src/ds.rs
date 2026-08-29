@@ -279,6 +279,7 @@ impl DsFrontend {
                     producer,
                     close_after: close,
                     atomic: true,
+                    internal: false,
                 }
                 .normalized(),
             )

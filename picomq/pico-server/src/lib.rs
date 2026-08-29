@@ -1,6 +1,7 @@
 //! Named-stream service over the s3stream engine (no HTTP, no metadata backend choice).
 
 pub mod auth;
+pub mod catalog;
 pub mod error;
 pub mod framing;
 pub mod node;
@@ -13,6 +14,7 @@ pub mod types;
 pub mod waiter;
 
 pub use auth::{KvTokenStore, TokenService, TOKEN_KEY_PREFIX};
+pub use catalog::{CatalogSource, CATALOG_STREAM};
 pub use error::{ErrorKind, ServiceError};
 pub use node::{NodeConfig, PicoNode};
 pub use ownership::{MetadataOwnershipService, OwnershipService};

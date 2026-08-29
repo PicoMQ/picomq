@@ -35,6 +35,7 @@ async fn run_gate(total: u64) {
     let store: Arc<dyn MetaStore> = Arc::new(SqliteStore::open(&path).await.unwrap());
 
     let (sink, views) = SqlSink::open(store.clone(), config()).await.unwrap();
+    sink.set_flushable_idx(u64::MAX);
     let sink = Arc::new(sink);
     sink.propose(MetadataCommand::RegisterNode {
         node_id: NODE,

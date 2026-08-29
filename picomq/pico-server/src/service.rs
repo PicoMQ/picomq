@@ -284,6 +284,9 @@ impl S3StreamService {
             let exhausted = page.len() < max + 1 - selected.len();
             for (key, value) in page {
                 cursor = Some(key.clone());
+                if is_reserved_name(&key) {
+                    continue;
+                }
                 let Ok(entry) = RegistryEntry::decode(&value) else {
                     continue;
                 };
@@ -340,6 +343,14 @@ impl S3StreamService {
 
     pub async fn delete(&self, name: &str) -> Result<bool, ServiceError> {
         let name = normalize(name);
+        if is_reserved_name(&name) {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "the /_sys/ prefix is reserved",
+            ));
+        }
         let gate = self.gate_of(&name);
         let _op = gate.op.lock().await;
 
@@ -388,6 +399,14 @@ impl S3StreamService {
     pub async fn append(&self, command: AppendCommand) -> Result<AppendResult, ServiceError> {
         let command = command.normalized();
         let name = normalize(&command.name);
+        if is_reserved_name(&name) && !command.internal {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "the /_sys/ prefix is reserved",
+            ));
+        }
         let gate = self.gate_of(&name);
         let _op = gate.op.lock().await;
 
@@ -867,6 +886,9 @@ impl S3StreamService {
                 cursor = page.last().map(|(key, _)| key.clone());
                 let now = now_ms();
                 for (name, value) in page {
+                    if is_reserved_name(&name) {
+                        continue;
+                    }
                     let Ok(entry) = RegistryEntry::decode(&value) else {
                         continue;
                     };
@@ -876,6 +898,30 @@ impl S3StreamService {
                 }
             }
         })
+    }
+
+    pub fn spawn_catalog_loop(
+        self: &Arc<Self>,
+        source: Arc<dyn crate::catalog::CatalogSource>,
+        leadership: tokio::sync::watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<()> {
+        crate::catalog::spawn_catalog_loop(self.clone(), self.views.clone(), source, leadership)
+    }
+
+    pub(crate) fn node_id(&self) -> i32 {
+        self.node.node_id()
+    }
+
+    pub(crate) async fn request_catalog_transfer(
+        &self,
+        stream_id: u64,
+        from_node: i32,
+        to_node: i32,
+    ) -> Result<(), String> {
+        self.node
+            .propose_transfer(stream_id, from_node, to_node)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     fn gate_of(&self, name: &str) -> Arc<Gate> {
@@ -1233,7 +1279,7 @@ impl S3StreamService {
         next
     }
 
-    async fn get_entry(
+    pub(crate) async fn get_entry(
         &self,
         name: &str,
         touch: bool,

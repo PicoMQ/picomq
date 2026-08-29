@@ -81,6 +81,8 @@ struct Shared {
     pending: std::sync::Mutex<Pending>,
     /// Highest log index known to exist (observed, never guessed).
     last_seen: AtomicU64,
+    /// Truncation ceiling. 0 means truncate nothing.
+    flushable_idx: AtomicU64,
     /// Wakes the tailer immediately after a local append (skips one poll).
     nudge: Notify,
     stats: Arc<SinkStats>,
@@ -150,6 +152,7 @@ impl SqlSink {
             views: views.clone(),
             pending: std::sync::Mutex::new(Pending::default()),
             last_seen: AtomicU64::new(applied),
+            flushable_idx: AtomicU64::new(0),
             nudge: Notify::new(),
             stats: Arc::new(SinkStats::default()),
         });
@@ -173,6 +176,19 @@ impl SqlSink {
     /// The publisher readers (managers, queries) load views from.
     pub fn views(&self) -> Arc<ViewPublisher> {
         self.shared.views.clone()
+    }
+
+    /// Raise the log index snapshot truncation may delete through.
+    pub fn set_flushable_idx(&self, idx: u64) {
+        self.shared.flushable_idx.fetch_max(idx, Ordering::SeqCst);
+    }
+
+    pub async fn fetch_after(
+        &self,
+        after: u64,
+        limit: u32,
+    ) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
+        self.shared.store.fetch_after(after, limit).await
     }
 }
 
@@ -332,8 +348,11 @@ async fn snapshot_task(shared: Arc<Shared>, mut last_snapshot: u64, config: SqlS
                     started.elapsed().as_millis() as u64,
                     unix_ms(),
                 );
-                if let Err(error) = shared.store.truncate_log(applied).await {
-                    tracing::warn!(%error, "log truncation failed; retrying next cycle");
+                let up_to = applied.min(shared.flushable_idx.load(Ordering::SeqCst));
+                if up_to > 0 {
+                    if let Err(error) = shared.store.truncate_log(up_to).await {
+                        tracing::warn!(%error, "log truncation failed; retrying next cycle");
+                    }
                 }
                 tokio::time::sleep(config.snapshot_min_interval).await;
             }
@@ -606,6 +625,7 @@ mod tests {
             ..fast_config()
         };
         let (sink, views) = SqlSink::open(store.clone(), config).await.unwrap();
+        sink.set_flushable_idx(u64::MAX);
 
         sink.propose(register(1, 10)).await.unwrap();
         for _ in 0..30 {
@@ -892,6 +912,7 @@ mod tests {
         let store = Arc::new(SqliteStore::open(&path).await.unwrap());
         let final_state = {
             let (sink, views) = SqlSink::open(store.clone(), config.clone()).await.unwrap();
+            sink.set_flushable_idx(u64::MAX);
             sink.propose(register(1, 10)).await.unwrap();
             for _ in 0..30 {
                 sink.propose(MetadataCommand::CreateStream {
@@ -960,6 +981,7 @@ mod tests {
             ..fast_config()
         };
         let (sink_a, views_a) = SqlSink::open(store_a.clone(), config_a).await.unwrap();
+        sink_a.set_flushable_idx(u64::MAX);
         sink_a.propose(register(1, 10)).await.unwrap();
         for _ in 0..20 {
             sink_a
@@ -1023,5 +1045,51 @@ mod tests {
             .unwrap();
         assert_eq!(ok.result, MetadataResult::Id(0));
         assert_eq!(views.load().state.streams.len(), 1);
+    }
+
+    /// Snapshots still happen but truncation holds until the flushable
+    /// watermark advances.
+    #[tokio::test]
+    async fn truncation_waits_for_flushable_idx() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        let config = SqlSinkConfig {
+            snapshot_every: 5,
+            ..fast_config()
+        };
+        let store = Arc::new(SqliteStore::open(&path).await.unwrap());
+        let (sink, _views) = SqlSink::open(store.clone(), config).await.unwrap();
+        sink.propose(register(1, 10)).await.unwrap();
+        for _ in 0..20 {
+            sink.propose(MetadataCommand::CreateStream {
+                node_id: 1,
+                node_epoch: 10,
+            })
+            .await
+            .unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while store.load_snapshot().await.unwrap().is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "snapshot never written"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let before = store.fetch_after(0, 10_000).await.unwrap().len();
+        assert_eq!(before, 21, "log must stay intact at watermark 0");
+
+        sink.set_flushable_idx(u64::MAX);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if store.fetch_after(0, 10_000).await.unwrap().len() < before {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "log never truncated after the watermark advanced"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }

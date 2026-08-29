@@ -44,6 +44,7 @@ async fn engine_end_to_end_on_sql_metadata_plane() {
 
     let store: Arc<dyn MetaStore> = Arc::new(SqliteStore::open(&db_path).await.unwrap());
     let (sink, views) = SqlSink::open(store.clone(), sink_config()).await.unwrap();
+    sink.set_flushable_idx(u64::MAX);
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let handle = MetadataNodeHandle::new(NODE_ID, NODE_EPOCH, sink.clone(), views.clone());
     handle.register("http://node-1:9090").await.unwrap();

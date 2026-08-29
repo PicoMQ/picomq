@@ -58,6 +58,8 @@ async fn postgres_sink_multi_writer_snapshot_and_lease() {
     let store_b: Arc<dyn MetaStore> = Arc::new(PgStore::connect(&url).await.unwrap());
     let (sink_a, views_a) = SqlSink::open(store_a.clone(), config()).await.unwrap();
     let (sink_b, views_b) = SqlSink::open(store_b.clone(), config()).await.unwrap();
+    sink_a.set_flushable_idx(u64::MAX);
+    sink_b.set_flushable_idx(u64::MAX);
     let (sink_a, sink_b) = (Arc::new(sink_a), Arc::new(sink_b));
 
     sink_a.propose(register(1, 10)).await.unwrap();

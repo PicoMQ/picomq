@@ -26,7 +26,7 @@ async fn admin_commands() {
 
     let cluster = admin(&server, &["cluster"]).ok();
     assert!(cluster.stdout.contains("node=1"), "{}", cluster.stdout);
-    assert!(cluster.stdout.contains("streams=1"), "{}", cluster.stdout);
+    assert!(cluster.stdout.contains("streams=2"), "{}", cluster.stdout);
 
     let as_json = admin(&server, &["--json", "cluster"]).ok();
     let parsed: serde_json::Value = serde_json::from_str(&as_json.stdout).unwrap();

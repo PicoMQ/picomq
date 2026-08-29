@@ -238,6 +238,7 @@ pub struct AppendCommand {
     pub producer: Option<Producer>,
     pub close_after: bool,
     pub atomic: bool,
+    pub internal: bool,
 }
 
 impl AppendCommand {

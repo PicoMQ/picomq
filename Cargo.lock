@@ -1868,6 +1868,7 @@ dependencies = [
 name = "pico-runtime"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "pico-auth",
  "pico-common",
  "pico-http",

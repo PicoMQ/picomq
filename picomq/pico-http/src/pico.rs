@@ -349,6 +349,7 @@ impl PicoFrontend {
                 producer,
                 close_after: close,
                 atomic: true,
+                internal: false,
             })
             .await?;
 

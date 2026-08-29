@@ -538,6 +538,7 @@ impl GroupCoordinator {
                 payloads: vec![encode_commits(commits)],
                 content_type: Some(GROUP_CONTENT_TYPE.to_owned()),
                 atomic: true,
+                internal: true,
                 ..Default::default()
             })
             .await
@@ -569,6 +570,7 @@ impl GroupCoordinator {
                 payloads: vec![encode_snapshot(&state.offsets)],
                 content_type: Some(GROUP_CONTENT_TYPE.to_owned()),
                 atomic: true,
+                internal: true,
                 ..Default::default()
             })
             .await
