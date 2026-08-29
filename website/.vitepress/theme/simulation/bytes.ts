@@ -1,11 +1,4 @@
 // Byte-level building blocks mirroring the real wire formats.
-//
-// Metadata codec (picomq/pico-metadata/src/codec.rs): little-endian,
-// u32-length-prefixed strings/blobs.
-// Record batch codec (s3stream/s3stream-codec/src/codec.rs): big-endian,
-// magic 0x22, 33-byte header.
-// WAL framing (s3stream/s3stream-codec/src/wal_record.rs): big-endian,
-// 24-byte header, CRC-32/ISO-HDLC masked to 31 bits.
 
 export type SegKind =
   | 'magic'
