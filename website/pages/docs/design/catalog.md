@@ -48,11 +48,11 @@ The source of truth stays the metadata log described in [Metadata](/docs/design/
 
 The projector runs only on the lease holder, the same election that gates object cleanup in [Leases](/docs/design/leases). On leadership it ensures `/_sys/catalog` exists, takes ownership of the stream, and folds the catalog's records into a shadow of the registry: last event per name wins, cursor is the last record's `applied_idx`. On step-down the loop aborts.
 
-It replays metadata log rows past the cursor against the shadow with the same conditional semantics as the apply path. A create that lost its race, a delete whose condition failed, or a producer-state rewrite emits nothing. Keys under `auth/`, `idx/`, and `/_sys/` are ignored. A row's events are appended atomically, so every applied registry mutation yields exactly one event, across failovers included.
+It replays metadata log rows past the cursor against the shadow with the same conditional semantics as the apply path. A create that lost its race, a delete whose condition failed, or a producer-state rewrite emits nothing. Keys under `auth/`, `idx/`, and `/_sys/` are ignored. A row's events are appended atomically, so every projected create, update, and delete lands exactly once, across failovers included.
 
 Events are appended with producer id `catalog` and consecutive sequences. Client writes, deletes, and trims against `/_sys/` are rejected. List and TTL sweep skip reserved names.
 
-A metadata log that predates the projector has no history to replay: first leadership emits one `create` per live registry entry at the current applied index, closed by a checkpoint. This baseline is at-least-once.
+A metadata log that predates the projector has no history to replay: first leadership emits one `create` per live registry entry at the current applied index, opened by a `baseline` record and closed by a checkpoint. A baseline whose checkpoint never landed is redone in full on the next leadership. The baseline is at-least-once.
 
 ## Events
 
@@ -65,13 +65,14 @@ Each catalog record is one JSON object with content type `application/json`:
   "stream_id": 42,
   "content_type": "text/plain",
   "closed": false,
+  "value_hash": "9f8b…",
   "applied_idx": 1203
 }
 ```
 
-`op` is `create`, `update`, or `delete`. `name` is the registry path. `stream_id` is the internal id from [Streams](/docs/design/streams). `applied_idx` is the metadata log index that produced the event, and is also the projector's cursor.
+`op` is `create`, `update`, or `delete`. `name` is the registry path. `stream_id` is the internal id from [Streams](/docs/design/streams). `value_hash` is the sha256 of the registry entry's bytes, kept so a recovered shadow can evaluate conditional deletes exactly. `applied_idx` is the metadata log index that produced the event, and is also the projector's cursor.
 
-Records with `op: "checkpoint"` carry only `applied_idx` and mark progress over event-less stretches of the log. Consumers skip them.
+Records with `op: "checkpoint"` or `op: "baseline"` carry only `applied_idx` and mark progress and baseline boundaries. Consumers skip them.
 
 ## Truncation
 

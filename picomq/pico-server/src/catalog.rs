@@ -34,6 +34,7 @@ pub struct CatalogEvent {
     pub stream_id: u64,
     pub content_type: String,
     pub closed: bool,
+    pub value_hash: String,
 }
 
 #[derive(Debug, Clone)]
@@ -41,8 +42,8 @@ struct ShadowEntry {
     stream_id: u64,
     closed: bool,
     content_type: String,
-    /// Exact registry bytes, unknown for entries recovered from the fold.
-    value: Option<Bytes>,
+    /// sha256 of the exact registry bytes, for conditional-delete checks.
+    hash: String,
 }
 
 impl ShadowEntry {
@@ -75,7 +76,7 @@ pub fn replay(command: &MetadataCommand, shadow: &mut Shadow) -> Option<CatalogE
             let entry = RegistryEntry::decode(value).ok()?;
             let op = match shadow.entries.get_mut(key) {
                 Some(prev) if prev.matches(&entry) => {
-                    prev.value = Some(value.clone());
+                    prev.hash = sha256_hex(value);
                     return None;
                 }
                 Some(_) => "update",
@@ -85,13 +86,10 @@ pub fn replay(command: &MetadataCommand, shadow: &mut Shadow) -> Option<CatalogE
         }
         MetadataCommand::DeleteKv { key } => shadow.delete(key),
         MetadataCommand::DeleteKvIfMatches { key, expected } => {
-            let matched = match shadow.entries.get(key) {
-                None => false,
-                Some(prev) => match &prev.value {
-                    Some(value) => value == expected,
-                    None => RegistryEntry::decode(expected).is_ok_and(|entry| prev.matches(&entry)),
-                },
-            };
+            let matched = shadow
+                .entries
+                .get(key)
+                .is_some_and(|prev| prev.hash == sha256_hex(expected));
             if !matched {
                 return None;
             }
@@ -109,13 +107,14 @@ impl Shadow {
         entry: &RegistryEntry,
         value: &Bytes,
     ) -> CatalogEvent {
+        let hash = sha256_hex(value);
         self.entries.insert(
             key.to_owned(),
             ShadowEntry {
                 stream_id: entry.stream_id,
                 closed: entry.closed,
                 content_type: entry.content_type.clone(),
-                value: Some(value.clone()),
+                hash: hash.clone(),
             },
         );
         CatalogEvent {
@@ -124,6 +123,7 @@ impl Shadow {
             stream_id: entry.stream_id,
             content_type: entry.content_type.clone(),
             closed: entry.closed,
+            value_hash: hash,
         }
     }
 
@@ -138,6 +138,7 @@ impl Shadow {
             stream_id: prev.stream_id,
             content_type: prev.content_type,
             closed: prev.closed,
+            value_hash: prev.hash,
         })
     }
 
@@ -152,7 +153,7 @@ impl Shadow {
                         stream_id: event.get("stream_id")?.as_u64()?,
                         closed: event.get("closed")?.as_bool()?,
                         content_type: event.get("content_type")?.as_str()?.to_owned(),
-                        value: None,
+                        hash: event.get("value_hash")?.as_str()?.to_owned(),
                     },
                 );
             }
@@ -163,6 +164,11 @@ impl Shadow {
         }
         Some(())
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn is_registry_key(key: &str) -> bool {
@@ -214,6 +220,9 @@ async fn run_as_leader(
 ) -> Result<(), String> {
     ensure_catalog(service, views).await?;
     let mut state = fold(service).await?;
+    if state.baseline_started && !state.checkpointed {
+        state = bootstrap(service, views).await?;
+    }
     source.set_flushable_idx(state.cursor);
     let mut idle = 0u32;
 
@@ -254,7 +263,7 @@ async fn run_as_leader(
             } else {
                 idle += 1;
                 if idle >= CHECKPOINT_EVERY {
-                    append_checkpoint(service, idx).await?;
+                    append_control(service, "checkpoint", idx).await?;
                     state.checkpointed = true;
                     source.set_flushable_idx(idx);
                     idle = 0;
@@ -269,6 +278,7 @@ struct Projection {
     shadow: Shadow,
     cursor: u64,
     checkpointed: bool,
+    baseline_started: bool,
 }
 
 /// Rebuilds the shadow at the cursor from the catalog's own records.
@@ -277,6 +287,7 @@ async fn fold(service: &S3StreamService) -> Result<Projection, String> {
         shadow: Shadow::default(),
         cursor: 0,
         checkpointed: false,
+        baseline_started: false,
     };
     let Some(meta) = service
         .head(CATALOG_STREAM)
@@ -308,10 +319,12 @@ async fn fold(service: &S3StreamService) -> Result<Projection, String> {
                 .and_then(Value::as_u64)
                 .ok_or("catalog record without applied_idx")?;
             state.cursor = state.cursor.max(idx);
-            if event.get("op").and_then(Value::as_str) == Some("checkpoint") {
-                state.checkpointed = true;
-            } else {
-                state.shadow.apply_folded(&event);
+            match event.get("op").and_then(Value::as_str) {
+                Some("checkpoint") => state.checkpointed = true,
+                Some("baseline") => state.baseline_started = true,
+                _ => {
+                    state.shadow.apply_folded(&event);
+                }
             }
         }
         pos = read.next_offset.record_offset();
@@ -334,14 +347,16 @@ async fn bootstrap(service: &S3StreamService, views: &ViewPublisher) -> Result<P
         };
         events.push(shadow.put("create", key, &entry, value));
     }
+    append_control(service, "baseline", cursor).await?;
     for chunk in events.chunks(BASELINE_CHUNK) {
         append_events(service, cursor, chunk).await?;
     }
-    append_checkpoint(service, cursor).await?;
+    append_control(service, "checkpoint", cursor).await?;
     Ok(Projection {
         shadow,
         cursor,
         checkpointed: true,
+        baseline_started: true,
     })
 }
 
@@ -357,7 +372,6 @@ async fn ensure_catalog(service: &S3StreamService, views: &ViewPublisher) -> Res
         internal: true,
     };
     service.create(command).await.map_err(|e| e.to_string())?;
-    let node_id = service.node_id();
     loop {
         let view = views.load();
         let Some(entry) = view.state.get_kv(CATALOG_STREAM) else {
@@ -367,21 +381,12 @@ async fn ensure_catalog(service: &S3StreamService, views: &ViewPublisher) -> Res
             continue;
         };
         let entry = RegistryEntry::decode(&entry).map_err(|e| e.to_string())?;
-        let Some(row) = view.state.get_stream(entry.stream_id) else {
-            views
-                .wait_applied(view.applied_index.saturating_add(1))
-                .await;
-            continue;
-        };
-        if row.node_id == node_id {
-            return Ok(());
-        }
+        // Fencing open: the same takeover and revive every stream gets.
         service
-            .request_catalog_transfer(entry.stream_id, row.node_id, node_id)
-            .await?;
-        views
-            .wait_applied(view.applied_index.saturating_add(1))
-            .await;
+            .ensure_open(entry.stream_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(());
     }
 }
 
@@ -397,8 +402,12 @@ async fn append_events(
     append_payloads(service, payloads).await
 }
 
-async fn append_checkpoint(service: &S3StreamService, applied_idx: u64) -> Result<(), String> {
-    let payload = Bytes::from(json!({"op": "checkpoint", "applied_idx": applied_idx}).to_string());
+async fn append_control(
+    service: &S3StreamService,
+    op: &str,
+    applied_idx: u64,
+) -> Result<(), String> {
+    let payload = Bytes::from(json!({"op": op, "applied_idx": applied_idx}).to_string());
     append_payloads(service, vec![payload]).await
 }
 
@@ -442,6 +451,7 @@ fn encode_event(event: &CatalogEvent, applied_idx: u64) -> Bytes {
             "stream_id": event.stream_id,
             "content_type": event.content_type,
             "closed": event.closed,
+            "value_hash": event.value_hash,
             "applied_idx": applied_idx,
         })
         .to_string(),
@@ -598,9 +608,9 @@ mod tests {
     fn fold_rebuilds_shadow() {
         let mut shadow = Shadow::default();
         let folded = [
-            json!({"op": "create", "name": "/a", "stream_id": 1, "content_type": "text/plain", "closed": false, "applied_idx": 5}),
-            json!({"op": "delete", "name": "/a", "stream_id": 1, "content_type": "text/plain", "closed": false, "applied_idx": 6}),
-            json!({"op": "create", "name": "/a", "stream_id": 2, "content_type": "text/plain", "closed": false, "applied_idx": 7}),
+            json!({"op": "create", "name": "/a", "stream_id": 1, "content_type": "text/plain", "closed": false, "value_hash": "x", "applied_idx": 5}),
+            json!({"op": "delete", "name": "/a", "stream_id": 1, "content_type": "text/plain", "closed": false, "value_hash": "x", "applied_idx": 6}),
+            json!({"op": "create", "name": "/a", "stream_id": 2, "content_type": "text/plain", "closed": false, "value_hash": "x", "applied_idx": 7}),
             json!({"op": "checkpoint", "applied_idx": 9}),
         ];
         for event in &folded {
@@ -608,10 +618,18 @@ mod tests {
         }
         let deleted = replay(&MetadataCommand::DeleteKv { key: "/a".into() }, &mut shadow).unwrap();
         assert_eq!(deleted.stream_id, 2);
+
         let mut shadow = Shadow::default();
-        shadow.apply_folded(
-            &json!({"op": "create", "name": "/b", "stream_id": 4, "content_type": "text/plain", "closed": false, "applied_idx": 1}),
-        );
+        let value = entry(4, false).encode();
+        shadow.apply_folded(&json!({
+            "op": "create",
+            "name": "/b",
+            "stream_id": 4,
+            "content_type": "text/plain",
+            "closed": false,
+            "value_hash": sha256_hex(&value),
+            "applied_idx": 1,
+        }));
         assert!(replay(
             &MetadataCommand::DeleteKvIfMatches {
                 key: "/b".into(),
@@ -620,10 +638,20 @@ mod tests {
             &mut shadow,
         )
         .is_none());
+        let mut stale = entry(4, false);
+        stale.deadline_ms = 99;
         assert!(replay(
             &MetadataCommand::DeleteKvIfMatches {
                 key: "/b".into(),
-                expected: entry(4, false).encode(),
+                expected: stale.encode(),
+            },
+            &mut shadow,
+        )
+        .is_none());
+        assert!(replay(
+            &MetadataCommand::DeleteKvIfMatches {
+                key: "/b".into(),
+                expected: value,
             },
             &mut shadow,
         )

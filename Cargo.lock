@@ -1899,10 +1899,13 @@ dependencies = [
  "pico-sql",
  "s3stream",
  "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

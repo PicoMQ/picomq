@@ -921,22 +921,6 @@ impl S3StreamService {
         crate::catalog::spawn_catalog_loop(self.clone(), self.views.clone(), source, leadership)
     }
 
-    pub(crate) fn node_id(&self) -> i32 {
-        self.node.node_id()
-    }
-
-    pub(crate) async fn request_catalog_transfer(
-        &self,
-        stream_id: u64,
-        from_node: i32,
-        to_node: i32,
-    ) -> Result<(), String> {
-        self.node
-            .propose_transfer(stream_id, from_node, to_node)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
     fn gate_of(&self, name: &str) -> Arc<Gate> {
         self.gates
             .lock()
