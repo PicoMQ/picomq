@@ -36,7 +36,6 @@ pub type DeferredOutcome = std::pin::Pin<
 pub enum HandlerOutcome {
     Response(ResponseFrame),
     NoResponse,
-    /// Ordered work is done; the rest (durability waits) completes here.
     Deferred(DeferredOutcome),
 }
 

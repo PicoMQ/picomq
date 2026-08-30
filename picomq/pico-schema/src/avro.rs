@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! AVRO schema
-
 use apache_avro::{schema::Schema as AvroSchema, types::Value, Reader};
 use bytes::Bytes;
 
@@ -39,7 +37,6 @@ impl AsRef<str> for MessageKind {
     }
 }
 
-/// AVRO Schema
 #[derive(Clone, Debug, Default)]
 pub struct Schema {
     pub(crate) key: Option<AvroSchema>,

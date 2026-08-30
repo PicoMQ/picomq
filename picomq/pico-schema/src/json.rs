@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! JSON schema
-
 use crate::record::Batch;
 use crate::{Error, Result, Validator};
 use bytes::Bytes;

@@ -20,7 +20,6 @@ use crate::handlers::common::{
 use crate::handlers::{HandlerError, HandlerOutcome};
 use crate::topic::{kafka_content_type, stream_name, validate_topic_name};
 
-/// Topic config that binds a CreateTopics topic to a registered schema name.
 pub const SCHEMA_CONFIG: &str = "pico.schema";
 pub const SCHEMA_VALIDATE_CONFIG: &str = "pico.schema.validate";
 

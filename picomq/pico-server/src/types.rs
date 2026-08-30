@@ -190,15 +190,8 @@ pub struct CreateCommand {
     pub expires_at_ms: Option<i64>,
     pub closed: bool,
     pub initial_payload: Bytes,
-    /// Caller-assigned external identity for the stream (e.g. the Kafka
-    /// topic UUID), resolvable via `lookup_by_external_id`. `None` when the
-    /// frontend has no such notion.
     pub external_id: Option<[u8; 16]>,
-    /// Set only by in-process callers (e.g. the group coordinator) to create
-    /// streams under the reserved `/_sys/` prefix. Client frontends must
-    /// leave this false.
     pub internal: bool,
-    /// Registry schema name to bind.
     pub schema_name: Option<String>,
     pub schema_validate: bool,
 }
@@ -352,9 +345,7 @@ pub struct StreamMeta {
     pub next_offset: OffsetToken,
     pub submitted_offset: OffsetToken,
     pub closed: bool,
-    /// Caller-assigned external identity, all zeros when none was set.
     pub external_id: [u8; 16],
-    /// Bound schema registry name, when set.
     pub schema_name: Option<String>,
 }
 
