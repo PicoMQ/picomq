@@ -26,7 +26,8 @@ use pico_auth::{Audience, Authorizer};
 use pico_protocol::ds::{
     H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ,
     H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR, H_STREAM_EXPIRES_AT, H_STREAM_NEXT_OFFSET,
-    H_STREAM_SEQ, H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL, H_STREAM_UP_TO_DATE,
+    H_STREAM_SCHEMA, H_STREAM_SCHEMA_VALIDATE, H_STREAM_SEQ, H_STREAM_SSE_DATA_ENCODING,
+    H_STREAM_TTL, H_STREAM_UP_TO_DATE,
 };
 use pico_server::framing::{is_json, mime_of};
 use pico_server::ownership::OwnershipService;
@@ -217,6 +218,10 @@ impl DsFrontend {
                 initial_payload: body,
                 external_id: None,
                 internal: false,
+                schema_name: header_str(headers, H_STREAM_SCHEMA)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+                schema_validate: truthy(headers, H_STREAM_SCHEMA_VALIDATE),
             })
             .await?;
         let meta = result.meta;
@@ -321,6 +326,9 @@ impl DsFrontend {
                 H_STREAM_EXPIRES_AT,
                 &format_instant(expires_at_ms),
             );
+        }
+        if let Some(schema_name) = &meta.schema_name {
+            set_header(&mut response, H_STREAM_SCHEMA, schema_name);
         }
         Ok(response)
     }

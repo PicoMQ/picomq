@@ -1,5 +1,6 @@
 //! CreateTopics and DeleteTopics.
 
+use kafka_protocol::messages::create_topics_request::CreatableTopicConfig;
 use kafka_protocol::messages::create_topics_response::{
     CreatableTopicResult, CreateTopicsResponse,
 };
@@ -18,6 +19,10 @@ use crate::handlers::common::{
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 use crate::topic::{kafka_content_type, stream_name, validate_topic_name};
+
+/// Topic config that binds a CreateTopics topic to a registered schema name.
+pub const SCHEMA_CONFIG: &str = "pico.schema";
+pub const SCHEMA_VALIDATE_CONFIG: &str = "pico.schema.validate";
 
 pub async fn create(
     ctx: &BrokerContext,
@@ -56,15 +61,25 @@ pub async fn create(
             );
             continue;
         }
-        match ctx
-            .service
-            .create(CreateCommand::with_external_id(
-                stream.clone(),
-                kafka_content_type(),
-                new_topic_id(),
-            ))
-            .await
-        {
+        let (schema_name, schema_validate) = match schema_configs(&topic.configs) {
+            Ok(parsed) => parsed,
+            Err(code) => {
+                topics.push(
+                    CreatableTopicResult::default()
+                        .with_name(topic_name(&name))
+                        .with_error_code(code),
+                );
+                continue;
+            }
+        };
+        let mut command =
+            CreateCommand::with_external_id(stream.clone(), kafka_content_type(), new_topic_id());
+        if let Some(schema_name) = schema_name {
+            command = command
+                .with_schema_name(schema_name)
+                .with_schema_validate(schema_validate);
+        }
+        match ctx.service.create(command).await {
             Ok(result) if result.created => topics.push(
                 CreatableTopicResult::default()
                     .with_name(topic_name(&name))
@@ -162,4 +177,42 @@ pub async fn delete(
         req.api_version,
         &response,
     )))
+}
+
+fn schema_configs(configs: &[CreatableTopicConfig]) -> Result<(Option<String>, bool), i16> {
+    let mut schema_name = None;
+    let mut schema_validate = false;
+    for config in configs {
+        let Some(value) = config
+            .value
+            .as_ref()
+            .map(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+        else {
+            if config.name.as_str() == SCHEMA_CONFIG
+                || config.name.as_str() == SCHEMA_VALIDATE_CONFIG
+            {
+                return Err(INVALID_REQUEST);
+            }
+            continue;
+        };
+        match config.name.as_str() {
+            SCHEMA_CONFIG => {
+                if schema_name.is_some() {
+                    return Err(INVALID_REQUEST);
+                }
+                schema_name = Some(value.to_owned());
+            }
+            SCHEMA_VALIDATE_CONFIG => match value {
+                "true" => schema_validate = true,
+                "false" => schema_validate = false,
+                _ => return Err(INVALID_REQUEST),
+            },
+            _ => {}
+        }
+    }
+    if schema_validate && schema_name.is_none() {
+        return Err(INVALID_REQUEST);
+    }
+    Ok((schema_name, schema_validate))
 }

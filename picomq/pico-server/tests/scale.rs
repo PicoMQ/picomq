@@ -87,6 +87,8 @@ async fn run_gate(total: u64) {
                     initial_payload: Bytes::new(),
                     external_id: None,
                     internal: false,
+                    schema_name: None,
+                    schema_validate: false,
                 })
                 .await
                 .unwrap();

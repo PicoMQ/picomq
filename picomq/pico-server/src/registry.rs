@@ -40,6 +40,9 @@ pub struct RegistryEntry {
     pub numeric_producers: BTreeMap<i64, NumericProducerEntry>,
     /// Offset up to which `numeric_producers` is known complete.
     pub producer_state_offset: u64,
+    /// Optional registry schema name bound at create time.
+    pub schema_name: Option<String>,
+    pub schema_validate: bool,
 }
 
 impl RegistryEntry {
@@ -75,7 +78,7 @@ impl RegistryEntry {
 
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
-        buf.put_u8(1);
+        buf.put_u8(2);
         buf.put_i64(self.stream_id as i64);
         put_str(&mut buf, &self.content_type);
         buf.put_u8(self.ttl_seconds.is_some() as u8);
@@ -112,6 +115,8 @@ impl RegistryEntry {
             }
         }
         buf.put_i64(self.producer_state_offset as i64);
+        put_str(&mut buf, self.schema_name.as_deref().unwrap_or(""));
+        buf.put_u8(self.schema_validate as u8);
         buf.freeze()
     }
 
@@ -119,7 +124,7 @@ impl RegistryEntry {
         let corrupt = |m: String| ServiceError::with_message(ErrorKind::BadRequest, None, false, m);
         let mut buf = bytes;
         let version = get_u8(&mut buf)?;
-        if version != 1 {
+        if version != 1 && version != 2 {
             return Err(corrupt(format!("unknown registry entry version {version}")));
         }
         let stream_id = get_i64(&mut buf)? as u64;
@@ -191,6 +196,12 @@ impl RegistryEntry {
             );
         }
         let producer_state_offset = get_i64(&mut buf)? as u64;
+        let (schema_name, schema_validate) = if version >= 2 {
+            let raw = get_str(&mut buf)?;
+            ((!raw.is_empty()).then_some(raw), get_u8(&mut buf)? == 1)
+        } else {
+            (None, false)
+        };
         Ok(Self {
             stream_id,
             content_type,
@@ -204,6 +215,8 @@ impl RegistryEntry {
             external_id,
             numeric_producers,
             producer_state_offset,
+            schema_name,
+            schema_validate,
         })
     }
 }
@@ -363,6 +376,8 @@ mod tests {
                 },
             )]),
             producer_state_offset: 106,
+            schema_name: None,
+            schema_validate: false,
         }
     }
 
@@ -379,6 +394,8 @@ mod tests {
                 closed: true,
                 external_id: [0; 16],
                 numeric_producers: BTreeMap::new(),
+                schema_name: Some("orders".into()),
+                schema_validate: true,
                 ..entry()
             },
         ] {

@@ -4,14 +4,15 @@ use kafka_protocol::messages::produce_response::{
 };
 use kafka_protocol::messages::ProduceRequest;
 use kafka_protocol::protocol::Decodable;
-use pico_server::{AppendBatchCommand, BatchSpan, NumericProducer};
+use kafka_protocol::records::RecordBatchDecoder;
+use pico_server::{AppendBatchCommand, BatchSpan, NumericProducer, SchemaBatch, SchemaRecord};
 
 use crate::batch::decode_batches;
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
     encode_response, ensure_local_leader, service_error_code, topic_name, CORRUPT_MESSAGE,
-    INVALID_REQUEST, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION,
+    INVALID_RECORD, INVALID_REQUEST, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 use crate::topic::{stream_name, validate_topic_name};
@@ -114,6 +115,21 @@ async fn produce_partition(
     {
         return Err(INVALID_REQUEST);
     }
+    let schema_name = ctx
+        .service
+        .validation_schema_of(stream)
+        .await
+        .map_err(|error| {
+            tracing::debug!(%error, stream, "schema bind lookup failed");
+            service_error_code(&error)
+        })?;
+    if let Some(schema_name) = schema_name {
+        let batch = schema_batch(stream, &records)?;
+        if let Err(error) = ctx.service.validate_schema(&schema_name, &batch).await {
+            tracing::debug!(%error, stream, %schema_name, "schema validation failed");
+            return Err(INVALID_RECORD);
+        }
+    }
     let first = &batches[0].info;
     let producer = if first.producer_id >= 0 {
         // The service enforces the single-batch requirement.
@@ -148,4 +164,37 @@ async fn produce_partition(
             service_error_code(&error)
         })?;
     Ok((result.base_offset as i64, result.log_start_offset as i64))
+}
+
+fn schema_batch(stream: &str, records: &Bytes) -> Result<SchemaBatch, i16> {
+    let mut buf = records.clone();
+    let sets = RecordBatchDecoder::decode_all(&mut buf).map_err(|error| {
+        tracing::debug!(%error, stream, "rejected produce payload");
+        CORRUPT_MESSAGE
+    })?;
+    let base_timestamp = sets
+        .first()
+        .and_then(|set| set.records.first())
+        .map(|record| record.timestamp)
+        .unwrap_or(0);
+    let records = sets
+        .iter()
+        .flat_map(|set| set.records.iter())
+        .map(|record| {
+            let mut builder = SchemaRecord::builder();
+            if let Some(key) = record.key.clone() {
+                builder = builder.key(key);
+            }
+            if let Some(value) = record.value.clone() {
+                builder = builder.value(value);
+            }
+            builder
+                .timestamp_delta(record.timestamp.saturating_sub(base_timestamp))
+                .build()
+        })
+        .collect();
+    Ok(SchemaBatch {
+        base_timestamp,
+        records,
+    })
 }

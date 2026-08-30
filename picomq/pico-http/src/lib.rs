@@ -2,6 +2,7 @@
 
 pub mod admin;
 mod auth;
+pub mod common;
 pub mod ds;
 mod http;
 pub mod pico;

@@ -73,6 +73,17 @@ impl PicoNode {
         object_storage: Arc<dyn ObjectStorageTrait>,
         wal_storage: Arc<dyn ObjectStorageTrait>,
     ) -> Result<Self, ServiceError> {
+        Self::start_with_schema(config, sink, views, object_storage, wal_storage, None).await
+    }
+
+    pub async fn start_with_schema(
+        config: NodeConfig,
+        sink: Arc<dyn CommandSink>,
+        views: Arc<ViewPublisher>,
+        object_storage: Arc<dyn ObjectStorageTrait>,
+        wal_storage: Arc<dyn ObjectStorageTrait>,
+        schema_registry: Option<pico_schema::Registry>,
+    ) -> Result<Self, ServiceError> {
         let handle =
             MetadataNodeHandle::new(config.node_id, config.node_epoch, sink, views.clone());
         handle
@@ -102,13 +113,17 @@ impl PicoNode {
             .await?;
 
         let kv_client: Arc<dyn KVClient> = engine.kv_client();
-        let service = Arc::new(S3StreamService::new(
+        let mut service = S3StreamService::new(
             engine.stream_client(),
             kv_client.clone(),
             views.clone(),
             handle.clone(),
             Arc::new(StreamWaiterRegistry::new()),
-        ));
+        );
+        if let Some(registry) = schema_registry {
+            service = service.with_schema_registry(registry);
+        }
+        let service = Arc::new(service);
         let ownership = Arc::new(MetadataOwnershipService::new(
             views.clone(),
             config.node_id,

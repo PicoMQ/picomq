@@ -29,7 +29,7 @@ Record batches are stored verbatim. The broker patches each batch's base-offset 
 | --- | --- |
 | Produce | `acks` 0, 1, and all behave identically: an acknowledged record is durable on object storage. Idempotent producers get exact broker semantics with epoch fencing, sequence checking, and duplicate replay at the original offset. |
 | Fetch | Long-polling with `fetch.min.bytes` and `fetch.max.wait.ms`, served from the same event-driven waiters as HTTP long polls. |
-| Topics | `CreateTopics` and `DeleteTopics` for single-partition topics, plus metadata auto-creation when the client enables it. Requests for more than one partition are rejected. |
+| Topics | `CreateTopics` and `DeleteTopics` for single-partition topics, plus metadata auto-creation when the client enables it. Requests for more than one partition are rejected. The `pico.schema` config binds a [schema](/docs/schemas), and `pico.schema.validate=true` validates produce against it. |
 | Offsets | `ListOffsets` for earliest, latest, and by timestamp. |
 | Consumer groups | The classic group protocol: `FindCoordinator`, join/sync/heartbeat/leave, offset commit and fetch, describe and list. Rebalances, generations, and fencing follow Kafka's state machine. |
 | Not supported | Transactions and control batches (rejected as invalid), multiple partitions per topic, the KIP-848 consumer protocol, and SASL (see the note on exposure below). |

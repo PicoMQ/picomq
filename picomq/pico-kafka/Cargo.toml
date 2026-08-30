@@ -21,6 +21,8 @@ tracing = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+pico-schema = { workspace = true }
+object_store = { workspace = true }
 pico-metadata = { workspace = true }
 pico-server = { workspace = true }
 s3stream = { workspace = true }

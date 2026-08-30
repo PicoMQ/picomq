@@ -32,6 +32,8 @@ Creates the stream. Idempotent: `201` when created, `200` when it already exists
 | `Pico-TTL` | Seconds of retention. Records older than this expire. |
 | `Pico-Expires-At` | Absolute expiry time for the stream. |
 | `Pico-Closed` | `true` creates the stream already sealed. |
+| `Pico-Schema` | Binds a registered [schema](/docs/schemas) by name. |
+| `Pico-Schema-Validate` | `true` validates appends against the bound schema. Defaults to `false`. |
 
 ## Append
 
@@ -85,7 +87,7 @@ Catch-up responses include an `ETag` and honor `If-None-Match` with `304`, so po
 HEAD /{stream}
 ```
 
-Returns the stream's metadata in headers with no body: `Pico-Next-Seq`, `Pico-Start-Seq`, `Pico-TTL`, `Pico-Expires-At`, and `Pico-Closed`. `404` when the stream does not exist.
+Returns the stream's metadata in headers with no body: `Pico-Next-Seq`, `Pico-Start-Seq`, `Pico-TTL`, `Pico-Expires-At`, `Pico-Closed`, and `Pico-Schema` when bound. `404` when the stream does not exist.
 
 ## Delete
 
@@ -102,6 +104,10 @@ GET /?prefix=/logs/&limit=100
 ```
 
 Lists streams as JSON. `prefix` filters by name prefix, `limit` caps the page, and `start_after` continues after a name from the previous page.
+
+## Schemas
+
+Schema registration (`/_schemas/{name}`) shares this listener and is covered in [Schemas](/docs/schemas).
 
 ## Admin API
 

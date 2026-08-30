@@ -27,6 +27,7 @@ pub const INVALID_REQUEST: i16 = 42;
 pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 pub const INVALID_PRODUCER_EPOCH: i16 = 47;
 pub const KAFKA_STORAGE_ERROR: i16 = 56;
+pub const INVALID_RECORD: i16 = 87;
 pub const GROUP_ID_NOT_FOUND: i16 = 69;
 pub const MEMBER_ID_REQUIRED: i16 = 79;
 pub const GROUP_MAX_SIZE_REACHED: i16 = 81;

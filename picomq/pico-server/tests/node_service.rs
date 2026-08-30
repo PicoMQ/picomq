@@ -56,6 +56,8 @@ fn create(name: &str, content_type: &str) -> CreateCommand {
         initial_payload: Bytes::new(),
         external_id: None,
         internal: false,
+        schema_name: None,
+        schema_validate: false,
     }
 }
 
@@ -1293,6 +1295,98 @@ async fn list_paginates_with_start_after() {
         vec!["/page/4"]
     );
     assert!(!last.has_more);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn append_rejects_schema_invalid_records() {
+    use bytes::Bytes;
+    use object_store::memory::InMemory;
+    use pico_schema::{Registry, SchemaFormat};
+
+    let store = InMemory::new();
+    let schema = Bytes::from_static(
+        br#"{
+        "title": "Person",
+        "type": "object",
+        "properties": {
+            "value": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                },
+                "required": ["name"]
+            }
+        }
+    }"#,
+    );
+
+    let (sink, views) = LocalSink::new();
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
+    let node = PicoNode::start_with_schema(
+        NodeConfig {
+            node_id: 1,
+            node_epoch: 1,
+            http_address: "http://127.0.0.1:4010".into(),
+            ..Default::default()
+        },
+        Arc::new(sink),
+        views,
+        object_storage,
+        wal_storage,
+        Some(Registry::new(store)),
+    )
+    .await
+    .unwrap();
+    let services = node.service();
+
+    services
+        .put_schema("person", SchemaFormat::Json, schema)
+        .await
+        .unwrap();
+    let fetched = services.get_schema("person").await.unwrap().unwrap();
+    assert_eq!(fetched.0, SchemaFormat::Json);
+
+    let mut cmd = create("/streams/orders", "application/json");
+    cmd.schema_name = Some("person".into());
+    cmd.schema_validate = true;
+    services.create(cmd).await.unwrap();
+
+    let ok = services
+        .append(append(
+            "/streams/orders",
+            &[br#"{"name":"alice"}"#],
+            "application/json",
+        ))
+        .await
+        .unwrap();
+    assert!(ok.applied);
+
+    let err = services
+        .append(append(
+            "/streams/orders",
+            &[br#"{"name":1}"#],
+            "application/json",
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::BadRequest);
+
+    // Unbound stream ignores the registered schema.
+    services
+        .create(create("/streams/raw", "application/json"))
+        .await
+        .unwrap();
+    services
+        .append(append(
+            "/streams/raw",
+            &[br#"{"name":1}"#],
+            "application/json",
+        ))
+        .await
+        .unwrap();
 
     node.close().await;
 }

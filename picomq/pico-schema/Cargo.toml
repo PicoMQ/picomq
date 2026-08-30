@@ -1,0 +1,39 @@
+[package]
+name = "pico-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Optional Avro/JSON/Protobuf schema registry and Arrow conversion for PicoMQ"
+repository.workspace = true
+
+[features]
+default = ["arrow"]
+arrow = ["dep:arrow"]
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+apache-avro = { workspace = true }
+arrow = { workspace = true, optional = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+jsonschema = { workspace = true }
+num-bigint = { workspace = true }
+object_store = { workspace = true }
+protobuf = { workspace = true }
+protobuf-json-mapping = { workspace = true }
+protobuf-parse = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { workspace = true }

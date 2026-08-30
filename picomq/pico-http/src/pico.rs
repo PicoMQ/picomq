@@ -27,8 +27,8 @@ use pico_protocol::envelope::{
 use pico_protocol::pico::{
     CT_BATCH_BINARY, CT_BATCH_JSON, CT_CORE, CT_CORE_PARAM, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT,
     H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT, H_MATCH_SEQ, H_NEXT_SEQ, H_PRODUCER_EPOCH,
-    H_PRODUCER_ID, H_PRODUCER_SEQ, H_RECEIVED_SEQ, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL,
-    H_UP_TO_DATE,
+    H_PRODUCER_ID, H_PRODUCER_SEQ, H_RECEIVED_SEQ, H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ,
+    H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE,
 };
 use pico_server::framing::{mime_equals, mime_of};
 use pico_server::ownership::OwnershipService;
@@ -239,6 +239,10 @@ impl PicoFrontend {
                 initial_payload: Bytes::new(),
                 external_id: None,
                 internal: false,
+                schema_name: header_str(headers, H_SCHEMA)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+                schema_validate: truthy(headers, H_SCHEMA_VALIDATE),
             })
             .await?;
         let meta = result.meta;
@@ -828,6 +832,9 @@ fn write_meta(response: &mut Response, meta: &StreamMeta) {
     }
     if let Some(expires_at_ms) = meta.expires_at_ms {
         set_header(response, H_EXPIRES_AT, &format_instant(expires_at_ms));
+    }
+    if let Some(schema_name) = &meta.schema_name {
+        set_header(response, H_SCHEMA, schema_name);
     }
 }
 

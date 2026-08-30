@@ -23,6 +23,7 @@ members = [
     "picomq/pico-runtime",
     "picomq/pico-client",
     "picomq/pico-cli",
+    "picomq/pico-schema",
 ]
 
 [workspace.package]
@@ -49,6 +50,21 @@ pico-kafka = { path = "picomq/pico-kafka" }
 pico-http = { path = "picomq/pico-http" }
 pico-runtime = { path = "picomq/pico-runtime" }
 pico-client = { path = "picomq/pico-client" }
+pico-schema = { path = "picomq/pico-schema" }
+
+# Schema registry / Arrow conversion (pico-schema)
+anyhow = "1"
+apache-avro = "0.21"
+arrow = "57"
+chrono = "0.4"
+jsonschema = "0.45"
+num-bigint = "0.4"
+pretty_assertions = "1"
+protobuf = { version = "3.7", features = ["with-bytes"] }
+protobuf-json-mapping = "3.7"
+protobuf-parse = "3.7"
+url = "2"
+uuid = { version = "1", features = ["serde", "v4", "v7"] }
 
 # CLI (PORT of Java `cli`: picocli -> clap; slf4j/logback -> tracing).
 clap = { version = "4", features = ["derive", "env"] }

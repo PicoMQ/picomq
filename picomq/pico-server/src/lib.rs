@@ -16,6 +16,9 @@ pub use auth::{KvTokenStore, TokenService, TOKEN_KEY_PREFIX};
 pub use error::{ErrorKind, ServiceError};
 pub use node::{NodeConfig, PicoNode};
 pub use ownership::{MetadataOwnershipService, OwnershipService};
+pub use pico_schema::{
+    Batch as SchemaBatch, Record as SchemaRecord, Registry as SchemaRegistry, SchemaFormat,
+};
 pub use service::{is_reserved_name, S3StreamService};
 pub use transfer::TransferWatcher;
 pub use types::{

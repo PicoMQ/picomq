@@ -186,6 +186,9 @@ pub struct CreateCommand {
     /// streams under the reserved `/_sys/` prefix. Client frontends must
     /// leave this false.
     pub internal: bool,
+    /// Registry schema name to bind.
+    pub schema_name: Option<String>,
+    pub schema_validate: bool,
 }
 
 impl CreateCommand {
@@ -204,7 +207,19 @@ impl CreateCommand {
             initial_payload: Bytes::new(),
             external_id: Some(external_id),
             internal: false,
+            schema_name: None,
+            schema_validate: false,
         }
+    }
+
+    pub fn with_schema_name(mut self, schema_name: impl Into<String>) -> Self {
+        self.schema_name = Some(schema_name.into());
+        self
+    }
+
+    pub fn with_schema_validate(mut self, validate: bool) -> Self {
+        self.schema_validate = validate;
+        self
     }
 
     pub fn validate(&self) -> Result<(), ServiceError> {
@@ -299,6 +314,8 @@ pub struct StreamMeta {
     pub closed: bool,
     /// Caller-assigned external identity, all zeros when none was set.
     pub external_id: [u8; 16],
+    /// Bound schema registry name, when set.
+    pub schema_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -381,6 +398,8 @@ mod tests {
             initial_payload: Bytes::new(),
             external_id: None,
             internal: false,
+            schema_name: None,
+            schema_validate: false,
         };
         assert!(cmd.validate().is_err());
     }

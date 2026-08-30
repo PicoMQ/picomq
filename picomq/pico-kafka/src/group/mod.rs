@@ -776,6 +776,8 @@ impl GroupCoordinator {
                 initial_payload: Bytes::new(),
                 external_id: None,
                 internal: true,
+                schema_name: None,
+                schema_validate: false,
             })
             .await
             .map(|_| ())

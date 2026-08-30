@@ -121,7 +121,7 @@ fn cors_headers(headers: &mut HeaderMap) {
     headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
     headers.insert(
         "Access-Control-Allow-Methods",
-        HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+        HeaderValue::from_static("GET, PUT, POST, DELETE, OPTIONS"),
     );
     headers.insert(
         "Access-Control-Allow-Headers",

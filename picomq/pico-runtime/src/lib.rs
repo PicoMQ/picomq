@@ -17,6 +17,8 @@ pub use config::{AuthMode, MetaBackend, ServerConfig};
 /// (`MetadataLifecycle`).
 const LIFECYCLE_TICK: Duration = Duration::from_secs(1);
 
+const SCHEMA_CACHE_EXPIRY: Duration = Duration::from_secs(30);
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("metadata store: {0}")]
@@ -47,6 +49,8 @@ pub enum RuntimeError {
     BootstrapToken(#[from] pico_auth::AuthError),
     #[error("bootstrap token {id:?} conflicts with a stored token of the same id")]
     BootstrapConflict { id: String },
+    #[error("schema registry: {0}")]
+    SchemaRegistry(#[from] pico_schema::Error),
 }
 
 /// A running PicoMQ process: metadata log, node, background maintenance and
@@ -62,6 +66,7 @@ pub struct PicoServer {
     /// Kept alive for the process lifetime: dropping it aborts the log's
     /// flusher/tailer tasks, so it must outlive the node.
     sink: Arc<SqlSink>,
+    schema_registry: Option<pico_schema::Registry>,
 }
 
 /// Open the metadata log, start the node, and serve the configured protocol,
@@ -86,6 +91,19 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             }
         }
     }
+
+    let schema_registry = match &config.schema_registry {
+        None => None,
+        Some(url) => {
+            let registry = url
+                .parse::<pico_schema::Builder>()?
+                .with_cache_expiry_after(Some(SCHEMA_CACHE_EXPIRY))
+                .build();
+            tracing::info!(%url, "schema registry enabled");
+            Some(registry)
+        }
+    };
+
     let store = open_store(&config.meta_backend).await?;
     let (sink, views) = SqlSink::open(store.clone(), SqlSinkConfig::default()).await?;
     let sink = Arc::new(sink);
@@ -127,7 +145,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         None => Default::default(),
     };
     let node = Arc::new(
-        PicoNode::start(
+        PicoNode::start_with_schema(
             NodeConfig {
                 node_id: config.node_id,
                 node_epoch: config.node_epoch,
@@ -141,6 +159,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             views,
             object_storage.clone(),
             wal_storage,
+            schema_registry.clone(),
         )
         .await?,
     );
@@ -234,6 +253,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         ttl_sweep,
         compaction_check,
         sink,
+        schema_registry,
     })
 }
 
@@ -313,6 +333,10 @@ impl PicoServer {
     /// The bound Kafka address, in Kafka mode.
     pub fn kafka_addr(&self) -> Option<std::net::SocketAddr> {
         self.kafka.as_ref().map(|(addr, _)| *addr)
+    }
+
+    pub fn schema_registry(&self) -> Option<&pico_schema::Registry> {
+        self.schema_registry.as_ref()
     }
 
     pub async fn shutdown(self) {
