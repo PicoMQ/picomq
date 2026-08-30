@@ -1823,21 +1823,12 @@ fn schema_batch_from_messages(
 ) -> Result<pico_schema::Batch, ServiceError> {
     let pico = framing::mime_of(Some(content_type)) == "application/x-picomq";
     let mut records = Vec::with_capacity(messages.len());
-    let mut base_timestamp = 0i64;
-    for (i, message) in messages.iter().enumerate() {
+    for message in messages {
         if pico {
             let envelope = pico_protocol::envelope::decode_envelope(message).map_err(|e| {
                 ServiceError::with_message(ErrorKind::BadRequest, None, false, e.to_string())
             })?;
-            if i == 0 {
-                base_timestamp = envelope.timestamp;
-            }
-            records.push(
-                pico_schema::Record::builder()
-                    .value(envelope.body)
-                    .timestamp_delta(envelope.timestamp.saturating_sub(base_timestamp))
-                    .build(),
-            );
+            records.push(pico_schema::Record::builder().value(envelope.body).build());
         } else {
             records.push(
                 pico_schema::Record::builder()
@@ -1846,10 +1837,7 @@ fn schema_batch_from_messages(
             );
         }
     }
-    Ok(pico_schema::Batch {
-        base_timestamp,
-        records,
-    })
+    Ok(pico_schema::Batch { records })
 }
 
 fn split_messages(

@@ -1,23 +1,16 @@
-//! Optional Avro / JSON Schema / Protobuf validation and Arrow conversion.
+//! Optional Avro / JSON Schema / Protobuf validation.
 
 use std::{
     collections::BTreeMap,
-    io,
-    num::TryFromIntError,
-    result,
-    string::FromUtf8Error,
+    io, result,
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, SystemTime},
 };
-
-#[cfg(feature = "arrow")]
-use arrow::{datatypes::DataType, error::ArrowError, record_batch::RecordBatch};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use jsonschema::ValidationError;
 use object_store::{path::Path, DynObjectStore, ObjectStore};
-use serde_json::Value;
 use tracing::{debug, instrument};
 
 pub mod avro;
@@ -27,61 +20,19 @@ pub mod record;
 
 pub use record::{Batch, Record};
 
-pub(crate) const ARROW_LIST_FIELD_NAME: &str = "element";
-pub(crate) const PARQUET_FIELD_ID_META_KEY: &str = "PARQUET:field_id";
-
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error(transparent)]
-    #[cfg(feature = "arrow")]
-    Arrow(#[from] ArrowError),
-
     #[error("{0}")]
     Avro(Box<apache_avro::Error>),
-
-    #[error("avro value cannot convert to json: {0:?}")]
-    AvroToJson(apache_avro::types::Value),
-
-    #[error("bad downcast for field {field}")]
-    BadDowncast { field: String },
-
-    #[error("arrow builders exhausted")]
-    BuilderExhausted,
-
-    #[error(transparent)]
-    ChronoParse(#[from] chrono::ParseError),
-
-    #[error("downcast failed")]
-    Downcast,
-
-    #[error(transparent)]
-    FromUtf8(#[from] FromUtf8Error),
-
-    #[error("invalid avro value: {0:?}")]
-    InvalidValue(apache_avro::types::Value),
-
-    #[error("invalid record")]
-    InvalidRecord,
 
     #[error(transparent)]
     Io(#[from] io::Error),
 
-    #[error("json to avro failed")]
-    JsonToAvro(Box<apache_avro::Schema>, Box<Value>),
-
-    #[error("json to avro field not found: {field}")]
-    JsonToAvroFieldNotFound {
-        schema: Box<apache_avro::Schema>,
-        value: Box<Value>,
-        field: String,
-    },
+    #[error("invalid record")]
+    InvalidRecord,
 
     #[error("{0}")]
     Message(String),
-
-    #[error("no common arrow type among {0:?}")]
-    #[cfg(feature = "arrow")]
-    NoCommonType(Vec<DataType>),
 
     #[error(transparent)]
     ObjectStore(#[from] object_store::Error),
@@ -116,13 +67,6 @@ pub enum Error {
     #[error("stream/topic without schema: {0}")]
     TopicWithoutSchema(String),
 
-    #[error(transparent)]
-    TryFromInt(#[from] TryFromIntError),
-
-    #[error("unsupported schema runtime value for {0:?}: {1}")]
-    #[cfg(feature = "arrow")]
-    UnsupportedSchemaRuntimeValue(DataType, Value),
-
     #[error("{0}")]
     ProtobufParse(String),
 
@@ -154,16 +98,6 @@ pub trait Validator {
     fn validate(&self, batch: &Batch) -> Result<()>;
 }
 
-#[cfg(feature = "arrow")]
-pub trait AsArrow {
-    fn as_arrow(
-        &self,
-        topic: &str,
-        partition: i32,
-        batch: &Batch,
-    ) -> impl std::future::Future<Output = Result<RecordBatch>> + Send;
-}
-
 #[derive(Clone, Debug)]
 pub enum Schema {
     Avro(Box<avro::Schema>),
@@ -193,18 +127,6 @@ impl Validator for Schema {
             Self::Avro(schema) => schema.validate(batch),
             Self::Json(schema) => schema.validate(batch),
             Self::Proto(schema) => schema.validate(batch),
-        }
-    }
-}
-
-#[cfg(feature = "arrow")]
-impl AsArrow for Schema {
-    #[instrument(skip(self, batch), ret)]
-    async fn as_arrow(&self, topic: &str, partition: i32, batch: &Batch) -> Result<RecordBatch> {
-        match self {
-            Self::Avro(schema) => schema.as_arrow(topic, partition, batch).await,
-            Self::Json(schema) => schema.as_arrow(topic, partition, batch).await,
-            Self::Proto(schema) => schema.as_arrow(topic, partition, batch).await,
         }
     }
 }
@@ -498,16 +420,6 @@ impl Registry {
         };
         schema.validate(batch)
     }
-
-    #[cfg(feature = "arrow")]
-    #[instrument(skip(self, batch), ret)]
-    pub async fn as_arrow(&self, name: &str, partition: i32, batch: &Batch) -> Result<RecordBatch> {
-        let schema = self
-            .schema(name)
-            .await?
-            .ok_or_else(|| Error::TopicWithoutSchema(name.to_owned()))?;
-        schema.as_arrow(name, partition, batch).await
-    }
 }
 
 #[async_trait]
@@ -638,42 +550,6 @@ message Value { string name = 1; }
             .record(Record::builder().key(encoded.0).value(encoded.1).build())
             .build();
         registry.validate("employee", &ok).await?;
-        Ok(())
-    }
-
-    #[cfg(feature = "arrow")]
-    #[tokio::test]
-    async fn json_as_arrow_smoke() -> Result<()> {
-        let store = InMemory::new();
-        let schema = br#"{
-            "title": "Person",
-            "type": "object",
-            "properties": {
-                "value": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string" }
-                    }
-                }
-            }
-        }"#;
-        store
-            .put(
-                &Path::from("person.json"),
-                PutPayload::from(Bytes::from_static(schema)),
-            )
-            .await?;
-        let registry = Registry::new(store);
-        let batch = Batch::builder()
-            .base_timestamp(1_234_567_890_000)
-            .record(
-                Record::builder()
-                    .value(Bytes::from_static(br#"{"name":"alice"}"#))
-                    .build(),
-            )
-            .build();
-        let rb = registry.as_arrow("person", 0, &batch).await?;
-        assert_eq!(rb.num_rows(), 1);
         Ok(())
     }
 

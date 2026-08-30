@@ -4,12 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Optional Avro/JSON/Protobuf schema registry and Arrow conversion for PicoMQ"
+description = "Optional Avro/JSON/Protobuf schema registry and validation for PicoMQ"
 repository.workspace = true
-
-[features]
-default = ["arrow"]
-arrow = ["dep:arrow"]
 
 [lints]
 workspace = true
@@ -17,12 +13,9 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 apache-avro = { workspace = true }
-arrow = { workspace = true, optional = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
-chrono = { workspace = true }
 jsonschema = { workspace = true }
-num-bigint = { workspace = true }
 object_store = { workspace = true }
 protobuf = { workspace = true }
 protobuf-json-mapping = { workspace = true }

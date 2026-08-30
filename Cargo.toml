@@ -52,13 +52,10 @@ pico-runtime = { path = "picomq/pico-runtime" }
 pico-client = { path = "picomq/pico-client" }
 pico-schema = { path = "picomq/pico-schema" }
 
-# Schema registry / Arrow conversion (pico-schema)
+# Schema registry / validation (pico-schema)
 anyhow = "1"
 apache-avro = "0.21"
-arrow = "57"
-chrono = "0.4"
 jsonschema = "0.45"
-num-bigint = "0.4"
 pretty_assertions = "1"
 protobuf = { version = "3.7", features = ["with-bytes"] }
 protobuf-json-mapping = "3.7"

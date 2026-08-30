@@ -172,11 +172,6 @@ fn schema_batch(stream: &str, records: &Bytes) -> Result<SchemaBatch, i16> {
         tracing::debug!(%error, stream, "rejected produce payload");
         CORRUPT_MESSAGE
     })?;
-    let base_timestamp = sets
-        .first()
-        .and_then(|set| set.records.first())
-        .map(|record| record.timestamp)
-        .unwrap_or(0);
     let records = sets
         .iter()
         .flat_map(|set| set.records.iter())
@@ -188,13 +183,8 @@ fn schema_batch(stream: &str, records: &Bytes) -> Result<SchemaBatch, i16> {
             if let Some(value) = record.value.clone() {
                 builder = builder.value(value);
             }
-            builder
-                .timestamp_delta(record.timestamp.saturating_sub(base_timestamp))
-                .build()
+            builder.build()
         })
         .collect();
-    Ok(SchemaBatch {
-        base_timestamp,
-        records,
-    })
+    Ok(SchemaBatch { records })
 }

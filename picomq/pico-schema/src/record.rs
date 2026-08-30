@@ -4,7 +4,6 @@ use bytes::Bytes;
 pub struct Record {
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
-    pub timestamp_delta: i64,
 }
 
 impl Record {
@@ -25,7 +24,6 @@ impl Record {
 pub struct RecordBuilder {
     key: Option<Bytes>,
     value: Option<Bytes>,
-    timestamp_delta: i64,
 }
 
 impl RecordBuilder {
@@ -39,23 +37,16 @@ impl RecordBuilder {
         self
     }
 
-    pub fn timestamp_delta(mut self, timestamp_delta: i64) -> Self {
-        self.timestamp_delta = timestamp_delta;
-        self
-    }
-
     pub fn build(self) -> Record {
         Record {
             key: self.key,
             value: self.value,
-            timestamp_delta: self.timestamp_delta,
         }
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Batch {
-    pub base_timestamp: i64,
     pub records: Vec<Record>,
 }
 
@@ -67,16 +58,10 @@ impl Batch {
 
 #[derive(Clone, Debug, Default)]
 pub struct BatchBuilder {
-    base_timestamp: i64,
     records: Vec<Record>,
 }
 
 impl BatchBuilder {
-    pub fn base_timestamp(mut self, base_timestamp: i64) -> Self {
-        self.base_timestamp = base_timestamp;
-        self
-    }
-
     pub fn record(mut self, record: Record) -> Self {
         self.records.push(record);
         self
@@ -84,7 +69,6 @@ impl BatchBuilder {
 
     pub fn build(self) -> Batch {
         Batch {
-            base_timestamp: self.base_timestamp,
             records: self.records,
         }
     }

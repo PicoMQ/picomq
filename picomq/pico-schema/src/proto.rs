@@ -28,13 +28,9 @@ use serde_json::Value;
 use tempfile::{tempdir, NamedTempFile};
 use tracing::{debug, error};
 
-#[cfg(feature = "arrow")]
-mod arrow;
-
 #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum MessageKind {
     Key,
-    Meta,
     Value,
 }
 
@@ -42,7 +38,6 @@ impl AsRef<str> for MessageKind {
     fn as_ref(&self) -> &str {
         match self {
             MessageKind::Key => "Key",
-            MessageKind::Meta => "Meta",
             MessageKind::Value => "Value",
         }
     }
@@ -148,7 +143,7 @@ impl TryFrom<Bytes> for Schema {
 
     fn try_from(proto: Bytes) -> Result<Self, Self::Error> {
         make_fd(proto)
-            .map(|mut protos| {
+            .inspect(|protos| {
                 debug!(
                     protos = ?protos
                         .iter()
@@ -159,23 +154,6 @@ impl TryFrom<Bytes> for Schema {
                         })
                         .collect::<Vec<_>>()
                 );
-
-                if let Some(mut meta) = META_FILE_DESCRIPTOR.clone() {
-                    debug!(
-                        meta = ?meta
-                            .iter()
-                            .flat_map(|proto| {
-                                proto
-                                    .messages()
-                                    .map(|message| message.name_to_package().to_owned())
-                            })
-                            .collect::<Vec<_>>()
-                    );
-
-                    protos.append(&mut meta);
-                }
-
-                protos
             })
             .map(|file_descriptors| Self { file_descriptors })
     }
@@ -191,9 +169,6 @@ static WELL_KNOWN_TYPES: LazyLock<Vec<FileDescriptor>> = LazyLock::new(|| {
         well_known_types::wrappers::file_descriptor().to_owned(),
     ]
 });
-
-static META_FILE_DESCRIPTOR: LazyLock<Option<Vec<FileDescriptor>>> =
-    LazyLock::new(|| make_fd(Bytes::from_static(include_bytes!("meta.proto"))).ok());
 
 fn make_fd(proto: Bytes) -> Result<Vec<FileDescriptor>> {
     tempdir().map_err(Into::into).and_then(|temp_dir| {
