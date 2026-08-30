@@ -2,6 +2,12 @@
 
 A schema is a named resource registered once and shared: any number of streams bind to it by name at create time. Writes to a bound stream are validated against the schema before they are acknowledged. Unbound streams are untouched, and reads always return the stored bytes, so decoding stays with the client.
 
+::: info Note
+The schema registry is built into Pico so you do not need a separate external registry. Register a schema and bind it to a stream so clients can discover the payload model.
+
+Broker-side validation (`schemaValidate`) adds CPU cost and reduces write throughput. Prefer validating in producers and consumers. Use the registry as discovery metadata, not as an enforcement path.
+:::
+
 Schemas are opt-in. A node started without `--schema-registry` validates nothing.
 
 <div class="pico-diagram">
