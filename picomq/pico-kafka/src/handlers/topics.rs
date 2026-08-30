@@ -211,8 +211,5 @@ fn schema_configs(configs: &[CreatableTopicConfig]) -> Result<(Option<String>, b
             _ => {}
         }
     }
-    if schema_validate && schema_name.is_none() {
-        return Err(INVALID_REQUEST);
-    }
     Ok((schema_name, schema_validate))
 }

@@ -16,6 +16,8 @@ tags:
     description: The Pico protocol.
   - name: schemas
     description: Schema registry on the protocol listener.
+  - name: stream-config
+    description: Protocol-neutral stream config on the protocol listener.
   - name: admin
     description: Admin listener endpoints (default port 9090).
   - name: tokens
@@ -275,6 +277,68 @@ paths:
       responses:
         "204":
           description: Deleted. The name is immediately reusable.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such stream.
+
+  /_streams/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        description: The stream path without requiring a leading slash. Topic `orders` is `/orders`.
+        schema: { type: string }
+    get:
+      tags: [stream-config]
+      summary: Read stream schema config
+      operationId: getStreamConfig
+      responses:
+        "200":
+          description: Current schema bind and validation flag.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema: { type: string, nullable: true }
+                  schemaValidate: { type: boolean }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such stream.
+    patch:
+      tags: [stream-config]
+      summary: Update stream schema config
+      operationId: patchStreamConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                schema: { type: string, nullable: true }
+                schemaValidate: { type: boolean }
+      responses:
+        "200":
+          description: Updated config.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema: { type: string, nullable: true }
+                  schemaValidate: { type: boolean }
+        "400":
+          description: Empty patch, unknown schema, or invalid body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":

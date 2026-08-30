@@ -2541,6 +2541,7 @@ dependencies = [
  "durable-streams",
  "futures",
  "humantime",
+ "object_store",
  "pico-auth",
  "pico-common",
  "pico-metadata",
@@ -2634,6 +2635,7 @@ dependencies = [
  "anyhow",
  "apache-avro",
  "arrow",
+ "async-trait",
  "bytes",
  "chrono",
  "jsonschema",
@@ -2649,7 +2651,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]

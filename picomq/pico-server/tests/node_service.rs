@@ -36,6 +36,7 @@ async fn start_node(
         views,
         object_storage,
         wal_storage,
+        None,
     )
     .await
     .unwrap()
@@ -526,6 +527,7 @@ async fn start_shared_node(
         views,
         object_storage,
         wal_storage,
+        None,
     )
     .await
     .unwrap()
@@ -760,6 +762,7 @@ async fn named_streams_survive_restart() {
         views.clone(),
         object_storage.clone(),
         wal_storage.clone(),
+        None,
     )
     .await
     .unwrap();
@@ -784,6 +787,7 @@ async fn named_streams_survive_restart() {
         views,
         object_storage,
         wal_storage,
+        None,
     )
     .await
     .unwrap();
@@ -1019,6 +1023,7 @@ async fn kafka_producer_state_survives_restart_via_rescan() {
         views.clone(),
         object_storage.clone(),
         wal_storage.clone(),
+        None,
     )
     .await
     .unwrap();
@@ -1057,6 +1062,7 @@ async fn kafka_producer_state_survives_restart_via_rescan() {
         views,
         object_storage,
         wal_storage,
+        None,
     )
     .await
     .unwrap();
@@ -1325,7 +1331,7 @@ async fn append_rejects_schema_invalid_records() {
     let (sink, views) = LocalSink::new();
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
-    let node = PicoNode::start_with_schema(
+    let node = PicoNode::start(
         NodeConfig {
             node_id: 1,
             node_epoch: 1,
@@ -1336,7 +1342,7 @@ async fn append_rejects_schema_invalid_records() {
         views,
         object_storage,
         wal_storage,
-        Some(Registry::new(store)),
+        Some(Arc::new(Registry::new(store))),
     )
     .await
     .unwrap();
@@ -1382,6 +1388,23 @@ async fn append_rejects_schema_invalid_records() {
     services
         .append(append(
             "/streams/raw",
+            &[br#"{"name":1}"#],
+            "application/json",
+        ))
+        .await
+        .unwrap();
+
+    services
+        .update_stream(pico_server::UpdateStreamCommand {
+            name: "/streams/orders".into(),
+            schema_name: None,
+            schema_validate: Some(false),
+        })
+        .await
+        .unwrap();
+    services
+        .append(append(
+            "/streams/orders",
             &[br#"{"name":1}"#],
             "application/json",
         ))

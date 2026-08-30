@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use pico_http::{serve, Protocol, RoutingMode, RunningServer, ServeOptions};
 use pico_metadata::LocalSink;
-use pico_schema::Registry;
+use pico_schema::{Registry, SchemaStore};
 use pico_server::{NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
@@ -29,10 +29,10 @@ pub async fn start_node() -> Arc<PicoNode> {
 }
 
 pub async fn start_node_with_schema(registry: Registry) -> Arc<PicoNode> {
-    start_node_inner(Some(registry)).await
+    start_node_inner(Some(Arc::new(registry))).await
 }
 
-async fn start_node_inner(schema_registry: Option<Registry>) -> Arc<PicoNode> {
+async fn start_node_inner(schema_registry: Option<Arc<dyn SchemaStore>>) -> Arc<PicoNode> {
     let (sink, views) = LocalSink::new();
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(3));
@@ -42,7 +42,7 @@ async fn start_node_inner(schema_registry: Option<Registry>) -> Arc<PicoNode> {
         ..Default::default()
     };
     Arc::new(
-        PicoNode::start_with_schema(
+        PicoNode::start(
             NodeConfig {
                 node_id: 1,
                 node_epoch: 1,

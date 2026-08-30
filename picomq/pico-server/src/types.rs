@@ -235,6 +235,34 @@ impl CreateCommand {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamConfig {
+    pub name: String,
+    pub schema_name: Option<String>,
+    pub schema_validate: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateStreamCommand {
+    pub name: String,
+    pub schema_name: Option<Option<String>>,
+    pub schema_validate: Option<bool>,
+}
+
+impl UpdateStreamCommand {
+    pub fn validate(&self) -> Result<(), ServiceError> {
+        if self.schema_name.is_none() && self.schema_validate.is_none() {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "no stream config fields to update",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateResult {
     pub created: bool,

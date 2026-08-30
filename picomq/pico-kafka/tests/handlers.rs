@@ -43,6 +43,7 @@ async fn test_broker() -> BrokerContext {
         views,
         object_storage,
         wal_storage,
+        None,
     )
     .await
     .unwrap();
@@ -841,11 +842,9 @@ async fn classic_group_lifecycle_and_offset_replay() {
 async fn create_topics_binds_pico_schema_and_validates_produce() {
     use kafka_protocol::messages::create_topics_request::{CreatableTopic, CreatableTopicConfig};
     use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse, ProduceResponse};
-    use object_store::memory::InMemory;
-    use pico_schema::{Registry, SchemaFormat};
+    use pico_schema::SchemaFormat;
 
-    let store = InMemory::new();
-    let registry = Registry::new(store);
+    let registry = pico_schema::Registry::new(object_store::memory::InMemory::new());
     let schema = bytes::Bytes::from_static(
         br#"{
         "title": "Person",
@@ -870,7 +869,7 @@ async fn create_topics_binds_pico_schema_and_validates_produce() {
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(20));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(21));
-    let node = PicoNode::start_with_schema(
+    let node = PicoNode::start(
         NodeConfig {
             node_id: 1,
             node_epoch: 1,
@@ -885,7 +884,7 @@ async fn create_topics_binds_pico_schema_and_validates_produce() {
         views,
         object_storage,
         wal_storage,
-        Some(registry),
+        Some(Arc::new(registry)),
     )
     .await
     .unwrap();

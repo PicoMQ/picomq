@@ -18,6 +18,7 @@ workspace = true
 anyhow = { workspace = true }
 apache-avro = { workspace = true }
 arrow = { workspace = true, optional = true }
+async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 jsonschema = { workspace = true }
@@ -31,7 +32,6 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-url = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

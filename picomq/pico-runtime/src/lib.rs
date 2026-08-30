@@ -49,8 +49,6 @@ pub enum RuntimeError {
     BootstrapToken(#[from] pico_auth::AuthError),
     #[error("bootstrap token {id:?} conflicts with a stored token of the same id")]
     BootstrapConflict { id: String },
-    #[error("schema registry: {0}")]
-    SchemaRegistry(#[from] pico_schema::Error),
 }
 
 /// A running PicoMQ process: metadata log, node, background maintenance and
@@ -66,7 +64,7 @@ pub struct PicoServer {
     /// Kept alive for the process lifetime: dropping it aborts the log's
     /// flusher/tailer tasks, so it must outlive the node.
     sink: Arc<SqlSink>,
-    schema_registry: Option<pico_schema::Registry>,
+    schema_registry: Option<Arc<dyn pico_schema::SchemaStore>>,
 }
 
 /// Open the metadata log, start the node, and serve the configured protocol,
@@ -94,13 +92,12 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
 
     let schema_registry = match &config.schema_registry {
         None => None,
-        Some(url) => {
-            let registry = url
-                .parse::<pico_schema::Builder>()?
+        Some(uri) => {
+            let registry = pico_schema::Builder::from(open_adapter(uri)?.object_store())
                 .with_cache_expiry_after(Some(SCHEMA_CACHE_EXPIRY))
                 .build();
-            tracing::info!(%url, "schema registry enabled");
-            Some(registry)
+            tracing::info!(%uri, "schema registry enabled");
+            Some(Arc::new(registry) as Arc<dyn pico_schema::SchemaStore>)
         }
     };
 
@@ -145,7 +142,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         None => Default::default(),
     };
     let node = Arc::new(
-        PicoNode::start_with_schema(
+        PicoNode::start(
             NodeConfig {
                 node_id: config.node_id,
                 node_epoch: config.node_epoch,
@@ -286,13 +283,17 @@ async fn bootstrap_token(store: &KvTokenStore, wire: &str) -> Result<(), Runtime
     Err(RuntimeError::BootstrapConflict { id: token.id })
 }
 
-fn open_bucket(uri: &str) -> Result<Arc<dyn ObjectStorageTrait>, RuntimeError> {
+fn open_adapter(uri: &str) -> Result<ObjectStoreAdapter, RuntimeError> {
     let parsed = IdUri::parse(uri)?;
     if parsed.protocol == "file" {
         let path = std::path::PathBuf::from(&parsed.path);
         std::fs::create_dir_all(&path).map_err(|source| RuntimeError::DataDir { path, source })?;
     }
-    Ok(Arc::new(ObjectStoreAdapter::from_bucket_uri(uri)?))
+    Ok(ObjectStoreAdapter::from_bucket_uri(uri)?)
+}
+
+fn open_bucket(uri: &str) -> Result<Arc<dyn ObjectStorageTrait>, RuntimeError> {
+    Ok(Arc::new(open_adapter(uri)?))
 }
 
 async fn open_store(backend: &MetaBackend) -> Result<Arc<dyn MetaStore>, RuntimeError> {
@@ -335,7 +336,7 @@ impl PicoServer {
         self.kafka.as_ref().map(|(addr, _)| *addr)
     }
 
-    pub fn schema_registry(&self) -> Option<&pico_schema::Registry> {
+    pub fn schema_registry(&self) -> Option<&Arc<dyn pico_schema::SchemaStore>> {
         self.schema_registry.as_ref()
     }
 

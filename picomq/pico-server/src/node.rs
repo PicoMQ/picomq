@@ -63,26 +63,13 @@ pub struct PicoNode {
 }
 
 impl PicoNode {
-    /// Wire and start a node on an already-open metadata sink. The engine
-    /// builder recovers the WAL and starts the pipeline. A `propose` that
-    /// returns is already applied, so registration needs no separate wait.
     pub async fn start(
         config: NodeConfig,
         sink: Arc<dyn CommandSink>,
         views: Arc<ViewPublisher>,
         object_storage: Arc<dyn ObjectStorageTrait>,
         wal_storage: Arc<dyn ObjectStorageTrait>,
-    ) -> Result<Self, ServiceError> {
-        Self::start_with_schema(config, sink, views, object_storage, wal_storage, None).await
-    }
-
-    pub async fn start_with_schema(
-        config: NodeConfig,
-        sink: Arc<dyn CommandSink>,
-        views: Arc<ViewPublisher>,
-        object_storage: Arc<dyn ObjectStorageTrait>,
-        wal_storage: Arc<dyn ObjectStorageTrait>,
-        schema_registry: Option<pico_schema::Registry>,
+        schema_registry: Option<Arc<dyn pico_schema::SchemaStore>>,
     ) -> Result<Self, ServiceError> {
         let handle =
             MetadataNodeHandle::new(config.node_id, config.node_epoch, sink, views.clone());

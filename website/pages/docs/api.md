@@ -107,7 +107,7 @@ Lists streams as JSON. `prefix` filters by name prefix, `limit` caps the page, a
 
 ## Schemas
 
-Schema registration (`/_schemas/{name}`) shares this listener and is covered in [Schemas](/docs/schemas).
+Schema registration (`/_schemas/{name}`) and stream schema config (`GET`/`PATCH /_streams/{name}`) share this listener and are covered in [Schemas](/docs/schemas).
 
 ## Admin API
 

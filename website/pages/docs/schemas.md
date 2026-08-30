@@ -28,10 +28,10 @@ Schemas are opt-in. A node started without `--schema-registry` validates nothing
 
 ## Enable
 
-`--schema-registry` (`PICO_SCHEMA_REGISTRY`) points at the object store holding the schemas. `s3://`, `file://`, and `memory://` are accepted.
+`--schema-registry` (`PICO_SCHEMA_REGISTRY`) points at the object store holding the schemas. It takes the same bucket URI form as `--storage`: `{id}@s3://bucket?k=v` with `s3://`, `file://`, and `mem://` backends.
 
 ```bash
-pico serve --schema-registry s3://my-bucket/schemas \
+pico serve --schema-registry 1@s3://schemas?region=us-east-1 \
     --meta-url postgres://user:pass@pg:5432/picomq \
     --storage=-2@s3://data?region=us-east-1
 ```
@@ -66,7 +66,7 @@ A `PUT` rejects a schema that does not parse in its format, and all three routes
 
 ## Bind
 
-A stream binds a schema by name as part of its create. The name must exist in the registry or the create fails, and the bind cannot be changed afterwards. Validation is a separate opt-in on the same create, off by default. A bind without it is discovery metadata with no write-path cost.
+A stream binds a schema by name as part of its create. The name must exist in the registry or the create fails. Validation is a separate opt-in on the same create, off by default. A bind without it is discovery metadata with no write-path cost.
 
 | Protocol | Bind on create | Validate |
 | --- | --- | --- |
@@ -74,10 +74,19 @@ A stream binds a schema by name as part of its create. The name must exist in th
 | Durable Streams | `Stream-Schema: {name}` | `Stream-Schema-Validate: true` |
 | Kafka | Topic config `pico.schema={name}` on `CreateTopics` | `pico.schema.validate=true` |
 
+After create, both fields are mutable through the common stream config API on every protocol mode, including Kafka:
+
+| Method and path | What it does |
+| --- | --- |
+| `GET /_streams/{name}` | Return `{ "schema", "schemaValidate" }`. `404` when the stream is absent. |
+| `PATCH /_streams/{name}` | Update either field. Body keys are optional. `"schema": null` clears the bind and turns validation off. |
+
+Kafka topics use the stream `/{topic}`, so `PATCH /_streams/orders` updates topic `orders`. In a cluster these routes follow stream ownership: a request landing on a non-owner node returns a `307` redirect to the owner, like stream reads and writes.
+
 Inspect returns the bound name, in `Pico-Schema` on the Pico protocol and `Stream-Schema` on Durable Streams, so a client can discover which schema to decode with.
 
 ## Validation
 
 Every append or produce on a validated stream is checked before the write is acknowledged, and a payload that does not match fails the whole request: `400` on HTTP, `INVALID_RECORD` (error `87`) on Kafka produce. Reads never involve the schema. Fetch and `GET` return the stored bytes whether or not the stream is bound.
 
-Validation fails closed. A validated stream rejects writes when its schema was deleted or the node runs without `--schema-registry`. Nodes cache registry reads for 30 seconds.
+A validated stream rejects writes when its schema was deleted from the registry. On a node running without `--schema-registry` the validate flag is ignored and writes pass through. Nodes cache registry reads for 30 seconds.

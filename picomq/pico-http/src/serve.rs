@@ -102,6 +102,8 @@ pub struct RunningServer {
 pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Result<RunningServer> {
     let common_router = common::router(
         node.service(),
+        node.ownership(),
+        options.routing_mode,
         options.authorizer.clone(),
         options.max_request_size,
     );

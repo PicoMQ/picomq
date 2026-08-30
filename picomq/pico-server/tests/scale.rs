@@ -65,6 +65,7 @@ async fn run_gate(total: u64) {
         views,
         object_storage,
         wal_storage,
+        None,
     )
     .await
     .unwrap();

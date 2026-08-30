@@ -1,16 +1,10 @@
 //! Optional Avro / JSON Schema / Protobuf validation and Arrow conversion.
-//!
-//! Schemas are loaded from an object-store registry (`s3://`, `file://`, or
-//! `memory://`) using the Nisshi layout: `{name}.proto`, `{name}.json`, or
-//! `{name}.avsc`. Stream paths like `/streams/orders` map to
-//! `streams/orders.proto` (leading slash stripped).
 
 use std::{
     collections::BTreeMap,
-    env, io,
+    io,
     num::TryFromIntError,
     result,
-    str::FromStr,
     string::FromUtf8Error,
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, SystemTime},
@@ -19,15 +13,12 @@ use std::{
 #[cfg(feature = "arrow")]
 use arrow::{datatypes::DataType, error::ArrowError, record_batch::RecordBatch};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use jsonschema::ValidationError;
-use object_store::{
-    aws::AmazonS3Builder, local::LocalFileSystem, memory::InMemory, path::Path, DynObjectStore,
-    ObjectStore,
-};
+use object_store::{path::Path, DynObjectStore, ObjectStore};
 use serde_json::Value;
 use tracing::{debug, instrument};
-use url::Url;
 
 pub mod avro;
 pub mod json;
@@ -95,9 +86,6 @@ pub enum Error {
     #[error(transparent)]
     ObjectStore(#[from] object_store::Error),
 
-    #[error(transparent)]
-    ParseUrl(#[from] url::ParseError),
-
     #[error("lock poisoned")]
     Poison,
 
@@ -130,9 +118,6 @@ pub enum Error {
 
     #[error(transparent)]
     TryFromInt(#[from] TryFromIntError),
-
-    #[error("unsupported schema registry url: {0}")]
-    UnsupportedSchemaRegistryUrl(Url),
 
     #[error("unsupported schema runtime value for {0:?}: {1}")]
     #[cfg(feature = "arrow")]
@@ -233,61 +218,17 @@ pub struct Registry {
     cache_expiry_after: Option<Duration>,
 }
 
-impl FromStr for Registry {
-    type Err = Error;
-
-    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
-        s.parse::<Builder>().map(Into::into)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Builder {
     object_store: Arc<DynObjectStore>,
     cache_expiry_after: Option<Duration>,
 }
 
-impl FromStr for Builder {
-    type Err = Error;
-
-    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
-        Url::parse(s)
-            .map_err(Into::into)
-            .and_then(|location| Builder::try_from(&location))
-    }
-}
-
-impl TryFrom<&Url> for Builder {
-    type Error = Error;
-
-    fn try_from(storage: &Url) -> Result<Self, Self::Error> {
-        debug!(%storage);
-
-        match storage.scheme() {
-            "s3" => {
-                let bucket_name = storage.host_str().unwrap_or("schema");
-                AmazonS3Builder::from_env()
-                    .with_bucket_name(bucket_name)
-                    .build()
-                    .map_err(Into::into)
-                    .map(Self::new)
-            }
-            "file" => {
-                let mut path = env::current_dir()?;
-                if let Some(domain) = storage.domain() {
-                    path.push(domain);
-                }
-                if let Some(relative) = storage.path().strip_prefix('/') {
-                    path.push(relative);
-                } else {
-                    path.push(storage.path());
-                }
-                LocalFileSystem::new_with_prefix(path)
-                    .map_err(Into::into)
-                    .map(Self::new)
-            }
-            "memory" => Ok(Self::new(InMemory::new())),
-            _ => Err(Error::UnsupportedSchemaRegistryUrl(storage.to_owned())),
+impl From<Arc<DynObjectStore>> for Builder {
+    fn from(object_store: Arc<DynObjectStore>) -> Self {
+        Self {
+            object_store,
+            cache_expiry_after: None,
         }
     }
 }
@@ -384,6 +325,14 @@ impl SchemaFormat {
     }
 }
 
+#[async_trait]
+pub trait SchemaStore: Send + Sync {
+    async fn schema(&self, name: &str) -> Result<Option<Schema>>;
+    async fn put(&self, name: &str, format: SchemaFormat, bytes: Bytes) -> Result<()>;
+    async fn get(&self, name: &str) -> Result<Option<(SchemaFormat, Bytes)>>;
+    async fn delete(&self, name: &str) -> Result<bool>;
+}
+
 impl Registry {
     pub fn new(object_store: impl ObjectStore) -> Self {
         Builder::new(object_store).build()
@@ -391,10 +340,6 @@ impl Registry {
 
     pub fn builder(object_store: impl ObjectStore) -> Builder {
         Builder::new(object_store)
-    }
-
-    pub fn builder_try_from_url(url: &Url) -> Result<Builder> {
-        Builder::try_from(url)
     }
 
     #[instrument(skip(self))]
@@ -565,11 +510,30 @@ impl Registry {
     }
 }
 
+#[async_trait]
+impl SchemaStore for Registry {
+    async fn schema(&self, name: &str) -> Result<Option<Schema>> {
+        Registry::schema(self, name).await
+    }
+
+    async fn put(&self, name: &str, format: SchemaFormat, bytes: Bytes) -> Result<()> {
+        Registry::put(self, name, format, bytes).await
+    }
+
+    async fn get(&self, name: &str) -> Result<Option<(SchemaFormat, Bytes)>> {
+        Registry::get(self, name).await
+    }
+
+    async fn delete(&self, name: &str) -> Result<bool> {
+        Registry::delete(self, name).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use object_store::PutPayload;
+    use object_store::{memory::InMemory, PutPayload};
     use pretty_assertions::assert_eq;
 
     #[tokio::test]

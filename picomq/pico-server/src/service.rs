@@ -21,8 +21,8 @@ use crate::producer::{self, Admission};
 use crate::registry::{validate_producer, ClosedBy, ProducerDecision, RegistryEntry};
 use crate::types::{
     AppendBatchCommand, AppendBatchResult, AppendCommand, AppendResult, BatchReadResult,
-    CloseResult, CreateCommand, CreateResult, OffsetToken, ReadResult, StreamBatch, StreamList,
-    StreamMeta, StreamRecord, StreamWatermarks,
+    CloseResult, CreateCommand, CreateResult, OffsetToken, ReadResult, StreamBatch, StreamConfig,
+    StreamList, StreamMeta, StreamRecord, StreamWatermarks, UpdateStreamCommand,
 };
 use crate::waiter::StreamWaiterRegistry;
 
@@ -115,15 +115,17 @@ pub struct S3StreamService {
     gates: Mutex<HashMap<String, Arc<Gate>>>,
     entry_cache: Mutex<HashMap<String, RegistryEntry>>,
     open_lock: tokio::sync::Mutex<()>,
-    schema_registry: Option<pico_schema::Registry>,
+    schema_registry: Option<Arc<dyn pico_schema::SchemaStore>>,
 }
 
-/// Stream names under `/_sys/` and `/_schemas/` are reserved.
+/// Stream names under `/_sys/`, `/_schemas/`, and `/_streams/` are reserved.
 pub fn is_reserved_name(name: &str) -> bool {
     name == "/_sys"
         || name.starts_with("/_sys/")
         || name == "/_schemas"
         || name.starts_with("/_schemas/")
+        || name == "/_streams"
+        || name.starts_with("/_streams/")
 }
 
 impl S3StreamService {
@@ -149,12 +151,12 @@ impl S3StreamService {
         }
     }
 
-    pub fn with_schema_registry(mut self, registry: pico_schema::Registry) -> Self {
+    pub fn with_schema_registry(mut self, registry: Arc<dyn pico_schema::SchemaStore>) -> Self {
         self.schema_registry = Some(registry);
         self
     }
 
-    pub fn schema_registry(&self) -> Option<&pico_schema::Registry> {
+    pub fn schema_registry(&self) -> Option<&Arc<dyn pico_schema::SchemaStore>> {
         self.schema_registry.as_ref()
     }
 
@@ -162,7 +164,7 @@ impl S3StreamService {
         self.waiters.clone()
     }
 
-    fn schema_registry_required(&self) -> Result<&pico_schema::Registry, ServiceError> {
+    fn schema_registry_required(&self) -> Result<&Arc<dyn pico_schema::SchemaStore>, ServiceError> {
         self.schema_registry
             .as_ref()
             .ok_or_else(|| schema_error("schema registry is not configured"))
@@ -222,6 +224,9 @@ impl S3StreamService {
     }
 
     pub async fn validation_schema_of(&self, name: &str) -> Result<Option<String>, ServiceError> {
+        if self.schema_registry.is_none() {
+            return Ok(None);
+        }
         Ok(self
             .get_entry(&normalize(name), false)
             .await?
@@ -239,7 +244,62 @@ impl S3StreamService {
             .ok_or_else(|| schema_error(format!("unknown schema {schema_name}")))
     }
 
-    pub async fn create(&self, command: CreateCommand) -> Result<CreateResult, ServiceError> {
+    pub async fn stream_config(&self, name: &str) -> Result<Option<StreamConfig>, ServiceError> {
+        let name = normalize(name);
+        Ok(self
+            .get_entry(&name, false)
+            .await?
+            .map(|entry| stream_config_of(&name, &entry)))
+    }
+
+    pub async fn update_stream(
+        &self,
+        command: UpdateStreamCommand,
+    ) -> Result<StreamConfig, ServiceError> {
+        command.validate()?;
+        let name = normalize(&command.name);
+        if is_reserved_name(&name) {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "reserved stream name prefix",
+            ));
+        }
+        let gate = self.gate_of(&name);
+        let _op = gate.op.lock().await;
+        let mut entry = self
+            .get_entry(&name, false)
+            .await?
+            .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound))?;
+
+        if let Some(schema_name) = &command.schema_name {
+            match schema_name {
+                Some(schema_name) => {
+                    self.require_schema(schema_name).await?;
+                    entry.schema_name = Some(schema_name.clone());
+                }
+                None => {
+                    entry.schema_name = None;
+                    entry.schema_validate = false;
+                }
+            }
+        }
+        if let Some(validate) = command.schema_validate {
+            entry.schema_validate = validate;
+        }
+        if entry.schema_name.is_none() {
+            entry.schema_validate = false;
+        }
+
+        self.put_entry(&name, entry.clone()).await?;
+        Ok(stream_config_of(&name, &entry))
+    }
+
+    pub async fn create(&self, mut command: CreateCommand) -> Result<CreateResult, ServiceError> {
+        if command.schema_name.is_none() {
+            command.schema_validate = false;
+        }
         command.validate()?;
         let name = normalize(&command.name);
         if is_reserved_name(&name) && !command.internal {
@@ -247,7 +307,7 @@ impl S3StreamService {
                 ErrorKind::BadRequest,
                 None,
                 false,
-                "the /_sys/ prefix is reserved",
+                "reserved stream name prefix",
             ));
         }
         let gate = self.gate_of(&name);
@@ -531,7 +591,7 @@ impl S3StreamService {
         } else {
             expand_payloads(&entry.content_type, &command.payloads)?
         };
-        if entry.schema_validate && !messages.is_empty() {
+        if entry.schema_validate && !messages.is_empty() && self.schema_registry.is_some() {
             if let Some(schema_name) = entry.schema_name.as_deref() {
                 let batch = schema_batch_from_messages(&entry.content_type, &messages)?;
                 self.validate_schema(schema_name, &batch).await?;
@@ -1547,10 +1607,12 @@ impl S3StreamService {
 }
 
 pub(crate) fn normalize(name: &str) -> String {
-    if name.is_empty() {
+    if name.is_empty() || name == "/" {
         "/".to_owned()
-    } else {
+    } else if name.starts_with('/') {
         name.to_owned()
+    } else {
+        format!("/{name}")
     }
 }
 
@@ -1745,6 +1807,14 @@ fn expand_payloads(content_type: &str, payloads: &[Bytes]) -> Result<Vec<Bytes>,
 
 fn schema_error(message: impl Into<String>) -> ServiceError {
     ServiceError::with_message(ErrorKind::BadRequest, None, false, message.into())
+}
+
+fn stream_config_of(name: &str, entry: &RegistryEntry) -> StreamConfig {
+    StreamConfig {
+        name: name.to_owned(),
+        schema_name: entry.schema_name.clone(),
+        schema_validate: entry.schema_validate,
+    }
 }
 
 fn schema_batch_from_messages(
