@@ -1,10 +1,4 @@
 //! Stream commands.
-//!
-//! The commands are written once against `pico_client::StreamApi` and
-//! `--protocol` picks the wire, so the
-//! two protocols cannot drift in the CLI's behavior. Positions are printed and
-//! accepted as opaque strings (`--from`), which is a Pico `seq` or a Durable
-//! Streams offset token depending on the protocol.
 
 use std::time::Duration;
 
@@ -13,10 +7,6 @@ use pico_client::{ClientConfig, ClientError, ErrorKind, Live, PicoClient, Protoc
 
 use crate::io::{note, print_record, stdin_records};
 
-/// The connection flags, before a profile is applied.
-///
-/// Precedence: flag, then environment, then a saved profile, then the local
-/// default.
 #[derive(Debug, Args)]
 pub struct Endpoint {
     /// Server base URL. Defaults to the profile's, else http://127.0.0.1:4437.
@@ -45,7 +35,6 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Layer the flags over the selected profile.
     pub fn resolve(self) -> Result<Target, String> {
         let profile = crate::config::selected(self.profile.as_deref())?;
         let token = match self.token {
@@ -61,14 +50,12 @@ impl Endpoint {
                 .protocol
                 .or(profile.protocol)
                 .unwrap_or(ProtocolArg::Pico),
-            // A bare flag cannot say "off", so a profile can only turn this on.
             http2: self.http2 || profile.http2.unwrap_or(false),
             token,
         })
     }
 }
 
-/// Where to talk, and how.
 #[derive(Debug, Clone)]
 pub struct Target {
     pub endpoint: String,
@@ -90,16 +77,12 @@ impl Target {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProtocolArg {
-    /// The Pico protocol: record batches, numeric sequences, stream listing.
     Pico,
-    /// The Durable Streams open protocol: raw bodies, opaque offsets.
     Ds,
-    /// The Kafka wire protocol. Serve only: client commands use Kafka tooling.
     Kafka,
 }
 
 impl ProtocolArg {
-    /// The client wire for stream commands. Kafka has no CLI client.
     pub fn client_protocol(self) -> Result<Protocol, ClientError> {
         match self {
             Self::Pico => Ok(Protocol::Pico),
@@ -256,8 +239,6 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
                     break;
                 }
                 if page.records.is_empty() {
-                    // The long poll already waited server-side. This only
-                    // keeps a closed-then-reopened loop from spinning.
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }

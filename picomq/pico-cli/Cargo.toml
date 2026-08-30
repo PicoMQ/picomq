@@ -29,6 +29,7 @@ clap = { workspace = true }
 # `signal` for the ctrl-c handler (PORT: Java's shutdown hook).
 tokio = { workspace = true, features = ["signal"] }
 tracing-subscriber = { workspace = true }
+rdkafka = { version = "0.39.0", default-features = false, features = ["cmake-build", "tokio"] }
 # linux-native is kernel keyutils: no dbus, so the Docker build stays lean.
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "linux-native"] }
 
