@@ -145,6 +145,18 @@ pub struct AppendBatchResult {
     pub log_start_offset: u64,
 }
 
+/// A batch append that has been admitted and submitted under the stream gate
+/// but is not yet durable. Pass to `finish_batch_append` to await durability.
+pub struct SubmittedBatchAppend {
+    pub(crate) name: String,
+    pub(crate) stream_id: u64,
+    pub(crate) base_offset: u64,
+    pub(crate) log_start_offset: u64,
+    pub(crate) notify_offset: u64,
+    pub(crate) duplicate: bool,
+    pub(crate) pending: Option<s3stream::PendingAppend>,
+}
+
 /// One stored batch, returned verbatim. `base_offset` may be below the
 /// requested position when the position falls mid-batch.
 #[derive(Debug, Clone)]
@@ -178,14 +190,10 @@ pub struct CreateCommand {
     pub expires_at_ms: Option<i64>,
     pub closed: bool,
     pub initial_payload: Bytes,
-    /// Caller-assigned external identity for the stream (e.g. the Kafka
-    /// topic UUID), resolvable via `lookup_by_external_id`. `None` when the
-    /// frontend has no such notion.
     pub external_id: Option<[u8; 16]>,
-    /// Set only by in-process callers (e.g. the group coordinator) to create
-    /// streams under the reserved `/_sys/` prefix. Client frontends must
-    /// leave this false.
     pub internal: bool,
+    pub schema_name: Option<String>,
+    pub schema_validate: bool,
 }
 
 impl CreateCommand {
@@ -204,7 +212,19 @@ impl CreateCommand {
             initial_payload: Bytes::new(),
             external_id: Some(external_id),
             internal: false,
+            schema_name: None,
+            schema_validate: false,
         }
+    }
+
+    pub fn with_schema_name(mut self, schema_name: impl Into<String>) -> Self {
+        self.schema_name = Some(schema_name.into());
+        self
+    }
+
+    pub fn with_schema_validate(mut self, validate: bool) -> Self {
+        self.schema_validate = validate;
+        self
     }
 
     pub fn validate(&self) -> Result<(), ServiceError> {
@@ -214,6 +234,34 @@ impl CreateCommand {
                 None,
                 false,
                 "ttlSeconds and expiresAt are mutually exclusive",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamConfig {
+    pub name: String,
+    pub schema_name: Option<String>,
+    pub schema_validate: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateStreamCommand {
+    pub name: String,
+    pub schema_name: Option<Option<String>>,
+    pub schema_validate: Option<bool>,
+}
+
+impl UpdateStreamCommand {
+    pub fn validate(&self) -> Result<(), ServiceError> {
+        if self.schema_name.is_none() && self.schema_validate.is_none() {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "no stream config fields to update",
             ));
         }
         Ok(())
@@ -297,8 +345,8 @@ pub struct StreamMeta {
     pub next_offset: OffsetToken,
     pub submitted_offset: OffsetToken,
     pub closed: bool,
-    /// Caller-assigned external identity, all zeros when none was set.
     pub external_id: [u8; 16],
+    pub schema_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -381,6 +429,8 @@ mod tests {
             initial_payload: Bytes::new(),
             external_id: None,
             internal: false,
+            schema_name: None,
+            schema_validate: false,
         };
         assert!(cmd.validate().is_err());
     }

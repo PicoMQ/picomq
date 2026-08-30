@@ -65,6 +65,7 @@ async fn run_gate(total: u64) {
         views,
         object_storage,
         wal_storage,
+        None,
     )
     .await
     .unwrap();
@@ -87,6 +88,8 @@ async fn run_gate(total: u64) {
                     initial_payload: Bytes::new(),
                     external_id: None,
                     internal: false,
+                    schema_name: None,
+                    schema_validate: false,
                 })
                 .await
                 .unwrap();

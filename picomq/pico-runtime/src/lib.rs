@@ -17,6 +17,8 @@ pub use config::{AuthMode, MetaBackend, ServerConfig};
 /// (`MetadataLifecycle`).
 const LIFECYCLE_TICK: Duration = Duration::from_secs(1);
 
+const SCHEMA_CACHE_EXPIRY: Duration = Duration::from_secs(30);
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("metadata store: {0}")]
@@ -62,6 +64,7 @@ pub struct PicoServer {
     /// Kept alive for the process lifetime: dropping it aborts the log's
     /// flusher/tailer tasks, so it must outlive the node.
     sink: Arc<SqlSink>,
+    schema_registry: Option<Arc<dyn pico_schema::SchemaStore>>,
 }
 
 /// Open the metadata log, start the node, and serve the configured protocol,
@@ -86,6 +89,18 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             }
         }
     }
+
+    let schema_registry = match &config.schema_registry {
+        None => None,
+        Some(uri) => {
+            let registry = pico_schema::Builder::from(open_adapter(uri)?.object_store())
+                .with_cache_expiry_after(Some(SCHEMA_CACHE_EXPIRY))
+                .build();
+            tracing::info!(%uri, "schema registry enabled");
+            Some(Arc::new(registry) as Arc<dyn pico_schema::SchemaStore>)
+        }
+    };
+
     let store = open_store(&config.meta_backend).await?;
     let (sink, views) = SqlSink::open(store.clone(), SqlSinkConfig::default()).await?;
     let sink = Arc::new(sink);
@@ -141,6 +156,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             views,
             object_storage.clone(),
             wal_storage,
+            schema_registry.clone(),
         )
         .await?,
     );
@@ -234,6 +250,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         ttl_sweep,
         compaction_check,
         sink,
+        schema_registry,
     })
 }
 
@@ -266,13 +283,17 @@ async fn bootstrap_token(store: &KvTokenStore, wire: &str) -> Result<(), Runtime
     Err(RuntimeError::BootstrapConflict { id: token.id })
 }
 
-fn open_bucket(uri: &str) -> Result<Arc<dyn ObjectStorageTrait>, RuntimeError> {
+fn open_adapter(uri: &str) -> Result<ObjectStoreAdapter, RuntimeError> {
     let parsed = IdUri::parse(uri)?;
     if parsed.protocol == "file" {
         let path = std::path::PathBuf::from(&parsed.path);
         std::fs::create_dir_all(&path).map_err(|source| RuntimeError::DataDir { path, source })?;
     }
-    Ok(Arc::new(ObjectStoreAdapter::from_bucket_uri(uri)?))
+    Ok(ObjectStoreAdapter::from_bucket_uri(uri)?)
+}
+
+fn open_bucket(uri: &str) -> Result<Arc<dyn ObjectStorageTrait>, RuntimeError> {
+    Ok(Arc::new(open_adapter(uri)?))
 }
 
 async fn open_store(backend: &MetaBackend) -> Result<Arc<dyn MetaStore>, RuntimeError> {
@@ -313,6 +334,10 @@ impl PicoServer {
     /// The bound Kafka address, in Kafka mode.
     pub fn kafka_addr(&self) -> Option<std::net::SocketAddr> {
         self.kafka.as_ref().map(|(addr, _)| *addr)
+    }
+
+    pub fn schema_registry(&self) -> Option<&Arc<dyn pico_schema::SchemaStore>> {
+        self.schema_registry.as_ref()
     }
 
     pub async fn shutdown(self) {

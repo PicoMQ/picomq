@@ -12,6 +12,8 @@ s3stream = { workspace = true }
 pico-metadata = { workspace = true }
 pico-common = { workspace = true }
 pico-auth = { workspace = true }
+pico-protocol = { workspace = true }
+pico-schema = { workspace = true }
 
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -23,6 +25,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 pico-sql = { workspace = true }
+object_store = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

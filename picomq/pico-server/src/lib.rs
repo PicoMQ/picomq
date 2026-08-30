@@ -16,11 +16,16 @@ pub use auth::{KvTokenStore, TokenService, TOKEN_KEY_PREFIX};
 pub use error::{ErrorKind, ServiceError};
 pub use node::{NodeConfig, PicoNode};
 pub use ownership::{MetadataOwnershipService, OwnershipService};
+pub use pico_schema::{
+    Batch as SchemaBatch, Record as SchemaRecord, Registry as SchemaRegistry, SchemaFormat,
+    SchemaStore,
+};
 pub use service::{is_reserved_name, S3StreamService};
 pub use transfer::TransferWatcher;
 pub use types::{
     AppendBatchCommand, AppendBatchResult, AppendCommand, AppendResult, BatchReadResult, BatchSpan,
     CloseResult, CreateCommand, CreateResult, NodeMeta, NumericProducer, OffsetToken, Owner,
-    ReadResult, StreamBatch, StreamList, StreamMeta, StreamRecord, StreamWatermarks,
+    ReadResult, StreamBatch, StreamConfig, StreamList, StreamMeta, StreamRecord, StreamWatermarks,
+    SubmittedBatchAppend, UpdateStreamCommand,
 };
 pub use waiter::StreamWaiterRegistry;

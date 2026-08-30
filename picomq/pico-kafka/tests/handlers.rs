@@ -43,6 +43,7 @@ async fn test_broker() -> BrokerContext {
         views,
         object_storage,
         wal_storage,
+        None,
     )
     .await
     .unwrap();
@@ -114,9 +115,9 @@ async fn api_versions_handler_lists_supported_apis() {
             .with_client_software_version(StrBytes::from_static_str("0.1")),
     );
     let outcome = dispatch(&broker, &req).await.unwrap();
-    let mut buf = match outcome {
+    let mut buf = match resolve(outcome).await {
         HandlerOutcome::Response(frame) => frame.0,
-        HandlerOutcome::NoResponse => panic!("expected response"),
+        _ => panic!("expected response"),
     };
     ResponseHeader::decode(&mut buf, 0).unwrap();
     let response = ApiVersionsResponse::decode(&mut buf, 3).unwrap();
@@ -127,10 +128,17 @@ async fn api_versions_handler_lists_supported_apis() {
         .any(|api| api.api_key == ApiKey::Metadata as i16));
 }
 
+async fn resolve(outcome: HandlerOutcome) -> HandlerOutcome {
+    match outcome {
+        HandlerOutcome::Deferred(deferred) => deferred.await.unwrap(),
+        other => other,
+    }
+}
+
 async fn response_body(broker: &BrokerContext, req: &[u8]) -> Bytes {
-    match dispatch(broker, req).await.unwrap() {
+    match resolve(dispatch(broker, req).await.unwrap()).await {
         HandlerOutcome::Response(frame) => frame.0,
-        HandlerOutcome::NoResponse => panic!("expected response"),
+        _ => panic!("expected response"),
     }
 }
 
@@ -835,4 +843,133 @@ async fn classic_group_lifecycle_and_offset_replay() {
         LeaveGroupResponse::decode(&mut buf, 2).unwrap().error_code,
         0
     );
+}
+
+#[tokio::test]
+async fn create_topics_binds_pico_schema_and_validates_produce() {
+    use kafka_protocol::messages::create_topics_request::{CreatableTopic, CreatableTopicConfig};
+    use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse, ProduceResponse};
+    use pico_schema::SchemaFormat;
+
+    let registry = pico_schema::Registry::new(object_store::memory::InMemory::new());
+    let schema = bytes::Bytes::from_static(
+        br#"{
+        "title": "Person",
+        "type": "object",
+        "properties": {
+            "value": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                },
+                "required": ["name"]
+            }
+        }
+    }"#,
+    );
+    registry
+        .put("person", SchemaFormat::Json, schema)
+        .await
+        .unwrap();
+
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(20));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(21));
+    let node = PicoNode::start(
+        NodeConfig {
+            node_id: 1,
+            node_epoch: 1,
+            http_address: "http://127.0.0.1:4021".into(),
+            protocol_addresses: std::collections::BTreeMap::from([(
+                pico_kafka::PROTOCOL_NAME.to_owned(),
+                "127.0.0.1:19093".to_owned(),
+            )]),
+            ..Default::default()
+        },
+        sink,
+        views,
+        object_storage,
+        wal_storage,
+        Some(Arc::new(registry)),
+    )
+    .await
+    .unwrap();
+    let broker = BrokerContext::new(
+        node.config().node_id,
+        node.config().cluster_id.clone(),
+        node.service(),
+        node.ownership(),
+        node.views(),
+        node.metadata().clone(),
+    );
+
+    let create_req = encode_request(
+        ApiKey::CreateTopics,
+        5,
+        1,
+        &CreateTopicsRequest::default()
+            .with_timeout_ms(5_000)
+            .with_topics(vec![CreatableTopic::default()
+                .with_name(tn("orders"))
+                .with_num_partitions(1)
+                .with_replication_factor(1)
+                .with_configs(vec![
+                    CreatableTopicConfig::default()
+                        .with_name(StrBytes::from_static_str("pico.schema"))
+                        .with_value(Some(StrBytes::from_static_str("person"))),
+                    CreatableTopicConfig::default()
+                        .with_name(StrBytes::from_static_str("pico.schema.validate"))
+                        .with_value(Some(StrBytes::from_static_str("true"))),
+                ])]),
+    );
+    let mut buf = response_body(&broker, &create_req).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let created = CreateTopicsResponse::decode(&mut buf, 5).unwrap();
+    assert_eq!(created.topics[0].error_code, 0);
+    assert_eq!(
+        broker
+            .service
+            .head("/orders")
+            .await
+            .unwrap()
+            .unwrap()
+            .schema_name
+            .as_deref(),
+        Some("person")
+    );
+
+    let bad = encode_request(
+        ApiKey::Produce,
+        10,
+        2,
+        &ProduceRequest::default()
+            .with_acks(1)
+            .with_topic_data(vec![TopicProduceData::default()
+                .with_name(tn("orders"))
+                .with_partition_data(vec![PartitionProduceData::default()
+                    .with_index(0)
+                    .with_records(Some(kafka_batch(br#"{"name":1}"#)))])]),
+    );
+    let mut buf = response_body(&broker, &bad).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let produced = ProduceResponse::decode(&mut buf, 10).unwrap();
+    assert_eq!(produced.responses[0].partition_responses[0].error_code, 87);
+
+    let ok = encode_request(
+        ApiKey::Produce,
+        10,
+        3,
+        &ProduceRequest::default()
+            .with_acks(1)
+            .with_topic_data(vec![TopicProduceData::default()
+                .with_name(tn("orders"))
+                .with_partition_data(vec![PartitionProduceData::default()
+                    .with_index(0)
+                    .with_records(Some(kafka_batch(br#"{"name":"alice"}"#)))])]),
+    );
+    let mut buf = response_body(&broker, &ok).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let produced = ProduceResponse::decode(&mut buf, 10).unwrap();
+    assert_eq!(produced.responses[0].partition_responses[0].error_code, 0);
 }

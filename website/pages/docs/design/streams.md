@@ -4,7 +4,7 @@ A stream in PicoMQ has two layers. Clients see a named stream with a content typ
 
 ## Names and the registry
 
-Stream names are paths, such as `logs/api/prod`. Each name maps to a registry entry stored in the metadata KV, which is part of the replicated state described in [Metadata](/docs/design/metadata). The entry records the internal stream id, the content type, TTL and expiry, whether the stream is closed, and the state of each idempotent producer.
+Stream names are paths, such as `logs/api/prod`. Each name maps to a registry entry stored in the metadata KV, which is part of the replicated state described in [Metadata](/docs/design/metadata). The entry records the internal stream id, the content type, the optional [schema](/docs/schemas) bind, TTL and expiry, whether the stream is closed, and the state of each idempotent producer.
 
 Creating a stream writes two things through the metadata log. First an internal stream is allocated, then a registry entry is stored under the name with the new stream id. Create is idempotent. Creating a name that already exists returns the existing stream unchanged, and two nodes racing to create the same name settle through the log, with the loser adopting the winner's entry.
 

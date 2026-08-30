@@ -269,6 +269,8 @@ mod tests {
             external_id: [0; 16],
             numeric_producers: BTreeMap::new(),
             producer_state_offset: 0,
+            schema_name: None,
+            schema_validate: false,
         }
     }
 

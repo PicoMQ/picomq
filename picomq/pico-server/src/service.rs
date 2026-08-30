@@ -9,6 +9,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use pico_common::now_ms;
 use pico_metadata::{MetadataNodeHandle, ViewPublisher};
+use pico_schema::Validator as _;
 use s3stream::{
     AppendContext, CreateStreamOptions, FetchContext, KVClient, KeyValue, OpenStreamOptions,
     PendingAppend, RecordBatch, Stream, StreamClientTrait as StreamClient,
@@ -20,8 +21,9 @@ use crate::producer::{self, Admission};
 use crate::registry::{validate_producer, ClosedBy, ProducerDecision, RegistryEntry};
 use crate::types::{
     AppendBatchCommand, AppendBatchResult, AppendCommand, AppendResult, BatchReadResult,
-    CloseResult, CreateCommand, CreateResult, OffsetToken, ReadResult, StreamBatch, StreamList,
-    StreamMeta, StreamRecord, StreamWatermarks,
+    CloseResult, CreateCommand, CreateResult, OffsetToken, ReadResult, StreamBatch, StreamConfig,
+    StreamList, StreamMeta, StreamRecord, StreamWatermarks, SubmittedBatchAppend,
+    UpdateStreamCommand,
 };
 use crate::waiter::StreamWaiterRegistry;
 
@@ -114,12 +116,17 @@ pub struct S3StreamService {
     gates: Mutex<HashMap<String, Arc<Gate>>>,
     entry_cache: Mutex<HashMap<String, RegistryEntry>>,
     open_lock: tokio::sync::Mutex<()>,
+    schema_registry: Option<Arc<dyn pico_schema::SchemaStore>>,
 }
 
-/// Stream names under `/_sys/` are reserved for internal state (e.g. Kafka
-/// consumer groups) and rejected for client creates.
+/// Stream names under `/_sys/`, `/_schemas/`, and `/_streams/` are reserved.
 pub fn is_reserved_name(name: &str) -> bool {
-    name == "/_sys" || name.starts_with("/_sys/")
+    name == "/_sys"
+        || name.starts_with("/_sys/")
+        || name == "/_schemas"
+        || name.starts_with("/_schemas/")
+        || name == "/_streams"
+        || name.starts_with("/_streams/")
 }
 
 impl S3StreamService {
@@ -141,14 +148,159 @@ impl S3StreamService {
             gates: Mutex::new(HashMap::new()),
             entry_cache: Mutex::new(HashMap::new()),
             open_lock: tokio::sync::Mutex::new(()),
+            schema_registry: None,
         }
+    }
+
+    pub fn with_schema_registry(mut self, registry: Arc<dyn pico_schema::SchemaStore>) -> Self {
+        self.schema_registry = Some(registry);
+        self
+    }
+
+    pub fn schema_registry(&self) -> Option<&Arc<dyn pico_schema::SchemaStore>> {
+        self.schema_registry.as_ref()
     }
 
     pub fn waiters(&self) -> Arc<StreamWaiterRegistry> {
         self.waiters.clone()
     }
 
-    pub async fn create(&self, command: CreateCommand) -> Result<CreateResult, ServiceError> {
+    fn schema_registry_required(&self) -> Result<&Arc<dyn pico_schema::SchemaStore>, ServiceError> {
+        self.schema_registry
+            .as_ref()
+            .ok_or_else(|| schema_error("schema registry is not configured"))
+    }
+
+    /// Fail-closed: a bound stream on a node without a registry, or whose
+    /// schema is gone from the registry, rejects writes rather than skipping
+    /// validation.
+    pub async fn validate_schema(
+        &self,
+        name: &str,
+        batch: &pico_schema::Batch,
+    ) -> Result<(), ServiceError> {
+        let registry = self.schema_registry_required()?;
+        let schema = registry
+            .schema(name)
+            .await
+            .map_err(|e| schema_error(e.to_string()))?
+            .ok_or_else(|| {
+                schema_error(format!("bound schema {name} is missing from the registry"))
+            })?;
+        schema
+            .validate(batch)
+            .map_err(|e| schema_error(e.to_string()))
+    }
+
+    pub async fn put_schema(
+        &self,
+        name: &str,
+        format: pico_schema::SchemaFormat,
+        bytes: bytes::Bytes,
+    ) -> Result<(), ServiceError> {
+        let registry = self.schema_registry_required()?;
+        registry
+            .put(name, format, bytes)
+            .await
+            .map_err(|e| schema_error(e.to_string()))
+    }
+
+    pub async fn get_schema(
+        &self,
+        name: &str,
+    ) -> Result<Option<(pico_schema::SchemaFormat, bytes::Bytes)>, ServiceError> {
+        let registry = self.schema_registry_required()?;
+        registry
+            .get(name)
+            .await
+            .map_err(|e| schema_error(e.to_string()))
+    }
+
+    pub async fn delete_schema(&self, name: &str) -> Result<bool, ServiceError> {
+        let registry = self.schema_registry_required()?;
+        registry
+            .delete(name)
+            .await
+            .map_err(|e| schema_error(e.to_string()))
+    }
+
+    pub async fn validation_schema_of(&self, name: &str) -> Result<Option<String>, ServiceError> {
+        if self.schema_registry.is_none() {
+            return Ok(None);
+        }
+        Ok(self
+            .get_entry(&normalize(name), false)
+            .await?
+            .filter(|entry| entry.schema_validate)
+            .and_then(|entry| entry.schema_name))
+    }
+
+    async fn require_schema(&self, schema_name: &str) -> Result<(), ServiceError> {
+        let registry = self.schema_registry_required()?;
+        registry
+            .schema(schema_name)
+            .await
+            .map_err(|e| schema_error(e.to_string()))?
+            .map(|_| ())
+            .ok_or_else(|| schema_error(format!("unknown schema {schema_name}")))
+    }
+
+    pub async fn stream_config(&self, name: &str) -> Result<Option<StreamConfig>, ServiceError> {
+        let name = normalize(name);
+        Ok(self
+            .get_entry(&name, false)
+            .await?
+            .map(|entry| stream_config_of(&name, &entry)))
+    }
+
+    pub async fn update_stream(
+        &self,
+        command: UpdateStreamCommand,
+    ) -> Result<StreamConfig, ServiceError> {
+        command.validate()?;
+        let name = normalize(&command.name);
+        if is_reserved_name(&name) {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "reserved stream name prefix",
+            ));
+        }
+        let gate = self.gate_of(&name);
+        let _op = gate.op.lock().await;
+        let mut entry = self
+            .get_entry(&name, false)
+            .await?
+            .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound))?;
+
+        if let Some(schema_name) = &command.schema_name {
+            match schema_name {
+                Some(schema_name) => {
+                    self.require_schema(schema_name).await?;
+                    entry.schema_name = Some(schema_name.clone());
+                }
+                None => {
+                    entry.schema_name = None;
+                    entry.schema_validate = false;
+                }
+            }
+        }
+        if let Some(validate) = command.schema_validate {
+            entry.schema_validate = validate;
+        }
+        if entry.schema_name.is_none() {
+            entry.schema_validate = false;
+        }
+
+        self.put_entry(&name, entry.clone()).await?;
+        Ok(stream_config_of(&name, &entry))
+    }
+
+    pub async fn create(&self, mut command: CreateCommand) -> Result<CreateResult, ServiceError> {
+        if command.schema_name.is_none() {
+            command.schema_validate = false;
+        }
         command.validate()?;
         let name = normalize(&command.name);
         if is_reserved_name(&name) && !command.internal {
@@ -156,7 +308,7 @@ impl S3StreamService {
                 ErrorKind::BadRequest,
                 None,
                 false,
-                "the /_sys/ prefix is reserved",
+                "reserved stream name prefix",
             ));
         }
         let gate = self.gate_of(&name);
@@ -171,6 +323,12 @@ impl S3StreamService {
                 created: false,
                 meta,
             });
+        }
+
+        // Only a real create checks the bind, so replays of an existing
+        // matching create stay idempotent even if the schema was deleted.
+        if let Some(schema_name) = command.schema_name.as_deref() {
+            self.require_schema(schema_name).await?;
         }
 
         let stream = self.provision_stream(&name).await?;
@@ -188,6 +346,8 @@ impl S3StreamService {
             external_id: command.external_id.unwrap_or([0; 16]),
             numeric_producers: Default::default(),
             producer_state_offset: 0,
+            schema_name: command.schema_name.clone(),
+            schema_validate: command.schema_validate,
         };
         let stored = self
             .kv_client
@@ -432,6 +592,12 @@ impl S3StreamService {
         } else {
             expand_payloads(&entry.content_type, &command.payloads)?
         };
+        if entry.schema_validate && !messages.is_empty() && self.schema_registry.is_some() {
+            if let Some(schema_name) = entry.schema_name.as_deref() {
+                let batch = schema_batch_from_messages(&entry.content_type, &messages)?;
+                self.validate_schema(schema_name, &batch).await?;
+            }
+        }
 
         let pendings = match self.submit_messages(&stream, &messages, command.atomic) {
             Ok(pendings) => pendings,
@@ -510,6 +676,14 @@ impl S3StreamService {
         &self,
         command: AppendBatchCommand,
     ) -> Result<AppendBatchResult, ServiceError> {
+        let submitted = self.submit_batch_append(command).await?;
+        self.finish_batch_append(submitted).await
+    }
+
+    pub async fn submit_batch_append(
+        &self,
+        command: AppendBatchCommand,
+    ) -> Result<SubmittedBatchAppend, ServiceError> {
         validate_batch_spans(&command)?;
         let record_count = command.record_count();
         let name = normalize(&command.name);
@@ -534,10 +708,14 @@ impl S3StreamService {
             Ok(Admission::Accepted(accepted)) => accepted,
             Ok(Admission::Duplicate { base_offset }) => {
                 self.cache_entry(&name, touch_deadline(entry));
-                return Ok(AppendBatchResult {
+                return Ok(SubmittedBatchAppend {
+                    name,
+                    stream_id,
                     base_offset,
-                    duplicate: true,
                     log_start_offset,
+                    notify_offset: 0,
+                    duplicate: true,
+                    pending: None,
                 });
             }
             Err(error) => {
@@ -581,15 +759,36 @@ impl S3StreamService {
 
         let notify_offset = stream.next_offset();
         drop(_op);
-        if let Err(e) = await_durable(vec![pending]).await {
-            self.open_streams.lock().unwrap().remove(&stream_id);
-            return Err(ServiceError::durability(e));
-        }
-        self.waiters.notify_append(&name, notify_offset);
-        Ok(AppendBatchResult {
+        Ok(SubmittedBatchAppend {
+            name,
+            stream_id,
             base_offset,
-            duplicate: false,
             log_start_offset,
+            notify_offset,
+            duplicate: false,
+            pending: Some(pending),
+        })
+    }
+
+    pub async fn finish_batch_append(
+        &self,
+        submitted: SubmittedBatchAppend,
+    ) -> Result<AppendBatchResult, ServiceError> {
+        if let Some(pending) = submitted.pending {
+            if let Err(e) = await_durable(vec![pending]).await {
+                self.open_streams
+                    .lock()
+                    .unwrap()
+                    .remove(&submitted.stream_id);
+                return Err(ServiceError::durability(e));
+            }
+            self.waiters
+                .notify_append(&submitted.name, submitted.notify_offset);
+        }
+        Ok(AppendBatchResult {
+            base_offset: submitted.base_offset,
+            duplicate: submitted.duplicate,
+            log_start_offset: submitted.log_start_offset,
         })
     }
 
@@ -1442,10 +1641,12 @@ impl S3StreamService {
 }
 
 pub(crate) fn normalize(name: &str) -> String {
-    if name.is_empty() {
+    if name.is_empty() || name == "/" {
         "/".to_owned()
-    } else {
+    } else if name.starts_with('/') {
         name.to_owned()
+    } else {
+        format!("/{name}")
     }
 }
 
@@ -1473,6 +1674,8 @@ fn config_matches(entry: &RegistryEntry, command: &CreateCommand) -> bool {
         && entry.ttl_seconds == command.ttl_seconds
         && entry.expires_at_ms == command.expires_at_ms
         && entry.closed == command.closed
+        && entry.schema_name == command.schema_name
+        && entry.schema_validate == command.schema_validate
 }
 
 fn deadline_of(ttl_seconds: Option<u64>, expires_at_ms: Option<i64>) -> i64 {
@@ -1634,6 +1837,41 @@ fn expand_payloads(content_type: &str, payloads: &[Bytes]) -> Result<Vec<Bytes>,
         out.extend(split_messages(content_type, payload, false)?);
     }
     Ok(out)
+}
+
+fn schema_error(message: impl Into<String>) -> ServiceError {
+    ServiceError::with_message(ErrorKind::BadRequest, None, false, message.into())
+}
+
+fn stream_config_of(name: &str, entry: &RegistryEntry) -> StreamConfig {
+    StreamConfig {
+        name: name.to_owned(),
+        schema_name: entry.schema_name.clone(),
+        schema_validate: entry.schema_validate,
+    }
+}
+
+fn schema_batch_from_messages(
+    content_type: &str,
+    messages: &[Bytes],
+) -> Result<pico_schema::Batch, ServiceError> {
+    let pico = framing::mime_of(Some(content_type)) == "application/x-picomq";
+    let mut records = Vec::with_capacity(messages.len());
+    for message in messages {
+        if pico {
+            let envelope = pico_protocol::envelope::decode_envelope(message).map_err(|e| {
+                ServiceError::with_message(ErrorKind::BadRequest, None, false, e.to_string())
+            })?;
+            records.push(pico_schema::Record::builder().value(envelope.body).build());
+        } else {
+            records.push(
+                pico_schema::Record::builder()
+                    .value(message.clone())
+                    .build(),
+            );
+        }
+    }
+    Ok(pico_schema::Batch { records })
 }
 
 fn split_messages(
@@ -1821,6 +2059,7 @@ fn to_meta(name: &str, entry: &RegistryEntry, start: u64, next: u64, submitted: 
         submitted_offset: OffsetToken::of_record_offset(submitted),
         closed: entry.closed,
         external_id: entry.external_id,
+        schema_name: entry.schema_name.clone(),
     }
 }
 
@@ -1912,6 +2151,8 @@ mod tests {
             external_id: [0; 16],
             numeric_producers: Default::default(),
             producer_state_offset: 0,
+            schema_name: None,
+            schema_validate: false,
         };
         let touched = touch_deadline(entry.clone());
         assert!(touched.deadline_ms > 0);

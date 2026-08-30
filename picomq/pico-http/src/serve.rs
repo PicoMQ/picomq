@@ -22,6 +22,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::admin::{self, AdminState};
+use crate::common;
 use crate::{DsFrontend, PicoFrontend, RoutingMode};
 
 /// Which stream protocol this process speaks.
@@ -99,34 +100,45 @@ pub struct RunningServer {
 /// different sockets in tests and keeps this crate free of metadata-backend
 /// choices.
 pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Result<RunningServer> {
+    let common_router = common::router(
+        node.service(),
+        node.ownership(),
+        options.routing_mode,
+        options.authorizer.clone(),
+        options.max_request_size,
+    );
     let protocol_router = match options.protocol {
-        Protocol::Pico => Arc::new(
-            PicoFrontend::with_tuning(
-                node.service(),
-                node.ownership(),
-                options.routing_mode,
-                options.long_poll_timeout,
-                options.sse_max_duration,
-                options.max_chunk_size,
-                options.max_request_size,
+        Protocol::Pico => common_router.fallback_service(
+            Arc::new(
+                PicoFrontend::with_tuning(
+                    node.service(),
+                    node.ownership(),
+                    options.routing_mode,
+                    options.long_poll_timeout,
+                    options.sse_max_duration,
+                    options.max_chunk_size,
+                    options.max_request_size,
+                )
+                .with_authorizer(options.authorizer.clone()),
             )
-            .with_authorizer(options.authorizer.clone()),
-        )
-        .router(),
-        Protocol::Ds => Arc::new(
-            DsFrontend::with_tuning(
-                node.service(),
-                node.ownership(),
-                options.routing_mode,
-                options.long_poll_timeout,
-                options.sse_max_duration,
-                options.max_chunk_size,
-                options.max_request_size,
+            .router(),
+        ),
+        Protocol::Ds => common_router.fallback_service(
+            Arc::new(
+                DsFrontend::with_tuning(
+                    node.service(),
+                    node.ownership(),
+                    options.routing_mode,
+                    options.long_poll_timeout,
+                    options.sse_max_duration,
+                    options.max_chunk_size,
+                    options.max_request_size,
+                )
+                .with_authorizer(options.authorizer.clone()),
             )
-            .with_authorizer(options.authorizer.clone()),
-        )
-        .router(),
-        Protocol::Kafka => Router::new(),
+            .router(),
+        ),
+        Protocol::Kafka => common_router,
     };
 
     let (stop, _) = watch::channel(false);

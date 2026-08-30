@@ -29,10 +29,24 @@ pub enum HandlerError {
     Batch(#[from] crate::batch::BatchParseError),
 }
 
-#[derive(Debug)]
+pub type DeferredOutcome = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<HandlerOutcome, HandlerError>> + Send>,
+>;
+
 pub enum HandlerOutcome {
     Response(ResponseFrame),
     NoResponse,
+    Deferred(DeferredOutcome),
+}
+
+impl std::fmt::Debug for HandlerOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Response(frame) => f.debug_tuple("Response").field(frame).finish(),
+            Self::NoResponse => f.write_str("NoResponse"),
+            Self::Deferred(_) => f.write_str("Deferred"),
+        }
+    }
 }
 
 pub async fn dispatch(
@@ -81,7 +95,7 @@ impl HandlerOutcome {
     pub fn into_frame(self) -> Option<Bytes> {
         match self {
             Self::Response(frame) => Some(frame.0),
-            Self::NoResponse => None,
+            Self::NoResponse | Self::Deferred(_) => None,
         }
     }
 }

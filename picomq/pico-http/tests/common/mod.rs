@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use pico_http::{serve, Protocol, RoutingMode, RunningServer, ServeOptions};
 use pico_metadata::LocalSink;
+use pico_schema::{Registry, SchemaStore};
 use pico_server::{NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
@@ -24,13 +25,19 @@ pub struct TestServer {
 }
 
 pub async fn start_node() -> Arc<PicoNode> {
+    start_node_inner(None).await
+}
+
+pub async fn start_node_with_schema(registry: Registry) -> Arc<PicoNode> {
+    start_node_inner(Some(Arc::new(registry))).await
+}
+
+async fn start_node_inner(schema_registry: Option<Arc<dyn SchemaStore>>) -> Arc<PicoNode> {
     let (sink, views) = LocalSink::new();
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(3));
     let engine = s3stream::Config {
         wal_upload_interval_ms: 200,
-        // The WAL rides `wal_storage` above. The bucket id has to match it, and
-        // a short batch window keeps append latency out of the test timings.
         wal_config: "3@mem://wal?batchInterval=5".into(),
         ..Default::default()
     };
@@ -46,6 +53,7 @@ pub async fn start_node() -> Arc<PicoNode> {
             views,
             object_storage,
             wal_storage,
+            schema_registry,
         )
         .await
         .unwrap(),
@@ -53,7 +61,10 @@ pub async fn start_node() -> Arc<PicoNode> {
 }
 
 async fn start(protocol: Protocol) -> TestServer {
-    let node = start_node().await;
+    start_with_node(protocol, start_node().await).await
+}
+
+async fn start_with_node(protocol: Protocol, node: Arc<PicoNode>) -> TestServer {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node.clone(),
@@ -79,13 +90,21 @@ async fn start(protocol: Protocol) -> TestServer {
     }
 }
 
-/// A Pico-protocol server.
 #[allow(dead_code)]
 pub async fn pico_server() -> TestServer {
     start(Protocol::Pico).await
 }
 
-/// A Durable Streams server.
+#[allow(dead_code)]
+pub async fn pico_server_with_schema(registry: Registry) -> TestServer {
+    start_with_node(Protocol::Pico, start_node_with_schema(registry).await).await
+}
+
+#[allow(dead_code)]
+pub async fn kafka_http_with_schema(registry: Registry) -> TestServer {
+    start_with_node(Protocol::Kafka, start_node_with_schema(registry).await).await
+}
+
 #[allow(dead_code)]
 pub async fn ds_server() -> TestServer {
     start(Protocol::Ds).await

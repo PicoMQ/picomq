@@ -101,7 +101,7 @@ pub struct ServerConfig {
     /// (`pico_auth::Scope::root`). Idempotent across restarts. A different
     /// stored token under the same id fails startup.
     pub bootstrap_token: Option<String>,
-    /// `ServerConfig#applyTo`.
+    pub schema_registry: Option<String>,
     pub engine: s3stream::Config,
 }
 
@@ -133,6 +133,7 @@ impl Default for ServerConfig {
             auth_mode: AuthMode::Off,
             insecure_allow_remote: false,
             bootstrap_token: None,
+            schema_registry: None,
             engine: s3stream::Config::default(),
         }
     }

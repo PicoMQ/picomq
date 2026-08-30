@@ -33,6 +33,8 @@ async-trait = { workspace = true }
 reqwest = { workspace = true }
 durable-streams = { workspace = true }
 tempfile = { workspace = true }
+pico-schema = { workspace = true }
+object_store = { workspace = true }
 
 [lints]
 workspace = true

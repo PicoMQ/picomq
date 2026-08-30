@@ -34,7 +34,7 @@ The node id is the one value worth care. Reusing an id for a different machine i
 | `--backlog` | `1024` | Listener accept queue depth. |
 | `--shutdown-drain-sec` | `0` | How long to fail readiness before closing listeners on shutdown. |
 
-`--protocol` is a global flag rather than a serve flag, selecting the client protocol this node serves: `pico`, `ds`, or `kafka`. In Kafka mode the HTTP listener carries only the admin surface, and the Kafka listener serves the data. The [Kafka protocol](/docs/kafka) page covers what that mode supports.
+`--protocol` is a global flag rather than a serve flag, selecting the client protocol this node serves: `pico`, `ds`, or `kafka`. In Kafka mode the data moves on the Kafka listener, and the HTTP stream listener keeps only the [schema routes](/docs/schemas). The [Kafka protocol](/docs/kafka) page covers what that mode supports.
 
 `--http-address` and `--kafka-advertise` matter in any multi-node deployment. Both are registered in the metadata state and handed to clients verbatim, in redirects for HTTP and in metadata responses for Kafka, so they must be addresses clients can actually reach, not bind addresses. The defaults only work single-node on localhost.
 
@@ -68,6 +68,8 @@ S3 credentials come from the standard `AWS_*` environment variables. Compatible 
 ```
 
 `--wal` optionally puts the WAL in its own bucket. When absent the WAL shares the data bucket under the next bucket id, which is the right default unless WAL and data need different storage classes or lifecycle rules.
+
+`--schema-registry` points at a store of named schemas that streams bind and optionally validate against. Unset by default, covered in [Schemas](/docs/schemas).
 
 ### S3 Express One Zone for the WAL
 

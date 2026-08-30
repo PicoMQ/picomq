@@ -16,6 +16,7 @@ pico-sql = { workspace = true }
 pico-server = { workspace = true }
 pico-http = { workspace = true }
 pico-kafka = { workspace = true }
+pico-schema = { workspace = true }
 
 thiserror = { workspace = true }
 tokio = { workspace = true }

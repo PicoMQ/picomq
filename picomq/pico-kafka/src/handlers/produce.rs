@@ -4,14 +4,17 @@ use kafka_protocol::messages::produce_response::{
 };
 use kafka_protocol::messages::ProduceRequest;
 use kafka_protocol::protocol::Decodable;
-use pico_server::{AppendBatchCommand, BatchSpan, NumericProducer};
+use kafka_protocol::records::RecordBatchDecoder;
+use pico_server::{
+    AppendBatchCommand, BatchSpan, NumericProducer, SchemaBatch, SchemaRecord, SubmittedBatchAppend,
+};
 
 use crate::batch::decode_batches;
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
     encode_response, ensure_local_leader, service_error_code, topic_name, CORRUPT_MESSAGE,
-    INVALID_REQUEST, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION,
+    INVALID_RECORD, INVALID_REQUEST, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 use crate::topic::{stream_name, validate_topic_name};
@@ -31,79 +34,111 @@ pub async fn handle(
         ));
     }
 
-    let mut topic_responses = Vec::with_capacity(request.topic_data.len());
+    let mut topics = Vec::with_capacity(request.topic_data.len());
     for topic in request.topic_data {
         let topic_name_str = topic.name.to_string();
         if !validate_topic_name(&topic_name_str) {
-            topic_responses.push(
-                TopicProduceResponse::default()
-                    .with_name(topic_name(&topic_name_str))
-                    .with_partition_responses(vec![PartitionProduceResponse::default()
+            topics.push((
+                topic_name_str,
+                vec![PartitionSubmit::Ready(
+                    PartitionProduceResponse::default()
                         .with_index(0)
-                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)]),
-            );
+                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION),
+                )],
+            ));
             continue;
         }
         let stream = stream_name(&topic_name_str);
         if let Err(code) = ensure_local_leader(ctx, &stream).await {
-            topic_responses.push(
-                TopicProduceResponse::default()
-                    .with_name(topic_name(&topic_name_str))
-                    .with_partition_responses(vec![PartitionProduceResponse::default()
+            topics.push((
+                topic_name_str,
+                vec![PartitionSubmit::Ready(
+                    PartitionProduceResponse::default()
                         .with_index(0)
-                        .with_error_code(code)]),
-            );
+                        .with_error_code(code),
+                )],
+            ));
             continue;
         }
 
-        let mut partition_responses = Vec::new();
+        let mut partitions = Vec::new();
         for partition in topic.partition_data {
             if partition.index != 0 {
-                partition_responses.push(
+                partitions.push(PartitionSubmit::Ready(
                     PartitionProduceResponse::default()
                         .with_index(partition.index)
                         .with_error_code(UNKNOWN_TOPIC_OR_PARTITION),
-                );
+                ));
                 continue;
             }
             let records = partition.records.unwrap_or_default();
-            let response = match produce_partition(ctx, &stream, records).await {
-                Ok((base_offset, log_start_offset)) => PartitionProduceResponse::default()
-                    .with_index(0)
-                    .with_error_code(NO_ERROR)
-                    .with_base_offset(base_offset)
-                    .with_log_start_offset(log_start_offset),
-                Err(code) => PartitionProduceResponse::default()
-                    .with_index(0)
-                    .with_error_code(code),
-            };
-            partition_responses.push(response);
+            partitions.push(match submit_partition(ctx, &stream, records).await {
+                Ok(submitted) => PartitionSubmit::Pending(submitted),
+                Err(code) => PartitionSubmit::Ready(
+                    PartitionProduceResponse::default()
+                        .with_index(0)
+                        .with_error_code(code),
+                ),
+            });
         }
-        topic_responses.push(
-            TopicProduceResponse::default()
-                .with_name(topic_name(&topic_name_str))
-                .with_partition_responses(partition_responses),
-        );
+        topics.push((topic_name_str, partitions));
     }
 
-    if request.acks == 0 {
-        return Ok(HandlerOutcome::NoResponse);
-    }
+    let service = ctx.service.clone();
+    let acks = request.acks;
+    let correlation_id = req.correlation_id;
+    let api_version = req.api_version;
+    Ok(HandlerOutcome::Deferred(Box::pin(async move {
+        let mut topic_responses = Vec::with_capacity(topics.len());
+        for (topic_name_str, partitions) in topics {
+            let mut partition_responses = Vec::with_capacity(partitions.len());
+            for partition in partitions {
+                partition_responses.push(match partition {
+                    PartitionSubmit::Ready(response) => response,
+                    PartitionSubmit::Pending(submitted) => {
+                        match service.finish_batch_append(submitted).await {
+                            Ok(result) => PartitionProduceResponse::default()
+                                .with_index(0)
+                                .with_error_code(NO_ERROR)
+                                .with_base_offset(result.base_offset as i64)
+                                .with_log_start_offset(result.log_start_offset as i64),
+                            Err(error) => PartitionProduceResponse::default()
+                                .with_index(0)
+                                .with_error_code(service_error_code(&error)),
+                        }
+                    }
+                });
+            }
+            topic_responses.push(
+                TopicProduceResponse::default()
+                    .with_name(topic_name(&topic_name_str))
+                    .with_partition_responses(partition_responses),
+            );
+        }
 
-    let response = ProduceResponse::default().with_responses(topic_responses);
-    Ok(HandlerOutcome::Response(encode_response(
-        req.correlation_id,
-        req.api_version,
-        &response,
-    )))
+        if acks == 0 {
+            return Ok(HandlerOutcome::NoResponse);
+        }
+
+        let response = ProduceResponse::default().with_responses(topic_responses);
+        Ok(HandlerOutcome::Response(encode_response(
+            correlation_id,
+            api_version,
+            &response,
+        )))
+    })))
 }
 
-/// Returns `(base_offset, log_start_offset)` or a Kafka partition error code.
-async fn produce_partition(
+enum PartitionSubmit {
+    Ready(PartitionProduceResponse),
+    Pending(SubmittedBatchAppend),
+}
+
+async fn submit_partition(
     ctx: &BrokerContext,
     stream: &str,
     records: Bytes,
-) -> Result<(i64, i64), i16> {
+) -> Result<SubmittedBatchAppend, i16> {
     let batches = decode_batches(&records).map_err(|error| {
         tracing::debug!(%error, stream, "rejected produce payload");
         CORRUPT_MESSAGE
@@ -113,6 +148,21 @@ async fn produce_partition(
         .any(|batch| batch.info.transactional || batch.info.control)
     {
         return Err(INVALID_REQUEST);
+    }
+    let schema_name = ctx
+        .service
+        .validation_schema_of(stream)
+        .await
+        .map_err(|error| {
+            tracing::debug!(%error, stream, "schema bind lookup failed");
+            service_error_code(&error)
+        })?;
+    if let Some(schema_name) = schema_name {
+        let batch = schema_batch(stream, &records)?;
+        if let Err(error) = ctx.service.validate_schema(&schema_name, &batch).await {
+            tracing::debug!(%error, stream, %schema_name, "schema validation failed");
+            return Err(INVALID_RECORD);
+        }
     }
     let first = &batches[0].info;
     let producer = if first.producer_id >= 0 {
@@ -133,9 +183,8 @@ async fn produce_partition(
             record_count: batch.info.record_count.max(0) as u32,
         })
         .collect();
-    let result = ctx
-        .service
-        .append_batch(AppendBatchCommand {
+    ctx.service
+        .submit_batch_append(AppendBatchCommand {
             name: stream.to_owned(),
             payload: records,
             batches: spans,
@@ -146,6 +195,28 @@ async fn produce_partition(
         .map_err(|error| {
             tracing::debug!(%error, stream, "append failed");
             service_error_code(&error)
-        })?;
-    Ok((result.base_offset as i64, result.log_start_offset as i64))
+        })
+}
+
+fn schema_batch(stream: &str, records: &Bytes) -> Result<SchemaBatch, i16> {
+    let mut buf = records.clone();
+    let sets = RecordBatchDecoder::decode_all(&mut buf).map_err(|error| {
+        tracing::debug!(%error, stream, "rejected produce payload");
+        CORRUPT_MESSAGE
+    })?;
+    let records = sets
+        .iter()
+        .flat_map(|set| set.records.iter())
+        .map(|record| {
+            let mut builder = SchemaRecord::builder();
+            if let Some(key) = record.key.clone() {
+                builder = builder.key(key);
+            }
+            if let Some(value) = record.value.clone() {
+                builder = builder.value(value);
+            }
+            builder.build()
+        })
+        .collect();
+    Ok(SchemaBatch { records })
 }

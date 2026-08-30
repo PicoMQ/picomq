@@ -14,6 +14,10 @@ servers:
 tags:
   - name: streams
     description: The Pico protocol.
+  - name: schemas
+    description: Schema registry on the protocol listener.
+  - name: stream-config
+    description: Protocol-neutral stream config on the protocol listener.
   - name: admin
     description: Admin listener endpoints (default port 9090).
   - name: tokens
@@ -78,6 +82,14 @@ paths:
         - name: Pico-Closed
           in: header
           description: Create the stream already sealed.
+          schema: { type: boolean }
+        - name: Pico-Schema
+          in: header
+          description: Bind a registered schema by name.
+          schema: { type: string }
+        - name: Pico-Schema-Validate
+          in: header
+          description: Validate appends against the bound schema. Defaults to false.
           schema: { type: boolean }
       requestBody:
         description: Optional initial records.
@@ -249,6 +261,9 @@ paths:
               schema: { type: string }
             Pico-Closed:
               schema: { type: boolean }
+            Pico-Schema:
+              description: The bound schema name, present when bound.
+              schema: { type: string }
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -268,6 +283,131 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: No such stream.
+
+  /_streams/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        description: The stream path without requiring a leading slash. Topic `orders` is `/orders`.
+        schema: { type: string }
+    get:
+      tags: [stream-config]
+      summary: Read stream schema config
+      operationId: getStreamConfig
+      responses:
+        "200":
+          description: Current schema bind and validation flag.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema: { type: string, nullable: true }
+                  schemaValidate: { type: boolean }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such stream.
+    patch:
+      tags: [stream-config]
+      summary: Update stream schema config
+      operationId: patchStreamConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                schema: { type: string, nullable: true }
+                schemaValidate: { type: boolean }
+      responses:
+        "200":
+          description: Updated config.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema: { type: string, nullable: true }
+                  schemaValidate: { type: boolean }
+        "400":
+          description: Empty patch, unknown schema, or invalid body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such stream.
+
+  /_schemas/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        description: The schema name. Names are paths and may contain slashes.
+        schema: { type: string }
+    put:
+      tags: [schemas]
+      summary: Register a schema
+      description: >
+        Store or replace a schema. The format comes from the Content-Type, or
+        from an extension on the name. 400 when the schema does not parse or
+        the node runs without a schema registry.
+      operationId: putSchema
+      requestBody:
+        required: true
+        content:
+          application/schema+json:
+            schema: { type: string }
+          application/avro:
+            schema: { type: string }
+          application/x-protobuf:
+            schema: { type: string }
+      responses:
+        "204":
+          description: Stored.
+        "400":
+          description: Unparseable schema, unknown format, or no registry configured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    get:
+      tags: [schemas]
+      summary: Fetch a schema
+      operationId: getSchema
+      responses:
+        "200":
+          description: The schema body with its content type.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such schema.
+    delete:
+      tags: [schemas]
+      summary: Delete a schema
+      operationId: deleteSchema
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No such schema.
 
   /health:
     get:

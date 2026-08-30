@@ -60,6 +60,7 @@ const docsSidebar = [
     items: [
       { text: 'HTTP API', link: '/docs/api' },
       { text: 'Kafka protocol', link: '/docs/kafka' },
+      { text: 'Schemas', link: '/docs/schemas' },
       { text: 'Rust client', link: '/docs/client' },
     ],
   },

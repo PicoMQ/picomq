@@ -279,6 +279,10 @@ impl ObjectStoreAdapter {
     pub fn new(inner: std::sync::Arc<dyn object_store::ObjectStore>, bucket_id: i16) -> Self {
         Self { inner, bucket_id }
     }
+
+    pub fn object_store(&self) -> std::sync::Arc<dyn object_store::ObjectStore> {
+        self.inner.clone()
+    }
 }
 
 /// AWS directory bucket names carry this reserved suffix

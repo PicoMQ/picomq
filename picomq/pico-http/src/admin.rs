@@ -18,15 +18,17 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use pico_auth::{
-    check_issue, scope_from_json, scope_to_json, AccessToken, Audience, AuthError, AuthPrincipal,
-    Authorizer, Operation, TokenRecord, TokenStore as _,
+    check_issue, scope_from_json, scope_to_json, AccessToken, Audience, AuthError, Authorizer,
+    Operation, TokenRecord, TokenStore as _,
 };
 use pico_metadata::MetadataState;
 use pico_server::registry::RegistryEntry;
-use pico_server::{ErrorKind, OwnershipService, PicoNode, ServiceError};
+use pico_server::{OwnershipService, PicoNode};
 use s3stream::StreamState;
 use serde_json::{json, Value};
 use tokio::sync::watch;
+
+use crate::common::{auth_error, authenticate, gate, service_error};
 
 /// What `/ready` reports on.
 ///
@@ -121,63 +123,12 @@ fn cors_headers(headers: &mut HeaderMap) {
     headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
     headers.insert(
         "Access-Control-Allow-Methods",
-        HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+        HeaderValue::from_static("GET, PUT, POST, DELETE, OPTIONS"),
     );
     headers.insert(
         "Access-Control-Allow-Headers",
         HeaderValue::from_static("authorization, content-type"),
     );
-}
-
-/// `Ok(None)`: auth off. `Ok(Some)`: authenticated and allowed.
-async fn gate(
-    state: &AdminState,
-    headers: &HeaderMap,
-    op: Operation,
-    resource: Option<&str>,
-) -> Result<Option<AuthPrincipal>, Box<Response>> {
-    let principal = authenticate(state, headers).await?;
-    if let Some(principal) = &principal {
-        state
-            .authorizer
-            .as_ref()
-            .expect("principal implies authorizer")
-            .authorize(principal, op, resource)
-            .map_err(|err| Box::new(auth_error(&err)))?;
-    }
-    Ok(principal)
-}
-
-async fn authenticate(
-    state: &AdminState,
-    headers: &HeaderMap,
-) -> Result<Option<AuthPrincipal>, Box<Response>> {
-    let Some(authorizer) = &state.authorizer else {
-        return Ok(None);
-    };
-    let credential = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| Box::new(auth_error(&AuthError::Unauthenticated)))?;
-    authorizer
-        .authenticate(credential, Audience::Admin, pico_common::now_ms())
-        .await
-        .map(Some)
-        .map_err(|err| Box::new(auth_error(&err)))
-}
-
-fn auth_error(err: &AuthError) -> Response {
-    if let AuthError::Store(detail) = err {
-        tracing::warn!(%detail, "admin auth store failure");
-    }
-    let (status, _, message) = crate::auth::status_code(err);
-    let mut response = error_response(StatusCode::from_u16(status).expect("known status"), message);
-    if status == 401 {
-        response
-            .headers_mut()
-            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-    }
-    response
 }
 
 fn asset(path: &str) -> Response {
@@ -244,7 +195,14 @@ async fn ready(State(state): State<AdminState>) -> Response {
 }
 
 async fn cluster(State(state): State<AdminState>, headers: HeaderMap) -> Response {
-    if let Err(response) = gate(&state, &headers, Operation::ClusterRead, None).await {
+    if let Err(response) = gate(
+        state.authorizer.as_deref(),
+        &headers,
+        Operation::ClusterRead,
+        None,
+    )
+    .await
+    {
         return *response;
     }
     let config = state.node.config();
@@ -285,7 +243,14 @@ async fn cluster(State(state): State<AdminState>, headers: HeaderMap) -> Respons
 }
 
 async fn nodes(State(state): State<AdminState>, headers: HeaderMap) -> Response {
-    if let Err(response) = gate(&state, &headers, Operation::NodeRead, None).await {
+    if let Err(response) = gate(
+        state.authorizer.as_deref(),
+        &headers,
+        Operation::NodeRead,
+        None,
+    )
+    .await
+    {
         return *response;
     }
     let local_id = state.node.config().node_id;
@@ -306,7 +271,14 @@ async fn stream(
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = gate(&state, &headers, Operation::StreamInspect, None).await {
+    if let Err(response) = gate(
+        state.authorizer.as_deref(),
+        &headers,
+        Operation::StreamInspect,
+        None,
+    )
+    .await
+    {
         return *response;
     }
     let name = format!("/{name}");
@@ -367,7 +339,14 @@ async fn transfer(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(response) = gate(&state, &headers, Operation::TransferStream, None).await {
+    if let Err(response) = gate(
+        state.authorizer.as_deref(),
+        &headers,
+        Operation::TransferStream,
+        None,
+    )
+    .await
+    {
         return *response;
     }
     let Some(name) = body.get("stream").and_then(Value::as_str) else {
@@ -399,7 +378,14 @@ async fn update_node(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(response) = gate(&state, &headers, Operation::UpdateNodeSlots, None).await {
+    if let Err(response) = gate(
+        state.authorizer.as_deref(),
+        &headers,
+        Operation::UpdateNodeSlots,
+        None,
+    )
+    .await
+    {
         return *response;
     }
     let Some(slots) = body.get("slots").and_then(Value::as_u64) else {
@@ -436,7 +422,7 @@ async fn update_node(
 /// Listing is filtered to ids the caller's token matcher allows. `count` is
 /// the number of visible records, informational only, never an enforced cap.
 async fn list_tokens(State(state): State<AdminState>, headers: HeaderMap) -> Response {
-    let principal = match authenticate(&state, &headers).await {
+    let principal = match authenticate(state.authorizer.as_deref(), &headers).await {
         Ok(principal) => principal,
         Err(response) => return *response,
     };
@@ -468,7 +454,7 @@ async fn issue_token(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let principal = match authenticate(&state, &headers).await {
+    let principal = match authenticate(state.authorizer.as_deref(), &headers).await {
         Ok(principal) => principal,
         Err(response) => return *response,
     };
@@ -543,7 +529,14 @@ async fn revoke_token(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = gate(&state, &headers, Operation::RevokeToken, Some(&id)).await {
+    if let Err(response) = gate(
+        state.authorizer.as_deref(),
+        &headers,
+        Operation::RevokeToken,
+        Some(&id),
+    )
+    .await
+    {
         return *response;
     }
     let store = state.node.tokens().store();
@@ -608,13 +601,4 @@ fn not_found(name: &str) -> Response {
 
 fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
-}
-
-fn service_error(e: ServiceError) -> Response {
-    let status = match e.kind {
-        ErrorKind::NotFound => StatusCode::NOT_FOUND,
-        ErrorKind::Conflict => StatusCode::CONFLICT,
-        _ => StatusCode::BAD_REQUEST,
-    };
-    error_response(status, e.message)
 }

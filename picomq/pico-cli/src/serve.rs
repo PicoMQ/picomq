@@ -131,6 +131,9 @@ pub struct ServeArgs {
         conflicts_with = "auth_bootstrap_token"
     )]
     auth_bootstrap_token_file: Option<PathBuf>,
+
+    #[arg(long, env = "PICO_SCHEMA_REGISTRY")]
+    schema_registry: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -208,6 +211,7 @@ impl ServeArgs {
             },
             insecure_allow_remote: self.insecure_allow_remote,
             bootstrap_token,
+            schema_registry: self.schema_registry,
             engine,
         })
     }
