@@ -1,5 +1,7 @@
-//! TCP listener and per-connection pipeline. Requests process concurrently
-//! but respond in receive order, with `max_in_flight` TCP backpressure.
+//! TCP listener and per-connection pipeline. Produce requests process
+//! strictly in receive order, other requests process concurrently. All
+//! responses are written in receive order, with `max_in_flight` TCP
+//! backpressure.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -47,6 +49,41 @@ struct Slot {
     reply: Reply,
     /// Released when the writer consumes the slot, capping outstanding work.
     _permit: OwnedSemaphorePermit,
+}
+
+const PRODUCE_API_KEY: i16 = 0;
+
+fn frame_api_key(body: &[u8]) -> Option<i16> {
+    Some(i16::from_be_bytes([*body.first()?, *body.get(1)?]))
+}
+
+async fn to_reply(mut result: Result<HandlerOutcome, HandlerError>) -> Reply {
+    loop {
+        return match result {
+            Ok(HandlerOutcome::Deferred(deferred)) => {
+                result = deferred.await;
+                continue;
+            }
+            Ok(HandlerOutcome::Response(frame)) => Reply::Frame(frame.0),
+            Ok(HandlerOutcome::NoResponse) => Reply::Skip,
+            Err(HandlerError::Unimplemented(api_key)) => {
+                warn!(api_key, "closing connection: unimplemented kafka api");
+                Reply::Close
+            }
+            Err(HandlerError::Protocol(message)) => {
+                warn!(%message, "closing connection: invalid kafka request");
+                Reply::Close
+            }
+            Err(HandlerError::Service(error)) => {
+                warn!(?error, "closing connection: kafka handler service error");
+                Reply::Close
+            }
+            Err(HandlerError::Batch(error)) => {
+                warn!(?error, "closing connection: kafka batch parse error");
+                Reply::Close
+            }
+        };
+    }
 }
 
 pub struct KafkaListener {
@@ -113,6 +150,13 @@ async fn run_reader(
     config: ListenerConfig,
     in_flight: Arc<Semaphore>,
 ) -> Result<(), KafkaError> {
+    let (produce_tx, produce_rx) = mpsc::channel(config.max_in_flight.max(1));
+    tokio::spawn(run_produce_worker(
+        produce_rx,
+        response_tx.clone(),
+        broker.clone(),
+    ));
+
     let mut sequence = 0u64;
     loop {
         let permit = in_flight
@@ -122,31 +166,18 @@ async fn run_reader(
             .expect("connection semaphore never closes");
         let frame = read_frame(&mut read_half, config.max_request_bytes).await?;
         let body = frame.freeze();
-        let tx = response_tx.clone();
         let seq = sequence;
         sequence += 1;
+        if frame_api_key(&body) == Some(PRODUCE_API_KEY) {
+            if produce_tx.send((seq, body, permit)).await.is_err() {
+                return Ok(());
+            }
+            continue;
+        }
+        let tx = response_tx.clone();
         let broker = broker.clone();
         tokio::spawn(async move {
-            let reply = match dispatch(&broker, &body).await {
-                Ok(HandlerOutcome::Response(frame)) => Reply::Frame(frame.0),
-                Ok(HandlerOutcome::NoResponse) => Reply::Skip,
-                Err(HandlerError::Unimplemented(api_key)) => {
-                    warn!(api_key, "closing connection: unimplemented kafka api");
-                    Reply::Close
-                }
-                Err(HandlerError::Protocol(message)) => {
-                    warn!(%message, "closing connection: invalid kafka request");
-                    Reply::Close
-                }
-                Err(HandlerError::Service(error)) => {
-                    warn!(?error, "closing connection: kafka handler service error");
-                    Reply::Close
-                }
-                Err(HandlerError::Batch(error)) => {
-                    warn!(?error, "closing connection: kafka batch parse error");
-                    Reply::Close
-                }
-            };
+            let reply = to_reply(dispatch(&broker, &body).await).await;
             let _ = tx
                 .send((
                     seq,
@@ -157,6 +188,48 @@ async fn run_reader(
                 ))
                 .await;
         });
+    }
+}
+
+async fn run_produce_worker(
+    mut produce_rx: mpsc::Receiver<(u64, Bytes, OwnedSemaphorePermit)>,
+    response_tx: mpsc::Sender<(u64, Slot)>,
+    broker: Arc<BrokerContext>,
+) {
+    while let Some((seq, body, permit)) = produce_rx.recv().await {
+        match dispatch(&broker, &body).await {
+            Ok(HandlerOutcome::Deferred(deferred)) => {
+                let tx = response_tx.clone();
+                tokio::spawn(async move {
+                    let reply = to_reply(deferred.await).await;
+                    let _ = tx
+                        .send((
+                            seq,
+                            Slot {
+                                reply,
+                                _permit: permit,
+                            },
+                        ))
+                        .await;
+                });
+            }
+            outcome => {
+                let reply = to_reply(outcome).await;
+                if response_tx
+                    .send((
+                        seq,
+                        Slot {
+                            reply,
+                            _permit: permit,
+                        },
+                    ))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
     }
 }
 

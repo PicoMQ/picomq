@@ -145,6 +145,18 @@ pub struct AppendBatchResult {
     pub log_start_offset: u64,
 }
 
+/// A batch append that has been admitted and submitted under the stream gate
+/// but is not yet durable. Pass to `finish_batch_append` to await durability.
+pub struct SubmittedBatchAppend {
+    pub(crate) name: String,
+    pub(crate) stream_id: u64,
+    pub(crate) base_offset: u64,
+    pub(crate) log_start_offset: u64,
+    pub(crate) notify_offset: u64,
+    pub(crate) duplicate: bool,
+    pub(crate) pending: Option<s3stream::PendingAppend>,
+}
+
 /// One stored batch, returned verbatim. `base_offset` may be below the
 /// requested position when the position falls mid-batch.
 #[derive(Debug, Clone)]

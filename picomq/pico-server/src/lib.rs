@@ -26,6 +26,6 @@ pub use types::{
     AppendBatchCommand, AppendBatchResult, AppendCommand, AppendResult, BatchReadResult, BatchSpan,
     CloseResult, CreateCommand, CreateResult, NodeMeta, NumericProducer, OffsetToken, Owner,
     ReadResult, StreamBatch, StreamConfig, StreamList, StreamMeta, StreamRecord, StreamWatermarks,
-    UpdateStreamCommand,
+    SubmittedBatchAppend, UpdateStreamCommand,
 };
 pub use waiter::StreamWaiterRegistry;

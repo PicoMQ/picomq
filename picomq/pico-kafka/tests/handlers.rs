@@ -115,9 +115,9 @@ async fn api_versions_handler_lists_supported_apis() {
             .with_client_software_version(StrBytes::from_static_str("0.1")),
     );
     let outcome = dispatch(&broker, &req).await.unwrap();
-    let mut buf = match outcome {
+    let mut buf = match resolve(outcome).await {
         HandlerOutcome::Response(frame) => frame.0,
-        HandlerOutcome::NoResponse => panic!("expected response"),
+        _ => panic!("expected response"),
     };
     ResponseHeader::decode(&mut buf, 0).unwrap();
     let response = ApiVersionsResponse::decode(&mut buf, 3).unwrap();
@@ -128,10 +128,17 @@ async fn api_versions_handler_lists_supported_apis() {
         .any(|api| api.api_key == ApiKey::Metadata as i16));
 }
 
+async fn resolve(outcome: HandlerOutcome) -> HandlerOutcome {
+    match outcome {
+        HandlerOutcome::Deferred(deferred) => deferred.await.unwrap(),
+        other => other,
+    }
+}
+
 async fn response_body(broker: &BrokerContext, req: &[u8]) -> Bytes {
-    match dispatch(broker, req).await.unwrap() {
+    match resolve(dispatch(broker, req).await.unwrap()).await {
         HandlerOutcome::Response(frame) => frame.0,
-        HandlerOutcome::NoResponse => panic!("expected response"),
+        _ => panic!("expected response"),
     }
 }
 

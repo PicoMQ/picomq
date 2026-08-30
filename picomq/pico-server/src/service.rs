@@ -22,7 +22,8 @@ use crate::registry::{validate_producer, ClosedBy, ProducerDecision, RegistryEnt
 use crate::types::{
     AppendBatchCommand, AppendBatchResult, AppendCommand, AppendResult, BatchReadResult,
     CloseResult, CreateCommand, CreateResult, OffsetToken, ReadResult, StreamBatch, StreamConfig,
-    StreamList, StreamMeta, StreamRecord, StreamWatermarks, UpdateStreamCommand,
+    StreamList, StreamMeta, StreamRecord, StreamWatermarks, SubmittedBatchAppend,
+    UpdateStreamCommand,
 };
 use crate::waiter::StreamWaiterRegistry;
 
@@ -675,6 +676,14 @@ impl S3StreamService {
         &self,
         command: AppendBatchCommand,
     ) -> Result<AppendBatchResult, ServiceError> {
+        let submitted = self.submit_batch_append(command).await?;
+        self.finish_batch_append(submitted).await
+    }
+
+    pub async fn submit_batch_append(
+        &self,
+        command: AppendBatchCommand,
+    ) -> Result<SubmittedBatchAppend, ServiceError> {
         validate_batch_spans(&command)?;
         let record_count = command.record_count();
         let name = normalize(&command.name);
@@ -699,10 +708,14 @@ impl S3StreamService {
             Ok(Admission::Accepted(accepted)) => accepted,
             Ok(Admission::Duplicate { base_offset }) => {
                 self.cache_entry(&name, touch_deadline(entry));
-                return Ok(AppendBatchResult {
+                return Ok(SubmittedBatchAppend {
+                    name,
+                    stream_id,
                     base_offset,
-                    duplicate: true,
                     log_start_offset,
+                    notify_offset: 0,
+                    duplicate: true,
+                    pending: None,
                 });
             }
             Err(error) => {
@@ -746,15 +759,36 @@ impl S3StreamService {
 
         let notify_offset = stream.next_offset();
         drop(_op);
-        if let Err(e) = await_durable(vec![pending]).await {
-            self.open_streams.lock().unwrap().remove(&stream_id);
-            return Err(ServiceError::durability(e));
-        }
-        self.waiters.notify_append(&name, notify_offset);
-        Ok(AppendBatchResult {
+        Ok(SubmittedBatchAppend {
+            name,
+            stream_id,
             base_offset,
-            duplicate: false,
             log_start_offset,
+            notify_offset,
+            duplicate: false,
+            pending: Some(pending),
+        })
+    }
+
+    pub async fn finish_batch_append(
+        &self,
+        submitted: SubmittedBatchAppend,
+    ) -> Result<AppendBatchResult, ServiceError> {
+        if let Some(pending) = submitted.pending {
+            if let Err(e) = await_durable(vec![pending]).await {
+                self.open_streams
+                    .lock()
+                    .unwrap()
+                    .remove(&submitted.stream_id);
+                return Err(ServiceError::durability(e));
+            }
+            self.waiters
+                .notify_append(&submitted.name, submitted.notify_offset);
+        }
+        Ok(AppendBatchResult {
+            base_offset: submitted.base_offset,
+            duplicate: submitted.duplicate,
+            log_start_offset: submitted.log_start_offset,
         })
     }
 
