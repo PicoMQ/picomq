@@ -2,7 +2,10 @@ mod common;
 
 #[tokio::test]
 async fn schema_crud_on_data_plane() {
-    let server = common::pico_server_with_schema(pico_schema::Registry::new(object_store::memory::InMemory::new())).await;
+    let server = common::pico_server_with_schema(pico_schema::Registry::new(
+        object_store::memory::InMemory::new(),
+    ))
+    .await;
     let client = reqwest::Client::new();
     let schema = r#"{
         "title": "Person",
@@ -123,7 +126,10 @@ async fn append_validates_against_bound_schema() {
 
 #[tokio::test]
 async fn stream_config_patch_updates_schema_bind() {
-    let server = common::pico_server_with_schema(pico_schema::Registry::new(object_store::memory::InMemory::new())).await;
+    let server = common::pico_server_with_schema(pico_schema::Registry::new(
+        object_store::memory::InMemory::new(),
+    ))
+    .await;
     let client = reqwest::Client::new();
     let schema = r#"{
         "title": "Person",
@@ -276,7 +282,10 @@ async fn stream_config_redirects_to_remote_owner() {
 
 #[tokio::test]
 async fn kafka_mode_exposes_schemas_only() {
-    let server = common::kafka_http_with_schema(pico_schema::Registry::new(object_store::memory::InMemory::new())).await;
+    let server = common::kafka_http_with_schema(pico_schema::Registry::new(
+        object_store::memory::InMemory::new(),
+    ))
+    .await;
     let client = reqwest::Client::new();
     let schema = r#"{"type":"object","properties":{"value":{"type":"object"}}}"#;
 
