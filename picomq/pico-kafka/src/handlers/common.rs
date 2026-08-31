@@ -1,7 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::{BrokerId, ResponseHeader, TopicName};
 use kafka_protocol::protocol::{Encodable, HeaderVersion, StrBytes};
-use pico_server::{ErrorKind, ServiceError};
+use picomq_server::{ErrorKind, ServiceError};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
@@ -84,7 +84,7 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
 }
 
 pub async fn ensure_local_leader(ctx: &BrokerContext, stream_name: &str) -> Result<(), i16> {
-    use pico_server::OwnershipService;
+    use picomq_server::OwnershipService;
     let owner = ctx
         .ownership
         .owner_of(stream_name)
@@ -123,7 +123,7 @@ pub fn reject_sys_create(name: &str) -> Result<(), i16> {
     }
 }
 
-pub fn concat_batches(batches: &[pico_server::StreamBatch]) -> Bytes {
+pub fn concat_batches(batches: &[picomq_server::StreamBatch]) -> Bytes {
     // The common case is a single stored batch: hand back the engine's
     // zero-copy Bytes untouched.
     if let [only] = batches {

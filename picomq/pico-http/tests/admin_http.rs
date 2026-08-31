@@ -6,11 +6,11 @@ mod common;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use pico_http::{serve, Protocol, ServeOptions};
+use picomq_http::{serve, Protocol, ServeOptions};
 
 #[tokio::test]
 async fn health_and_ready() {
-    let server = common::pico_server().await;
+    let server = common::picomq_server().await;
     let client = reqwest::Client::new();
 
     let health = client
@@ -90,7 +90,7 @@ async fn ready_fails_while_draining() {
 
 #[tokio::test]
 async fn cluster_nodes_and_stream_detail() {
-    let server = common::pico_server().await;
+    let server = common::picomq_server().await;
     let client = reqwest::Client::new();
 
     let create = client
@@ -163,7 +163,7 @@ async fn cluster_nodes_and_stream_detail() {
 
 #[tokio::test]
 async fn update_node_slots() {
-    let server = common::pico_server().await;
+    let server = common::picomq_server().await;
     let client = reqwest::Client::new();
 
     let updated = client
@@ -200,7 +200,7 @@ async fn update_node_slots() {
 
 #[tokio::test]
 async fn transfer_validation() {
-    let server = common::pico_server().await;
+    let server = common::picomq_server().await;
     let client = reqwest::Client::new();
 
     let absent = client
@@ -251,7 +251,7 @@ async fn transfer_validation() {
 /// assets were embedded and a hint page otherwise.
 #[tokio::test]
 async fn dashboard_is_served_at_root() {
-    let server = common::pico_server().await;
+    let server = common::picomq_server().await;
     let client = reqwest::Client::new();
 
     let index = client

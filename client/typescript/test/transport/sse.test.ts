@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { iterateSse } from '../src/sse'
-import { ClientError } from '../src/error'
+import { iterateSse } from '../../src/transport/sse'
+import { ClientError } from '../../src/error'
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
   const bytes = new TextEncoder().encode(text)

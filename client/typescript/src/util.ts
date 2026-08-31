@@ -1,4 +1,4 @@
-import { ClientError } from './error'
+import { abortError, ClientError } from './error'
 
 export function base64Decode(value: string): Uint8Array {
   const bin = atob(value)
@@ -8,17 +8,34 @@ export function base64Decode(value: string): Uint8Array {
 }
 
 export function parseOptionalUint(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined
+  if (value === undefined || !/^\d+$/.test(value)) return undefined
   const n = Number(value)
-  return Number.isFinite(n) ? n : undefined
+  return Number.isSafeInteger(n) ? n : undefined
 }
 
 export function retryableError(error: unknown): boolean {
   return error instanceof ClientError && error.retryable()
 }
 
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(abortError(signal.reason))
+      return
+    }
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(abortError(signal.reason))
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 export function parseSafeSeq(value: string, label: string): number {
@@ -29,11 +46,9 @@ export function parseSafeSeq(value: string, label: string): number {
   }
   const n = Number(value)
   if (!Number.isSafeInteger(n)) {
-    throw new ClientError(
-      'other',
-      `${label} ${value} exceeds Number.MAX_SAFE_INTEGER`,
-      { code: 'invalid_response' },
-    )
+    throw new ClientError('other', `${label} ${value} exceeds Number.MAX_SAFE_INTEGER`, {
+      code: 'invalid_response',
+    })
   }
   return n
 }

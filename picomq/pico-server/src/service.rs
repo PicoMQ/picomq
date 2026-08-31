@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use pico_common::now_ms;
-use pico_metadata::{MetadataNodeHandle, ViewPublisher};
-use pico_schema::Validator as _;
+use picomq_common::now_ms;
+use picomq_metadata::{MetadataNodeHandle, ViewPublisher};
+use picomq_schema::Validator as _;
 use s3stream::{
     AppendContext, CreateStreamOptions, FetchContext, KVClient, KeyValue, OpenStreamOptions,
     PendingAppend, RecordBatch, Stream, StreamClientTrait as StreamClient,
@@ -116,7 +116,7 @@ pub struct S3StreamService {
     gates: Mutex<HashMap<String, Arc<Gate>>>,
     entry_cache: Mutex<HashMap<String, RegistryEntry>>,
     open_lock: tokio::sync::Mutex<()>,
-    schema_registry: Option<Arc<dyn pico_schema::SchemaStore>>,
+    schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
 }
 
 /// Stream names under `/_sys/`, `/_schemas/`, and `/_streams/` are reserved.
@@ -152,12 +152,12 @@ impl S3StreamService {
         }
     }
 
-    pub fn with_schema_registry(mut self, registry: Arc<dyn pico_schema::SchemaStore>) -> Self {
+    pub fn with_schema_registry(mut self, registry: Arc<dyn picomq_schema::SchemaStore>) -> Self {
         self.schema_registry = Some(registry);
         self
     }
 
-    pub fn schema_registry(&self) -> Option<&Arc<dyn pico_schema::SchemaStore>> {
+    pub fn schema_registry(&self) -> Option<&Arc<dyn picomq_schema::SchemaStore>> {
         self.schema_registry.as_ref()
     }
 
@@ -165,7 +165,9 @@ impl S3StreamService {
         self.waiters.clone()
     }
 
-    fn schema_registry_required(&self) -> Result<&Arc<dyn pico_schema::SchemaStore>, ServiceError> {
+    fn schema_registry_required(
+        &self,
+    ) -> Result<&Arc<dyn picomq_schema::SchemaStore>, ServiceError> {
         self.schema_registry
             .as_ref()
             .ok_or_else(|| schema_error("schema registry is not configured"))
@@ -177,7 +179,7 @@ impl S3StreamService {
     pub async fn validate_schema(
         &self,
         name: &str,
-        batch: &pico_schema::Batch,
+        batch: &picomq_schema::Batch,
     ) -> Result<(), ServiceError> {
         let registry = self.schema_registry_required()?;
         let schema = registry
@@ -195,7 +197,7 @@ impl S3StreamService {
     pub async fn put_schema(
         &self,
         name: &str,
-        format: pico_schema::SchemaFormat,
+        format: picomq_schema::SchemaFormat,
         bytes: bytes::Bytes,
     ) -> Result<(), ServiceError> {
         let registry = self.schema_registry_required()?;
@@ -208,7 +210,7 @@ impl S3StreamService {
     pub async fn get_schema(
         &self,
         name: &str,
-    ) -> Result<Option<(pico_schema::SchemaFormat, bytes::Bytes)>, ServiceError> {
+    ) -> Result<Option<(picomq_schema::SchemaFormat, bytes::Bytes)>, ServiceError> {
         let registry = self.schema_registry_required()?;
         registry
             .get(name)
@@ -998,7 +1000,7 @@ impl S3StreamService {
         const PAGE: usize = 4096;
         let service = self.clone();
         tokio::spawn(async move {
-            let mut cursor: Option<pico_metadata::StreamOffsetKey> = None;
+            let mut cursor: Option<picomq_metadata::StreamOffsetKey> = None;
             let mut run: (u64, usize) = (u64::MAX, 0);
             loop {
                 tokio::time::sleep(tick).await;
@@ -1854,24 +1856,28 @@ fn stream_config_of(name: &str, entry: &RegistryEntry) -> StreamConfig {
 fn schema_batch_from_messages(
     content_type: &str,
     messages: &[Bytes],
-) -> Result<pico_schema::Batch, ServiceError> {
+) -> Result<picomq_schema::Batch, ServiceError> {
     let pico = framing::mime_of(Some(content_type)) == "application/x-picomq";
     let mut records = Vec::with_capacity(messages.len());
     for message in messages {
         if pico {
-            let envelope = pico_protocol::envelope::decode_envelope(message).map_err(|e| {
+            let envelope = picomq_protocol::envelope::decode_envelope(message).map_err(|e| {
                 ServiceError::with_message(ErrorKind::BadRequest, None, false, e.to_string())
             })?;
-            records.push(pico_schema::Record::builder().value(envelope.body).build());
+            records.push(
+                picomq_schema::Record::builder()
+                    .value(envelope.body)
+                    .build(),
+            );
         } else {
             records.push(
-                pico_schema::Record::builder()
+                picomq_schema::Record::builder()
                     .value(message.clone())
                     .build(),
             );
         }
     }
-    Ok(pico_schema::Batch { records })
+    Ok(picomq_schema::Batch { records })
 }
 
 fn split_messages(

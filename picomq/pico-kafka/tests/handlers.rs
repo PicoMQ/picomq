@@ -13,9 +13,9 @@ use kafka_protocol::records::{
     Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
     NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, NO_SEQUENCE,
 };
-use pico_kafka::{dispatch, BrokerContext, HandlerOutcome, KafkaListener, ListenerConfig};
-use pico_metadata::{CommandSink, LocalSink};
-use pico_server::{NodeConfig, PicoNode};
+use picomq_kafka::{dispatch, BrokerContext, HandlerOutcome, KafkaListener, ListenerConfig};
+use picomq_metadata::{CommandSink, LocalSink};
+use picomq_server::{NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 use tokio::net::TcpListener;
 
@@ -34,7 +34,7 @@ async fn test_broker() -> BrokerContext {
             node_epoch: 1,
             http_address: "http://127.0.0.1:4001".into(),
             protocol_addresses: std::collections::BTreeMap::from([(
-                pico_kafka::PROTOCOL_NAME.to_owned(),
+                picomq_kafka::PROTOCOL_NAME.to_owned(),
                 "127.0.0.1:19092".to_owned(),
             )]),
             ..Default::default()
@@ -846,12 +846,12 @@ async fn classic_group_lifecycle_and_offset_replay() {
 }
 
 #[tokio::test]
-async fn create_topics_binds_pico_schema_and_validates_produce() {
+async fn create_topics_binds_picomq_schema_and_validates_produce() {
     use kafka_protocol::messages::create_topics_request::{CreatableTopic, CreatableTopicConfig};
     use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse, ProduceResponse};
-    use pico_schema::SchemaFormat;
+    use picomq_schema::SchemaFormat;
 
-    let registry = pico_schema::Registry::new(object_store::memory::InMemory::new());
+    let registry = picomq_schema::Registry::new(object_store::memory::InMemory::new());
     let schema = bytes::Bytes::from_static(
         br#"{
         "title": "Person",
@@ -882,7 +882,7 @@ async fn create_topics_binds_pico_schema_and_validates_produce() {
             node_epoch: 1,
             http_address: "http://127.0.0.1:4021".into(),
             protocol_addresses: std::collections::BTreeMap::from([(
-                pico_kafka::PROTOCOL_NAME.to_owned(),
+                picomq_kafka::PROTOCOL_NAME.to_owned(),
                 "127.0.0.1:19093".to_owned(),
             )]),
             ..Default::default()

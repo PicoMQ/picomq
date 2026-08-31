@@ -1,19 +1,19 @@
 //! Scale gates for the data plane: many named streams on one node, each
 //! taking appends through the service. Complements the metadata-plane gates
-//! (`pico-metadata`/`pico-sql` scale tests) by exercising the per-stream
+//! (`picomq-metadata`/`picomq-sql` scale tests) by exercising the per-stream
 //! state this layer holds: registry entries, entry cache, gates, and open
 //! engine streams.
 //!
 //! The default gate runs 50k streams. The 1M gate is `#[ignore]`d; run it
 //! explicitly with
-//! `cargo test --release -p pico-server --test scale -- --ignored --nocapture`.
+//! `cargo test --release -p picomq-server --test scale -- --ignored --nocapture`.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use pico_metadata::{CommandSink, LocalSink};
-use pico_server::{AppendCommand, CreateCommand, NodeConfig, OffsetToken, PicoNode};
+use picomq_metadata::{CommandSink, LocalSink};
+use picomq_server::{AppendCommand, CreateCommand, NodeConfig, OffsetToken, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
 /// Append durability waits are dominated by the WAL group-commit window
@@ -196,7 +196,7 @@ async fn fifty_k_streams_with_appends_gate() {
 
 /// The full 1M gate. Run explicitly in release mode (see module docs).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "run explicitly: cargo test --release -p pico-server --test scale -- --ignored --nocapture"]
+#[ignore = "run explicitly: cargo test --release -p picomq-server --test scale -- --ignored --nocapture"]
 async fn million_streams_with_appends_gate() {
     run_gate(1_000_000).await;
 }

@@ -6,9 +6,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use pico_client::{connect, ErrorKind, Live, Protocol, ReadLimits};
-use pico_http::Protocol as ServeProtocol;
-use pico_runtime::{MetaBackend, PicoServer, ServerConfig};
+use picomq_client::{connect, ErrorKind, Live, Protocol, ReadLimits};
+use picomq_http::Protocol as ServeProtocol;
+use picomq_runtime::{MetaBackend, PicoServer, ServerConfig};
 
 struct Server {
     server: PicoServer,
@@ -16,7 +16,7 @@ struct Server {
 }
 
 async fn start(protocol: Protocol, dir: &std::path::Path) -> Server {
-    let server = pico_runtime::start(ServerConfig {
+    let server = picomq_runtime::start(ServerConfig {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
         protocol: match protocol {

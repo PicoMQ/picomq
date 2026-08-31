@@ -6,7 +6,7 @@ describe('RetryPolicy', () => {
     expect(RetryPolicy.none().delay(0)).toBeNull()
   })
 
-  it('retries retryable failures via cockatiel', async () => {
+  it('retries retryable failures up to the attempt budget', async () => {
     const policy = new RetryPolicy(3, 0, 0, 2)
     let calls = 0
     const result = await policy.run(

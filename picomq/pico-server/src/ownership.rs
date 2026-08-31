@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pico_metadata::ViewPublisher;
+use picomq_metadata::ViewPublisher;
 use s3stream::StreamState;
 
 use crate::error::ServiceError;

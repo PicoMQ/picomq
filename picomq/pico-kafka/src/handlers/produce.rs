@@ -5,7 +5,7 @@ use kafka_protocol::messages::produce_response::{
 use kafka_protocol::messages::ProduceRequest;
 use kafka_protocol::protocol::Decodable;
 use kafka_protocol::records::RecordBatchDecoder;
-use pico_server::{
+use picomq_server::{
     AppendBatchCommand, BatchSpan, NumericProducer, SchemaBatch, SchemaRecord, SubmittedBatchAppend,
 };
 

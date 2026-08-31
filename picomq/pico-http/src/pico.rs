@@ -15,24 +15,27 @@ use axum::response::Response;
 use axum::routing::any;
 use axum::Router;
 use bytes::Bytes;
-use serde_json::{json, Map, Value};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
-use pico_auth::{Audience, Authorizer};
-use pico_protocol::envelope::{
+use picomq_auth::{Audience, Authorizer};
+use picomq_protocol::envelope::{
     decode_batch_append, decode_envelope, decode_json_append, encode_batch_read, encode_envelope,
     encode_json_read, RecordEnvelope, SequencedRecord,
 };
-use pico_protocol::pico::{
-    CT_BATCH_BINARY, CT_BATCH_JSON, CT_CORE, CT_CORE_PARAM, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT,
-    H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT, H_MATCH_SEQ, H_NEXT_SEQ, H_PRODUCER_EPOCH,
-    H_PRODUCER_ID, H_PRODUCER_SEQ, H_RECEIVED_SEQ, H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ,
-    H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE,
+use picomq_protocol::mime::{mime_equals, mime_of};
+use picomq_protocol::pico::{
+    engine_ct, sse_control_event, sse_data_event, user_ct_of, ErrorBody, Listing, StreamEntry,
+    CT_BATCH_BINARY, CT_BATCH_JSON, CT_CORE, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT, E_BAD_REQUEST,
+    E_CLOSED, E_CONFLICT, E_DURABILITY, E_FENCED, E_MATCH_FAILED, E_NOT_FOUND, E_SEQUENCE_GAP,
+    FORMAT_BINARY, FORMAT_JSON, FORMAT_RAW, H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT,
+    H_MATCH_SEQ, H_NEXT_SEQ, H_PRODUCER_EPOCH, H_PRODUCER_ID, H_PRODUCER_SEQ, H_RECEIVED_SEQ,
+    H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE,
+    LIVE_LONG_POLL, LIVE_SSE, Q_BYTES, Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT, Q_LIVE, Q_PREFIX,
+    Q_SEQ, Q_START_AFTER, SEQ_NOW,
 };
-use pico_server::framing::{mime_equals, mime_of};
-use pico_server::ownership::OwnershipService;
-use pico_server::{
+use picomq_server::ownership::OwnershipService;
+use picomq_server::{
     AppendCommand, CreateCommand, ErrorKind, OffsetToken, ReadResult, S3StreamService,
     ServiceError, StreamMeta,
 };
@@ -204,7 +207,7 @@ impl PicoFrontend {
         if stream_name(uri) == "/" {
             return Ok(error(
                 400,
-                "bad_request",
+                E_BAD_REQUEST,
                 "cannot create the root stream",
                 None,
             ));
@@ -212,7 +215,7 @@ impl PicoFrontend {
         if !body.is_empty() {
             return Ok(error(
                 400,
-                "bad_request",
+                E_BAD_REQUEST,
                 "create takes no body, append with POST",
                 None,
             ));
@@ -250,7 +253,7 @@ impl PicoFrontend {
         if !result.created && !mime_equals(Some(&user_ct_of(&meta.content_type)), Some(&user_ct)) {
             return Ok(error(
                 409,
-                "conflict",
+                E_CONFLICT,
                 &format!(
                     "stream exists with content type {}",
                     user_ct_of(&meta.content_type)
@@ -292,7 +295,7 @@ impl PicoFrontend {
         name: &str,
     ) -> Result<Response, ServiceError> {
         if stream_name(uri) == "/" {
-            return Ok(error(400, "bad_request", "no stream in path", None));
+            return Ok(error(400, E_BAD_REQUEST, "no stream in path", None));
         }
         if let Some(trim_seq) =
             parse_strict_u64_header(headers, H_TRIM_SEQ, "invalid Pico-Trim-Seq")?
@@ -402,13 +405,13 @@ impl PicoFrontend {
             return self.list(uri, permit).await;
         }
         let seq = self.parse_seq(uri, headers, name).await?;
-        match query_param(uri, "live") {
+        match query_param(uri, Q_LIVE) {
             None => {
                 let out = self.read(name, seq, uri).await?;
                 self.write_read(uri, headers, name, seq, out, false)
             }
-            Some(mode) if mode == "long-poll" => self.long_poll(uri, headers, name, seq).await,
-            Some(mode) if mode == "sse" => self.sse(name, seq).await,
+            Some(mode) if mode == LIVE_LONG_POLL => self.long_poll(uri, headers, name, seq).await,
+            Some(mode) if mode == LIVE_SSE => self.sse(name, seq).await,
             Some(mode) => Err(bad_request(format!("invalid live mode: {mode}"))),
         }
     }
@@ -416,11 +419,11 @@ impl PicoFrontend {
     async fn list(&self, uri: &Uri, permit: Option<&Permit>) -> Result<Response, ServiceError> {
         let prefix = match permit {
             Some(permit) => permit.stream_name.clone(),
-            None => query_param(uri, "prefix")
+            None => query_param(uri, Q_PREFIX)
                 .filter(|p| !p.is_empty())
                 .unwrap_or_else(|| "/".into()),
         };
-        let start_after = match (permit, query_param(uri, "start_after")) {
+        let start_after = match (permit, query_param(uri, Q_START_AFTER)) {
             (Some(permit), Some(after)) => Some(
                 permit
                     .principal
@@ -430,41 +433,39 @@ impl PicoFrontend {
             ),
             (_, after) => after,
         };
-        let limit = parse_strict_u64(query_param(uri, "limit").as_deref(), "invalid limit")?;
+        let limit = parse_strict_u64(query_param(uri, Q_LIMIT).as_deref(), "invalid limit")?;
         let result = self
             .service
             .list(&prefix, start_after.as_deref(), limit.unwrap_or(0) as usize)
             .await?;
 
-        let streams: Vec<Value> = result
-            .streams
-            .iter()
-            .map(|meta| {
-                let name = match permit {
-                    Some(permit) => permit.principal.scope.strip_stream_name(&meta.name),
-                    None => &meta.name,
-                };
-                let mut node = Map::new();
-                node.insert("name".into(), json!(name));
-                node.insert("content_type".into(), json!(user_ct_of(&meta.content_type)));
-                node.insert("start_seq".into(), json!(meta.start_offset.record_offset()));
-                node.insert("next_seq".into(), json!(meta.next_offset.record_offset()));
-                node.insert("closed".into(), json!(meta.closed));
-                if let Some(ttl) = meta.ttl_seconds {
-                    node.insert("ttl".into(), json!(ttl));
-                }
-                if let Some(expires_at_ms) = meta.expires_at_ms {
-                    node.insert("expires_at".into(), json!(format_instant(expires_at_ms)));
-                }
-                Value::Object(node)
-            })
-            .collect();
-        let body = json!({ "streams": streams, "has_more": result.has_more });
+        let listing = Listing {
+            streams: result
+                .streams
+                .iter()
+                .map(|meta| {
+                    let name = match permit {
+                        Some(permit) => permit.principal.scope.strip_stream_name(&meta.name),
+                        None => &meta.name,
+                    };
+                    StreamEntry {
+                        name: name.to_owned(),
+                        content_type: Some(user_ct_of(&meta.content_type)),
+                        start_seq: meta.start_offset.record_offset(),
+                        next_seq: meta.next_offset.record_offset(),
+                        closed: meta.closed,
+                        ttl_seconds: meta.ttl_seconds,
+                        expires_at: meta.expires_at_ms.map(format_instant),
+                    }
+                })
+                .collect(),
+            has_more: result.has_more,
+        };
 
         let mut response = base_response(200);
         set_header(&mut response, header::CACHE_CONTROL.as_str(), "no-store");
         set_header(&mut response, header::CONTENT_TYPE.as_str(), CT_JSON);
-        *response.body_mut() = Body::from(serde_json::to_vec(&body).expect("json encode"));
+        *response.body_mut() = Body::from(listing.encode());
         Ok(response)
     }
 
@@ -474,8 +475,8 @@ impl PicoFrontend {
         seq: OffsetToken,
         uri: &Uri,
     ) -> Result<ReadResult, ServiceError> {
-        let count = parse_strict_u64(query_param(uri, "count").as_deref(), "invalid count")?;
-        let bytes = parse_strict_u64(query_param(uri, "bytes").as_deref(), "invalid bytes")?;
+        let count = parse_strict_u64(query_param(uri, Q_COUNT).as_deref(), "invalid count")?;
+        let bytes = parse_strict_u64(query_param(uri, Q_BYTES).as_deref(), "invalid bytes")?;
         let cap = self.max_chunk_size.max(MAX_READ_BYTES);
         let max_bytes = match bytes {
             None => self.max_chunk_size,
@@ -493,7 +494,7 @@ impl PicoFrontend {
         name: &str,
         seq: OffsetToken,
     ) -> Result<Response, ServiceError> {
-        let cursor = cursor(query_param(uri, "cursor").as_deref());
+        let cursor = cursor(query_param(uri, Q_CURSOR).as_deref());
         let out = self.read(name, seq, uri).await?;
         if !(out.records.is_empty() && out.up_to_date) || out.closed {
             let mut response = self.write_read(uri, headers, name, seq, out, true)?;
@@ -612,9 +613,9 @@ impl PicoFrontend {
         out: ReadResult,
         live: bool,
     ) -> Result<Response, ServiceError> {
-        let format = query_param(uri, "format")
+        let format = query_param(uri, Q_FORMAT)
             .filter(|f| !f.is_empty())
-            .unwrap_or_else(|| "json".into());
+            .unwrap_or_else(|| FORMAT_JSON.into());
         let empty_tail = out.records.is_empty() && out.up_to_date;
 
         let mut response = base_response(if empty_tail && live { 204 } else { 200 });
@@ -655,11 +656,11 @@ impl PicoFrontend {
 
         let records = to_sequenced(&out.records)?;
         match format.as_str() {
-            "json" => {
+            FORMAT_JSON => {
                 set_header(&mut response, header::CONTENT_TYPE.as_str(), CT_JSON);
                 *response.body_mut() = Body::from(encode_json_read(&records));
             }
-            "binary" => {
+            FORMAT_BINARY => {
                 set_header(
                     &mut response,
                     header::CONTENT_TYPE.as_str(),
@@ -667,7 +668,7 @@ impl PicoFrontend {
                 );
                 *response.body_mut() = Body::from(encode_batch_read(&records));
             }
-            "raw" => {
+            FORMAT_RAW => {
                 set_header(
                     &mut response,
                     header::CONTENT_TYPE.as_str(),
@@ -690,7 +691,7 @@ impl PicoFrontend {
         headers: &HeaderMap,
         name: &str,
     ) -> Result<OffsetToken, ServiceError> {
-        let Some(raw) = query_param(uri, "seq") else {
+        let Some(raw) = query_param(uri, Q_SEQ) else {
             if let Some(last_event_id) =
                 header_str(headers, "last-event-id").filter(|v| !v.is_empty())
             {
@@ -698,7 +699,7 @@ impl PicoFrontend {
             }
             return Ok(OffsetToken::beginning());
         };
-        if raw.eq_ignore_ascii_case("now") {
+        if raw.eq_ignore_ascii_case(SEQ_NOW) {
             return self
                 .service
                 .head(name)
@@ -736,17 +737,17 @@ fn options() -> Response {
 
 fn service_error_response(e: ServiceError) -> Response {
     match e.kind {
-        ErrorKind::NotFound => error(404, "not_found", "no such stream", None),
-        ErrorKind::BadRequest => error(400, "bad_request", &e.message, None),
+        ErrorKind::NotFound => error(404, E_NOT_FOUND, "no such stream", None),
+        ErrorKind::BadRequest => error(400, E_BAD_REQUEST, &e.message, None),
         ErrorKind::Fenced => {
-            let mut response = error(403, "fenced", &e.message, None);
+            let mut response = error(403, E_FENCED, &e.message, None);
             if let Some(epoch) = e.producer_epoch {
                 set_header(&mut response, H_PRODUCER_EPOCH, &epoch.to_string());
             }
             response
         }
         ErrorKind::SequenceGap => {
-            let mut response = error(409, "sequence_gap", &e.message, None);
+            let mut response = error(409, E_SEQUENCE_GAP, &e.message, None);
             if let Some(expected) = e.expected_seq {
                 set_header(&mut response, H_EXPECTED_SEQ, &expected.to_string());
             }
@@ -755,14 +756,14 @@ fn service_error_response(e: ServiceError) -> Response {
             }
             response
         }
-        ErrorKind::MatchFailed => error(412, "match_failed", &e.message, e.next_offset.as_ref()),
-        ErrorKind::Conflict => error(409, "conflict", &e.message, e.next_offset.as_ref()),
+        ErrorKind::MatchFailed => error(412, E_MATCH_FAILED, &e.message, e.next_offset.as_ref()),
+        ErrorKind::Conflict => error(409, E_CONFLICT, &e.message, e.next_offset.as_ref()),
         ErrorKind::Closed => {
-            let mut response = error(409, "closed", "stream is closed", e.next_offset.as_ref());
+            let mut response = error(409, E_CLOSED, "stream is closed", e.next_offset.as_ref());
             set_header(&mut response, H_CLOSED, "true");
             response
         }
-        ErrorKind::Durability => error(500, "durability", &e.message, None),
+        ErrorKind::Durability => error(500, E_DURABILITY, &e.message, None),
     }
 }
 
@@ -781,7 +782,9 @@ fn decode_records(headers: &HeaderMap, body: &Bytes) -> Result<Vec<RecordEnvelop
     )])
 }
 
-fn producer_of(headers: &HeaderMap) -> Result<Option<pico_server::types::Producer>, ServiceError> {
+fn producer_of(
+    headers: &HeaderMap,
+) -> Result<Option<picomq_server::types::Producer>, ServiceError> {
     let id = header_str(headers, H_PRODUCER_ID);
     let epoch = header_str(headers, H_PRODUCER_EPOCH);
     let seq = header_str(headers, H_PRODUCER_SEQ);
@@ -798,22 +801,7 @@ fn producer_of(headers: &HeaderMap) -> Result<Option<pico_server::types::Produce
         .ok_or_else(|| bad_request("invalid Pico-Producer-Epoch"))?;
     let seq = parse_strict_u64(Some(seq), "invalid Pico-Producer-Seq")?
         .ok_or_else(|| bad_request("invalid Pico-Producer-Seq"))?;
-    Ok(Some(pico_server::types::Producer::new(id, epoch, seq)?))
-}
-
-pub fn engine_ct(user_ct: &str) -> String {
-    format!("{CT_CORE}; {CT_CORE_PARAM}={user_ct}")
-}
-
-pub fn user_ct_of(engine_ct: &str) -> String {
-    let Some((_, params)) = engine_ct.split_once(';') else {
-        return DEFAULT_CT.to_owned();
-    };
-    let params = params.trim();
-    match params.strip_prefix(&format!("{CT_CORE_PARAM}=")) {
-        Some(user) => user.to_owned(),
-        None => DEFAULT_CT.to_owned(),
-    }
+    Ok(Some(picomq_server::types::Producer::new(id, epoch, seq)?))
 }
 
 fn write_meta(response: &mut Response, meta: &StreamMeta) {
@@ -839,7 +827,7 @@ fn write_meta(response: &mut Response, meta: &StreamMeta) {
 }
 
 fn to_sequenced(
-    records: &[pico_server::StreamRecord],
+    records: &[picomq_server::StreamRecord],
 ) -> Result<Vec<SequencedRecord>, ServiceError> {
     records
         .iter()
@@ -850,30 +838,6 @@ fn to_sequenced(
             })
         })
         .collect()
-}
-
-fn sse_data_event(records: &[SequencedRecord], next_seq: u64) -> Bytes {
-    let json = encode_json_read(records);
-    let json = String::from_utf8(json.to_vec()).expect("json is utf-8");
-    let mut out = format!("event: data\nid: {next_seq}\n");
-    for line in crate::http::sse_lines(&json) {
-        out.push_str("data:");
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push('\n');
-    Bytes::from(out)
-}
-
-fn sse_control_event(next_seq: u64, up_to_date: bool, closed: bool) -> Bytes {
-    let mut node = Map::new();
-    node.insert("next_seq".into(), json!(next_seq));
-    node.insert("up_to_date".into(), json!(up_to_date));
-    if closed {
-        node.insert("closed".into(), json!(true));
-    }
-    let json = serde_json::to_string(&Value::Object(node)).expect("json encode");
-    Bytes::from(format!("event: control\nid: {next_seq}\ndata:{json}\n\n"))
 }
 
 fn respond(status: u16, next: Option<&OffsetToken>, closed: bool) -> Response {
@@ -888,7 +852,6 @@ fn respond(status: u16, next: Option<&OffsetToken>, closed: bool) -> Response {
     response
 }
 
-/// JSON `{error, message?, next_seq?}`.
 pub(crate) fn error(
     status: u16,
     code: &str,
@@ -898,16 +861,15 @@ pub(crate) fn error(
     let mut response = base_response(status);
     set_header(&mut response, header::CONTENT_TYPE.as_str(), CT_JSON);
     set_header(&mut response, header::CACHE_CONTROL.as_str(), "no-store");
-    let mut node = Map::new();
-    node.insert("error".into(), json!(code));
-    if !message.is_empty() {
-        node.insert("message".into(), json!(message));
+    let next_seq = next.map(|next| next.record_offset());
+    if let Some(next_seq) = next_seq {
+        set_header(&mut response, H_NEXT_SEQ, &next_seq.to_string());
     }
-    if let Some(next) = next {
-        set_header(&mut response, H_NEXT_SEQ, &next.record_offset().to_string());
-        node.insert("next_seq".into(), json!(next.record_offset()));
-    }
-    *response.body_mut() =
-        Body::from(serde_json::to_vec(&Value::Object(node)).expect("json encode"));
+    let body = ErrorBody {
+        code: code.to_owned(),
+        message: Some(message.to_owned()).filter(|m| !m.is_empty()),
+        next_seq,
+    };
+    *response.body_mut() = Body::from(body.encode());
     response
 }

@@ -1,5 +1,5 @@
 [package]
-name = "pico-schema"
+name = "picomq-schema"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

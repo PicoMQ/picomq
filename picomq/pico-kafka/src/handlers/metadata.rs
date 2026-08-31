@@ -3,7 +3,7 @@ use kafka_protocol::messages::metadata_response::{
 };
 use kafka_protocol::messages::MetadataRequest;
 use kafka_protocol::protocol::{Decodable, StrBytes};
-use pico_server::{CreateCommand, OwnershipService};
+use picomq_server::{CreateCommand, OwnershipService};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
@@ -116,7 +116,7 @@ async fn list_topic_names(ctx: &BrokerContext) -> Result<Vec<String>, HandlerErr
         .collect())
 }
 
-async fn create_topic(ctx: &BrokerContext, name: &str) -> Result<(), pico_server::ServiceError> {
+async fn create_topic(ctx: &BrokerContext, name: &str) -> Result<(), picomq_server::ServiceError> {
     ctx.service
         .create(CreateCommand::with_external_id(
             name,

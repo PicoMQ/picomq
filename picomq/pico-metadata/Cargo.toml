@@ -1,5 +1,5 @@
 [package]
-name = "pico-metadata"
+name = "picomq-metadata"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 s3stream = { workspace = true }
-pico-common = { workspace = true }
+picomq-common = { workspace = true }
 
 arc-swap = { workspace = true }
 async-trait = { workspace = true }

@@ -10,7 +10,7 @@
 use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
 use axum::response::Response;
 
-use pico_server::ownership::OwnershipService;
+use picomq_server::ownership::OwnershipService;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RoutingMode {

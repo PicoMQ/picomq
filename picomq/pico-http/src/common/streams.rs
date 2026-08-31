@@ -3,8 +3,8 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use pico_auth::Operation;
-use pico_server::{StreamConfig, UpdateStreamCommand};
+use picomq_auth::Operation;
+use picomq_server::{StreamConfig, UpdateStreamCommand};
 use serde_json::{json, Value};
 
 use super::{gate, service_error, CommonState};

@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! PICOMQ_PG_URL=postgres://user:pass@localhost:5432/picomq \
-//!     cargo test -p pico-sql --test pg_e2e
+//!     cargo test -p picomq-sql --test pg_e2e
 //! ```
 //!
 //! Skipped (pass, with a note) when the variable is absent. WIPES the three
@@ -12,8 +12,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use pico_metadata::{CommandSink, MetadataCommand, MetadataResult};
-use pico_sql::{LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig};
+use picomq_metadata::{CommandSink, MetadataCommand, MetadataResult};
+use picomq_sql::{LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig};
 
 fn config() -> SqlSinkConfig {
     SqlSinkConfig {

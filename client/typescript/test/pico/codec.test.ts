@@ -7,7 +7,7 @@ import {
   encodeBatchAppend,
   encodeBatchRead,
   encodeEnvelope,
-} from '../src/codec'
+} from '../../src/pico/codec'
 
 function concat(...parts: (Uint8Array | number[])[]): Uint8Array {
   const arrays = parts.map((p) => (p instanceof Uint8Array ? p : new Uint8Array(p)))

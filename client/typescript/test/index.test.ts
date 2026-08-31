@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { connect } from '../src/index'
-import { PicoClient } from '../src/pico'
-import { DsClient } from '../src/ds'
+import { PicoClient } from '../src/pico/client'
+import { DsClient } from '../src/ds/client'
 
 describe('connect', () => {
   it('returns a pico client', () => {

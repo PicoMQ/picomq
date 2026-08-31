@@ -11,9 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use pico_metadata::{CommandSink, LocalSink, ViewPublisher};
-use pico_server::ownership::OwnershipService as _;
-use pico_server::{AppendCommand, CreateCommand, ErrorKind, NodeConfig, OffsetToken, PicoNode};
+use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
+use picomq_server::ownership::OwnershipService as _;
+use picomq_server::{AppendCommand, CreateCommand, ErrorKind, NodeConfig, OffsetToken, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
 async fn start_node(
@@ -285,7 +285,7 @@ async fn list_and_match_seq_via_services() {
 /// The core flow on the SQL-backed sink: same service, durable log underneath.
 #[tokio::test]
 async fn core_flow_on_sql_sink() {
-    use pico_sql::{MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
+    use picomq_sql::{MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
 
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn MetaStore> = Arc::new(
@@ -398,7 +398,7 @@ async fn wait_appended_long_poll() {
 /// fenced, gap rejected. And the closed-stream replay path.
 #[tokio::test]
 async fn producer_idempotency_and_closed_replay() {
-    use pico_server::types::Producer;
+    use picomq_server::types::Producer;
 
     let node = local_node().await;
     let services = node.service();
@@ -536,7 +536,7 @@ async fn start_shared_node(
 async fn wait_for_view(
     views: &ViewPublisher,
     what: &str,
-    satisfied: impl Fn(&pico_metadata::MetadataView) -> bool,
+    satisfied: impl Fn(&picomq_metadata::MetadataView) -> bool,
 ) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -669,7 +669,7 @@ async fn transfer_moves_stream_to_target_node() {
 /// the stream at its last epoch and finishes the transfer.
 #[tokio::test]
 async fn stale_transfer_completes_when_source_restarts() {
-    use pico_metadata::MetadataCommand;
+    use picomq_metadata::MetadataCommand;
 
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
@@ -813,8 +813,8 @@ fn fake_batch(body: &[u8]) -> Bytes {
     Bytes::from(payload)
 }
 
-fn one_batch(record_count: u32) -> Vec<pico_server::BatchSpan> {
-    vec![pico_server::BatchSpan {
+fn one_batch(record_count: u32) -> Vec<picomq_server::BatchSpan> {
+    vec![picomq_server::BatchSpan {
         patch_at: 0,
         record_count,
     }]
@@ -824,7 +824,7 @@ fn one_batch(record_count: u32) -> Vec<pico_server::BatchSpan> {
 /// service layer.
 #[tokio::test]
 async fn kafka_batch_append_read_and_idempotency() {
-    use pico_server::{AppendBatchCommand, NumericProducer};
+    use picomq_server::{AppendBatchCommand, NumericProducer};
 
     let node = local_node().await;
     let services = node.service();
@@ -1007,7 +1007,7 @@ fn kafka_v2_batch(producer_id: i64, epoch: i16, base_seq: i32, count: u32) -> By
 /// batch still replays as a duplicate with its original offset.
 #[tokio::test]
 async fn kafka_producer_state_survives_restart_via_rescan() {
-    use pico_server::{AppendBatchCommand, NumericProducer};
+    use picomq_server::{AppendBatchCommand, NumericProducer};
 
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
@@ -1031,7 +1031,7 @@ async fn kafka_producer_state_survives_restart_via_rescan() {
     let batch = |seq: i32, count: u32| AppendBatchCommand {
         name: "/topics/replayed".into(),
         payload: kafka_v2_batch(42, 0, seq, count),
-        batches: vec![pico_server::BatchSpan {
+        batches: vec![picomq_server::BatchSpan {
             patch_at: 0,
             record_count: count,
         }],
@@ -1087,7 +1087,7 @@ async fn kafka_producer_state_survives_restart_via_rescan() {
 /// client creates cannot claim the reserved subtree.
 #[tokio::test]
 async fn kafka_multi_batch_spans_and_reserved_names() {
-    use pico_server::{AppendBatchCommand, BatchSpan, NumericProducer};
+    use picomq_server::{AppendBatchCommand, BatchSpan, NumericProducer};
 
     let node = local_node().await;
     let services = node.service();
@@ -1309,7 +1309,7 @@ async fn list_paginates_with_start_after() {
 async fn append_rejects_schema_invalid_records() {
     use bytes::Bytes;
     use object_store::memory::InMemory;
-    use pico_schema::{Registry, SchemaFormat};
+    use picomq_schema::{Registry, SchemaFormat};
 
     let store = InMemory::new();
     let schema = Bytes::from_static(
@@ -1395,7 +1395,7 @@ async fn append_rejects_schema_invalid_records() {
         .unwrap();
 
     services
-        .update_stream(pico_server::UpdateStreamCommand {
+        .update_stream(picomq_server::UpdateStreamCommand {
             name: "/streams/orders".into(),
             schema_name: None,
             schema_validate: Some(false),

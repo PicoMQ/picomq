@@ -4,8 +4,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bytes::Bytes;
-use pico_auth::Operation;
-use pico_server::SchemaFormat;
+use picomq_auth::Operation;
+use picomq_server::SchemaFormat;
 use serde_json::json;
 
 use super::{gate, service_error, CommonState};

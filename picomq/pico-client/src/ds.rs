@@ -1,27 +1,19 @@
-//! The Durable Streams protocol client.
-//!
-//! Left out: idempotent producer sessions, streaming reader iterators and
-//! the SSE parser (see the crate docs). A read here is one chunk, which is
-//! exactly what such iterators would loop over.
-
 use async_trait::async_trait;
 use bytes::Bytes;
-use pico_protocol::ds::{
-    H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_RECEIVED_SEQ, H_STREAM_CLOSED,
-    H_STREAM_NEXT_OFFSET, H_STREAM_TTL, H_STREAM_UP_TO_DATE,
+use picomq_protocol::ds::{
+    decode_error, AppendRequest, AppendResponse, CloseRequest, CreateRequest, CreateResponse,
+    DeleteRequest, DeleteResponse, HeadRequest, HeadResponse, ReadRequest, ReadResponse,
+    LIVE_LONG_POLL, OFFSET_BEGINNING, OFFSET_NOW,
 };
-use reqwest::header::CONTENT_TYPE;
-use reqwest::{Method, Response, StatusCode};
+use picomq_protocol::WireRequest;
+use reqwest::Response;
 
-use crate::error::{ClientError, ErrorKind, Result};
-use crate::pico::{default_http, header, send, truthy, urlencode};
+use crate::error::{ClientError, Result};
+use crate::pico::{build, default_http, send};
 use crate::retry::RetryPolicy;
 use crate::types::{
     AppendAck, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo, StreamListing,
 };
-
-const OFFSET_BEGINNING: &str = "-1";
-const OFFSET_NOW: &str = "now";
 
 pub struct DsClient {
     http: reqwest::Client,
@@ -46,39 +38,29 @@ impl DsClient {
         }
     }
 
-    fn url(&self, name: &str, query: &str) -> String {
-        let path = if name.starts_with('/') {
-            name.to_owned()
-        } else {
-            format!("/{name}")
-        };
-        format!("{}{path}{query}", self.base_url)
+    async fn call(&self, wire: WireRequest) -> Result<Response> {
+        let ok = wire.ok;
+        let response = send(&self.http, build(&self.http, &self.base_url, wire)).await?;
+        expect(response, ok).await
     }
 
     async fn head_once(&self, name: &str) -> Result<Option<StreamInfo>> {
-        let request = self.http.request(Method::HEAD, self.url(name, ""));
-        let response = send(&self.http, request).await?;
-        if response.status() == StatusCode::NOT_FOUND {
+        let response = self.call(HeadRequest { stream: name }.encode()).await?;
+        let Some(head) = HeadResponse::decode(response.status().as_u16(), response.headers())
+        else {
             return Ok(None);
-        }
-        let response = expect(response, &[200]).await?;
-        let next = header(&response, H_STREAM_NEXT_OFFSET).unwrap_or_default();
+        };
         Ok(Some(StreamInfo {
             name: name.to_owned(),
-            content_type: header(&response, CONTENT_TYPE.as_str()),
-            // The protocol reports no start offset. The beginning token is
-            // always a valid read position.
+            content_type: head.content_type,
             start: OFFSET_BEGINNING.to_owned(),
-            next,
-            closed: truthy(&response, H_STREAM_CLOSED),
-            ttl_seconds: header(&response, H_STREAM_TTL).and_then(|v| v.parse().ok()),
-            expires_at: header(&response, "Stream-Expires-At"),
+            next: head.next_offset.unwrap_or_default(),
+            closed: head.closed,
+            ttl_seconds: head.ttl_seconds,
+            expires_at: head.expires_at,
         }))
     }
 
-    /// `limits` has no wire representation. The DS read request is only
-    /// `(offset, live, cursor)`, and how much a chunk carries is the server's
-    /// `max_chunk_size` to decide.
     async fn read_once(
         &self,
         name: &str,
@@ -86,22 +68,15 @@ impl DsClient {
         live: Live,
         _limits: ReadLimits,
     ) -> Result<ReadPage> {
-        let mut query = format!("?offset={}", urlencode(from));
-        if live == Live::LongPoll {
-            query.push_str("&live=long-poll");
-        }
-        let response = send(&self.http, self.http.get(self.url(name, &query))).await?;
-        let response = expect(response, &[200, 204]).await?;
+        let mut request = ReadRequest::new(name, from);
+        request.live = (live == Live::LongPoll).then_some(LIVE_LONG_POLL);
+        let response = self.call(request.encode()).await?;
 
-        let next = header(&response, H_STREAM_NEXT_OFFSET).unwrap_or_else(|| from.to_owned());
-        let up_to_date = truthy(&response, H_STREAM_UP_TO_DATE);
-        let closed = truthy(&response, H_STREAM_CLOSED);
-        let empty = response.status() == StatusCode::NO_CONTENT;
+        let read = ReadResponse::decode(response.status().as_u16(), response.headers());
+        let next = read.next_offset.unwrap_or_else(|| from.to_owned());
         let body = response.bytes().await?;
 
-        // A chunk is the unit the protocol returns: bodies arrive
-        // concatenated, with no per-record framing to split them on.
-        let records = if empty || body.is_empty() {
+        let records = if read.no_content || body.is_empty() {
             Vec::new()
         } else {
             vec![Record {
@@ -112,10 +87,10 @@ impl DsClient {
             }]
         };
         Ok(ReadPage {
-            up_to_date: up_to_date || empty,
+            up_to_date: read.up_to_date || read.no_content,
             records,
             next,
-            closed,
+            closed: read.closed,
         })
     }
 }
@@ -140,15 +115,10 @@ impl StreamApi for DsClient {
         content_type: &str,
         ttl_seconds: Option<u64>,
     ) -> Result<bool> {
-        let mut request = self
-            .http
-            .put(self.url(name, ""))
-            .header(CONTENT_TYPE, content_type);
-        if let Some(ttl) = ttl_seconds {
-            request = request.header(H_STREAM_TTL, ttl.to_string());
-        }
-        let response = expect(send(&self.http, request).await?, &[200, 201]).await?;
-        Ok(response.status() == StatusCode::CREATED)
+        let mut request = CreateRequest::new(name, content_type);
+        request.ttl_seconds = ttl_seconds;
+        let response = self.call(request.encode()).await?;
+        Ok(CreateResponse::decode(response.status().as_u16(), response.headers()).created)
     }
 
     async fn head(&self, name: &str) -> Result<Option<StreamInfo>> {
@@ -162,16 +132,12 @@ impl StreamApi for DsClient {
                 records.len()
             )));
         };
-        let request = self
-            .http
-            .post(self.url(name, ""))
-            .header(CONTENT_TYPE, content_type)
-            .body(body.clone());
-        let response = send(&self.http, request).await?;
-        let response = expect(response, &[200, 204]).await?;
-        let next = header(&response, H_STREAM_NEXT_OFFSET).unwrap_or_default();
+        let request = AppendRequest::new(name, content_type, body.clone());
+        let response = self.call(request.encode()).await?;
+        let next = AppendResponse::decode(response.headers())
+            .next_offset
+            .unwrap_or_default();
         Ok(AppendAck {
-            // The protocol reports only where the stream now ends.
             start: next.clone(),
             next,
             timestamp: None,
@@ -197,22 +163,15 @@ impl StreamApi for DsClient {
     }
 
     async fn close(&self, name: &str) -> Result<String> {
-        let request = self
-            .http
-            .post(self.url(name, ""))
-            .header(H_STREAM_CLOSED, "true");
-        let response = send(&self.http, request).await?;
-        let response = expect(response, &[200, 204]).await?;
-        Ok(header(&response, H_STREAM_NEXT_OFFSET).unwrap_or_default())
+        let response = self.call(CloseRequest { stream: name }.encode()).await?;
+        Ok(AppendResponse::decode(response.headers())
+            .next_offset
+            .unwrap_or_default())
     }
 
     async fn delete(&self, name: &str) -> Result<bool> {
-        let response = send(&self.http, self.http.delete(self.url(name, ""))).await?;
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(false);
-        }
-        expect(response, &[204]).await?;
-        Ok(true)
+        let response = self.call(DeleteRequest { stream: name }.encode()).await?;
+        Ok(DeleteResponse::decode(response.status().as_u16()).found)
     }
 }
 
@@ -221,47 +180,7 @@ async fn expect(response: Response, expected: &[u16]) -> Result<Response> {
     if expected.contains(&status) {
         return Ok(response);
     }
-
-    let closed = truthy(&response, H_STREAM_CLOSED);
-    let epoch = header(&response, H_PRODUCER_EPOCH);
-    let expected_seq = header(&response, H_PRODUCER_EXPECTED_SEQ);
-    let received_seq = header(&response, H_PRODUCER_RECEIVED_SEQ);
-    let next = header(&response, H_STREAM_NEXT_OFFSET);
+    let headers = response.headers().clone();
     let body = response.text().await.unwrap_or_default();
-
-    let (kind, code) = match status {
-        400 => (ErrorKind::BadRequest, "bad_request"),
-        401 => (ErrorKind::Unauthenticated, "unauthenticated"),
-        // DS has no error codes. A fencing 403 carries Producer-Epoch, an
-        // auth 403 never does.
-        403 if epoch.is_some() => (ErrorKind::StaleEpoch, "stale_epoch"),
-        403 => (ErrorKind::PermissionDenied, "permission_denied"),
-        404 => (ErrorKind::NotFound, "not_found"),
-        409 if closed => (ErrorKind::Closed, "closed"),
-        409 if expected_seq.is_some() || received_seq.is_some() => {
-            (ErrorKind::Conflict, "sequence_conflict")
-        }
-        409 => (ErrorKind::Conflict, "conflict"),
-        410 => (ErrorKind::OffsetGone, "offset_gone"),
-        _ => (ErrorKind::Other, "request_failed"),
-    };
-    let mut message = if body.is_empty() { None } else { Some(body) };
-    if kind == ErrorKind::StaleEpoch {
-        if let Some(epoch) = epoch {
-            message = Some(format!(
-                "{} (current epoch {epoch})",
-                message.unwrap_or_else(|| "stale producer epoch".to_owned())
-            ));
-        }
-    }
-    if let (Some(expected_seq), Some(received_seq)) = (&expected_seq, &received_seq) {
-        message = Some(format!(
-            "{} (expected seq {expected_seq}, received {received_seq})",
-            message.unwrap_or_else(|| "producer sequence gap".to_owned())
-        ));
-    }
-
-    Err(ClientError::new(status, kind, code)
-        .with_message(message)
-        .with_next(next))
+    Err(decode_error(status, &headers, &body).into())
 }

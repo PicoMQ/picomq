@@ -1,9 +1,5 @@
-import {
-  ConstantBackoff,
-  ExponentialBackoff,
-  handleWhen,
-  retry,
-} from 'cockatiel'
+import { throwIfAborted } from './error'
+import { sleep } from './util'
 
 export class RetryPolicy {
   readonly maxAttempts: number
@@ -11,16 +7,11 @@ export class RetryPolicy {
   readonly maxBackoffMs: number
   readonly multiplier: number
 
-  constructor(
-    maxAttempts = 1,
-    initialBackoffMs = 0,
-    maxBackoffMs = 0,
-    multiplier = 1,
-  ) {
+  constructor(maxAttempts = 1, initialBackoffMs = 0, maxBackoffMs = 0, multiplier = 1) {
     this.maxAttempts = Math.max(1, maxAttempts)
-    this.initialBackoffMs = initialBackoffMs
-    this.maxBackoffMs = maxBackoffMs
-    this.multiplier = multiplier
+    this.initialBackoffMs = Math.max(0, initialBackoffMs)
+    this.maxBackoffMs = Math.max(0, maxBackoffMs)
+    this.multiplier = Math.max(1, multiplier)
   }
 
   static none(): RetryPolicy {
@@ -33,7 +24,9 @@ export class RetryPolicy {
 
   delay(attempt: number): number | null {
     if (attempt + 1 >= this.maxAttempts) return null
-    return this.backoffMs(attempt + 1)
+    if (this.initialBackoffMs === 0) return 0
+    const cap = this.maxBackoffMs > 0 ? this.maxBackoffMs : Number.POSITIVE_INFINITY
+    return Math.min(this.initialBackoffMs * this.multiplier ** attempt, cap)
   }
 
   async run<T>(
@@ -41,30 +34,20 @@ export class RetryPolicy {
     isRetryable: (error: unknown) => boolean,
     signal?: AbortSignal,
   ): Promise<T> {
-    if (this.maxAttempts <= 1) {
-      return operation()
+    for (let attempt = 0; ; attempt++) {
+      throwIfAborted(signal)
+      try {
+        return await operation()
+      } catch (error) {
+        const wait = this.delay(attempt)
+        if (wait === null || !isRetryable(error)) throw error
+        await sleep(jittered(wait), signal)
+      }
     }
-
-    const backoff =
-      this.initialBackoffMs === 0
-        ? new ConstantBackoff(0)
-        : new ExponentialBackoff({
-            initialDelay: this.initialBackoffMs,
-            maxDelay: this.maxBackoffMs,
-            exponent: this.multiplier,
-          })
-
-    const policy = retry(handleWhen(isRetryable), {
-      maxAttempts: this.maxAttempts,
-      backoff,
-    })
-
-    return policy.execute(() => operation(), signal)
   }
+}
 
-  private backoffMs(attempt: number): number {
-    if (this.initialBackoffMs === 0 || attempt === 0) return 0
-    const ms = this.initialBackoffMs * this.multiplier ** (attempt - 1)
-    return Math.min(ms, this.maxBackoffMs)
-  }
+function jittered(ms: number): number {
+  if (ms <= 0) return 0
+  return ms / 2 + Math.random() * (ms / 2)
 }

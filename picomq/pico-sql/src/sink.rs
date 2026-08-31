@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use pico_metadata::sink::Proposed;
-use pico_metadata::snapshot::SnapshotError;
-use pico_metadata::{
+use picomq_metadata::sink::Proposed;
+use picomq_metadata::snapshot::SnapshotError;
+use picomq_metadata::{
     apply, codec, CommandSink, MetadataCommand, MetadataError, MetadataResult, MetadataState,
     MetadataView, SinkStats, ViewPublisher,
 };
@@ -108,7 +108,7 @@ impl SqlSink {
     ) -> Result<(Self, Arc<ViewPublisher>), SqlSinkError> {
         // Cold start: snapshot row, then replay the log tail.
         let (mut state, mut applied) = match store.load_snapshot().await? {
-            Some((idx, payload)) => (pico_metadata::snapshot::decode(&payload)?, idx),
+            Some((idx, payload)) => (picomq_metadata::snapshot::decode(&payload)?, idx),
             None => (MetadataState::new(), 0),
         };
         let mut snapshot_base = applied;
@@ -125,7 +125,7 @@ impl SqlSink {
                         .load_snapshot()
                         .await?
                         .ok_or(SqlSinkError::TruncatedWithoutSnapshot { idx })?;
-                    state = pico_metadata::snapshot::decode(&snap_payload)?;
+                    state = picomq_metadata::snapshot::decode(&snap_payload)?;
                     applied = snap_idx;
                     snapshot_base = snap_idx;
                     continue 'replay;
@@ -320,9 +320,10 @@ async fn snapshot_task(shared: Arc<Shared>, mut last_snapshot: u64, config: SqlS
         let started = std::time::Instant::now();
         // Encode scales with state size; keep it off the async workers.
         let state = view.state.clone();
-        let payload = tokio::task::spawn_blocking(move || pico_metadata::snapshot::encode(&state))
-            .await
-            .expect("snapshot encode panicked");
+        let payload =
+            tokio::task::spawn_blocking(move || picomq_metadata::snapshot::encode(&state))
+                .await
+                .expect("snapshot encode panicked");
         match shared.store.store_snapshot(applied, &payload).await {
             Ok(()) => {
                 last_snapshot = applied;
@@ -389,7 +390,7 @@ async fn restore_from_snapshot(shared: &Shared, applied: u64) -> Restore {
     if snap_idx <= applied {
         return poison("log truncated beyond the stored snapshot");
     }
-    let state = match pico_metadata::snapshot::decode(&payload) {
+    let state = match picomq_metadata::snapshot::decode(&payload) {
         Ok(state) => state,
         Err(error) => {
             tracing::error!(%error, "snapshot decode failed");
@@ -524,7 +525,7 @@ fn fail_all(waiters: Vec<oneshot::Sender<Result<Proposed, MetadataError>>>, mess
 mod tests {
     use super::*;
     use crate::store::SqliteStore;
-    use pico_metadata::LocalSink;
+    use picomq_metadata::LocalSink;
 
     fn fast_config() -> SqlSinkConfig {
         SqlSinkConfig {

@@ -1,5 +1,10 @@
-import { ClientError, type ErrorKind } from './error'
-import { header, Http, toArrayBuffer, truthy, urlencode } from './http'
+import { ClientError, type ErrorKind } from '../error'
+import { base64Decode, parseOptionalUint, retryableError } from '../util'
+import { toEnvelope } from '../record'
+import { RetryPolicy } from '../retry'
+import { Stream } from '../stream'
+import { header, Http, toArrayBuffer, truthy, urlencode } from '../transport/http'
+import { subscribeLoop } from '../transport/subscribe'
 import {
   H_DS_PRODUCER_EPOCH,
   H_DS_PRODUCER_EXPECTED_SEQ,
@@ -10,11 +15,10 @@ import {
   H_STREAM_TTL,
   H_STREAM_UP_TO_DATE,
 } from './headers'
-import { RetryPolicy } from './retry'
-import { subscribeLoop } from './subscribe'
-import { base64Decode, parseOptionalUint, retryableError } from './util'
 import type {
   AppendAck,
+  AppendInput,
+  AppendOptions,
   CallOptions,
   Live,
   Protocol,
@@ -26,10 +30,11 @@ import type {
   StreamListing,
   StreamRecord,
   SubscribeOptions,
-} from './types'
+} from '../types'
 
 const OFFSET_BEGINNING = '-1'
 const OFFSET_NOW = 'now'
+const DEFAULT_CONTENT_TYPE = 'application/octet-stream'
 
 export class DsClient implements StreamApi {
   private readonly http: Http
@@ -63,26 +68,21 @@ export class DsClient implements StreamApi {
     return OFFSET_NOW
   }
 
+  stream(name: string): Stream {
+    return new Stream(this, name)
+  }
+
   async create(
     name: string,
     contentType: string,
     ttlSeconds?: number,
     options?: CallOptions,
   ): Promise<boolean> {
-    const headers: { [key: string]: string } = { 'Content-Type': contentType }
-    if (ttlSeconds !== undefined) {
-      headers[H_STREAM_TTL] = String(ttlSeconds)
-    }
-    const response = await expectDs(
-      await this.http.send({
-        method: 'PUT',
-        url: this.url(name),
-        headers,
-        signal: options?.signal,
-      }),
-      [200, 201],
+    return this.retry.run(
+      () => this.createOnce(name, contentType, ttlSeconds, options?.signal),
+      retryableError,
+      options?.signal,
     )
-    return response.status === 201
   }
 
   async head(name: string, options?: CallOptions): Promise<StreamInfo | null> {
@@ -93,24 +93,22 @@ export class DsClient implements StreamApi {
     )
   }
 
-  async append(
-    name: string,
-    records: Uint8Array[],
-    contentType: string,
-    options?: CallOptions,
-  ): Promise<AppendAck> {
+  async append(name: string, records: AppendInput[], options?: AppendOptions): Promise<AppendAck> {
     if (records.length !== 1) {
       throw ClientError.unsupported(
         `the Durable Streams protocol appends one message per request, got ${records.length}`,
       )
     }
-    const body = records[0]!
+    const envelope = toEnvelope(records[0]!)
+    if (Object.keys(envelope.headers).length > 0) {
+      throw ClientError.unsupported('the Durable Streams protocol has no record headers')
+    }
     const response = await expectDs(
       await this.http.send({
         method: 'POST',
         url: this.url(name),
-        headers: { 'Content-Type': contentType },
-        body: toArrayBuffer(body),
+        headers: { 'Content-Type': options?.contentType ?? DEFAULT_CONTENT_TYPE },
+        body: toArrayBuffer(envelope.body),
         signal: options?.signal,
       }),
       [200, 204],
@@ -135,8 +133,7 @@ export class DsClient implements StreamApi {
 
   subscribe(name: string, from: string, options: SubscribeOptions = {}): AsyncIterable<SseEvent> {
     const http = this.http
-    const streamUrl = (offset: string) =>
-      this.url(name, `?offset=${urlencode(offset)}&live=sse`)
+    const streamUrl = (offset: string) => this.url(name, `?offset=${urlencode(offset)}&live=sse`)
     return subscribeLoop(from, options, {
       open: async (offset, lastEventId, signal) => {
         const headers: { [key: string]: string } = { Accept: 'text/event-stream' }
@@ -148,7 +145,7 @@ export class DsClient implements StreamApi {
           [200],
         )
       },
-      onData: (raw, ctx) => [
+      onData: (raw, ctx): StreamRecord[] => [
         {
           position: '',
           headers: {},
@@ -167,24 +164,53 @@ export class DsClient implements StreamApi {
   }
 
   async close(name: string, options?: CallOptions): Promise<string> {
+    return this.retry.run(
+      () => this.closeOnce(name, options?.signal),
+      retryableError,
+      options?.signal,
+    )
+  }
+
+  async delete(name: string, options?: CallOptions): Promise<boolean> {
+    return this.retry.run(
+      () => this.deleteOnce(name, options?.signal),
+      retryableError,
+      options?.signal,
+    )
+  }
+
+  private async createOnce(
+    name: string,
+    contentType: string,
+    ttlSeconds: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const headers: { [key: string]: string } = { 'Content-Type': contentType }
+    if (ttlSeconds !== undefined) {
+      headers[H_STREAM_TTL] = String(ttlSeconds)
+    }
+    const response = await expectDs(
+      await this.http.send({ method: 'PUT', url: this.url(name), headers, signal }),
+      [200, 201],
+    )
+    return response.status === 201
+  }
+
+  private async closeOnce(name: string, signal?: AbortSignal): Promise<string> {
     const response = await expectDs(
       await this.http.send({
         method: 'POST',
         url: this.url(name),
         headers: { [H_STREAM_CLOSED]: 'true' },
-        signal: options?.signal,
+        signal,
       }),
       [200, 204],
     )
     return header(response, H_STREAM_NEXT_OFFSET) ?? ''
   }
 
-  async delete(name: string, options?: CallOptions): Promise<boolean> {
-    const response = await this.http.send({
-      method: 'DELETE',
-      url: this.url(name),
-      signal: options?.signal,
-    })
+  private async deleteOnce(name: string, signal?: AbortSignal): Promise<boolean> {
+    const response = await this.http.send({ method: 'DELETE', url: this.url(name), signal })
     if (response.status === 404) {
       return false
     }
@@ -284,7 +310,6 @@ function decodeDsData(data: string, encoding: string): Uint8Array {
     case 'base64':
       return base64Decode(data)
     case 'json':
-      return new TextEncoder().encode(data)
     case 'raw':
     default:
       return new TextEncoder().encode(data)

@@ -23,7 +23,7 @@ COPY --from=dashboard /src/picomq/pico-http/_dashboard /src/picomq/pico-http/_da
 RUN --mount=type=cache,id=picomq-target,sharing=locked,target=/src/target \
     --mount=type=cache,id=picomq-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=picomq-cargo-git,sharing=locked,target=/usr/local/cargo/git \
-    cargo build --locked --release -p pico-cli \
+    cargo build --locked --release -p picomq-cli \
  && cp /src/target/release/pico /src/pico
 
 FROM debian:bookworm-slim

@@ -1,4 +1,4 @@
-import { ClientError, isAbortError } from './error'
+import { ClientError, abortError, isAbortError } from '../error'
 
 export interface RawSseEvent {
   event: string
@@ -25,16 +25,12 @@ export async function* iterateSse(
   try {
     for (;;) {
       if (signal?.aborted) {
-        throw ClientError.aborted(
-          signal.reason instanceof Error ? signal.reason.message : 'Aborted',
-        )
+        throw abortError(signal.reason)
       }
       const { done, value } = await reader.read()
       if (done) {
         if (signal?.aborted) {
-          throw ClientError.aborted(
-            signal.reason instanceof Error ? signal.reason.message : 'Aborted',
-          )
+          throw abortError(signal.reason)
         }
         break
       }

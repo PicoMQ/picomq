@@ -1,5 +1,4 @@
-import { ClientError, isAbortError, type ErrorKind } from './error'
-import { H_CLOSED } from './headers'
+import { ClientError, isAbortError } from '../error'
 
 const MAX_REDIRECT_HOPS = 5
 
@@ -74,9 +73,6 @@ export class Http {
         })
       }
       url = new URL(location, url).toString()
-      if (this.token) {
-        headers.set('Authorization', `Bearer ${this.token}`)
-      }
     }
 
     throw new ClientError('other', 'too_many_redirects', { code: 'too_many_redirects' })
@@ -104,17 +100,14 @@ export class Http {
       await agent.close()
     }
     this.fetch = (url, init) =>
-      undici.fetch(
-        url,
-        {
-          method: init?.method,
-          headers: init?.headers,
-          body: init?.body ?? null,
-          signal: init?.signal ?? undefined,
-          dispatcher: agent,
-          redirect: 'manual',
-        } as never,
-      ) as unknown as Promise<Response>
+      undici.fetch(url, {
+        method: init?.method,
+        headers: init?.headers,
+        body: init?.body ?? null,
+        signal: init?.signal ?? undefined,
+        dispatcher: agent,
+        redirect: 'manual',
+      } as never) as unknown as Promise<Response>
   }
 }
 
@@ -134,53 +127,4 @@ export function urlencode(value: string): string {
 
 export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
-}
-
-export async function expectStatus(response: Response, expected: number[]): Promise<Response> {
-  if (expected.includes(response.status)) {
-    return response
-  }
-
-  const closed = truthy(response, H_CLOSED)
-  const body = await response.text().catch(() => '')
-  let parsed: { error?: string; message?: string; next_seq?: number } = {}
-  try {
-    parsed = JSON.parse(body) as typeof parsed
-  } catch {
-    parsed = {}
-  }
-
-  const code = parsed.error ?? `http_${response.status}`
-  const message =
-    parsed.message ??
-    (body && Object.keys(parsed).length === 0 ? body : undefined) ??
-    code
-  const next = parsed.next_seq !== undefined ? String(parsed.next_seq) : null
-
-  throw new ClientError(kind(response.status, code, closed), message, {
-    status: response.status,
-    code,
-    next,
-  })
-}
-
-function kind(status: number, code: string, closed: boolean): ErrorKind {
-  switch (status) {
-    case 400:
-      return 'bad_request'
-    case 401:
-      return 'unauthenticated'
-    case 403:
-      return code === 'permission_denied' ? 'permission_denied' : 'stale_epoch'
-    case 404:
-      return 'not_found'
-    case 409:
-      return closed || code === 'closed' ? 'closed' : 'conflict'
-    case 410:
-      return 'offset_gone'
-    case 412:
-      return 'conflict'
-    default:
-      return 'other'
-  }
 }

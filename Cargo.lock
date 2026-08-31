@@ -2139,7 +2139,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "pico-auth"
+name = "picomq-auth"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2156,7 +2156,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pico-cli"
+name = "picomq-cli"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -2164,10 +2164,10 @@ dependencies = [
  "dirs",
  "hdrhistogram",
  "keyring",
- "pico-auth",
- "pico-client",
- "pico-http",
- "pico-runtime",
+ "picomq-auth",
+ "picomq-client",
+ "picomq-http",
+ "picomq-runtime",
  "rdkafka",
  "reqwest 0.12.28",
  "s3stream",
@@ -2180,31 +2180,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "pico-client"
+name = "picomq-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
  "bytes",
  "futures",
- "pico-auth",
- "pico-http",
- "pico-protocol",
- "pico-runtime",
+ "picomq-auth",
+ "picomq-http",
+ "picomq-protocol",
+ "picomq-runtime",
  "reqwest 0.12.28",
  "s3stream",
- "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
 ]
 
 [[package]]
-name = "pico-common"
+name = "picomq-common"
 version = "0.1.0"
 
 [[package]]
-name = "pico-http"
+name = "picomq-http"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2215,12 +2214,12 @@ dependencies = [
  "futures",
  "humantime",
  "object_store",
- "pico-auth",
- "pico-common",
- "pico-metadata",
- "pico-protocol",
- "pico-schema",
- "pico-server",
+ "picomq-auth",
+ "picomq-common",
+ "picomq-metadata",
+ "picomq-protocol",
+ "picomq-schema",
+ "picomq-server",
  "reqwest 0.12.28",
  "rust-embed",
  "s3stream",
@@ -2233,7 +2232,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pico-kafka"
+name = "picomq-kafka"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2242,9 +2241,9 @@ dependencies = [
  "futures",
  "kafka-protocol",
  "object_store",
- "pico-metadata",
- "pico-schema",
- "pico-server",
+ "picomq-metadata",
+ "picomq-schema",
+ "picomq-server",
  "s3stream",
  "thiserror 2.0.20",
  "tokio",
@@ -2254,14 +2253,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "pico-metadata"
+name = "picomq-metadata"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
  "bytes",
  "im",
- "pico-common",
+ "picomq-common",
  "proptest",
  "s3stream",
  "thiserror 2.0.20",
@@ -2270,27 +2269,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "pico-protocol"
+name = "picomq-protocol"
 version = "0.1.0"
 dependencies = [
  "base64",
  "bytes",
+ "http",
  "serde_json",
  "thiserror 2.0.20",
 ]
 
 [[package]]
-name = "pico-runtime"
+name = "picomq-runtime"
 version = "0.1.0"
 dependencies = [
- "pico-auth",
- "pico-common",
- "pico-http",
- "pico-kafka",
- "pico-metadata",
- "pico-schema",
- "pico-server",
- "pico-sql",
+ "picomq-auth",
+ "picomq-common",
+ "picomq-http",
+ "picomq-kafka",
+ "picomq-metadata",
+ "picomq-schema",
+ "picomq-server",
+ "picomq-sql",
  "rdkafka",
  "reqwest 0.12.28",
  "s3stream",
@@ -2302,7 +2302,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pico-schema"
+name = "picomq-schema"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2324,19 +2324,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "pico-server"
+name = "picomq-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
  "futures",
  "object_store",
- "pico-auth",
- "pico-common",
- "pico-metadata",
- "pico-protocol",
- "pico-schema",
- "pico-sql",
+ "picomq-auth",
+ "picomq-common",
+ "picomq-metadata",
+ "picomq-protocol",
+ "picomq-schema",
+ "picomq-sql",
  "s3stream",
  "serde_json",
  "tempfile",
@@ -2346,13 +2346,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "pico-sql"
+name = "picomq-sql"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
- "pico-common",
- "pico-metadata",
+ "picomq-common",
+ "picomq-metadata",
  "proptest",
  "s3stream",
  "sqlx",

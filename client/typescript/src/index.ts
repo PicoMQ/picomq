@@ -1,11 +1,16 @@
 export type {
   AppendAck,
+  AppendInput,
+  AppendOptions,
   CallOptions,
   ClientConfig,
   Live,
+  ProducerAck,
+  ProducerRef,
   Protocol,
   ReadLimits,
   ReadPage,
+  RecordsOptions,
   SseEvent,
   StreamApi,
   StreamInfo,
@@ -14,14 +19,16 @@ export type {
   SubscribeOptions,
 } from './types'
 
+export type { RecordEnvelope } from './record'
 export { ClientError, isAbortError, type ErrorKind } from './error'
-export { DsClient } from './ds'
-export { PicoClient, type ProducerAck, type ProducerRef } from './pico'
+export { DsClient } from './ds/client'
+export { PicoClient } from './pico/client'
 export { Pending, Producer, type ProducerClient, type ProducerConfig } from './producer'
+export { PicoStream, Stream } from './stream'
 export { RetryPolicy } from './retry'
 
-import { DsClient } from './ds'
-import { PicoClient } from './pico'
+import { DsClient } from './ds/client'
+import { PicoClient } from './pico/client'
 import { RetryPolicy } from './retry'
 import type { ClientConfig, Protocol, StreamApi } from './types'
 

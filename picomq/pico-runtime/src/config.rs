@@ -1,15 +1,15 @@
 //! What a PicoMQ process needs to know to start.
 //!
 //! One [`ServerConfig::meta_url`] points at the SQL metadata log (see
-//! `pico_sql`). Argument parsing belongs to the binary (`pico serve`), which
+//! `picomq_sql`). Argument parsing belongs to the binary (`pico serve`), which
 //! builds this struct.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use pico_common::now_ms;
-use pico_http::{Protocol, RoutingMode};
+use picomq_common::now_ms;
+use picomq_http::{Protocol, RoutingMode};
 
 /// Where the metadata command log lives.
 ///
@@ -98,7 +98,7 @@ pub struct ServerConfig {
     /// Permits non-loopback binds with auth off.
     pub insecure_allow_remote: bool,
     /// Root token (wire form) seeded at startup with [`Scope::root`]
-    /// (`pico_auth::Scope::root`). Idempotent across restarts. A different
+    /// (`picomq_auth::Scope::root`). Idempotent across restarts. A different
     /// stored token under the same id fails startup.
     pub bootstrap_token: Option<String>,
     pub schema_registry: Option<String>,

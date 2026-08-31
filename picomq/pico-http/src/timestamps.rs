@@ -4,13 +4,13 @@
 //! stream and lazily read back from the tail record's envelope after a
 //! restart (any decode failure means "no history": 0).
 
-use pico_common::now_ms;
+use picomq_common::now_ms;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use pico_protocol::envelope::decode_envelope_timestamp;
-use pico_server::{OffsetToken, S3StreamService, ServiceError};
+use picomq_protocol::envelope::decode_envelope_timestamp;
+use picomq_server::{OffsetToken, S3StreamService, ServiceError};
 
 pub struct StreamTimestamps {
     service: Arc<S3StreamService>,

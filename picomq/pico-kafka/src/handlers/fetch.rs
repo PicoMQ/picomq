@@ -8,7 +8,7 @@ use futures::future::select_all;
 use kafka_protocol::messages::fetch_response::{FetchableTopicResponse, PartitionData};
 use kafka_protocol::messages::FetchRequest;
 use kafka_protocol::protocol::Decodable;
-use pico_server::OffsetToken;
+use picomq_server::OffsetToken;
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
@@ -234,7 +234,7 @@ async fn read_partition(
             PartitionRead {
                 data: partition_data(
                     NO_ERROR,
-                    &pico_server::StreamWatermarks {
+                    &picomq_server::StreamWatermarks {
                         log_start_offset: read.log_start_offset,
                         high_watermark: read.high_watermark,
                     },
@@ -250,7 +250,7 @@ async fn read_partition(
 
 fn partition_data(
     error_code: i16,
-    watermarks: &pico_server::StreamWatermarks,
+    watermarks: &picomq_server::StreamWatermarks,
     records: Option<Bytes>,
 ) -> PartitionData {
     PartitionData::default()

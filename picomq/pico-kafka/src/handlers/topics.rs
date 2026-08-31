@@ -9,7 +9,7 @@ use kafka_protocol::messages::delete_topics_response::{
 };
 use kafka_protocol::messages::{CreateTopicsRequest, DeleteTopicsRequest};
 use kafka_protocol::protocol::Decodable;
-use pico_server::CreateCommand;
+use picomq_server::CreateCommand;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;

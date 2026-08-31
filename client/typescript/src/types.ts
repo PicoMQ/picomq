@@ -1,4 +1,5 @@
 import type { RetryPolicy } from './retry'
+import type { Stream } from './stream'
 
 export type Protocol = 'pico' | 'ds'
 
@@ -14,12 +15,30 @@ export interface CallOptions {
   signal?: AbortSignal
 }
 
+export interface AppendOptions extends CallOptions {
+  contentType?: string
+}
+
 export interface SubscribeOptions extends CallOptions {
   reconnect?: boolean
   maxReconnectAttempts?: number
   reconnectDelayMs?: number
   maxReconnectDelayMs?: number
 }
+
+export interface RecordsOptions extends CallOptions {
+  live?: boolean
+  batch?: ReadLimits
+}
+
+export type AppendInput =
+  | Uint8Array
+  | string
+  | {
+      body: Uint8Array | string
+      headers?: { [key: string]: string }
+      timestamp?: number | bigint
+    }
 
 export interface StreamInfo {
   name: string
@@ -65,10 +84,23 @@ export type SseEvent =
   | { type: 'data'; id?: string; records: StreamRecord[]; raw: Uint8Array }
   | { type: 'control'; id?: string; next: string; upToDate: boolean; closed: boolean }
 
+export interface ProducerRef {
+  id: string
+  epoch: number
+  seq: number
+}
+
+export interface ProducerAck {
+  applied: boolean
+  duplicate: boolean
+  ack: AppendAck
+}
+
 export interface StreamApi {
   protocol(): Protocol
   beginning(): string
   now(): string
+  stream(name: string): Stream
   create(
     name: string,
     contentType: string,
@@ -76,12 +108,7 @@ export interface StreamApi {
     options?: CallOptions,
   ): Promise<boolean>
   head(name: string, options?: CallOptions): Promise<StreamInfo | null>
-  append(
-    name: string,
-    records: Uint8Array[],
-    contentType: string,
-    options?: CallOptions,
-  ): Promise<AppendAck>
+  append(name: string, records: AppendInput[], options?: AppendOptions): Promise<AppendAck>
   read(
     name: string,
     from: string,
@@ -89,12 +116,9 @@ export interface StreamApi {
     limits?: ReadLimits,
     options?: CallOptions,
   ): Promise<ReadPage>
-  subscribe(
-    name: string,
-    from: string,
-    options?: SubscribeOptions,
-  ): AsyncIterable<SseEvent>
+  subscribe(name: string, from: string, options?: SubscribeOptions): AsyncIterable<SseEvent>
   list(prefix: string, limit?: number, options?: CallOptions): Promise<StreamListing>
   close(name: string, options?: CallOptions): Promise<string>
   delete(name: string, options?: CallOptions): Promise<boolean>
+  closeTransport(): Promise<void>
 }

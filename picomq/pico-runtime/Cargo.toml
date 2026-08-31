@@ -1,5 +1,5 @@
 [package]
-name = "pico-runtime"
+name = "picomq-runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,14 +9,14 @@ repository.workspace = true
 
 [dependencies]
 s3stream = { workspace = true }
-pico-auth = { workspace = true }
-pico-metadata = { workspace = true }
-pico-common = { workspace = true }
-pico-sql = { workspace = true }
-pico-server = { workspace = true }
-pico-http = { workspace = true }
-pico-kafka = { workspace = true }
-pico-schema = { workspace = true }
+picomq-auth = { workspace = true }
+picomq-metadata = { workspace = true }
+picomq-common = { workspace = true }
+picomq-sql = { workspace = true }
+picomq-server = { workspace = true }
+picomq-http = { workspace = true }
+picomq-kafka = { workspace = true }
+picomq-schema = { workspace = true }
 
 thiserror = { workspace = true }
 tokio = { workspace = true }

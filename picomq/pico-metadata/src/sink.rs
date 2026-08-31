@@ -1,7 +1,7 @@
 //! The write boundary: where commands enter the replicated log.
 //!
 //! The same manager/KV implementations work over any log: [`LocalSink`]
-//! applies in-process (single node, tests); `SqlSink` (crate `pico-sql`)
+//! applies in-process (single node, tests); `SqlSink` (crate `picomq-sql`)
 //! appends to a durable SQL table and coalesces concurrent proposes into one
 //! row. Delivery concerns (leader forwarding, conflict retry) belong to the
 //! sink, never to callers.

@@ -1,5 +1,9 @@
+import type { RecordEnvelope } from '../record'
+
 const ENVELOPE_VERSION = 1
 const BATCH_VERSION = 1
+
+const ENC = new TextEncoder()
 
 export class CodecError extends Error {
   constructor(message: string) {
@@ -8,31 +12,25 @@ export class CodecError extends Error {
   }
 }
 
-export interface RecordEnvelope {
-  timestamp: bigint
-  headers: { [key: string]: string }
-  body: Uint8Array
-}
-
 export interface SequencedRecord {
   seq: bigint
   envelope: RecordEnvelope
 }
 
-function sortedEntries(headers: { [key: string]: string }): [string, string][] {
-  return Object.entries(headers).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+interface EncodedHeaders {
+  size: number
+  entries: [Uint8Array, Uint8Array][]
 }
 
-function headersSize(headers: { [key: string]: string }): number {
+function encodeHeaders(headers: { [key: string]: string }): EncodedHeaders {
+  const entries = Object.entries(headers)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([name, value]) => [ENC.encode(name), ENC.encode(value)] as [Uint8Array, Uint8Array])
   let size = 4
-  for (const [name, value] of sortedEntries(headers)) {
-    size += 8 + utf8ByteLength(name) + utf8ByteLength(value)
+  for (const [name, value] of entries) {
+    size += 8 + name.length + value.length
   }
-  return size
-}
-
-function utf8ByteLength(s: string): number {
-  return new TextEncoder().encode(s).byteLength
+  return { size, entries }
 }
 
 function putU32(view: DataView, offset: number, value: number): number {
@@ -55,17 +53,13 @@ function putBytes(buf: Uint8Array, offset: number, bytes: Uint8Array): number {
   return offset + bytes.length
 }
 
-function putHeaders(buf: Uint8Array, view: DataView, offset: number, headers: { [key: string]: string }): number {
-  const entries = sortedEntries(headers)
-  offset = putU32(view, offset, entries.length)
-  const enc = new TextEncoder()
-  for (const [name, value] of entries) {
-    const nb = enc.encode(name)
-    const vb = enc.encode(value)
-    offset = putU32(view, offset, nb.length)
-    offset = putBytes(buf, offset, nb)
-    offset = putU32(view, offset, vb.length)
-    offset = putBytes(buf, offset, vb)
+function putHeaders(buf: Uint8Array, view: DataView, offset: number, encoded: EncodedHeaders): number {
+  offset = putU32(view, offset, encoded.entries.length)
+  for (const [name, value] of encoded.entries) {
+    offset = putU32(view, offset, name.length)
+    offset = putBytes(buf, offset, name)
+    offset = putU32(view, offset, value.length)
+    offset = putBytes(buf, offset, value)
   }
   return offset
 }
@@ -153,17 +147,19 @@ class Reader {
 }
 
 export function encodeBatchAppend(records: RecordEnvelope[]): Uint8Array {
+  const encoded = records.map((r) => encodeHeaders(r.headers))
   let size = 5
-  for (const r of records) {
-    size += 4 + headersSize(r.headers) + 4 + r.body.length
+  for (let i = 0; i < records.length; i++) {
+    size += encoded[i]!.size + 4 + records[i]!.body.length
   }
   const buf = new Uint8Array(size)
   const view = new DataView(buf.buffer)
   let offset = 0
   buf[offset++] = BATCH_VERSION
   offset = putU32(view, offset, records.length)
-  for (const r of records) {
-    offset = putHeaders(buf, view, offset, r.headers)
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i]!
+    offset = putHeaders(buf, view, offset, encoded[i]!)
     offset = putU32(view, offset, r.body.length)
     offset = putBytes(buf, offset, r.body)
   }
@@ -185,19 +181,21 @@ export function decodeBatchAppend(payload: Uint8Array): RecordEnvelope[] {
 }
 
 export function encodeBatchRead(records: SequencedRecord[]): Uint8Array {
+  const encoded = records.map((rec) => encodeHeaders(rec.envelope.headers))
   let size = 5
-  for (const rec of records) {
-    size += 16 + 4 + headersSize(rec.envelope.headers) + 4 + rec.envelope.body.length
+  for (let i = 0; i < records.length; i++) {
+    size += 16 + encoded[i]!.size + 4 + records[i]!.envelope.body.length
   }
   const buf = new Uint8Array(size)
   const view = new DataView(buf.buffer)
   let offset = 0
   buf[offset++] = BATCH_VERSION
   offset = putU32(view, offset, records.length)
-  for (const rec of records) {
+  for (let i = 0; i < records.length; i++) {
+    const rec = records[i]!
     offset = putU64(view, offset, rec.seq)
     offset = putI64(view, offset, rec.envelope.timestamp)
-    offset = putHeaders(buf, view, offset, rec.envelope.headers)
+    offset = putHeaders(buf, view, offset, encoded[i]!)
     offset = putU32(view, offset, rec.envelope.body.length)
     offset = putBytes(buf, offset, rec.envelope.body)
   }
@@ -221,13 +219,14 @@ export function decodeBatchRead(payload: Uint8Array): SequencedRecord[] {
 }
 
 export function encodeEnvelope(envelope: RecordEnvelope): Uint8Array {
-  const size = 1 + 8 + headersSize(envelope.headers) + envelope.body.length
+  const encoded = encodeHeaders(envelope.headers)
+  const size = 1 + 8 + encoded.size + envelope.body.length
   const buf = new Uint8Array(size)
   const view = new DataView(buf.buffer)
   let offset = 0
   buf[offset++] = ENVELOPE_VERSION
   offset = putI64(view, offset, envelope.timestamp)
-  offset = putHeaders(buf, view, offset, envelope.headers)
+  offset = putHeaders(buf, view, offset, encoded)
   putBytes(buf, offset, envelope.body)
   return buf
 }

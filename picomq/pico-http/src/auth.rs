@@ -5,9 +5,9 @@
 
 use axum::http::{header, HeaderMap, Method, Uri};
 use axum::response::Response;
-use pico_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
-use pico_protocol::ds::H_STREAM_CLOSED;
-use pico_protocol::pico::{H_CLOSED, H_TRIM_SEQ};
+use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
+use picomq_protocol::ds::H_STREAM_CLOSED;
+use picomq_protocol::pico::{H_CLOSED, H_TRIM_SEQ};
 
 use crate::ds;
 use crate::http::{header_str, set_header, truthy};
@@ -35,7 +35,7 @@ pub async fn gate(
     let Some(authorizer) = authorizer else {
         return Ok(None);
     };
-    let now_ms = pico_common::now_ms();
+    let now_ms = picomq_common::now_ms();
     let (principal, anonymous) = match header_str(headers, header::AUTHORIZATION.as_str()) {
         Some(credential) => (
             authorizer
@@ -127,7 +127,7 @@ fn write_ops(close: bool, empty: bool) -> Vec<Operation> {
 /// The name to authorize. A Pico list is checked against its prefix filter.
 fn auth_resource(audience: Audience, uri: &Uri) -> String {
     if audience == Audience::Pico && stream_name(uri) == "/" {
-        crate::http::query_param(uri, "prefix")
+        crate::http::query_param(uri, picomq_protocol::pico::Q_PREFIX)
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| stream_name(uri))
     } else {
@@ -165,14 +165,15 @@ fn ds_reject(err: AuthError) -> Response {
 
 /// Store failures get a generic message: backend detail stays in server logs.
 pub(crate) fn status_code(err: &AuthError) -> (u16, &'static str, &'static str) {
+    use picomq_protocol::pico::{E_PERMISSION_DENIED, E_UNAUTHENTICATED};
     match err {
         AuthError::Unauthenticated | AuthError::Malformed => {
-            (401, "unauthenticated", "unauthenticated")
+            (401, E_UNAUTHENTICATED, "unauthenticated")
         }
-        AuthError::Expired => (401, "unauthenticated", "token expired"),
-        AuthError::WrongAudience => (401, "unauthenticated", "wrong audience"),
+        AuthError::Expired => (401, E_UNAUTHENTICATED, "token expired"),
+        AuthError::WrongAudience => (401, E_UNAUTHENTICATED, "wrong audience"),
         AuthError::Denied | AuthError::NarrowingRejected => {
-            (403, "permission_denied", "permission denied")
+            (403, E_PERMISSION_DENIED, "permission denied")
         }
         AuthError::Store(_) => (500, "internal", "auth unavailable"),
     }
@@ -181,7 +182,7 @@ pub(crate) fn status_code(err: &AuthError) -> (u16, &'static str, &'static str) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pico_auth::{
+    use picomq_auth::{
         AccessToken, MemoryTokenStore, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord,
         TokenStore,
     };

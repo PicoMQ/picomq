@@ -5,13 +5,13 @@
 //!
 //! The default gate runs 20k creates (CI-friendly, a few seconds on SQLite
 //! with full-sync durability). The 1M gate is `#[ignore]`d. Run it explicitly
-//! with `cargo test -p pico-sql --test scale -- --ignored`.
+//! with `cargo test -p picomq-sql --test scale -- --ignored`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pico_metadata::{CommandSink, MetadataCommand, MetadataResult};
-use pico_sql::{MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
+use picomq_metadata::{CommandSink, MetadataCommand, MetadataResult};
+use picomq_sql::{MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
 
 const NODE: i32 = 1;
 const EPOCH: i64 = 1;
@@ -143,7 +143,7 @@ async fn twenty_k_creates_gate() {
 
 /// The full 1M gate. Run explicitly in release mode (see module docs).
 #[tokio::test]
-#[ignore = "run explicitly: cargo test --release -p pico-sql --test scale -- --ignored --nocapture"]
+#[ignore = "run explicitly: cargo test --release -p picomq-sql --test scale -- --ignored --nocapture"]
 async fn million_creates_gate() {
     run_gate(1_000_000).await;
 }

@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use pico_auth::{AuthError, Authorizer, TokenRecord, TokenStore, Verifier, ID_MAX_LEN, ID_MIN_LEN};
+use picomq_auth::{
+    AuthError, Authorizer, TokenRecord, TokenStore, Verifier, ID_MAX_LEN, ID_MIN_LEN,
+};
 use s3stream::{KVClient, KeyValue};
 
 /// Metadata KV prefix for token records. Must not start with `/`.
@@ -160,7 +162,7 @@ impl TokenService {
                 if !*leadership.borrow_and_update() {
                     continue;
                 }
-                if let Err(error) = service.remove_expired(pico_common::now_ms()).await {
+                if let Err(error) = service.remove_expired(picomq_common::now_ms()).await {
                     tracing::debug!(%error, "token expiry failed");
                 }
             }
@@ -171,7 +173,7 @@ impl TokenService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pico_auth::{AccessToken, Scope};
+    use picomq_auth::{AccessToken, Scope};
     use s3stream::MemoryKvClient;
 
     fn record(id: &str) -> TokenRecord {

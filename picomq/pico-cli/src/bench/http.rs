@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use hdrhistogram::sync::{Recorder, SyncHistogram};
 use hdrhistogram::Histogram;
-use pico_client::producer::{Pending, Producer, ProducerConfig};
-use pico_client::{ClientError, DsClient, Live, PicoClient, Protocol, ReadLimits, StreamApi};
+use picomq_client::producer::{Pending, Producer, ProducerConfig};
+use picomq_client::{ClientError, DsClient, Live, PicoClient, Protocol, ReadLimits, StreamApi};
 
 use super::{emit, report_progress, BenchArgs, Counters, Schedule};
 use crate::io::note;
@@ -22,7 +22,7 @@ enum Client {
 
 impl Client {
     fn open(protocol: Protocol, endpoint: &Target) -> Result<Self, ClientError> {
-        let http = pico_client::http_client(&endpoint.client_config())?;
+        let http = picomq_client::http_client(&endpoint.client_config())?;
         let url = &endpoint.endpoint;
         Ok(match protocol {
             Protocol::Pico => Self::Pico(PicoClient::with_http(url, http, Default::default())),

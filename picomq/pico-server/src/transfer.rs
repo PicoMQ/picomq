@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pico_metadata::{MetadataView, ViewPublisher};
+use picomq_metadata::{MetadataView, ViewPublisher};
 use s3stream::StreamState;
 
 use crate::service::S3StreamService;

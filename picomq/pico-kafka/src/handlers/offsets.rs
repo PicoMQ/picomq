@@ -101,7 +101,7 @@ async fn list_offset(
     ctx: &BrokerContext,
     stream: &str,
     timestamp: i64,
-) -> Result<(i64, i64), pico_server::ServiceError> {
+) -> Result<(i64, i64), picomq_server::ServiceError> {
     let watermarks = ctx.service.watermarks(stream).await?;
     Ok(match timestamp {
         EARLIEST_TIMESTAMP => (watermarks.log_start_offset as i64, timestamp),
@@ -116,8 +116,8 @@ async fn resolve_timestamp(
     ctx: &BrokerContext,
     stream: &str,
     target: i64,
-    watermarks: &pico_server::StreamWatermarks,
-) -> Result<(i64, i64), pico_server::ServiceError> {
+    watermarks: &picomq_server::StreamWatermarks,
+) -> Result<(i64, i64), picomq_server::ServiceError> {
     if watermarks.high_watermark <= watermarks.log_start_offset {
         return Ok((watermarks.high_watermark as i64, target));
     }
@@ -133,8 +133,8 @@ async fn resolve_timestamp(
         }
         for batch in read.batches {
             let batches = decode_batches(&batch.payload).map_err(|error| {
-                pico_server::ServiceError::with_message(
-                    pico_server::ErrorKind::BadRequest,
+                picomq_server::ServiceError::with_message(
+                    picomq_server::ErrorKind::BadRequest,
                     None,
                     false,
                     error.to_string(),

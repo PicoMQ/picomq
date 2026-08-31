@@ -1,7 +1,7 @@
 //! Protocol-neutral HTTP plumbing shared by the Pico and Durable Streams
 //! handlers.
 //!
-//! MIME helpers live once in [`pico_server::framing`] and are imported by
+//! MIME helpers live once in [`picomq_server::framing`] and are imported by
 //! both frontends.
 
 use std::time::Duration;
@@ -11,13 +11,13 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use base64::Engine as _;
 
-use pico_server::{ErrorKind, OffsetToken, ServiceError};
+use picomq_server::{ErrorKind, OffsetToken, ServiceError};
 
 pub(crate) fn bad_request(message: impl Into<String>) -> ServiceError {
     ServiceError::with_message(ErrorKind::BadRequest, None, false, message)
 }
 
-pub(crate) fn codec_error(e: pico_protocol::CodecError) -> ServiceError {
+pub(crate) fn codec_error(e: picomq_protocol::CodecError) -> ServiceError {
     bad_request(e.message)
 }
 
@@ -147,11 +147,6 @@ pub(crate) fn cursor(raw: Option<&str>) -> u64 {
         }
     }
     interval
-}
-
-pub(crate) fn sse_lines(text: &str) -> impl Iterator<Item = &str> {
-    text.split("\r\n")
-        .flat_map(|chunk| chunk.split(['\r', '\n']))
 }
 
 /// Etag format: `"base64(scope):start:end[:c]"`.

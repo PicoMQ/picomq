@@ -1,14 +1,12 @@
-//! Vocabulary of the native HTTP protocols, shared by `pico-http` and
-//! `pico-client`. Kafka's wire spec is external and lives with `pico-kafka`.
-//!
-//! - [`pico`]: Pico protocol header and content type constants.
-//! - [`ds`]: Durable Streams protocol header constants.
-//! - [`envelope`]: the native record model and at-rest codecs.
-//! - [`error`]: the codec error type.
+//! PicoMQ wire protocol: the Pico and Durable Streams contracts.
 
 pub mod ds;
 pub mod envelope;
 pub mod error;
+pub mod mime;
 pub mod pico;
+mod sse;
+mod wire;
 
-pub use error::CodecError;
+pub use error::{CodecError, ErrorKind, WireError};
+pub use wire::{bearer, Producer, WireRequest};

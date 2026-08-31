@@ -20,7 +20,7 @@ if [[ -n "${PICO_BIN:-}" ]]; then
   BIN="${PICO_BIN}"
 else
   cd "${ROOT}"
-  cargo build --release -p pico-cli
+  cargo build --release -p picomq-cli
   BIN="${ROOT}/target/release/pico"
 fi
 

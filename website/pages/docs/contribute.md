@@ -11,7 +11,7 @@ If you are new to the project, new to Rust, or just unsure whether a change belo
 The workspace is split into two areas with a hard boundary between them:
 
 - **`s3stream/`** is the stream engine: WAL, object layout, caching, compaction. It is a self-contained library (crates, wire specification, conformance fixtures).
-- **`picomq/`** is the host: metadata plane, server, HTTP frontends (Pico protocol and Durable Streams), client, and the `pico` CLI. Host crates depend only on the `s3stream` facade crate, never on engine internals. The wire vocabulary (header constants, record envelope codec) lives in `pico-protocol`, a small crate shared by the frontends and `pico-client`, which keeps the client publishable as a standalone SDK with no server dependencies.
+- **`picomq/`** is the host: metadata plane, server, HTTP frontends (Pico protocol and Durable Streams), client, and the `pico` CLI. Host crates depend only on the `s3stream` facade crate, never on engine internals. The wire vocabulary (header constants, record envelope codec) lives in `picomq-protocol`, a small crate shared by the frontends and `picomq-client`, which keeps the client publishable as a standalone SDK with no server dependencies.
 
 Keeping that boundary intact is a review criterion. If a change in `picomq/*` needs something from inside the engine, the right move is to widen the facade.
 
@@ -30,7 +30,7 @@ Postgres-backed tests are env-gated and skipped unless a URL is provided:
 
 ```bash
 PICOMQ_PG_URL=postgres://user:pass@localhost:5432/picomq \
-    cargo test -p pico-sql --test pg_contract --test pg_e2e
+    cargo test -p picomq-sql --test pg_contract --test pg_e2e
 ```
 
 For an end-to-end environment, the compose stacks in `harness/aio` bring up a node with Postgres and RustFS (or SQLite and local files with `compose.lite.yml`). See [Quick start](/docs/quick-start).

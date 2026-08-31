@@ -1,7 +1,8 @@
 import { asClientError, ClientError } from './error'
-import type { PicoClient, ProducerAck, ProducerRef } from './pico'
-import { RetryPolicy } from './retry'
 import { parseSafeSeq, sleep } from './util'
+import { toEnvelope, type RecordEnvelope } from './record'
+import { RetryPolicy } from './retry'
+import type { AppendInput, CallOptions, ProducerAck, ProducerRef } from './types'
 
 export interface ProducerConfig {
   epoch?: number
@@ -16,8 +17,9 @@ export interface ProducerConfig {
 export interface ProducerClient {
   appendAs(
     name: string,
-    records: Uint8Array[],
+    records: AppendInput[],
     producer: ProducerRef,
+    options?: CallOptions,
   ): Promise<ProducerAck>
 }
 
@@ -44,14 +46,16 @@ function resolveConfig(config: ProducerConfig = {}): ResolvedConfig {
 }
 
 interface Item {
-  body: Uint8Array
+  envelope: RecordEnvelope
   resolve: (seq: number) => void
   reject: (error: ClientError) => void
   release: () => void
 }
 
 export class Pending {
-  constructor(private readonly promise: Promise<number>) {}
+  constructor(private readonly promise: Promise<number>) {
+    promise.catch(() => undefined)
+  }
 
   durable(): Promise<number> {
     return this.promise
@@ -67,22 +71,23 @@ export class Producer {
   private closed = false
   private poisoned = false
 
-  constructor(client: ProducerClient | PicoClient, name: string, id: string, config: ProducerConfig = {}) {
+  constructor(client: ProducerClient, name: string, id: string, config: ProducerConfig = {}) {
     this.config = resolveConfig(config)
     this.budget = new Semaphore(this.config.maxBufferedBytes)
     this.runner = this.run(client, name, id)
   }
 
-  async send(record: Uint8Array): Promise<Pending> {
-    if (record.byteLength > this.config.maxBufferedBytes) {
+  async send(record: AppendInput): Promise<Pending> {
+    const envelope = toEnvelope(record)
+    if (envelope.body.byteLength > this.config.maxBufferedBytes) {
       throw new ClientError(
         'bad_request',
-        `record of ${record.byteLength} bytes exceeds the session's ${this.config.maxBufferedBytes} byte budget`,
+        `record of ${envelope.body.byteLength} bytes exceeds the session's ${this.config.maxBufferedBytes} byte budget`,
         { code: 'record_too_large' },
       )
     }
     this.ensureOpen()
-    const release = await this.budget.acquire(Math.max(1, record.byteLength))
+    const release = await this.budget.acquire(Math.max(1, envelope.body.byteLength))
     let settle!: (seq: number) => void
     let fail!: (error: ClientError) => void
     const promise = new Promise<number>((resolve, reject) => {
@@ -90,7 +95,7 @@ export class Producer {
       fail = reject
     })
     this.push({
-      body: record,
+      envelope,
       resolve: settle,
       reject: fail,
       release,
@@ -98,7 +103,7 @@ export class Producer {
     return new Pending(promise)
   }
 
-  async sendDurable(record: Uint8Array): Promise<number> {
+  async sendDurable(record: AppendInput): Promise<number> {
     return (await this.send(record)).durable()
   }
 
@@ -109,15 +114,17 @@ export class Producer {
   }
 
   async close(): Promise<void> {
+    this.closed = true
     try {
-      await this.flush()
+      const release = await this.budget.acquire(this.config.maxBufferedBytes)
+      release()
     } finally {
-      this.closed = true
       while (this.waiters.length > 0) {
         this.waiters.shift()?.(null)
       }
       await this.runner
     }
+    this.ensureNotPoisoned()
   }
 
   private ensureOpen(): void {
@@ -181,19 +188,23 @@ export class Producer {
       const batch = await this.collect(first)
       const batchSeq = seq
       seq += 1
+      if (batchSeq === 0) {
+        await this.sendBatch(client, name, id, batch, batchSeq)
+        continue
+      }
       const release = await inflight.acquire(1)
       void this.sendBatch(client, name, id, batch, batchSeq).finally(release)
     }
   }
 
   private async collect(first: Item): Promise<Item[]> {
-    let bytes = first.body.byteLength
+    let bytes = first.envelope.body.byteLength
     const batch = [first]
     if (this.config.lingerMs === 0) {
       while (batch.length < this.config.maxBatchRecords && bytes < this.config.maxBatchBytes) {
         const item = this.tryRecv()
         if (!item) break
-        bytes += item.body.byteLength
+        bytes += item.envelope.body.byteLength
         batch.push(item)
       }
       return batch
@@ -204,7 +215,7 @@ export class Producer {
       if (remaining <= 0) break
       const item = await this.recv(remaining)
       if (!item) break
-      bytes += item.body.byteLength
+      bytes += item.envelope.body.byteLength
       batch.push(item)
     }
     return batch
@@ -221,7 +232,7 @@ export class Producer {
       const start = await this.appendWithRetries(
         client,
         name,
-        batch.map((item) => item.body),
+        batch.map((item) => item.envelope),
         id,
         seq,
       )
@@ -243,7 +254,7 @@ export class Producer {
   private async appendWithRetries(
     client: ProducerClient,
     name: string,
-    records: Uint8Array[],
+    records: RecordEnvelope[],
     id: string,
     seq: number,
   ): Promise<number> {

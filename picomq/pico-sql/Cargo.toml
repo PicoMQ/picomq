@@ -1,5 +1,5 @@
 [package]
-name = "pico-sql"
+name = "picomq-sql"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,8 @@ repository.workspace = true
 
 [dependencies]
 s3stream = { workspace = true }
-pico-metadata = { workspace = true }
-pico-common = { workspace = true }
+picomq-metadata = { workspace = true }
+picomq-common = { workspace = true }
 
 async-trait = { workspace = true }
 bytes = { workspace = true }

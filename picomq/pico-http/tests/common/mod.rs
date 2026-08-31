@@ -1,5 +1,5 @@
 //! Loopback test harness: a `PicoNode` on `LocalSink` + memory object
-//! storage, served over a real TCP socket by `pico_http::serve`. The same
+//! storage, served over a real TCP socket by `picomq_http::serve`. The same
 //! bind path `pico serve` uses. Timeouts are shortened for tests (short long
 //! poll, 2s SSE cap).
 
@@ -7,10 +7,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pico_http::{serve, Protocol, RoutingMode, RunningServer, ServeOptions};
-use pico_metadata::LocalSink;
-use pico_schema::{Registry, SchemaStore};
-use pico_server::{NodeConfig, PicoNode};
+use picomq_http::{serve, Protocol, RoutingMode, RunningServer, ServeOptions};
+use picomq_metadata::LocalSink;
+use picomq_schema::{Registry, SchemaStore};
+use picomq_server::{NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
 pub struct TestServer {
@@ -91,12 +91,12 @@ async fn start_with_node(protocol: Protocol, node: Arc<PicoNode>) -> TestServer 
 }
 
 #[allow(dead_code)]
-pub async fn pico_server() -> TestServer {
+pub async fn picomq_server() -> TestServer {
     start(Protocol::Pico).await
 }
 
 #[allow(dead_code)]
-pub async fn pico_server_with_schema(registry: Registry) -> TestServer {
+pub async fn picomq_server_with_schema(registry: Registry) -> TestServer {
     start_with_node(Protocol::Pico, start_node_with_schema(registry).await).await
 }
 

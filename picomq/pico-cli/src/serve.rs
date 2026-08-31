@@ -4,7 +4,7 @@
 //! which frontend is mounted.
 //!
 //! This module only *parses*: every field maps to
-//! [`pico_runtime::ServerConfig`], which owns what starting a server means.
+//! [`picomq_runtime::ServerConfig`], which owns what starting a server means.
 //! `--topo` / `ClusterConfig` files are not ported.
 
 use std::net::SocketAddr;
@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
-use pico_http::{Protocol, RoutingMode};
-use pico_runtime::{AuthMode, MetaBackend, ServerConfig};
+use picomq_http::{Protocol, RoutingMode};
+use picomq_runtime::{AuthMode, MetaBackend, ServerConfig};
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { PicoClient } from '../src/pico'
-import { DsClient } from '../src/ds'
+import { PicoClient } from '../../src/pico/client'
+import { DsClient } from '../../src/ds/client'
 
 function sseResponse(text: string, headers: Record<string, string> = {}): Response {
   return new Response(text, {

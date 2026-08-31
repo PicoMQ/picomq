@@ -6,9 +6,9 @@ use std::sync::Arc;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use pico_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
-use pico_server::ownership::OwnershipService;
-use pico_server::{ErrorKind, S3StreamService, ServiceError};
+use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
+use picomq_server::ownership::OwnershipService;
+use picomq_server::{ErrorKind, S3StreamService, ServiceError};
 use serde_json::json;
 
 use crate::RoutingMode;
@@ -73,7 +73,7 @@ pub(crate) async fn authenticate(
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| Box::new(auth_error(&AuthError::Unauthenticated)))?;
     authorizer
-        .authenticate(credential, Audience::Admin, pico_common::now_ms())
+        .authenticate(credential, Audience::Admin, picomq_common::now_ms())
         .await
         .map(Some)
         .map_err(|err| Box::new(auth_error(&err)))

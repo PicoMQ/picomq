@@ -17,13 +17,13 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use pico_auth::{
+use picomq_auth::{
     check_issue, scope_from_json, scope_to_json, AccessToken, Audience, AuthError, Authorizer,
     Operation, TokenRecord, TokenStore as _,
 };
-use pico_metadata::MetadataState;
-use pico_server::registry::RegistryEntry;
-use pico_server::{OwnershipService, PicoNode};
+use picomq_metadata::MetadataState;
+use picomq_server::registry::RegistryEntry;
+use picomq_server::{OwnershipService, PicoNode};
 use s3stream::StreamState;
 use serde_json::{json, Value};
 use tokio::sync::watch;
@@ -315,7 +315,7 @@ async fn stream(
         "ownerNodeId": owner_node_id,
         "ownerAdvertisedAddress": owner_address,
         "ownerLocal": owner.local,
-        "contentType": crate::pico::user_ct_of(&entry.content_type),
+        "contentType": picomq_protocol::pico::user_ct_of(&entry.content_type),
         "ttlSeconds": entry.ttl_seconds,
         "expiresAtMs": entry.expires_at_ms,
         "closed": entry.closed,
@@ -469,7 +469,7 @@ async fn issue_token(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid scope"),
     };
     // An uncredentialed admin plane is never intended.
-    if id == pico_auth::ANONYMOUS_TOKEN_ID && requested.allows_audience(Audience::Admin) {
+    if id == picomq_auth::ANONYMOUS_TOKEN_ID && requested.allows_audience(Audience::Admin) {
         return error_response(
             StatusCode::BAD_REQUEST,
             "the anonymous grant cannot carry the admin audience",
@@ -478,7 +478,7 @@ async fn issue_token(
     let issuer = principal
         .as_ref()
         .map(|p| p.scope.clone())
-        .unwrap_or_else(pico_auth::Scope::root);
+        .unwrap_or_else(picomq_auth::Scope::root);
     if let Err(err) = check_issue(&issuer, id, &requested) {
         return match err {
             AuthError::Malformed => {
@@ -497,7 +497,7 @@ async fn issue_token(
         id: id.to_owned(),
         verifier,
         scope: requested,
-        created_at_ms: pico_common::now_ms(),
+        created_at_ms: picomq_common::now_ms(),
         issued_by: principal.map(|p| p.id.clone()).unwrap_or_default(),
     };
     let stored = match state
@@ -561,7 +561,11 @@ fn token_json(record: &TokenRecord) -> Value {
     })
 }
 
-fn node_json(state: &MetadataState, node: &pico_metadata::state::NodeRow, local_id: i32) -> Value {
+fn node_json(
+    state: &MetadataState,
+    node: &picomq_metadata::state::NodeRow,
+    local_id: i32,
+) -> Value {
     let opening = state
         .opening_by_node
         .range((node.node_id, 0)..=(node.node_id, u64::MAX))

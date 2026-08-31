@@ -1,7 +1,7 @@
-import { ClientError, isAbortError, throwIfAborted } from './error'
+import { ClientError, isAbortError, throwIfAborted } from '../error'
+import { sleep } from '../util'
 import { iterateSse, type RawSseEvent } from './sse'
-import { sleep } from './util'
-import type { SseEvent, StreamRecord, SubscribeOptions } from './types'
+import type { SseEvent, StreamRecord, SubscribeOptions } from '../types'
 
 export interface SubscribeHooks {
   open(
@@ -14,36 +14,76 @@ export interface SubscribeHooks {
   encodingOf?(response: Response): string
 }
 
+class Reconnect {
+  private drops = 0
+
+  constructor(
+    private readonly enabled: boolean,
+    private readonly maxAttempts: number | undefined,
+    private readonly initialDelayMs: number,
+    private readonly maxDelayMs: number,
+    private readonly signal: AbortSignal | undefined,
+  ) {}
+
+  reset(): void {
+    this.drops = 0
+  }
+
+  async recover(error: unknown): Promise<void> {
+    if (isAbortError(error) || this.signal?.aborted) {
+      throwIfAborted(this.signal)
+      throw error
+    }
+    if (!this.enabled) throw error
+    this.drops += 1
+    if (this.exhausted()) throw error
+    await this.wait()
+  }
+
+  async idle(): Promise<boolean> {
+    if (!this.enabled) return false
+    this.drops += 1
+    if (this.exhausted()) return false
+    await this.wait()
+    return true
+  }
+
+  private exhausted(): boolean {
+    return this.maxAttempts !== undefined && this.drops > this.maxAttempts
+  }
+
+  private wait(): Promise<void> {
+    const delay = Math.min(this.maxDelayMs, this.initialDelayMs * 2 ** Math.max(0, this.drops - 1))
+    return sleep(delay, this.signal)
+  }
+}
+
 export function subscribeLoop(
   from: string,
   options: SubscribeOptions,
   hooks: SubscribeHooks,
 ): AsyncIterable<SseEvent> {
-  const reconnect = options.reconnect ?? true
-  const maxAttempts = options.maxReconnectAttempts
-  const initialDelay = options.reconnectDelayMs ?? 1000
-  const maxDelay = options.maxReconnectDelayMs ?? 30_000
+  const reconnectEnabled = options.reconnect ?? true
   const signal = options.signal
 
   return {
     async *[Symbol.asyncIterator]() {
+      const reconnect = new Reconnect(
+        reconnectEnabled,
+        options.maxReconnectAttempts,
+        options.reconnectDelayMs ?? 1000,
+        options.maxReconnectDelayMs ?? 30_000,
+        signal,
+      )
       let offset = from
       let lastEventId: string | undefined
-      let drops = 0
       for (;;) {
         throwIfAborted(signal)
         let response: Response
         try {
           response = await hooks.open(offset, lastEventId, signal)
         } catch (error) {
-          if (isAbortError(error) || signal?.aborted) {
-            throwIfAborted(signal)
-            throw error
-          }
-          if (!reconnect) throw error
-          drops += 1
-          if (maxAttempts !== undefined && drops > maxAttempts) throw error
-          await sleep(Math.min(maxDelay, initialDelay * 2 ** Math.max(0, drops - 1)))
+          await reconnect.recover(error)
           continue
         }
         if (!response.body) {
@@ -85,25 +125,16 @@ export function subscribeLoop(
             }
           }
         } catch (error) {
-          if (isAbortError(error) || signal?.aborted) {
-            throwIfAborted(signal)
-            throw error
-          }
-          if (!reconnect) throw error
-          drops += 1
-          if (maxAttempts !== undefined && drops > maxAttempts) throw error
-          await sleep(Math.min(maxDelay, initialDelay * 2 ** Math.max(0, drops - 1)))
+          await reconnect.recover(error)
           continue
         }
 
-        if (closed || !reconnect) return
+        if (closed || !reconnectEnabled) return
         if (sawEvent) {
-          drops = 0
+          reconnect.reset()
           continue
         }
-        drops += 1
-        if (maxAttempts !== undefined && drops > maxAttempts) return
-        await sleep(Math.min(maxDelay, initialDelay * 2 ** Math.max(0, drops - 1)))
+        if (!(await reconnect.idle())) return
       }
     },
   }

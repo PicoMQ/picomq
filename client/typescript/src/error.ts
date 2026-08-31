@@ -46,7 +46,11 @@ export class ClientError extends Error {
 
   retryable(): boolean {
     if (this.kind === 'aborted' || this.kind === 'unsupported') return false
-    return this.kind === 'transport' || this.status === 429 || (this.status >= 500 && this.status <= 599)
+    return (
+      this.kind === 'transport' ||
+      this.status === 429 ||
+      (this.status >= 500 && this.status <= 599)
+    )
   }
 }
 
@@ -56,22 +60,21 @@ export function isAbortError(error: unknown): boolean {
   return false
 }
 
+export function abortError(reason: unknown): ClientError {
+  if (reason instanceof ClientError && reason.kind === 'aborted') return reason
+  return ClientError.aborted(reason instanceof Error ? reason.message : 'Aborted')
+}
+
 export function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
-    throw isAbortError(signal.reason)
-      ? signal.reason instanceof ClientError
-        ? signal.reason
-        : ClientError.aborted(signal.reason instanceof Error ? signal.reason.message : 'Aborted')
-      : ClientError.aborted(
-          signal.reason instanceof Error ? signal.reason.message : 'Aborted',
-        )
+    throw abortError(signal.reason)
   }
 }
 
 export function asClientError(error: unknown): ClientError {
   if (error instanceof ClientError) return error
   if (isAbortError(error)) {
-    return ClientError.aborted(error instanceof Error ? error.message : 'Aborted')
+    return abortError(error)
   }
   return ClientError.transport(error instanceof Error ? error.message : String(error))
 }
