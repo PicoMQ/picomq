@@ -14,7 +14,11 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libsqlite3-dev pkg-config \
+ && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        libsqlite3-dev \
+        pkg-config \
  && rm -rf /var/lib/apt/lists/*
 
 COPY . .
