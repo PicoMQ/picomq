@@ -32,7 +32,7 @@ edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
 description = "A durable stream engine on object storage."
-repository = "https://github.com/picomq/picomq"
+repository = "https://github.com/PicoMQ/picomq"
 
 [workspace.dependencies]
 s3stream-codec = { path = "s3stream/s3stream-codec" }

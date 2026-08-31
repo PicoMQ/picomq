@@ -31,11 +31,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/picomq/picomq.git",
+    "url": "git+https://github.com/PicoMQ/picomq.git",
     "directory": "client/typescript"
   },
   "bugs": {
-    "url": "https://github.com/picomq/picomq/issues"
+    "url": "https://github.com/PicoMQ/picomq/issues"
   },
   "homepage": "https://picomq.com/docs/client",
   "keywords": [
