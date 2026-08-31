@@ -16,7 +16,7 @@ pub use auth::{KvTokenStore, TokenService, TOKEN_KEY_PREFIX};
 pub use error::{ErrorKind, ServiceError};
 pub use node::{NodeConfig, PicoNode};
 pub use ownership::{MetadataOwnershipService, OwnershipService};
-pub use pico_schema::{
+pub use picomq_schema::{
     Batch as SchemaBatch, Record as SchemaRecord, Registry as SchemaRegistry, SchemaFormat,
     SchemaStore,
 };

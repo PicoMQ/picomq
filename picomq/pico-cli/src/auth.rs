@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use pico_auth::AccessToken;
+use picomq_auth::AccessToken;
 
 use crate::io::note;
 use crate::stream::Endpoint;

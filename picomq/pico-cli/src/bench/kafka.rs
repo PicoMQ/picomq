@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use hdrhistogram::sync::{Recorder, SyncHistogram};
 use hdrhistogram::Histogram;
-use pico_client::ClientError;
+use picomq_client::ClientError;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;

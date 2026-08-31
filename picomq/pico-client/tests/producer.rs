@@ -5,13 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use pico_client::producer::{Producer, ProducerConfig};
-use pico_client::{ClientConfig, ErrorKind, Live, PicoClient, ReadLimits, StreamApi};
-use pico_http::Protocol as ServeProtocol;
-use pico_runtime::{MetaBackend, ServerConfig};
+use picomq_client::producer::{Producer, ProducerConfig};
+use picomq_client::{ClientConfig, ErrorKind, Live, PicoClient, ReadLimits, StreamApi};
+use picomq_http::Protocol as ServeProtocol;
+use picomq_runtime::{MetaBackend, ServerConfig};
 
-async fn start(dir: &std::path::Path) -> (pico_runtime::PicoServer, Arc<PicoClient>) {
-    let server = pico_runtime::start(ServerConfig {
+async fn start(dir: &std::path::Path) -> (picomq_runtime::PicoServer, Arc<PicoClient>) {
+    let server = picomq_runtime::start(ServerConfig {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
         protocol: ServeProtocol::Pico,
@@ -28,7 +28,7 @@ async fn start(dir: &std::path::Path) -> (pico_runtime::PicoServer, Arc<PicoClie
     .unwrap();
     let endpoint = format!("http://{}", server.local_addr());
     // HTTP/2 so the session's in-flight batches share one connection.
-    let http = pico_client::http_client(&ClientConfig {
+    let http = picomq_client::http_client(&ClientConfig {
         http2: true,
         ..Default::default()
     })
@@ -154,7 +154,7 @@ async fn resending_a_batch_applies_it_once() {
         .append_as(
             "/streams/dedupe",
             &records,
-            &pico_client::pico::ProducerRef {
+            &picomq_client::pico::ProducerRef {
                 id: "writer-1",
                 epoch: 0,
                 seq: 0,
@@ -168,7 +168,7 @@ async fn resending_a_batch_applies_it_once() {
         .append_as(
             "/streams/dedupe",
             &records,
-            &pico_client::pico::ProducerRef {
+            &picomq_client::pico::ProducerRef {
                 id: "writer-1",
                 epoch: 0,
                 seq: 0,
@@ -199,7 +199,7 @@ async fn a_batch_out_of_order_is_rejected() {
         .append_as(
             "/streams/gap",
             &[Bytes::from_static(b"first")],
-            &pico_client::pico::ProducerRef {
+            &picomq_client::pico::ProducerRef {
                 id: "writer-1",
                 epoch: 0,
                 seq: 0,
@@ -213,7 +213,7 @@ async fn a_batch_out_of_order_is_rejected() {
         .append_as(
             "/streams/gap",
             &[Bytes::from_static(b"early")],
-            &pico_client::pico::ProducerRef {
+            &picomq_client::pico::ProducerRef {
                 id: "writer-1",
                 epoch: 0,
                 seq: 2,

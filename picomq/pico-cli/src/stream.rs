@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use clap::{Args, Subcommand, ValueEnum};
-use pico_client::{ClientConfig, ClientError, ErrorKind, Live, PicoClient, Protocol, ReadLimits};
+use picomq_client::{ClientConfig, ClientError, ErrorKind, Live, PicoClient, Protocol, ReadLimits};
 
 use crate::io::{note, print_record, stdin_records};
 
@@ -94,7 +94,7 @@ impl ProtocolArg {
     }
 }
 
-impl From<ProtocolArg> for pico_http::Protocol {
+impl From<ProtocolArg> for picomq_http::Protocol {
     fn from(value: ProtocolArg) -> Self {
         match value {
             ProtocolArg::Pico => Self::Pico,
@@ -162,7 +162,7 @@ pub enum StreamCommand {
 pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, ClientError> {
     let protocol = endpoint.protocol.client_protocol()?;
     let client =
-        pico_client::connect_with(protocol, &endpoint.endpoint, &endpoint.client_config())?;
+        picomq_client::connect_with(protocol, &endpoint.endpoint, &endpoint.client_config())?;
 
     match command {
         StreamCommand::Create {
@@ -267,7 +267,7 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
                     "trim is a Pico protocol operation; use --protocol pico",
                 ));
             }
-            let http = pico_client::http_client(&endpoint.client_config())?;
+            let http = picomq_client::http_client(&endpoint.client_config())?;
             let start = PicoClient::with_http(&endpoint.endpoint, http, Default::default())
                 .trim(&stream, seq)
                 .await?;

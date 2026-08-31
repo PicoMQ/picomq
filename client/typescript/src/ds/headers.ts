@@ -1,0 +1,8 @@
+export const H_STREAM_NEXT_OFFSET = 'Stream-Next-Offset'
+export const H_STREAM_UP_TO_DATE = 'Stream-Up-To-Date'
+export const H_STREAM_TTL = 'Stream-TTL'
+export const H_STREAM_EXPIRES_AT = 'Stream-Expires-At'
+export const H_STREAM_CLOSED = 'Stream-Closed'
+export const H_DS_PRODUCER_EPOCH = 'Producer-Epoch'
+export const H_DS_PRODUCER_EXPECTED_SEQ = 'Producer-Expected-Seq'
+export const H_DS_PRODUCER_RECEIVED_SEQ = 'Producer-Received-Seq'

@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use pico_metadata::{apply, MetadataCommand, MetadataState};
+use picomq_metadata::{apply, MetadataCommand, MetadataState};
 
 const NODE_A: i32 = 1;
 const NODE_B: i32 = 2;
@@ -120,7 +120,7 @@ fn run_gate(total: u64) {
 
     // Snapshot round trip over the full state.
     let started = Instant::now();
-    let encoded = pico_metadata::snapshot::encode(&state);
+    let encoded = picomq_metadata::snapshot::encode(&state);
     let encode_elapsed = started.elapsed();
     let bytes_per_stream = encoded.len() as u64 / total;
     println!(
@@ -132,7 +132,7 @@ fn run_gate(total: u64) {
         "compact rows: expected <= 64 B/stream in the snapshot"
     );
     let started = Instant::now();
-    let decoded = pico_metadata::snapshot::decode(&encoded).unwrap();
+    let decoded = picomq_metadata::snapshot::decode(&encoded).unwrap();
     println!(
         "snapshot decode (incl. index rebuild): {:?}",
         started.elapsed()
@@ -148,7 +148,7 @@ fn hundred_k_streams_gate() {
 
 /// The full 1M gate. Run explicitly in release mode (see module docs).
 #[test]
-#[ignore = "run explicitly: cargo test --release -p pico-metadata --test scale -- --ignored --nocapture"]
+#[ignore = "run explicitly: cargo test --release -p picomq-metadata --test scale -- --ignored --nocapture"]
 fn million_streams_gate() {
     run_gate(1_000_000);
 }

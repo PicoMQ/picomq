@@ -1,5 +1,5 @@
 [package]
-name = "pico-server"
+name = "picomq-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,11 @@ repository.workspace = true
 
 [dependencies]
 s3stream = { workspace = true }
-pico-metadata = { workspace = true }
-pico-common = { workspace = true }
-pico-auth = { workspace = true }
-pico-protocol = { workspace = true }
-pico-schema = { workspace = true }
+picomq-metadata = { workspace = true }
+picomq-common = { workspace = true }
+picomq-auth = { workspace = true }
+picomq-protocol = { workspace = true }
+picomq-schema = { workspace = true }
 
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -24,7 +24,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-pico-sql = { workspace = true }
+picomq-sql = { workspace = true }
 object_store = { workspace = true }
 tempfile = { workspace = true }
 

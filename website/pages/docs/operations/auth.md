@@ -53,7 +53,7 @@ The reserved id `anonymous` applies its scope to requests with no credential. Is
 
 `pico auth login` stores a token per profile, in the OS keyring or in a private file with `PICO_NO_KEYRING=1`. `status` verifies it against the endpoint and `logout` removes it. An explicit `--token` or `PICO_TOKEN` wins over storage. See [CLI](/docs/operations/cli#connecting).
 
-Programs using `pico-client` set the token on the client config. The client follows `307`s itself and re-attaches the credential on every hop, because standard HTTP clients drop `Authorization` on cross-origin redirects and ownership redirects cross origins. The dashboard prompts for a token on rejection and holds it in session storage.
+Programs using `picomq-client` set the token on the client config. The client follows `307`s itself and re-attaches the credential on every hop, because standard HTTP clients drop `Authorization` on cross-origin redirects and ownership redirects cross origins. The dashboard prompts for a token on rejection and holds it in session storage.
 
 ## Errors
 

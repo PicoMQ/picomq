@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use clap::Args;
 use hdrhistogram::sync::SyncHistogram;
-use pico_client::ClientError;
+use picomq_client::ClientError;
 use serde_json::json;
 
 use crate::io::note;

@@ -1,8 +1,3 @@
-//! Retry policy for idempotent reads.
-//!
-//! Only the read-shaped calls (`head`, `read`, `list`) are wrapped, because
-//! appends are not blindly safe to repeat.
-
 use std::future::Future;
 use std::time::Duration;
 
@@ -26,7 +21,6 @@ impl RetryPolicy {
         }
     }
 
-    /// Retry up to `max_attempts` with the default backoff (100 ms, x2, capped at 30 s).
     pub fn attempts(max_attempts: u32) -> Self {
         Self {
             max_attempts: max_attempts.max(1),
@@ -47,12 +41,6 @@ impl RetryPolicy {
         Duration::from_millis(millis as u64).min(self.max_backoff)
     }
 
-    /// How long to wait before `attempt`'s retry, or `None` when the policy is
-    /// out of attempts.
-    ///
-    /// For callers that cannot use [`Self::run`] because their retry
-    /// condition is not [`ClientError::retryable`], such as a producer
-    /// resending a batch that arrived out of order.
     pub fn delay(&self, attempt: u32) -> Option<Duration> {
         (attempt + 1 < self.max_attempts).then(|| self.backoff(attempt + 1))
     }

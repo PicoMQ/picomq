@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use pico_auth::Authorizer;
-use pico_server::PicoNode;
+use picomq_auth::Authorizer;
+use picomq_server::PicoNode;
 use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::watch;

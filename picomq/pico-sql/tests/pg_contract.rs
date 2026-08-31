@@ -3,15 +3,15 @@
 //!
 //! ```text
 //! PICOMQ_PG_URL=postgres://user:pass@localhost:5432/picomq \
-//!     cargo test -p pico-sql --test pg_contract
+//!     cargo test -p picomq-sql --test pg_contract
 //! ```
 //!
 //! Skipped (pass, with a note) when the variable is absent, so CI without a
 //! database stays green. The test WIPES the three metadata tables first.
 //! Point it at a dedicated test database.
 
-use pico_sql::store::contract_suite;
-use pico_sql::PgStore;
+use picomq_sql::store::contract_suite;
+use picomq_sql::PgStore;
 
 #[tokio::test]
 async fn postgres_contract() {

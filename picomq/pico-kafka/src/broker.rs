@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use pico_metadata::{MetadataNodeHandle, ViewPublisher};
-use pico_server::{MetadataOwnershipService, S3StreamService};
+use picomq_metadata::{MetadataNodeHandle, ViewPublisher};
+use picomq_server::{MetadataOwnershipService, S3StreamService};
 use tokio::sync::Mutex;
 
 use crate::group::GroupCoordinator;
@@ -63,7 +63,7 @@ impl BrokerContext {
         self.node_id
     }
 
-    pub async fn allocate_producer_id(&self) -> Result<i64, pico_metadata::MetadataError> {
+    pub async fn allocate_producer_id(&self) -> Result<i64, picomq_metadata::MetadataError> {
         let mut lease = self.producer_ids.lock().await;
         if lease.remaining == 0 {
             let first = self

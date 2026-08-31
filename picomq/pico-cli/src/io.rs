@@ -4,7 +4,7 @@
 use std::io::{BufRead, Write};
 
 use bytes::Bytes;
-use pico_client::Record;
+use picomq_client::Record;
 
 /// Read stdin as newline-delimited records, collected rather than streamed
 /// so a batch can be appended in one request.

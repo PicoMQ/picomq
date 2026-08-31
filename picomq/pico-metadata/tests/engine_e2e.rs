@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use pico_metadata::{LocalSink, MetadataNodeHandle};
+use picomq_metadata::{LocalSink, MetadataNodeHandle};
 use s3stream::{
     AppendContext, Config, CreateStreamOptions, FetchContext, KVClient as _, KeyValue,
     MemoryObjectStorage, ObjectStorageTrait, ObjectWalConfig, ObjectWalService, OpenStreamOptions,

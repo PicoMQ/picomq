@@ -5,11 +5,13 @@ pub mod config;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pico_auth::{AccessToken, Scope, TokenRecord, TokenStore, Verifier};
-use pico_http::{RunningServer, ServeOptions};
-use pico_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
-use pico_server::{KvTokenStore, NodeConfig, PicoNode};
-use pico_sql::{LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig, SqliteStore};
+use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore, Verifier};
+use picomq_http::{RunningServer, ServeOptions};
+use picomq_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
+use picomq_server::{KvTokenStore, NodeConfig, PicoNode};
+use picomq_sql::{
+    LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig, SqliteStore,
+};
 use s3stream::{IdUri, ObjectStorageTrait, ObjectStoreAdapter};
 
 pub use config::{AuthMode, MetaBackend, ServerConfig};
@@ -22,13 +24,13 @@ const SCHEMA_CACHE_EXPIRY: Duration = Duration::from_secs(30);
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("metadata store: {0}")]
-    Store(#[from] pico_sql::StoreError),
+    Store(#[from] picomq_sql::StoreError),
     #[error("metadata log: {0}")]
-    MetadataLog(#[from] pico_sql::SqlSinkError),
+    MetadataLog(#[from] picomq_sql::SqlSinkError),
     #[error("object storage: {0}")]
     Storage(#[from] s3stream::ObjectError),
     #[error("node startup: {0}")]
-    Node(#[from] pico_server::ServiceError),
+    Node(#[from] picomq_server::ServiceError),
     #[error("bind {addr}: {source}")]
     Bind {
         addr: std::net::SocketAddr,
@@ -46,7 +48,7 @@ pub enum RuntimeError {
     )]
     InsecureBind { addr: std::net::SocketAddr },
     #[error("bootstrap token: {0}")]
-    BootstrapToken(#[from] pico_auth::AuthError),
+    BootstrapToken(#[from] picomq_auth::AuthError),
     #[error("bootstrap token {id:?} conflicts with a stored token of the same id")]
     BootstrapConflict { id: String },
 }
@@ -64,14 +66,14 @@ pub struct PicoServer {
     /// Kept alive for the process lifetime: dropping it aborts the log's
     /// flusher/tailer tasks, so it must outlive the node.
     sink: Arc<SqlSink>,
-    schema_registry: Option<Arc<dyn pico_schema::SchemaStore>>,
+    schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
 }
 
 /// Open the metadata log, start the node, and serve the configured protocol,
 /// in that order: metadata first (a node must be registered before it can
 /// own streams), then storage and the engine, then listeners.
 pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
-    let kafka = matches!(config.protocol, pico_http::Protocol::Kafka);
+    let kafka = matches!(config.protocol, picomq_http::Protocol::Kafka);
     if !config.insecure_allow_remote {
         // The Kafka listener carries no authentication, so a non-loopback
         // bind needs the explicit opt-out regardless of auth mode.
@@ -93,11 +95,11 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     let schema_registry = match &config.schema_registry {
         None => None,
         Some(uri) => {
-            let registry = pico_schema::Builder::from(open_adapter(uri)?.object_store())
+            let registry = picomq_schema::Builder::from(open_adapter(uri)?.object_store())
                 .with_cache_expiry_after(Some(SCHEMA_CACHE_EXPIRY))
                 .build();
             tracing::info!(%uri, "schema registry enabled");
-            Some(Arc::new(registry) as Arc<dyn pico_schema::SchemaStore>)
+            Some(Arc::new(registry) as Arc<dyn picomq_schema::SchemaStore>)
         }
     };
 
@@ -137,7 +139,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
                 .kafka_advertise
                 .clone()
                 .unwrap_or_else(|| bound.to_string());
-            std::collections::BTreeMap::from([(pico_kafka::PROTOCOL_NAME.to_owned(), advertise)])
+            std::collections::BTreeMap::from([(picomq_kafka::PROTOCOL_NAME.to_owned(), advertise)])
         }
         None => Default::default(),
     };
@@ -189,7 +191,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     let compaction_check = node.service().spawn_compaction_check(LIFECYCLE_TICK);
 
     let kafka = if let Some((listener, bound)) = kafka_listener {
-        let broker = Arc::new(pico_kafka::BrokerContext::new(
+        let broker = Arc::new(picomq_kafka::BrokerContext::new(
             config.node_id,
             config.cluster_id.clone(),
             node.service(),
@@ -197,13 +199,13 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             node.views(),
             node.metadata().clone(),
         ));
-        let listener_config = pico_kafka::ListenerConfig {
+        let listener_config = picomq_kafka::ListenerConfig {
             addr: bound,
             max_request_bytes: config.max_request_size,
             ..Default::default()
         };
         let task = tokio::spawn(async move {
-            if let Err(error) = pico_kafka::KafkaListener::new(listener_config, broker)
+            if let Err(error) = picomq_kafka::KafkaListener::new(listener_config, broker)
                 .serve(listener)
                 .await
             {
@@ -221,7 +223,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         AuthMode::Required => Some(node.authorizer()),
         AuthMode::Off => None,
     };
-    let server = pico_http::serve(
+    let server = picomq_http::serve(
         node,
         ServeOptions {
             protocol: config.protocol,
@@ -264,7 +266,7 @@ async fn bootstrap_token(store: &KvTokenStore, wire: &str) -> Result<(), Runtime
         id: token.id.clone(),
         verifier,
         scope: Scope::root(),
-        created_at_ms: pico_common::now_ms(),
+        created_at_ms: picomq_common::now_ms(),
         issued_by: String::new(),
     };
     if store.put_if_absent(record).await? {
@@ -336,7 +338,7 @@ impl PicoServer {
         self.kafka.as_ref().map(|(addr, _)| *addr)
     }
 
-    pub fn schema_registry(&self) -> Option<&Arc<dyn pico_schema::SchemaStore>> {
+    pub fn schema_registry(&self) -> Option<&Arc<dyn picomq_schema::SchemaStore>> {
         self.schema_registry.as_ref()
     }
 

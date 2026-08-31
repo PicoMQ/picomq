@@ -2,7 +2,7 @@ mod common;
 
 #[tokio::test]
 async fn schema_crud_on_data_plane() {
-    let server = common::pico_server_with_schema(pico_schema::Registry::new(
+    let server = common::picomq_server_with_schema(picomq_schema::Registry::new(
         object_store::memory::InMemory::new(),
     ))
     .await;
@@ -64,7 +64,7 @@ async fn schema_crud_on_data_plane() {
 
 #[tokio::test]
 async fn append_validates_against_bound_schema() {
-    let server = common::pico_server_with_schema(pico_schema::Registry::new(
+    let server = common::picomq_server_with_schema(picomq_schema::Registry::new(
         object_store::memory::InMemory::new(),
     ))
     .await;
@@ -126,7 +126,7 @@ async fn append_validates_against_bound_schema() {
 
 #[tokio::test]
 async fn stream_config_patch_updates_schema_bind() {
-    let server = common::pico_server_with_schema(pico_schema::Registry::new(
+    let server = common::picomq_server_with_schema(picomq_schema::Registry::new(
         object_store::memory::InMemory::new(),
     ))
     .await;
@@ -221,8 +221,8 @@ async fn stream_config_patch_updates_schema_bind() {
 
 #[tokio::test]
 async fn stream_config_redirects_to_remote_owner() {
-    use pico_server::ownership::OwnershipService;
-    use pico_server::{NodeMeta, Owner, ServiceError};
+    use picomq_server::ownership::OwnershipService;
+    use picomq_server::{NodeMeta, Owner, ServiceError};
     use std::sync::Arc;
 
     struct RemoteOwnership;
@@ -242,10 +242,10 @@ async fn stream_config_redirects_to_remote_owner() {
     }
 
     let node = common::start_node().await;
-    let router = pico_http::common::router(
+    let router = picomq_http::common::router(
         node.service(),
         Arc::new(RemoteOwnership),
-        pico_http::RoutingMode::Redirect,
+        picomq_http::RoutingMode::Redirect,
         None,
         32 * 1024 * 1024,
     );
@@ -282,7 +282,7 @@ async fn stream_config_redirects_to_remote_owner() {
 
 #[tokio::test]
 async fn kafka_mode_exposes_schemas_only() {
-    let server = common::kafka_http_with_schema(pico_schema::Registry::new(
+    let server = common::kafka_http_with_schema(picomq_schema::Registry::new(
         object_store::memory::InMemory::new(),
     ))
     .await;

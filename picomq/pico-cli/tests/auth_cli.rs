@@ -3,7 +3,7 @@
 
 mod common;
 
-use pico_auth::AccessToken;
+use picomq_auth::AccessToken;
 
 #[tokio::test]
 async fn auth_flow_end_to_end() {

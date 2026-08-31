@@ -16,23 +16,22 @@ use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::any;
 use axum::Router;
-use base64::Engine as _;
 use bytes::Bytes;
-use serde_json::{json, Map, Value};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
-use pico_auth::{Audience, Authorizer};
-use pico_protocol::ds::{
-    H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ,
-    H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR, H_STREAM_EXPIRES_AT, H_STREAM_NEXT_OFFSET,
-    H_STREAM_SCHEMA, H_STREAM_SCHEMA_VALIDATE, H_STREAM_SEQ, H_STREAM_SSE_DATA_ENCODING,
-    H_STREAM_TTL, H_STREAM_UP_TO_DATE,
+use picomq_auth::{Audience, Authorizer};
+use picomq_protocol::ds::{
+    encode_json_array, SseEncoder, H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID,
+    H_PRODUCER_RECEIVED_SEQ, H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR, H_STREAM_EXPIRES_AT,
+    H_STREAM_NEXT_OFFSET, H_STREAM_SCHEMA, H_STREAM_SCHEMA_VALIDATE, H_STREAM_SEQ,
+    H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL, H_STREAM_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE,
+    OFFSET_NOW, Q_CURSOR, Q_LIVE, Q_OFFSET,
 };
-use pico_server::framing::{is_json, mime_of};
-use pico_server::ownership::OwnershipService;
-use pico_server::types::Producer;
-use pico_server::{
+use picomq_protocol::mime::{is_json, mime_of};
+use picomq_server::ownership::OwnershipService;
+use picomq_server::types::Producer;
+use picomq_server::{
     AppendCommand, CreateCommand, ErrorKind, OffsetToken, ReadResult, S3StreamService, ServiceError,
 };
 
@@ -339,15 +338,15 @@ impl DsFrontend {
         headers: &HeaderMap,
         name: &str,
     ) -> Result<Response, ServiceError> {
-        let live = query_param(uri, "live").filter(|v| !v.is_empty());
-        let offset_raw = query_param(uri, "offset");
+        let live = query_param(uri, Q_LIVE).filter(|v| !v.is_empty());
+        let offset_raw = query_param(uri, Q_OFFSET);
         let offset_now = offset_raw
             .as_deref()
-            .is_some_and(|raw| raw.eq_ignore_ascii_case("now"));
+            .is_some_and(|raw| raw.eq_ignore_ascii_case(OFFSET_NOW));
         let offset = self
             .parse_offset(name, offset_raw.as_deref(), live.is_some())
             .await?;
-        let cursor_raw = query_param(uri, "cursor");
+        let cursor_raw = query_param(uri, Q_CURSOR);
 
         match live.as_deref() {
             None => {
@@ -357,11 +356,11 @@ impl DsFrontend {
                     .await?;
                 self.write_read(headers, name, offset, out, false, offset_now)
             }
-            Some("long-poll") => {
+            Some(LIVE_LONG_POLL) => {
                 self.long_poll(headers, name, offset, cursor_raw.as_deref())
                     .await
             }
-            Some("sse") => self.sse(name, offset, cursor_raw.as_deref()).await,
+            Some(LIVE_SSE) => self.sse(name, offset, cursor_raw.as_deref()).await,
             Some(_) => Err(bad_request("invalid live mode")),
         }
     }
@@ -447,7 +446,9 @@ impl DsFrontend {
                 };
 
                 if !read.records.is_empty() {
-                    if tx.send(encoder.data_event(&read)).await.is_err() {
+                    let payloads: Vec<Bytes> =
+                        read.records.iter().map(|r| r.payload.clone()).collect();
+                    if tx.send(encoder.data_event(&payloads)).await.is_err() {
                         return;
                     }
                     offset = read.next_offset;
@@ -547,7 +548,8 @@ impl DsFrontend {
 
         if !(empty_tail && live) {
             let body = if json {
-                json_array_body(&out)
+                let payloads: Vec<Bytes> = out.records.iter().map(|r| r.payload.clone()).collect();
+                encode_json_array(&payloads)
             } else {
                 out.concatenated()
             };
@@ -568,7 +570,7 @@ impl DsFrontend {
             }
             return Ok(OffsetToken::beginning());
         };
-        if raw.eq_ignore_ascii_case("now") {
+        if raw.eq_ignore_ascii_case(OFFSET_NOW) {
             return self
                 .service
                 .head(name)
@@ -688,83 +690,4 @@ pub(crate) fn fail(status: u16, message: &str) -> Response {
     let message = if message.is_empty() { "error" } else { message };
     *response.body_mut() = Body::from(message.to_owned());
     response
-}
-
-fn json_array_body(out: &ReadResult) -> Bytes {
-    let mut body = Vec::with_capacity(
-        2 + out
-            .records
-            .iter()
-            .map(|r| r.payload.len() + 1)
-            .sum::<usize>(),
-    );
-    body.push(b'[');
-    for (i, record) in out.records.iter().enumerate() {
-        if i > 0 {
-            body.push(b',');
-        }
-        body.extend_from_slice(&record.payload);
-    }
-    body.push(b']');
-    Bytes::from(body)
-}
-
-struct SseEncoder {
-    json: bool,
-    base64: bool,
-}
-
-impl SseEncoder {
-    fn new(content_type: &str) -> Self {
-        let mime = mime_of(Some(content_type));
-        let json = is_json(&mime);
-        Self {
-            json,
-            base64: !json && !mime.starts_with("text/"),
-        }
-    }
-
-    fn data_event(&self, read: &ReadResult) -> Bytes {
-        let mut out = String::from("event: data\n");
-        if self.base64 {
-            out.push_str("data:");
-            out.push_str(&base64::engine::general_purpose::STANDARD.encode(read.concatenated()));
-            out.push('\n');
-        } else {
-            let text = if self.json {
-                String::from_utf8_lossy(&json_array_body(read)).into_owned()
-            } else {
-                String::from_utf8_lossy(&read.concatenated()).into_owned()
-            };
-            for line in crate::http::sse_lines(&text) {
-                out.push_str("data:");
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-        out.push('\n');
-        Bytes::from(out)
-    }
-
-    fn control_event(
-        &self,
-        next_offset: &str,
-        cursor: Option<u64>,
-        up_to_date: bool,
-        closed: bool,
-    ) -> Bytes {
-        let mut node = Map::new();
-        node.insert("streamNextOffset".into(), json!(next_offset));
-        if !closed {
-            if let Some(cursor) = cursor {
-                node.insert("streamCursor".into(), json!(cursor.to_string()));
-            }
-        }
-        node.insert("upToDate".into(), json!(up_to_date));
-        if closed {
-            node.insert("streamClosed".into(), json!(true));
-        }
-        let json = serde_json::to_string(&Value::Object(node)).expect("json encode");
-        Bytes::from(format!("event: control\ndata:{json}\n\n"))
-    }
 }

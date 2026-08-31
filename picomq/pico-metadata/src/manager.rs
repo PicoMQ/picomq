@@ -309,7 +309,7 @@ impl ObjectManagerTrait for MetadataObjectManager {
                 node_epoch: self.node.node_epoch,
                 count: count as u32,
                 ttl_ms: ttl_ms as i64,
-                now_ms: pico_common::now_ms(),
+                now_ms: picomq_common::now_ms(),
             })
             .await?
         {
@@ -330,7 +330,7 @@ impl ObjectManagerTrait for MetadataObjectManager {
                 node_id: self.node.node_id,
                 node_epoch: self.node.node_epoch,
                 request,
-                now_ms: pico_common::now_ms(),
+                now_ms: picomq_common::now_ms(),
             })
             .await;
         match proposed {
@@ -352,7 +352,7 @@ impl ObjectManagerTrait for MetadataObjectManager {
                 node_id: self.node.node_id,
                 node_epoch: self.node.node_epoch,
                 request,
-                now_ms: pico_common::now_ms(),
+                now_ms: picomq_common::now_ms(),
             })
             .await;
         match proposed {

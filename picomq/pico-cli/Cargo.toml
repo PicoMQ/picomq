@@ -1,5 +1,5 @@
 [package]
-name = "pico-cli"
+name = "picomq-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,10 +13,10 @@ path = "src/main.rs"
 
 [dependencies]
 s3stream = { workspace = true }
-pico-auth = { workspace = true }
-pico-http = { workspace = true }
-pico-runtime = { workspace = true }
-pico-client = { workspace = true }
+picomq-auth = { workspace = true }
+picomq-http = { workspace = true }
+picomq-runtime = { workspace = true }
+picomq-client = { workspace = true }
 bytes = { workspace = true }
 hdrhistogram = { workspace = true }
 serde_json = { workspace = true }

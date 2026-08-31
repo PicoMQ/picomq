@@ -15,9 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use pico_metadata::lifecycle::{MetadataLifecycle, ObjectCleaner};
-use pico_metadata::{CommandSink, MetadataCommand, MetadataNodeHandle};
-use pico_sql::{LeaseConfig, LeaseKeeper, MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
+use picomq_metadata::lifecycle::{MetadataLifecycle, ObjectCleaner};
+use picomq_metadata::{CommandSink, MetadataCommand, MetadataNodeHandle};
+use picomq_sql::{LeaseConfig, LeaseKeeper, MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
 use s3stream::{
     AppendContext, Config, CreateStreamOptions, FetchContext, KVClient as _, KeyValue,
     MemoryObjectStorage, ObjectStorageTrait, ObjectWalConfig, ObjectWalService, OpenStreamOptions,

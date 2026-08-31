@@ -1,12 +1,3 @@
-//! Pico protocol record model: envelopes, sequenced records, and the three
-//! wire codecs (envelope, binary batch, JSON).
-//!
-//! `SequencedRecord`,
-//! `RecordEnvelopeCodec`, `BatchCodec`, `JsonCodec`. All integers are
-//!
-//! Envelope (v1): `u8 version | i64 timestamp | headers | body...` where
-//! headers = `u32 count` then per header `u32 name_len | name | u32 value_len
-
 use std::collections::BTreeMap;
 
 use base64::Engine as _;
@@ -296,22 +287,19 @@ mod tests {
             .collect()
     }
 
-    /// Byte-level golden test against the Java format (hand-assembled from
-    /// `RecordEnvelopeCodec#encode`: version, BE i64 timestamp, header table,
-    /// raw body).
     #[test]
     fn envelope_bytes_match_java_layout() {
         let envelope = RecordEnvelope::new(7, headers(&[("a", "b")]), Bytes::from_static(b"xy"));
         let encoded = encode_envelope(&envelope);
         let expected: Vec<u8> = [
-            &[1u8][..],          // version
-            &7i64.to_be_bytes(), // timestamp
-            &1u32.to_be_bytes(), // header count
+            &[1u8][..],
+            &7i64.to_be_bytes(),
             &1u32.to_be_bytes(),
-            b"a", // name
             &1u32.to_be_bytes(),
-            b"b",  // value
-            b"xy", // body
+            b"a",
+            &1u32.to_be_bytes(),
+            b"b",
+            b"xy",
         ]
         .concat();
         assert_eq!(&encoded[..], &expected[..]);
@@ -360,7 +348,6 @@ mod tests {
         assert_eq!(json[0]["headers"]["h"], "1");
         assert_eq!(json[0]["body"], "text");
 
-        // Non-UTF-8 body goes out as body_b64 and comes back byte-identical.
         let binary = vec![SequencedRecord {
             seq: 2,
             envelope: RecordEnvelope::new(5, BTreeMap::new(), Bytes::from_static(&[0xff, 0xfe])),

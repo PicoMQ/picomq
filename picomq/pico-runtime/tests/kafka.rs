@@ -3,14 +3,14 @@
 //! producers, restart recovery, and an ignored load gate.
 //!
 //! Run the load gate explicitly:
-//! `cargo test --release -p pico-runtime --test kafka -- --ignored --nocapture`
+//! `cargo test --release -p picomq-runtime --test kafka -- --ignored --nocapture`
 
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use pico_http::Protocol;
-use pico_runtime::{MetaBackend, PicoServer, ServerConfig};
+use picomq_http::Protocol;
+use picomq_runtime::{MetaBackend, PicoServer, ServerConfig};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
@@ -43,7 +43,9 @@ fn config(dir: &Path, node_epoch: i64) -> ServerConfig {
 }
 
 async fn broker(dir: &Path, node_epoch: i64) -> (PicoServer, String) {
-    let server = pico_runtime::start(config(dir, node_epoch)).await.unwrap();
+    let server = picomq_runtime::start(config(dir, node_epoch))
+        .await
+        .unwrap();
     let bootstrap = server.kafka_addr().unwrap().to_string();
     (server, bootstrap)
 }
@@ -197,7 +199,7 @@ async fn restart_recovers_data_and_offsets() {
 /// Load gate: sustained produce then consume of `TOTAL` records, reporting
 /// throughput. Run in release mode.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "run explicitly: cargo test --release -p pico-runtime --test kafka -- --ignored --nocapture"]
+#[ignore = "run explicitly: cargo test --release -p picomq-runtime --test kafka -- --ignored --nocapture"]
 async fn produce_consume_load() {
     const TOTAL: usize = 200_000;
     const VALUE_BYTES: usize = 512;

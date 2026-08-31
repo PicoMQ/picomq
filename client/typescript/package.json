@@ -1,0 +1,59 @@
+{
+  "name": "@picomq/client",
+  "version": "0.1.0",
+  "description": "PicoMQ TypeScript client for the Pico protocol and Durable Streams over HTTP",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup && tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/picomq/picomq.git",
+    "directory": "client/typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/picomq/picomq/issues"
+  },
+  "homepage": "https://picomq.com/docs/client",
+  "keywords": [
+    "picomq",
+    "streams",
+    "http",
+    "client"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  },
+  "dependencies": {
+    "undici": "^8.10.0"
+  }
+}

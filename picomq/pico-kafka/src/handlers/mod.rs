@@ -10,7 +10,7 @@ mod versions;
 
 use bytes::Bytes;
 use kafka_protocol::messages::ApiKey;
-use pico_server::ServiceError;
+use picomq_server::ServiceError;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;

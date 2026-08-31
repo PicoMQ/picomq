@@ -189,7 +189,7 @@ async fn expire_loop(sink: Arc<dyn CommandSink>, leader: Arc<AtomicBool>, tick: 
         }
         if let Err(error) = sink
             .propose(MetadataCommand::ExpirePreparedObjects {
-                now_ms: pico_common::now_ms(),
+                now_ms: picomq_common::now_ms(),
             })
             .await
         {

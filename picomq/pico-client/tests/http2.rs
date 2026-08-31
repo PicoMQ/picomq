@@ -9,12 +9,12 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use pico_client::{ClientConfig, Live, PicoClient, Protocol, ReadLimits, StreamApi};
-use pico_http::Protocol as ServeProtocol;
-use pico_runtime::{MetaBackend, ServerConfig};
+use picomq_client::{ClientConfig, Live, PicoClient, Protocol, ReadLimits, StreamApi};
+use picomq_http::Protocol as ServeProtocol;
+use picomq_runtime::{MetaBackend, ServerConfig};
 
-async fn start(dir: &std::path::Path) -> (pico_runtime::PicoServer, String) {
-    let server = pico_runtime::start(ServerConfig {
+async fn start(dir: &std::path::Path) -> (picomq_runtime::PicoServer, String) {
+    let server = picomq_runtime::start(ServerConfig {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
         protocol: ServeProtocol::Pico,
@@ -37,7 +37,7 @@ async fn start(dir: &std::path::Path) -> (pico_runtime::PicoServer, String) {
 async fn appends_over_h2c_negotiate_http2() {
     let dir = tempfile::tempdir().unwrap();
     let (server, endpoint) = start(dir.path()).await;
-    let http = pico_client::http_client(&ClientConfig {
+    let http = picomq_client::http_client(&ClientConfig {
         http2: true,
         ..Default::default()
     })
@@ -83,7 +83,7 @@ async fn appends_over_h2c_negotiate_http2() {
 async fn one_connection_carries_many_concurrent_appends() {
     let dir = tempfile::tempdir().unwrap();
     let (server, endpoint) = start(dir.path()).await;
-    let client = pico_client::connect_with(
+    let client = picomq_client::connect_with(
         Protocol::Pico,
         &endpoint,
         &ClientConfig {

@@ -1,0 +1,23 @@
+{
+  "name": "@picomq/example-ai-sdk",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server/index.ts",
+    "start": "tsx server/index.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^4.0.52",
+    "@picomq/client": "file:../../client/typescript",
+    "ai": "^7.0.85"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}

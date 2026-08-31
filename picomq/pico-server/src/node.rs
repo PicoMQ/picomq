@@ -1,14 +1,14 @@
 //! Node assembly: metadata plane + s3stream engine + named-stream service.
 //!
 //! Intentionally not here: the metadata layer is a
-//! [`pico_metadata::CommandSink`] the host constructs (`LocalSink` or
-//! `pico-sql`'s `SqlSink`) and owns, including its shutdown and any lease
+//! [`picomq_metadata::CommandSink`] the host constructs (`LocalSink` or
+//! `picomq-sql`'s `SqlSink`) and owns, including its shutdown and any lease
 //! keeper.
 
 use std::sync::Arc;
 
-use pico_auth::Authorizer;
-use pico_metadata::{CommandSink, MetadataNodeHandle, ViewPublisher};
+use picomq_auth::Authorizer;
+use picomq_metadata::{CommandSink, MetadataNodeHandle, ViewPublisher};
 use s3stream::{
     Client as _, Config, KVClient, ObjectStorageTrait, ObjectWalConfig, ObjectWalService,
     S3StreamBuilder, S3StreamEngine,
@@ -69,7 +69,7 @@ impl PicoNode {
         views: Arc<ViewPublisher>,
         object_storage: Arc<dyn ObjectStorageTrait>,
         wal_storage: Arc<dyn ObjectStorageTrait>,
-        schema_registry: Option<Arc<dyn pico_schema::SchemaStore>>,
+        schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
     ) -> Result<Self, ServiceError> {
         let handle =
             MetadataNodeHandle::new(config.node_id, config.node_epoch, sink, views.clone());

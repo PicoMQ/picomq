@@ -1,20 +1,15 @@
-//! The Pico protocol client.
-//!
-//! Read-shaped calls retry, appends do not. Producer sessions live in
-//! `producer.rs`. There are no future-returning variants (an async client
-//! makes them redundant).
-
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use pico_protocol::envelope::{decode_batch_read, encode_batch_append, RecordEnvelope};
-use pico_protocol::pico::{
-    CT_BATCH_BINARY, H_CLOSED, H_EXPIRES_AT, H_NEXT_SEQ, H_PRODUCER_EPOCH, H_PRODUCER_ID,
-    H_PRODUCER_SEQ, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE,
+use picomq_protocol::envelope::RecordEnvelope;
+use picomq_protocol::pico::{
+    decode_error, AppendRequest, AppendResponse, CloseRequest, CloseResponse, CreateRequest,
+    CreateResponse, DeleteRequest, DeleteResponse, HeadRequest, HeadResponse, ListRequest, Listing,
+    ReadRequest, ReadResponse, TrimRequest, TrimResponse, LIVE_LONG_POLL, SEQ_BEGINNING,
 };
-use reqwest::header::CONTENT_TYPE;
-use reqwest::{Method, Response, StatusCode};
+use picomq_protocol::WireRequest;
+use reqwest::Response;
 
 use crate::error::{ClientError, ErrorKind, Result};
 use crate::retry::RetryPolicy;
@@ -22,22 +17,11 @@ use crate::types::{
     AppendAck, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo, StreamListing,
 };
 
-/// Who is appending, and where in its own sequence this append sits.
-#[derive(Debug, Clone, Copy)]
-pub struct ProducerRef<'a> {
-    pub id: &'a str,
-    pub epoch: u64,
-    pub seq: u64,
-}
+pub use picomq_protocol::pico::Producer as ProducerRef;
 
-/// The outcome of an identified append.
 #[derive(Debug, Clone)]
 pub struct ProducerAck {
-    /// False when the append changed nothing: a duplicate, or a close-only
-    /// request.
     pub applied: bool,
-    /// The server had already applied this sequence. The records are in the
-    /// stream exactly once.
     pub duplicate: bool,
     pub ack: AppendAck,
 }
@@ -66,86 +50,62 @@ impl PicoClient {
         }
     }
 
-    /// Append as an identified producer, so the server can order and
-    /// de-duplicate the request.
-    ///
-    /// The server requires `seq == last_seq + 1` for the producer, which makes
-    /// the sequence do double duty: a request that arrives early is rejected
-    /// with [`ErrorKind::SequenceGap`] instead of landing out of order, and a
-    /// re-sent request is recognized as a duplicate and applied once. Both are
-    /// visible in the returned [`ProducerAck`].
-    ///
-    /// Sent as the `Pico-Producer-Id`/`-Epoch`/`-Seq` request headers.
     pub async fn append_as(
         &self,
         name: &str,
         records: &[Bytes],
         producer: &ProducerRef<'_>,
     ) -> Result<ProducerAck> {
-        let envelopes: Vec<RecordEnvelope> = records
-            .iter()
-            .map(|body| RecordEnvelope::new(0, BTreeMap::new(), body.clone()))
-            .collect();
-        let request = self
-            .http
-            .post(self.url(name, ""))
-            .header(CONTENT_TYPE, CT_BATCH_BINARY)
-            .header(H_PRODUCER_ID, producer.id)
-            .header(H_PRODUCER_EPOCH, producer.epoch.to_string())
-            .header(H_PRODUCER_SEQ, producer.seq.to_string())
-            .body(encode_batch_append(&envelopes));
-        let response = send(&self.http, request).await?;
-        let response = expect(response, &[200]).await?;
-        let next = header(&response, H_NEXT_SEQ).unwrap_or_else(|| "0".to_owned());
-        // A duplicate is answered with 200 and "nothing applied": the records
-        // are already in the stream, so there is no new start to report.
-        let start = header(&response, H_START_SEQ);
-        let applied = start.is_some();
+        let envelopes = envelopes(records);
+        let mut request = AppendRequest::new(name, &envelopes);
+        request.producer = Some(*producer);
+        let response = self.call(request.encode()).await?;
+        let ack = AppendResponse::decode(response.headers());
+        let next = seq_string(ack.next_seq);
+        let applied = ack.start_seq.is_some();
         Ok(ProducerAck {
             applied,
             duplicate: !applied && !records.is_empty(),
             ack: AppendAck {
-                start: start.unwrap_or_else(|| next.clone()),
+                start: ack
+                    .start_seq
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| next.clone()),
                 next,
-                timestamp: header(&response, H_TIMESTAMP).and_then(|v| v.parse().ok()),
+                timestamp: ack.timestamp,
             },
         })
     }
 
     pub async fn trim(&self, name: &str, seq: u64) -> Result<String> {
-        let request = self
-            .http
-            .post(self.url(name, ""))
-            .header(H_TRIM_SEQ, seq.to_string());
-        let response = send(&self.http, request).await?;
-        let response = expect(response, &[200]).await?;
-        Ok(header(&response, H_START_SEQ).unwrap_or_else(|| "0".to_owned()))
+        let response = self
+            .call(TrimRequest { stream: name, seq }.encode())
+            .await?;
+        Ok(seq_string(
+            TrimResponse::decode(response.headers()).start_seq,
+        ))
     }
 
-    fn url(&self, name: &str, query: &str) -> String {
-        let path = if name.starts_with('/') {
-            name.to_owned()
-        } else {
-            format!("/{name}")
-        };
-        format!("{}{path}{query}", self.base_url)
+    async fn call(&self, wire: WireRequest) -> Result<Response> {
+        let ok = wire.ok;
+        let response = send(&self.http, build(&self.http, &self.base_url, wire)).await?;
+        expect(response, ok).await
     }
 
     async fn head_once(&self, name: &str) -> Result<Option<StreamInfo>> {
-        let request = self.http.request(Method::HEAD, self.url(name, ""));
-        let response = send(&self.http, request).await?;
-        if response.status() == StatusCode::NOT_FOUND {
+        let response = self.call(HeadRequest { stream: name }.encode()).await?;
+        let Some(head) = HeadResponse::decode(response.status().as_u16(), response.headers())
+        else {
             return Ok(None);
-        }
-        let response = expect(response, &[200]).await?;
+        };
         Ok(Some(StreamInfo {
             name: name.to_owned(),
-            content_type: header(&response, CONTENT_TYPE.as_str()),
-            start: header(&response, H_START_SEQ).unwrap_or_else(|| "0".to_owned()),
-            next: header(&response, H_NEXT_SEQ).unwrap_or_else(|| "0".to_owned()),
-            closed: truthy(&response, H_CLOSED),
-            ttl_seconds: header(&response, H_TTL).and_then(|v| v.parse().ok()),
-            expires_at: header(&response, H_EXPIRES_AT),
+            content_type: head.content_type,
+            start: seq_string(head.start_seq),
+            next: seq_string(head.next_seq),
+            closed: head.closed,
+            ttl_seconds: head.ttl_seconds,
+            expires_at: head.expires_at,
         }))
     }
 
@@ -156,41 +116,21 @@ impl PicoClient {
         live: Live,
         limits: ReadLimits,
     ) -> Result<ReadPage> {
-        let mut query = format!("?format=binary&seq={from}");
-        if limits.count > 0 {
-            query.push_str(&format!("&count={}", limits.count));
-        }
-        if limits.bytes > 0 {
-            query.push_str(&format!("&bytes={}", limits.bytes));
-        }
-        if live == Live::LongPoll {
-            query.push_str("&live=long-poll");
-        }
-        let response = send(&self.http, self.http.get(self.url(name, &query))).await?;
-        let response = expect(
-            response,
-            if live == Live::Off {
-                &[200]
-            } else {
-                &[200, 204]
-            },
-        )
-        .await?;
+        let mut request = ReadRequest::new(name, from);
+        request.count = limits.count;
+        request.bytes = limits.bytes;
+        request.live = (live == Live::LongPoll).then_some(LIVE_LONG_POLL);
+        let response = self.call(request.encode()).await?;
 
-        let next = header(&response, H_NEXT_SEQ).unwrap_or_else(|| from.to_owned());
-        let up_to_date = truthy(&response, H_UP_TO_DATE);
-        let closed = truthy(&response, H_CLOSED);
-        let empty = response.status() == StatusCode::NO_CONTENT;
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
         let body = response.bytes().await?;
+        let read = ReadResponse::decode(status, &headers, &body).map_err(invalid_response)?;
 
-        let records = if empty || body.is_empty() {
-            Vec::new()
-        } else {
-            decode_batch_read(&body)
-                .map_err(|e| {
-                    ClientError::new(0, ErrorKind::Other, "invalid_response")
-                        .with_message(Some(e.to_string()))
-                })?
+        Ok(ReadPage {
+            up_to_date: read.up_to_date || (read.no_content && live == Live::LongPoll),
+            records: read
+                .records
                 .into_iter()
                 .map(|record| Record {
                     position: record.seq.to_string(),
@@ -198,32 +138,40 @@ impl PicoClient {
                     headers: record.envelope.headers,
                     body: record.envelope.body,
                 })
-                .collect()
-        };
-        Ok(ReadPage {
-            up_to_date: up_to_date || (empty && live == Live::LongPoll),
-            records,
-            next,
-            closed,
+                .collect(),
+            next: read
+                .next_seq
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| from.to_owned()),
+            closed: read.closed,
         })
     }
 
     async fn list_once(&self, prefix: &str, limit: u64) -> Result<StreamListing> {
-        let mut query = format!("?prefix={}", urlencode(prefix));
-        if limit > 0 {
-            query.push_str(&format!("&limit={limit}"));
-        }
-        let response = send(&self.http, self.http.get(self.url("/", &query))).await?;
-        let response = expect(response, &[200]).await?;
-        let body: serde_json::Value = response.json().await?;
+        let request = ListRequest {
+            prefix,
+            limit,
+            start_after: None,
+        };
+        let response = self.call(request.encode()).await?;
+        let body = response.bytes().await?;
+        let listing = Listing::decode(&body).map_err(invalid_response)?;
 
-        let streams = body["streams"]
-            .as_array()
-            .map(|entries| entries.iter().map(stream_info).collect())
-            .unwrap_or_default();
         Ok(StreamListing {
-            streams,
-            has_more: body["has_more"].as_bool().unwrap_or(false),
+            streams: listing
+                .streams
+                .into_iter()
+                .map(|entry| StreamInfo {
+                    name: entry.name,
+                    content_type: entry.content_type,
+                    start: entry.start_seq.to_string(),
+                    next: entry.next_seq.to_string(),
+                    closed: entry.closed,
+                    ttl_seconds: entry.ttl_seconds,
+                    expires_at: entry.expires_at,
+                })
+                .collect(),
+            has_more: listing.has_more,
         })
     }
 }
@@ -235,10 +183,9 @@ impl StreamApi for PicoClient {
     }
 
     fn beginning(&self) -> String {
-        "0".to_owned()
+        SEQ_BEGINNING.to_owned()
     }
 
-    /// The tail is wherever the stream is now, so callers `head` first.
     fn now(&self) -> Result<String> {
         Err(ClientError::unsupported(
             "the Pico protocol has no `now` token; read from the stream's next seq",
@@ -251,15 +198,10 @@ impl StreamApi for PicoClient {
         content_type: &str,
         ttl_seconds: Option<u64>,
     ) -> Result<bool> {
-        let mut request = self
-            .http
-            .put(self.url(name, ""))
-            .header(CONTENT_TYPE, content_type);
-        if let Some(ttl) = ttl_seconds {
-            request = request.header(H_TTL, ttl.to_string());
-        }
-        let response = expect(send(&self.http, request).await?, &[200, 201]).await?;
-        Ok(response.status() == StatusCode::CREATED)
+        let mut request = CreateRequest::new(name, content_type);
+        request.ttl_seconds = ttl_seconds;
+        let response = self.call(request.encode()).await?;
+        Ok(CreateResponse::decode(response.status().as_u16(), response.headers()).created)
     }
 
     async fn head(&self, name: &str) -> Result<Option<StreamInfo>> {
@@ -272,22 +214,19 @@ impl StreamApi for PicoClient {
         records: &[Bytes],
         _content_type: &str,
     ) -> Result<AppendAck> {
-        let envelopes: Vec<RecordEnvelope> = records
-            .iter()
-            .map(|body| RecordEnvelope::new(0, BTreeMap::new(), body.clone()))
-            .collect();
-        let request = self
-            .http
-            .post(self.url(name, ""))
-            .header(CONTENT_TYPE, CT_BATCH_BINARY)
-            .body(encode_batch_append(&envelopes));
-        let response = send(&self.http, request).await?;
-        let response = expect(response, &[200]).await?;
-        let next = header(&response, H_NEXT_SEQ).unwrap_or_else(|| "0".to_owned());
+        let envelopes = envelopes(records);
+        let response = self
+            .call(AppendRequest::new(name, &envelopes).encode())
+            .await?;
+        let ack = AppendResponse::decode(response.headers());
+        let next = seq_string(ack.next_seq);
         Ok(AppendAck {
-            start: header(&response, H_START_SEQ).unwrap_or_else(|| next.clone()),
+            start: ack
+                .start_seq
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| next.clone()),
             next,
-            timestamp: header(&response, H_TIMESTAMP).and_then(|v| v.parse().ok()),
+            timestamp: ack.timestamp,
         })
     }
 
@@ -308,43 +247,57 @@ impl StreamApi for PicoClient {
     }
 
     async fn close(&self, name: &str) -> Result<String> {
-        let request = self.http.post(self.url(name, "")).header(H_CLOSED, "true");
-        let response = send(&self.http, request).await?;
-        let response = expect(response, &[200]).await?;
-        Ok(header(&response, H_NEXT_SEQ).unwrap_or_else(|| "0".to_owned()))
+        let response = self.call(CloseRequest { stream: name }.encode()).await?;
+        Ok(seq_string(
+            CloseResponse::decode(response.headers()).next_seq,
+        ))
     }
 
     async fn delete(&self, name: &str) -> Result<bool> {
-        let response = send(&self.http, self.http.delete(self.url(name, ""))).await?;
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(false);
-        }
-        expect(response, &[204]).await?;
-        Ok(true)
+        let response = self.call(DeleteRequest { stream: name }.encode()).await?;
+        Ok(DeleteResponse::decode(response.status().as_u16()).found)
     }
 }
 
-fn stream_info(node: &serde_json::Value) -> StreamInfo {
-    StreamInfo {
-        name: node["name"].as_str().unwrap_or_default().to_owned(),
-        content_type: node["content_type"].as_str().map(str::to_owned),
-        start: node["start_seq"].as_u64().unwrap_or(0).to_string(),
-        next: node["next_seq"].as_u64().unwrap_or(0).to_string(),
-        closed: node["closed"].as_bool().unwrap_or(false),
-        ttl_seconds: node["ttl"].as_u64(),
-        expires_at: node["expires_at"].as_str().map(str::to_owned),
-    }
+fn envelopes(records: &[Bytes]) -> Vec<RecordEnvelope> {
+    records
+        .iter()
+        .map(|body| RecordEnvelope::new(0, BTreeMap::new(), body.clone()))
+        .collect()
+}
+
+fn seq_string(seq: Option<u64>) -> String {
+    seq.map(|v| v.to_string())
+        .unwrap_or_else(|| SEQ_BEGINNING.to_owned())
+}
+
+fn invalid_response(e: picomq_protocol::CodecError) -> ClientError {
+    ClientError::new(0, ErrorKind::Other, "invalid_response").with_message(Some(e.to_string()))
 }
 
 pub(crate) fn default_http() -> Result<reqwest::Client> {
     crate::http_client(&crate::ClientConfig::default())
 }
 
+pub(crate) fn build(
+    http: &reqwest::Client,
+    base_url: &str,
+    wire: WireRequest,
+) -> reqwest::RequestBuilder {
+    let mut builder = http.request(wire.method, format!("{base_url}{}", wire.path_and_query));
+    for (name, value) in wire.headers {
+        builder = builder.header(name, value);
+    }
+    if !wire.body.is_empty() {
+        builder = builder.body(wire.body);
+    }
+    builder
+}
+
 const MAX_REDIRECT_HOPS: usize = 5;
 
-/// Send, following ownership redirects (307/308) by re-issuing the request at
-/// the Location. The clone keeps every header, so the credential rides each
-/// hop, which reqwest's own redirect handling would strip across origins.
+// Re-issues the request at the Location so every header, including
+// Authorization, rides each redirect hop.
 pub(crate) async fn send(
     http: &reqwest::Client,
     builder: reqwest::RequestBuilder,
@@ -381,63 +334,12 @@ pub(crate) fn header(response: &Response, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(crate) fn truthy(response: &Response, name: &str) -> bool {
-    header(response, name).is_some_and(|value| value.eq_ignore_ascii_case("true"))
-}
-
-pub(crate) fn urlencode(value: &str) -> String {
-    // Stream names and prefixes are paths. Only the characters that would
-    // break a query string need escaping.
-    value
-        .chars()
-        .map(|c| match c {
-            '&' => "%26".to_owned(),
-            '=' => "%3D".to_owned(),
-            '?' => "%3F".to_owned(),
-            '#' => "%23".to_owned(),
-            ' ' => "%20".to_owned(),
-            '+' => "%2B".to_owned(),
-            other => other.to_string(),
-        })
-        .collect()
-}
-
 pub(crate) async fn expect(response: Response, expected: &[u16]) -> Result<Response> {
     let status = response.status().as_u16();
     if expected.contains(&status) {
         return Ok(response);
     }
-
-    let closed = truthy(&response, H_CLOSED);
+    let headers = response.headers().clone();
     let body = response.text().await.unwrap_or_default();
-    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
-    let code = parsed["error"]
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("http_{status}"));
-    let message = parsed["message"]
-        .as_str()
-        .map(str::to_owned)
-        .or(Some(body).filter(|b| !b.is_empty() && parsed.is_null()));
-    let next = parsed["next_seq"].as_u64().map(|v| v.to_string());
-
-    Err(ClientError::new(status, kind(status, &code, closed), code)
-        .with_message(message)
-        .with_next(next))
-}
-
-fn kind(status: u16, code: &str, closed: bool) -> ErrorKind {
-    match status {
-        400 => ErrorKind::BadRequest,
-        401 => ErrorKind::Unauthenticated,
-        // The auth gate says `permission_denied`, producer fencing says
-        // `fenced`. Same status, different problem.
-        403 if code == "permission_denied" => ErrorKind::PermissionDenied,
-        403 => ErrorKind::StaleEpoch,
-        404 => ErrorKind::NotFound,
-        409 if closed || code == "closed" => ErrorKind::Closed,
-        409 | 412 => ErrorKind::Conflict,
-        410 => ErrorKind::OffsetGone,
-        _ => ErrorKind::Other,
-    }
+    Err(decode_error(status, &headers, &body).into())
 }

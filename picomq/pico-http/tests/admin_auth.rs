@@ -6,9 +6,9 @@ mod common;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use pico_auth::{AccessToken, Scope, TokenRecord, TokenStore};
-use pico_http::{serve, Protocol, RoutingMode, RunningServer, ServeOptions};
-use pico_server::PicoNode;
+use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore};
+use picomq_http::{serve, Protocol, RoutingMode, RunningServer, ServeOptions};
+use picomq_server::PicoNode;
 use serde_json::{json, Value};
 
 async fn admin_server() -> (RunningServer, String, Arc<PicoNode>) {

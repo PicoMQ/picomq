@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use bytes::Bytes;
-use pico_server::{
+use picomq_server::{
     AppendCommand, CreateCommand, ErrorKind, MetadataOwnershipService, OffsetToken,
     OwnershipService, S3StreamService,
 };
@@ -151,7 +151,7 @@ pub struct GroupCoordinator {
     node_id: i32,
     service: Arc<S3StreamService>,
     ownership: Arc<MetadataOwnershipService>,
-    views: Arc<pico_metadata::ViewPublisher>,
+    views: Arc<picomq_metadata::ViewPublisher>,
     groups: StdMutex<HashMap<String, Arc<Mutex<Group>>>>,
 }
 
@@ -160,7 +160,7 @@ impl GroupCoordinator {
         node_id: i32,
         service: Arc<S3StreamService>,
         ownership: Arc<MetadataOwnershipService>,
-        views: Arc<pico_metadata::ViewPublisher>,
+        views: Arc<picomq_metadata::ViewPublisher>,
     ) -> Arc<Self> {
         Arc::new(Self {
             node_id,

@@ -9,10 +9,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bytes::Bytes;
-use pico_protocol::envelope::{decode_batch_read, encode_batch_append, RecordEnvelope};
+use picomq_protocol::envelope::{decode_batch_read, encode_batch_append, RecordEnvelope};
 use serde_json::Value;
 
-use common::pico_server;
+use common::picomq_server;
 
 const CT_BATCH_JSON: &str = "application/vnd.picomq.batch+json";
 const CT_BATCH_BINARY: &str = "application/vnd.picomq.batch";
@@ -28,7 +28,7 @@ fn client() -> reqwest::Client {
 /// appendAndRead + matchSeq + producerSession + listTrimCloseDelete).
 #[tokio::test]
 async fn protocol_end_to_end() {
-    let server = pico_server().await;
+    let server = picomq_server().await;
     let http = client();
     let url = format!("{}/native/orders", server.base_url);
 
@@ -322,7 +322,7 @@ async fn protocol_end_to_end() {
 /// and Expires-At round out through HEAD.`seq=now` is the live tail.
 #[tokio::test]
 async fn create_options_and_tail_seq() {
-    let server = pico_server().await;
+    let server = picomq_server().await;
     let http = client();
 
     let ttl_url = format!("{}/options/ttl", server.base_url);
@@ -383,7 +383,7 @@ async fn create_options_and_tail_seq() {
 
 #[tokio::test]
 async fn live_reads() {
-    let server = pico_server().await;
+    let server = picomq_server().await;
     let http = client();
     let url = format!("{}/live/feed", server.base_url);
     http.put(&url)
@@ -466,8 +466,8 @@ async fn live_reads() {
 /// through a stub ownership service.
 #[tokio::test]
 async fn remote_owner_redirects() {
-    use pico_server::ownership::OwnershipService;
-    use pico_server::{NodeMeta, Owner, ServiceError};
+    use picomq_server::ownership::OwnershipService;
+    use picomq_server::{NodeMeta, Owner, ServiceError};
 
     struct RemoteOwnership;
 
@@ -486,10 +486,10 @@ async fn remote_owner_redirects() {
     }
 
     let node = common::start_node().await;
-    let frontend = std::sync::Arc::new(pico_http::PicoFrontend::new(
+    let frontend = std::sync::Arc::new(picomq_http::PicoFrontend::new(
         node.service(),
         std::sync::Arc::new(RemoteOwnership),
-        pico_http::RoutingMode::Redirect,
+        picomq_http::RoutingMode::Redirect,
     ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());

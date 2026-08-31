@@ -16,7 +16,7 @@ A request for a stream owned by another node returns `307` with the owner's addr
 
 `message` and `next_seq` appear when they help. Unknown streams return `404`, malformed requests `400`, and ownership conflicts `409`.
 
-With auth required, every request sends `Authorization: Bearer <token>`. A missing or invalid credential is `401` with a `WWW-Authenticate: Bearer` challenge, and a valid credential with insufficient scope is `403`. Standard HTTP clients drop `Authorization` on cross-origin redirects and ownership redirects cross origins, so clients must follow `307`s themselves and re-attach the credential, which is what `pico-client` and the CLI do. See [Authorization](/docs/design/auth) for the scope model.
+With auth required, every request sends `Authorization: Bearer <token>`. A missing or invalid credential is `401` with a `WWW-Authenticate: Bearer` challenge, and a valid credential with insufficient scope is `403`. Standard HTTP clients drop `Authorization` on cross-origin redirects and ownership redirects cross origins, so clients must follow `307`s themselves and re-attach the credential, which is what `picomq-client` and the CLI do. See [Authorization](/docs/design/auth) for the scope model.
 
 ## Create
 

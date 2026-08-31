@@ -9,16 +9,16 @@ use axum::response::IntoResponse;
 use axum::routing::any;
 use axum::Router;
 use bytes::Bytes;
-use pico_auth::{
+use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
-use pico_client::{ClientConfig, ErrorKind, PicoClient, RetryPolicy, StreamApi};
-use pico_http::Protocol as ServeProtocol;
-use pico_runtime::{AuthMode, MetaBackend, PicoServer, ServerConfig};
+use picomq_client::{ClientConfig, ErrorKind, PicoClient, RetryPolicy, StreamApi};
+use picomq_http::Protocol as ServeProtocol;
+use picomq_runtime::{AuthMode, MetaBackend, PicoServer, ServerConfig};
 
 async fn secured_server(dir: &std::path::Path) -> (PicoServer, String, AccessToken) {
     let (root, _) = AccessToken::issue("ops/root").unwrap();
-    let server = pico_runtime::start(ServerConfig {
+    let server = picomq_runtime::start(ServerConfig {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
         protocol: ServeProtocol::Pico,
@@ -42,7 +42,7 @@ fn with_token(endpoint: &str, token: Option<String>) -> PicoClient {
     };
     PicoClient::with_http(
         endpoint,
-        pico_client::http_client(&config).unwrap(),
+        picomq_client::http_client(&config).unwrap(),
         RetryPolicy::none(),
     )
 }
@@ -95,7 +95,7 @@ async fn error_kinds_distinguish_auth_from_fencing() {
     assert!(rooted.create("/orders", "text/plain", None).await.unwrap());
 
     // A fencing 403 through the same client keeps its own kind.
-    let producer = pico_client::pico::ProducerRef {
+    let producer = picomq_client::pico::ProducerRef {
         id: "p1",
         epoch: 2,
         seq: 0,
@@ -104,7 +104,7 @@ async fn error_kinds_distinguish_auth_from_fencing() {
         .append_as("/orders", &[Bytes::from_static(b"a")], &producer)
         .await
         .unwrap();
-    let stale = pico_client::pico::ProducerRef {
+    let stale = picomq_client::pico::ProducerRef {
         id: "p1",
         epoch: 1,
         seq: 1,

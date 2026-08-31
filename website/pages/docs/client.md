@@ -1,8 +1,8 @@
 # Rust client
 
-`pico-client` is the Rust SDK for the HTTP protocols. It speaks the native Pico protocol and [Durable Streams](/docs/design/protocols) behind one `StreamApi` trait, and includes a batching producer for high-throughput appends. Kafka needs no SDK here: [standard Kafka clients](/docs/kafka) connect directly.
+`picomq-client` is the Rust SDK for the HTTP protocols. It speaks the native Pico protocol and [Durable Streams](/docs/design/protocols) behind one `StreamApi` trait, and includes a batching producer for high-throughput appends. Kafka needs no SDK here: [standard Kafka clients](/docs/kafka) connect directly.
 
-The crate is standalone. It depends on `pico-protocol`, the small crate holding the shared wire vocabulary (header constants and the record envelope codec), plus the usual HTTP stack (`reqwest`, `tokio`). Pulling in the client does not build any part of the server.
+The crate is standalone. It depends on `picomq-protocol`, the small crate holding the shared wire vocabulary (header constants and the record envelope codec), plus the usual HTTP stack (`reqwest`, `tokio`). Pulling in the client does not build any part of the server.
 
 ## Install
 
@@ -10,16 +10,16 @@ Until the crates are published, use a git dependency:
 
 ```toml
 [dependencies]
-pico-client = { git = "https://github.com/picomq/picomq" }
+picomq-client = { git = "https://github.com/picomq/picomq" }
 ```
 
 ## Usage
 
 ```rust
-use pico_client::{connect, Live, Protocol, ReadLimits};
+use picomq_client::{connect, Live, Protocol, ReadLimits};
 
 #[tokio::main]
-async fn main() -> pico_client::Result<()> {
+async fn main() -> picomq_client::Result<()> {
     let client = connect(Protocol::Pico, "http://localhost:8080")?;
 
     client.create("/orders/1042", "application/json", None).await?;
@@ -54,7 +54,7 @@ The client follows ownership redirects (`307`) itself and re-attaches the creden
 
 ## Producers
 
-For exactly-once appends, `pico_client::producer` provides identified producer sessions over the Pico protocol. The server tracks the producer's id, epoch, and sequence, rejects stale epochs, and recognizes re-sent requests as duplicates instead of applying them twice.
+For exactly-once appends, `picomq_client::producer` provides identified producer sessions over the Pico protocol. The server tracks the producer's id, epoch, and sequence, rejects stale epochs, and recognizes re-sent requests as duplicates instead of applying them twice.
 
 ## Protocol differences
 

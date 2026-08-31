@@ -40,19 +40,19 @@ s3stream-object = { path = "s3stream/s3stream-object" }
 s3stream-wal = { path = "s3stream/s3stream-wal" }
 s3stream-core = { path = "s3stream/s3stream-core" }
 s3stream = { path = "s3stream/s3stream" }
-pico-common = { path = "picomq/pico-common" }
-pico-protocol = { path = "picomq/pico-protocol" }
-pico-auth = { path = "picomq/pico-auth" }
-pico-metadata = { path = "picomq/pico-metadata" }
-pico-sql = { path = "picomq/pico-sql" }
-pico-server = { path = "picomq/pico-server" }
-pico-kafka = { path = "picomq/pico-kafka" }
-pico-http = { path = "picomq/pico-http" }
-pico-runtime = { path = "picomq/pico-runtime" }
-pico-client = { path = "picomq/pico-client" }
-pico-schema = { path = "picomq/pico-schema" }
+picomq-common = { path = "picomq/pico-common" }
+picomq-protocol = { path = "picomq/pico-protocol", version = "0.1.0" }
+picomq-auth = { path = "picomq/pico-auth" }
+picomq-metadata = { path = "picomq/pico-metadata" }
+picomq-sql = { path = "picomq/pico-sql" }
+picomq-server = { path = "picomq/pico-server" }
+picomq-kafka = { path = "picomq/pico-kafka" }
+picomq-http = { path = "picomq/pico-http" }
+picomq-runtime = { path = "picomq/pico-runtime" }
+picomq-client = { path = "picomq/pico-client", version = "0.1.0" }
+picomq-schema = { path = "picomq/pico-schema" }
 
-# Schema registry / validation (pico-schema)
+# Schema registry / validation (picomq-schema)
 anyhow = "1"
 apache-avro = "0.21"
 jsonschema = "0.45"
@@ -69,6 +69,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # HTTP frontends (PORT of Java `frontend/*`: Javalin/Jetty -> axum/hyper).
 axum = "0.8"
+http = "1"
 # Listener backlog: std/tokio give no way to set it.
 socket2 = "0.5"
 serde = { version = "1", features = ["derive"] }
@@ -76,7 +77,7 @@ toml = "0.8"
 # Locating the user config directory per platform.
 dirs = "5"
 base64 = "0.22"
-# pico-auth: opaque token verifier (uniform secret, not a password KDF).
+# picomq-auth: opaque token verifier (uniform secret, not a password KDF).
 sha2 = "0.10"
 subtle = "2"
 zeroize = { version = "1", features = ["derive"] }

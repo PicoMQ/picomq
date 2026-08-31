@@ -11,7 +11,7 @@ git clone https://github.com/picomq/picomq && cd picomq
 cargo install --path picomq/pico-cli
 ```
 
-This puts `pico` in `~/.cargo/bin`, which cargo adds to the `PATH`. To build without installing, use `cargo build --release -p pico-cli` and run `./target/release/pico`. The [Docker](#docker) section below skips the host install entirely.
+This puts `pico` in `~/.cargo/bin`, which cargo adds to the `PATH`. To build without installing, use `cargo build --release -p picomq-cli` and run `./target/release/pico`. The [Docker](#docker) section below skips the host install entirely.
 
 ## Run a node
 

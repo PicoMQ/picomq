@@ -1,18 +1,18 @@
 [package]
-name = "pico-http"
+name = "picomq-http"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "PicoMQ HTTP frontends: the Pico protocol and the Durable Streams protocol over pico-server"
+description = "PicoMQ HTTP frontends: the Pico protocol and the Durable Streams protocol over picomq-server"
 repository.workspace = true
 
 [dependencies]
-pico-protocol = { workspace = true }
-pico-server = { workspace = true }
-pico-common = { workspace = true }
-pico-auth = { workspace = true }
-pico-metadata = { workspace = true }
+picomq-protocol = { workspace = true }
+picomq-server = { workspace = true }
+picomq-common = { workspace = true }
+picomq-auth = { workspace = true }
+picomq-metadata = { workspace = true }
 s3stream = { workspace = true }
 axum = { workspace = true, features = ["http2"] }
 socket2 = { workspace = true }
@@ -33,7 +33,7 @@ async-trait = { workspace = true }
 reqwest = { workspace = true }
 durable-streams = { workspace = true }
 tempfile = { workspace = true }
-pico-schema = { workspace = true }
+picomq-schema = { workspace = true }
 object_store = { workspace = true }
 
 [lints]

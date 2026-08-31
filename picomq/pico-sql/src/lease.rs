@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
-use pico_common::now_ms;
+use picomq_common::now_ms;
 
 use crate::store::{MetaStore, StoreError, DEFAULT_LEASE_TTL_MS};
 

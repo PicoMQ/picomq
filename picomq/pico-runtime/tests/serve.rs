@@ -6,9 +6,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
-use pico_auth::AccessToken;
-use pico_http::Protocol;
-use pico_runtime::{AuthMode, MetaBackend, RuntimeError, ServerConfig};
+use picomq_auth::AccessToken;
+use picomq_http::Protocol;
+use picomq_runtime::{AuthMode, MetaBackend, RuntimeError, ServerConfig};
 
 fn loopback() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 0))
@@ -36,7 +36,7 @@ fn config(dir: &Path, protocol: Protocol, node_epoch: i64) -> ServerConfig {
 #[tokio::test]
 async fn pico_protocol_over_a_started_process() {
     let dir = tempfile::tempdir().unwrap();
-    let server = pico_runtime::start(config(dir.path(), Protocol::Pico, 1))
+    let server = picomq_runtime::start(config(dir.path(), Protocol::Pico, 1))
         .await
         .unwrap();
     let http = reqwest::Client::new();
@@ -84,7 +84,7 @@ async fn pico_protocol_over_a_started_process() {
 #[tokio::test]
 async fn ds_protocol_over_a_started_process() {
     let dir = tempfile::tempdir().unwrap();
-    let server = pico_runtime::start(config(dir.path(), Protocol::Ds, 1))
+    let server = picomq_runtime::start(config(dir.path(), Protocol::Ds, 1))
         .await
         .unwrap();
     let http = reqwest::Client::new();
@@ -124,7 +124,7 @@ async fn kafka_protocol_over_a_started_process() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = config(dir.path(), Protocol::Kafka, 1);
     config.kafka_listen = loopback();
-    let server = pico_runtime::start(config).await.unwrap();
+    let server = picomq_runtime::start(config).await.unwrap();
     let kafka_addr = server.kafka_addr().unwrap();
 
     // ApiVersions v0 request, framed by hand: api_key, version,
@@ -176,14 +176,14 @@ async fn auth_off_refuses_non_loopback_binds() {
     let mut refused = config(dir.path(), Protocol::Pico, 1);
     refused.addr = SocketAddr::from(([0, 0, 0, 0], 0));
     assert!(matches!(
-        pico_runtime::start(refused).await,
+        picomq_runtime::start(refused).await,
         Err(RuntimeError::InsecureBind { .. })
     ));
 
     let mut refused_admin = config(dir.path(), Protocol::Pico, 1);
     refused_admin.admin_addr = Some(SocketAddr::from(([0, 0, 0, 0], 0)));
     assert!(matches!(
-        pico_runtime::start(refused_admin).await,
+        picomq_runtime::start(refused_admin).await,
         Err(RuntimeError::InsecureBind { .. })
     ));
 }
@@ -197,7 +197,7 @@ async fn kafka_non_loopback_bind_refused_regardless_of_auth() {
     refused.auth_mode = AuthMode::Required;
     refused.kafka_listen = SocketAddr::from(([0, 0, 0, 0], 0));
     assert!(matches!(
-        pico_runtime::start(refused).await,
+        picomq_runtime::start(refused).await,
         Err(RuntimeError::InsecureBind { .. })
     ));
 }
@@ -209,7 +209,7 @@ async fn insecure_allow_remote_permits_non_loopback_binds() {
     allowed.addr = SocketAddr::from(([0, 0, 0, 0], 0));
     allowed.admin_addr = Some(SocketAddr::from(([0, 0, 0, 0], 0)));
     allowed.insecure_allow_remote = true;
-    let server = pico_runtime::start(allowed).await.unwrap();
+    let server = picomq_runtime::start(allowed).await.unwrap();
     server.shutdown().await;
 }
 
@@ -228,7 +228,7 @@ async fn bootstrap_enforces_and_stays_idempotent() {
     };
 
     let http = reqwest::Client::new();
-    let first = pico_runtime::start(secured(1, root.render()))
+    let first = picomq_runtime::start(secured(1, root.render()))
         .await
         .unwrap();
     let url = format!("http://{}/streams/locked", first.local_addr());
@@ -254,14 +254,14 @@ async fn bootstrap_enforces_and_stays_idempotent() {
     );
     first.shutdown().await;
 
-    let second = pico_runtime::start(secured(2, root.render()))
+    let second = picomq_runtime::start(secured(2, root.render()))
         .await
         .unwrap();
     second.shutdown().await;
 
     let (imposter, _) = AccessToken::issue("ops/root").unwrap();
     assert!(matches!(
-        pico_runtime::start(secured(3, imposter.render())).await,
+        picomq_runtime::start(secured(3, imposter.render())).await,
         Err(RuntimeError::BootstrapConflict { id }) if id == "ops/root"
     ));
 }
@@ -272,7 +272,7 @@ async fn state_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let http = reqwest::Client::new();
 
-    let first = pico_runtime::start(config(dir.path(), Protocol::Pico, 1))
+    let first = picomq_runtime::start(config(dir.path(), Protocol::Pico, 1))
         .await
         .unwrap();
     let url = format!("http://{}/streams/durable", first.local_addr());
@@ -301,7 +301,7 @@ async fn state_survives_a_restart() {
     first.shutdown().await;
 
     // `nodeEpoch = System.currentTimeMillis()`).
-    let second = pico_runtime::start(config(dir.path(), Protocol::Pico, 2))
+    let second = picomq_runtime::start(config(dir.path(), Protocol::Pico, 2))
         .await
         .unwrap();
     let url = format!("http://{}/streams/durable", second.local_addr());

@@ -6,11 +6,11 @@ mod common;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use pico_auth::{
+use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
-use pico_http::{serve, Protocol, RoutingMode, ServeOptions};
-use pico_server::PicoNode;
+use picomq_http::{serve, Protocol, RoutingMode, ServeOptions};
+use picomq_server::PicoNode;
 
 fn full_stream_scope(prefix: &str, auto_prefix: bool) -> Scope {
     Scope {
@@ -29,7 +29,7 @@ fn full_stream_scope(prefix: &str, auto_prefix: bool) -> Scope {
 async fn gated_server(
     protocol: Protocol,
     scope: Scope,
-) -> (pico_http::RunningServer, String, Arc<PicoNode>) {
+) -> (picomq_http::RunningServer, String, Arc<PicoNode>) {
     let node = common::start_node().await;
     let (token, verifier) = AccessToken::issue("it/tester").unwrap();
     node.tokens()
@@ -301,14 +301,14 @@ async fn anonymous_grant_scopes_uncredentialed_access() {
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
 
-    let (_, verifier) = AccessToken::issue(pico_auth::ANONYMOUS_TOKEN_ID).unwrap();
+    let (_, verifier) = AccessToken::issue(picomq_auth::ANONYMOUS_TOKEN_ID).unwrap();
     let record = TokenRecord {
-        id: pico_auth::ANONYMOUS_TOKEN_ID.into(),
+        id: picomq_auth::ANONYMOUS_TOKEN_ID.into(),
         verifier,
         scope: Scope {
             streams: ResourceSet::prefix("/public/"),
             groups: OperationGroups {
-                stream: pico_auth::ReadWrite::read_only(),
+                stream: picomq_auth::ReadWrite::read_only(),
                 ..OperationGroups::default()
             },
             audiences: [Audience::Pico].into(),
@@ -347,7 +347,7 @@ async fn anonymous_grant_scopes_uncredentialed_access() {
 
     node.tokens()
         .store()
-        .delete_if(pico_auth::ANONYMOUS_TOKEN_ID, &record.verifier)
+        .delete_if(picomq_auth::ANONYMOUS_TOKEN_ID, &record.verifier)
         .await
         .unwrap();
     assert_eq!(anonymous("/public/feed").await.unwrap().status(), 401);
