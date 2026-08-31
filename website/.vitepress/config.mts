@@ -61,7 +61,14 @@ const docsSidebar = [
       { text: 'HTTP API', link: '/docs/api' },
       { text: 'Kafka protocol', link: '/docs/kafka' },
       { text: 'Schemas', link: '/docs/schemas' },
-      { text: 'Rust client', link: '/docs/client' },
+      {
+        text: 'Clients',
+        collapsed: true,
+        items: [
+          { text: 'Rust', link: '/docs/client/rust' },
+          { text: 'TypeScript', link: '/docs/client/typescript' },
+        ],
+      },
     ],
   },
   {

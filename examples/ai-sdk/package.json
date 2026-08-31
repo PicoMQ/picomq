@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.52",
-    "@picomq/client": "file:../../client/typescript",
+    "@picomq/client": "^0.1.0",
     "ai": "^7.0.85"
   },
   "devDependencies": {
