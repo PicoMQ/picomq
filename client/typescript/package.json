@@ -37,7 +37,7 @@
   "bugs": {
     "url": "https://github.com/PicoMQ/picomq/issues"
   },
-  "homepage": "https://picomq.com/docs/client",
+  "homepage": "https://picomq.com/docs/client/typescript",
   "keywords": [
     "picomq",
     "streams",

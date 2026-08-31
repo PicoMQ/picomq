@@ -6,12 +6,12 @@ The crate is standalone. It depends on `picomq-protocol`, the small crate holdin
 
 ## Install
 
-Until the crates are published, use a git dependency:
-
 ```toml
 [dependencies]
-picomq-client = { git = "https://github.com/picomq/picomq" }
+picomq-client = "0.1.0"
 ```
+
+`picomq-protocol` is a transitive dependency. It contains the protocol headers and codecs.
 
 ## Usage
 
