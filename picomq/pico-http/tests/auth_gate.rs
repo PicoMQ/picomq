@@ -9,7 +9,7 @@ use std::sync::Arc;
 use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
-use picomq_http::{serve, Protocol, RoutingMode, ServeOptions};
+use picomq_http::{serve, HttpProtocol, RoutingMode, ServeOptions};
 use picomq_server::PicoNode;
 
 fn full_stream_scope(prefix: &str, auto_prefix: bool) -> Scope {
@@ -27,7 +27,7 @@ fn full_stream_scope(prefix: &str, auto_prefix: bool) -> Scope {
 
 /// A node with one seeded token, served with the gate on. Returns the wire token.
 async fn gated_server(
-    protocol: Protocol,
+    protocol: HttpProtocol,
     scope: Scope,
 ) -> (picomq_http::RunningServer, String, Arc<PicoNode>) {
     let node = common::start_node().await;
@@ -63,7 +63,7 @@ async fn gated_server(
 #[tokio::test]
 async fn pico_gate_enforces_bearer_and_scope() {
     let (server, wire, _node) =
-        gated_server(Protocol::Pico, full_stream_scope("/it/", false)).await;
+        gated_server(HttpProtocol::Pico, full_stream_scope("/it/", false)).await;
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
 
@@ -123,7 +123,7 @@ async fn pico_gate_enforces_bearer_and_scope() {
 #[tokio::test]
 async fn auto_prefix_resolves_stores_and_strips() {
     let (server, wire, node) =
-        gated_server(Protocol::Pico, full_stream_scope("/acct/", true)).await;
+        gated_server(HttpProtocol::Pico, full_stream_scope("/acct/", true)).await;
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
 
@@ -181,7 +181,8 @@ async fn auto_prefix_resolves_stores_and_strips() {
 /// connection or an event stream.
 #[tokio::test]
 async fn streaming_reads_refused_at_the_gate() {
-    let (server, wire, _node) = gated_server(Protocol::Ds, full_stream_scope("/it/", false)).await;
+    let (server, wire, _node) =
+        gated_server(HttpProtocol::Ds, full_stream_scope("/it/", false)).await;
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
 
@@ -207,7 +208,8 @@ async fn streaming_reads_refused_at_the_gate() {
     assert_eq!(out_of_scope.status(), 403);
     server.shutdown().await;
 
-    let (server, _, _node) = gated_server(Protocol::Pico, full_stream_scope("/it/", false)).await;
+    let (server, _, _node) =
+        gated_server(HttpProtocol::Pico, full_stream_scope("/it/", false)).await;
     let base = format!("http://{}", server.local_addr());
     let long_poll = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -227,7 +229,7 @@ async fn streaming_reads_refused_at_the_gate() {
 #[tokio::test]
 async fn auto_prefix_isolates_tenants() {
     let (server, tenant_a, node) =
-        gated_server(Protocol::Pico, full_stream_scope("/a/", true)).await;
+        gated_server(HttpProtocol::Pico, full_stream_scope("/a/", true)).await;
     let (token_b, verifier_b) = AccessToken::issue("it/tenant-b").unwrap();
     node.tokens()
         .store()
@@ -297,7 +299,8 @@ async fn auto_prefix_isolates_tenants() {
 /// callers, out-of-scope requests stay 401, and revoking it closes the door.
 #[tokio::test]
 async fn anonymous_grant_scopes_uncredentialed_access() {
-    let (server, wire, node) = gated_server(Protocol::Pico, full_stream_scope("/", false)).await;
+    let (server, wire, node) =
+        gated_server(HttpProtocol::Pico, full_stream_scope("/", false)).await;
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
 
@@ -358,7 +361,7 @@ async fn anonymous_grant_scopes_uncredentialed_access() {
 #[tokio::test]
 async fn pico_fencing_403_stays_distinct_from_auth_403() {
     let (server, wire, _node) =
-        gated_server(Protocol::Pico, full_stream_scope("/it/", false)).await;
+        gated_server(HttpProtocol::Pico, full_stream_scope("/it/", false)).await;
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
 
@@ -395,7 +398,8 @@ async fn pico_fencing_403_stays_distinct_from_auth_403() {
 
 #[tokio::test]
 async fn ds_fencing_403_keeps_producer_epoch_under_auth() {
-    let (server, wire, _node) = gated_server(Protocol::Ds, full_stream_scope("/it/", false)).await;
+    let (server, wire, _node) =
+        gated_server(HttpProtocol::Ds, full_stream_scope("/it/", false)).await;
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
 
@@ -431,7 +435,8 @@ async fn ds_fencing_403_keeps_producer_epoch_under_auth() {
 
 #[tokio::test]
 async fn ds_gate_rejects_in_plain_text_without_new_vocabulary() {
-    let (server, wire, _node) = gated_server(Protocol::Ds, full_stream_scope("/it/", false)).await;
+    let (server, wire, _node) =
+        gated_server(HttpProtocol::Ds, full_stream_scope("/it/", false)).await;
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
 

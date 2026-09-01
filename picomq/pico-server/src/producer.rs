@@ -1,9 +1,8 @@
 //! Numeric idempotent-producer state over verbatim batch appends. Semantics
 //! and defaults match Kafka's broker so its clients dedup exactly.
 
-use bytes::Buf;
-
 use crate::error::ServiceError;
+use crate::record;
 use crate::registry::RegistryEntry;
 use crate::types::NumericProducer;
 
@@ -75,28 +74,6 @@ fn cap_stalest<K: Ord + Clone, V>(
     }
 }
 
-/// `(producer_id, epoch, base_sequence, record_count)` from a stored batch
-/// header, `None` when the payload carries no producer identity.
-pub fn producer_identity(payload: &[u8]) -> Option<(i64, i16, i32, i32)> {
-    const MAGIC_AT: usize = 16;
-    const PRODUCER_ID_AT: usize = 43;
-    const HEADER_LEN: usize = 61;
-    if payload.len() < HEADER_LEN || payload[MAGIC_AT] != 2 {
-        return None;
-    }
-    let mut buf = &payload[PRODUCER_ID_AT..];
-    let producer_id = buf.get_i64();
-    let epoch = buf.get_i16();
-    let base_sequence = buf.get_i32();
-    let record_count = buf.get_i32();
-    (producer_id >= 0 && base_sequence >= 0 && record_count > 0).then_some((
-        producer_id,
-        epoch,
-        base_sequence,
-        record_count,
-    ))
-}
-
 /// Sequences occupy `[0, i32::MAX]` and wrap to 0.
 pub fn next_seq(seq: i32, increment: u32) -> i32 {
     let increment = increment as i64;
@@ -164,28 +141,25 @@ pub(crate) fn record(
         );
 }
 
-pub(crate) fn fold_stored_batch(
-    entry: &mut RegistryEntry,
-    payload: &[u8],
-    base_offset: u64,
-    now_ms: i64,
-) {
-    let Some((producer_id, epoch, base_sequence, record_count)) = producer_identity(payload) else {
+/// Replay the producer spans of every batch in a stored payload.
+pub(crate) fn fold_stored_payload(entry: &mut RegistryEntry, payload: &[u8], now_ms: i64) {
+    let Ok(headers) = record::batch_headers(payload) else {
         return;
     };
-    entry
-        .numeric_producers
-        .entry(producer_id)
-        .or_default()
-        .record(
-            epoch,
-            ProducerSpan {
-                first_seq: base_sequence,
-                last_seq: next_seq(base_sequence, (record_count as u32).saturating_sub(1)),
-                base_offset,
-            },
+    for header in headers {
+        let Some(producer) = header.producer else {
+            continue;
+        };
+        record(
+            entry,
+            Some((
+                producer,
+                next_seq(producer.first_seq, header.record_count.saturating_sub(1)),
+            )),
+            header.base_offset,
             now_ms,
         );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,6 +245,7 @@ mod tests {
             producer_state_offset: 0,
             schema_name: None,
             schema_validate: false,
+            kafka_topic: None,
         }
     }
 

@@ -5,11 +5,10 @@
 
 mod common;
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bytes::Bytes;
-use picomq_protocol::envelope::{decode_batch_read, encode_batch_append, RecordEnvelope};
+use picomq_protocol::record::{decode_batch_read, encode_batch_append, PicoRecord};
 use serde_json::Value;
 
 use common::picomq_server;
@@ -78,12 +77,10 @@ async fn protocol_end_to_end() {
     assert!(raw_timestamp > 0);
 
     let batch = encode_batch_append(&[
-        RecordEnvelope::new(
-            0,
-            BTreeMap::from([("key".to_owned(), "a".to_owned())]),
-            Bytes::from_static(b"one"),
-        ),
-        RecordEnvelope::new(0, BTreeMap::new(), Bytes::from_static(b"two")),
+        PicoRecord::new(Bytes::from_static(b"one"))
+            .with_key("order-1")
+            .with_header("key", "a"),
+        PicoRecord::new(Bytes::from_static(b"two")),
     ]);
     let batched = http
         .post(&url)
@@ -134,6 +131,8 @@ async fn protocol_end_to_end() {
         assert_eq!(record["seq"], i as u64);
     }
     assert_eq!(records[1]["headers"]["key"], "a");
+    assert_eq!(records[1]["key"], "order-1");
+    assert!(records[2].get("key").is_none());
     assert_eq!(records[3]["body"], "three");
     let mut previous = 0;
     for record in records {
@@ -150,7 +149,8 @@ async fn protocol_end_to_end() {
     assert_eq!(binary.headers()["Content-Type"], CT_BATCH_BINARY);
     let decoded = decode_batch_read(&binary.bytes().await.unwrap()).unwrap();
     assert_eq!(decoded.len(), 5);
-    assert_eq!(&decoded[0].envelope.body[..], b"hello-world");
+    assert_eq!(&decoded[0].record.body[..], b"hello-world");
+    assert_eq!(decoded[1].record.key.as_deref(), Some(&b"order-1"[..]));
 
     let raw_read = http
         .get(format!("{url}?seq=0&format=raw"))

@@ -4,20 +4,15 @@ use kafka_protocol::messages::produce_response::{
 };
 use kafka_protocol::messages::ProduceRequest;
 use kafka_protocol::protocol::Decodable;
-use kafka_protocol::records::RecordBatchDecoder;
-use picomq_server::{
-    AppendBatchCommand, BatchSpan, NumericProducer, SchemaBatch, SchemaRecord, SubmittedBatchAppend,
-};
+use picomq_server::{AppendBatchCommand, SubmittedBatchAppend};
 
-use crate::batch::decode_batches;
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    encode_response, ensure_local_leader, service_error_code, topic_name, CORRUPT_MESSAGE,
-    INVALID_RECORD, INVALID_REQUEST, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION,
+    encode_response, ensure_local_leader, resolve_topic, service_error_code, topic_name, NO_ERROR,
+    UNKNOWN_TOPIC_OR_PARTITION,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
-use crate::topic::{stream_name, validate_topic_name};
 
 pub async fn handle(
     ctx: &BrokerContext,
@@ -37,48 +32,28 @@ pub async fn handle(
     let mut topics = Vec::with_capacity(request.topic_data.len());
     for topic in request.topic_data {
         let topic_name_str = topic.name.to_string();
-        if !validate_topic_name(&topic_name_str) {
-            topics.push((
-                topic_name_str,
-                vec![PartitionSubmit::Ready(
-                    PartitionProduceResponse::default()
-                        .with_index(0)
-                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION),
-                )],
-            ));
-            continue;
-        }
-        let stream = stream_name(&topic_name_str);
+        let stream = match resolve_topic(ctx, &topic_name_str).await {
+            Ok(stream) => stream,
+            Err(code) => {
+                topics.push((topic_name_str, vec![failed(0, code)]));
+                continue;
+            }
+        };
         if let Err(code) = ensure_local_leader(ctx, &stream).await {
-            topics.push((
-                topic_name_str,
-                vec![PartitionSubmit::Ready(
-                    PartitionProduceResponse::default()
-                        .with_index(0)
-                        .with_error_code(code),
-                )],
-            ));
+            topics.push((topic_name_str, vec![failed(0, code)]));
             continue;
         }
 
         let mut partitions = Vec::new();
         for partition in topic.partition_data {
             if partition.index != 0 {
-                partitions.push(PartitionSubmit::Ready(
-                    PartitionProduceResponse::default()
-                        .with_index(partition.index)
-                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION),
-                ));
+                partitions.push(failed(partition.index, UNKNOWN_TOPIC_OR_PARTITION));
                 continue;
             }
             let records = partition.records.unwrap_or_default();
             partitions.push(match submit_partition(ctx, &stream, records).await {
                 Ok(submitted) => PartitionSubmit::Pending(submitted),
-                Err(code) => PartitionSubmit::Ready(
-                    PartitionProduceResponse::default()
-                        .with_index(0)
-                        .with_error_code(code),
-                ),
+                Err(code) => failed(0, code),
             });
         }
         topics.push((topic_name_str, partitions));
@@ -134,89 +109,27 @@ enum PartitionSubmit {
     Pending(SubmittedBatchAppend),
 }
 
+fn failed(index: i32, code: i16) -> PartitionSubmit {
+    PartitionSubmit::Ready(
+        PartitionProduceResponse::default()
+            .with_index(index)
+            .with_error_code(code),
+    )
+}
+
 async fn submit_partition(
     ctx: &BrokerContext,
     stream: &str,
     records: Bytes,
 ) -> Result<SubmittedBatchAppend, i16> {
-    let batches = decode_batches(&records).map_err(|error| {
-        tracing::debug!(%error, stream, "rejected produce payload");
-        CORRUPT_MESSAGE
-    })?;
-    if batches
-        .iter()
-        .any(|batch| batch.info.transactional || batch.info.control)
-    {
-        return Err(INVALID_REQUEST);
-    }
-    let schema_name = ctx
-        .service
-        .validation_schema_of(stream)
-        .await
-        .map_err(|error| {
-            tracing::debug!(%error, stream, "schema bind lookup failed");
-            service_error_code(&error)
-        })?;
-    if let Some(schema_name) = schema_name {
-        let batch = schema_batch(stream, &records)?;
-        if let Err(error) = ctx.service.validate_schema(&schema_name, &batch).await {
-            tracing::debug!(%error, stream, %schema_name, "schema validation failed");
-            return Err(INVALID_RECORD);
-        }
-    }
-    let first = &batches[0].info;
-    let producer = if first.producer_id >= 0 {
-        // The service enforces the single-batch requirement.
-        Some(NumericProducer {
-            id: first.producer_id,
-            epoch: first.producer_epoch,
-            first_seq: first.base_sequence,
-        })
-    } else {
-        None
-    };
-    let base_timestamp_ms = first.min_timestamp;
-    let spans = batches
-        .iter()
-        .map(|batch| BatchSpan {
-            patch_at: batch.payload_offset,
-            record_count: batch.info.record_count.max(0) as u32,
-        })
-        .collect();
     ctx.service
         .submit_batch_append(AppendBatchCommand {
             name: stream.to_owned(),
             payload: records,
-            batches: spans,
-            producer,
-            base_timestamp_ms,
         })
         .await
         .map_err(|error| {
-            tracing::debug!(%error, stream, "append failed");
+            tracing::debug!(%error, stream, "produce rejected");
             service_error_code(&error)
         })
-}
-
-fn schema_batch(stream: &str, records: &Bytes) -> Result<SchemaBatch, i16> {
-    let mut buf = records.clone();
-    let sets = RecordBatchDecoder::decode_all(&mut buf).map_err(|error| {
-        tracing::debug!(%error, stream, "rejected produce payload");
-        CORRUPT_MESSAGE
-    })?;
-    let records = sets
-        .iter()
-        .flat_map(|set| set.records.iter())
-        .map(|record| {
-            let mut builder = SchemaRecord::builder();
-            if let Some(key) = record.key.clone() {
-                builder = builder.key(key);
-            }
-            if let Some(value) = record.value.clone() {
-                builder = builder.value(value);
-            }
-            builder.build()
-        })
-        .collect();
-    Ok(SchemaBatch { records })
 }

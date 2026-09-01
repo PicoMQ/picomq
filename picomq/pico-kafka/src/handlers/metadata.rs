@@ -3,20 +3,17 @@ use kafka_protocol::messages::metadata_response::{
 };
 use kafka_protocol::messages::MetadataRequest;
 use kafka_protocol::protocol::{Decodable, StrBytes};
-use picomq_server::{CreateCommand, OwnershipService};
+use picomq_server::{alias, CreateCommand, OwnershipService};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    broker_id, encode_response, new_topic_id, parse_host_port, reject_sys_create,
-    service_error_code, topic_name, topic_uuid, INVALID_REQUEST, NO_ERROR,
-    UNKNOWN_TOPIC_OR_PARTITION,
+    broker_id, encode_response, is_internal_topic, new_topic_id, parse_host_port,
+    service_error_code, topic_name, topic_uuid, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION,
 };
+use crate::handlers::topics::KAFKA_CREATED_CT;
 use crate::handlers::{HandlerError, HandlerOutcome};
-use crate::topic::{
-    is_internal_topic, kafka_content_type, stream_name, topic_from_stream, validate_topic_name,
-};
 
 pub async fn handle(
     ctx: &BrokerContext,
@@ -48,50 +45,34 @@ pub async fn handle(
         );
     }
 
-    let topic_names: Vec<String> = match &request.topics {
-        None => list_topic_names(ctx).await?,
-        Some(topics) if topics.is_empty() => list_topic_names(ctx).await?,
-        Some(topics) => topics
+    let requested: Vec<String> = match &request.topics {
+        Some(topics) if !topics.is_empty() => topics
             .iter()
             .filter_map(|topic| topic.name.as_ref().map(|name| name.to_string()))
             .collect(),
+        _ => ctx
+            .service
+            .list_topics()
+            .into_iter()
+            .map(|(topic, _)| topic)
+            .collect(),
     };
 
-    let mut response_topics = Vec::with_capacity(topic_names.len());
-    for topic in topic_names {
-        if !validate_topic_name(&topic) {
-            response_topics.push(topic_error(&topic, UNKNOWN_TOPIC_OR_PARTITION));
-            continue;
-        }
-        let name = stream_name(&topic);
-        if reject_sys_create(&name).is_err() {
-            response_topics.push(topic_error(&topic, INVALID_REQUEST));
-            continue;
-        }
-        match ctx.service.describe(&name).await {
-            Ok(Some(_)) => {}
-            Ok(None) if request.allow_auto_topic_creation => {
-                if let Err(error) = create_topic(ctx, &name).await {
-                    response_topics.push(topic_error(&topic, service_error_code(&error)));
-                    continue;
-                }
-            }
-            Ok(None) => {
-                response_topics.push(topic_error(&topic, UNKNOWN_TOPIC_OR_PARTITION));
+    let mut response_topics = Vec::with_capacity(requested.len());
+    for topic in requested {
+        let stream = match resolve_or_create(ctx, &topic, request.allow_auto_topic_creation).await {
+            Ok(stream) => stream,
+            Err(code) => {
+                response_topics.push(topic_error(&topic, code));
                 continue;
             }
-            Err(error) => {
-                response_topics.push(topic_error(&topic, service_error_code(&error)));
-                continue;
-            }
-        }
-        match build_topic(ctx, &topic, &name, req.api_version).await {
+        };
+        match build_topic(ctx, &topic, &stream, req.api_version).await {
             Ok(response_topic) => response_topics.push(response_topic),
             Err(code) => response_topics.push(topic_error(&topic, code)),
         }
     }
 
-    // Any node serves admin requests, so the answering node is the controller.
     let response = MetadataResponse::default()
         .with_brokers(brokers)
         .with_controller_id(broker_id(ctx.node_id))
@@ -104,27 +85,34 @@ pub async fn handle(
     )))
 }
 
-/// All Kafka topic streams: kafka content type, single-segment `/{topic}`
-/// names, reserved subtree excluded.
-async fn list_topic_names(ctx: &BrokerContext) -> Result<Vec<String>, HandlerError> {
-    let list = ctx.service.list("/", None, 10_000).await?;
-    Ok(list
-        .streams
-        .into_iter()
-        .filter(|stream| stream.content_type == kafka_content_type())
-        .filter_map(|stream| topic_from_stream(&stream.name).map(str::to_owned))
-        .collect())
-}
-
-async fn create_topic(ctx: &BrokerContext, name: &str) -> Result<(), picomq_server::ServiceError> {
+async fn resolve_or_create(
+    ctx: &BrokerContext,
+    topic: &str,
+    auto_create: bool,
+) -> Result<String, i16> {
+    if !alias::is_valid_topic(topic) {
+        return Err(UNKNOWN_TOPIC_OR_PARTITION);
+    }
+    if let Some(stream) = ctx
+        .service
+        .lookup_by_topic(topic)
+        .await
+        .map_err(|error| service_error_code(&error))?
+    {
+        return Ok(stream);
+    }
+    if !auto_create {
+        return Err(UNKNOWN_TOPIC_OR_PARTITION);
+    }
+    let stream = alias::stream_name_for_topic(topic);
     ctx.service
-        .create(CreateCommand::with_external_id(
-            name,
-            kafka_content_type(),
-            new_topic_id(),
-        ))
-        .await?;
-    Ok(())
+        .create(
+            CreateCommand::with_external_id(&stream, KAFKA_CREATED_CT, new_topic_id())
+                .with_kafka_topic(topic),
+        )
+        .await
+        .map_err(|error| service_error_code(&error))?;
+    Ok(stream)
 }
 
 async fn build_topic(
@@ -139,10 +127,6 @@ async fn build_topic(
         .await
         .map_err(|error| service_error_code(&error))?
         .ok_or(UNKNOWN_TOPIC_OR_PARTITION)?;
-    if meta.content_type != kafka_content_type() {
-        // A stream created by another frontend is not a Kafka topic.
-        return Err(INVALID_REQUEST);
-    }
     let owner = ctx
         .ownership
         .owner_of(name)

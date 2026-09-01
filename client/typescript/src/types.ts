@@ -31,12 +31,15 @@ export interface RecordsOptions extends CallOptions {
   batch?: ReadLimits
 }
 
+export type HeaderValue = string | Uint8Array
+
 export type AppendInput =
   | Uint8Array
   | string
   | {
       body: Uint8Array | string
-      headers?: { [key: string]: string }
+      key?: Uint8Array | string
+      headers?: { [key: string]: HeaderValue }
       timestamp?: number | bigint
     }
 
@@ -59,7 +62,8 @@ export interface AppendAck {
 export interface StreamRecord {
   position: string
   timestamp?: number
-  headers: { [key: string]: string }
+  key?: Uint8Array
+  headers: { [key: string]: HeaderValue }
   body: Uint8Array
 }
 

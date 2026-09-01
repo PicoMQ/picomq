@@ -23,8 +23,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
+humantime = { workspace = true }
+picomq-protocol = { workspace = true }
 rdkafka = { version = "0.39.0", default-features = false, features = ["cmake-build", "tokio"] }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 

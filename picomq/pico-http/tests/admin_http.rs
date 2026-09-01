@@ -6,7 +6,7 @@ mod common;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use picomq_http::{serve, Protocol, ServeOptions};
+use picomq_http::{serve, HttpProtocol, ServeOptions};
 
 #[tokio::test]
 async fn health_and_ready() {
@@ -44,7 +44,7 @@ async fn ready_fails_while_draining() {
     let server = serve(
         node,
         ServeOptions {
-            protocol: Protocol::Pico,
+            protocol: HttpProtocol::Pico,
             addr: loopback,
             admin_addr: Some(loopback),
             shutdown_drain: Duration::from_secs(2),

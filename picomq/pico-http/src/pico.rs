@@ -19,25 +19,25 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
 use picomq_auth::{Audience, Authorizer};
-use picomq_protocol::envelope::{
-    decode_batch_append, decode_envelope, decode_json_append, encode_batch_read, encode_envelope,
-    encode_json_read, RecordEnvelope, SequencedRecord,
-};
 use picomq_protocol::mime::{mime_equals, mime_of};
 use picomq_protocol::pico::{
-    engine_ct, sse_control_event, sse_data_event, user_ct_of, ErrorBody, Listing, StreamEntry,
-    CT_BATCH_BINARY, CT_BATCH_JSON, CT_CORE, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT, E_BAD_REQUEST,
-    E_CLOSED, E_CONFLICT, E_DURABILITY, E_FENCED, E_MATCH_FAILED, E_NOT_FOUND, E_SEQUENCE_GAP,
+    sse_control_event, sse_data_event, ErrorBody, Listing, StreamEntry, CT_BATCH_BINARY,
+    CT_BATCH_JSON, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT, E_BAD_REQUEST, E_CLOSED, E_CONFLICT,
+    E_DURABILITY, E_FENCED, E_MATCH_FAILED, E_NOT_FOUND, E_SCHEMA_VIOLATION, E_SEQUENCE_GAP,
     FORMAT_BINARY, FORMAT_JSON, FORMAT_RAW, H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT,
-    H_MATCH_SEQ, H_NEXT_SEQ, H_PRODUCER_EPOCH, H_PRODUCER_ID, H_PRODUCER_SEQ, H_RECEIVED_SEQ,
-    H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE,
-    LIVE_LONG_POLL, LIVE_SSE, Q_BYTES, Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT, Q_LIVE, Q_PREFIX,
-    Q_SEQ, Q_START_AFTER, SEQ_NOW,
+    H_KAFKA_TOPIC, H_KEY, H_MATCH_SEQ, H_NEXT_SEQ, H_PRODUCER_EPOCH, H_PRODUCER_ID, H_PRODUCER_SEQ,
+    H_RECEIVED_SEQ, H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL,
+    H_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, Q_BYTES, Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT, Q_LIVE,
+    Q_PREFIX, Q_SEQ, Q_START_AFTER, SEQ_NOW,
+};
+use picomq_protocol::record::{
+    decode_batch_append, decode_json_append, encode_batch_read, encode_json_read, PicoRecord,
+    SequencedRecord,
 };
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{
-    AppendCommand, CreateCommand, ErrorKind, OffsetToken, ReadResult, S3StreamService,
-    ServiceError, StreamMeta,
+    AppendCommand, CreateCommand, ErrorKind, LogRecord, OffsetToken, ReadResult, S3StreamService,
+    ServiceError, StreamMeta, StreamRecord,
 };
 
 use crate::auth::Permit;
@@ -47,7 +47,6 @@ use crate::http::{
     truthy,
 };
 use crate::route::{route, stream_name, RoutingMode};
-use crate::timestamps::StreamTimestamps;
 
 const CACHE_CATCH_UP: &str = "public, max-age=60, stale-while-revalidate=300";
 
@@ -61,7 +60,6 @@ const DEFAULT_MAX_REQUEST_SIZE: usize = 32 * 1024 * 1024;
 pub struct PicoFrontend {
     service: Arc<S3StreamService>,
     ownership: Arc<dyn OwnershipService>,
-    timestamps: StreamTimestamps,
     authorizer: Option<Arc<Authorizer>>,
     mode: RoutingMode,
     long_poll_timeout: Duration,
@@ -96,11 +94,9 @@ impl PicoFrontend {
         max_chunk_size: usize,
         max_request_size: usize,
     ) -> Self {
-        let timestamps = StreamTimestamps::new(service.clone());
         Self {
             service,
             ownership,
-            timestamps,
             authorizer: None,
             mode,
             long_poll_timeout,
@@ -227,7 +223,7 @@ impl PicoFrontend {
             return Err(bad_request("Pico-TTL and Pico-Expires-At both set"));
         }
 
-        let user_ct = header_str(headers, header::CONTENT_TYPE.as_str())
+        let content_type = header_str(headers, header::CONTENT_TYPE.as_str())
             .filter(|v| !v.is_empty())
             .unwrap_or(DEFAULT_CT)
             .to_owned();
@@ -235,29 +231,29 @@ impl PicoFrontend {
             .service
             .create(CreateCommand {
                 name: name.to_owned(),
-                content_type: engine_ct(&user_ct),
+                content_type: content_type.clone(),
                 ttl_seconds,
                 expires_at_ms,
                 closed: truthy(headers, H_CLOSED),
-                initial_payload: Bytes::new(),
+                initial_records: Vec::new(),
                 external_id: None,
                 internal: false,
                 schema_name: header_str(headers, H_SCHEMA)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned),
                 schema_validate: truthy(headers, H_SCHEMA_VALIDATE),
+                kafka_topic: header_str(headers, H_KAFKA_TOPIC)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
             })
             .await?;
         let meta = result.meta;
 
-        if !result.created && !mime_equals(Some(&user_ct_of(&meta.content_type)), Some(&user_ct)) {
+        if !result.created && !mime_equals(Some(&meta.content_type), Some(&content_type)) {
             return Ok(error(
                 409,
                 E_CONFLICT,
-                &format!(
-                    "stream exists with content type {}",
-                    user_ct_of(&meta.content_type)
-                ),
+                &format!("stream exists with content type {}", meta.content_type),
                 Some(&meta.next_offset),
             ));
         }
@@ -267,11 +263,7 @@ impl PicoFrontend {
             Some(&meta.next_offset),
             meta.closed,
         );
-        set_header(
-            &mut response,
-            header::CONTENT_TYPE.as_str(),
-            &user_ct_of(&meta.content_type),
-        );
+        write_meta(&mut response, &meta);
         if result.created {
             set_header(&mut response, header::LOCATION.as_str(), uri.path());
         }
@@ -329,53 +321,26 @@ impl PicoFrontend {
         } else {
             decode_records(headers, body)?
         };
-        let timestamp = if records.is_empty() {
-            None
-        } else {
-            Some(self.timestamps.next(name).await?)
-        };
-        let payloads: Vec<Bytes> = records
-            .iter()
-            .map(|record| {
-                encode_envelope(&RecordEnvelope::new(
-                    timestamp.expect("timestamp set when records exist"),
-                    record.headers.clone(),
-                    record.body.clone(),
-                ))
-            })
-            .collect();
+        let count = records.len() as u64;
 
         let result = self
             .service
             .append(AppendCommand {
                 name: name.to_owned(),
-                payloads,
-                content_type: Some(CT_CORE.to_owned()),
+                records,
+                content_type: None,
                 stream_seq: None,
                 match_seq,
                 producer,
                 close_after: close,
-                atomic: true,
             })
             .await?;
 
-        if result.applied {
-            if let Some(timestamp) = timestamp {
-                self.timestamps.record(name, timestamp);
-            }
-        }
-
         let mut response = respond(200, Some(&result.next_offset), result.closed);
-        if result.applied && !records.is_empty() {
-            let start = result.next_offset.record_offset() - records.len() as u64;
+        if let (true, Some(timestamp)) = (result.applied && count > 0, result.timestamp_ms) {
+            let start = result.next_offset.record_offset() - count;
             set_header(&mut response, H_START_SEQ, &start.to_string());
-            set_header(
-                &mut response,
-                H_TIMESTAMP,
-                &timestamp
-                    .expect("timestamp set when records exist")
-                    .to_string(),
-            );
+            set_header(&mut response, H_TIMESTAMP, &timestamp.to_string());
         }
         if let Some(epoch) = result.producer_epoch {
             set_header(&mut response, H_PRODUCER_EPOCH, &epoch.to_string());
@@ -388,9 +353,6 @@ impl PicoFrontend {
 
     async fn delete(&self, name: &str) -> Result<Response, ServiceError> {
         let deleted = self.service.delete(name).await?;
-        if deleted {
-            self.timestamps.invalidate(name);
-        }
         Ok(respond(if deleted { 204 } else { 404 }, None, false))
     }
 
@@ -450,7 +412,7 @@ impl PicoFrontend {
                     };
                     StreamEntry {
                         name: name.to_owned(),
-                        content_type: Some(user_ct_of(&meta.content_type)),
+                        content_type: Some(meta.content_type.clone()),
                         start_seq: meta.start_offset.record_offset(),
                         next_seq: meta.next_offset.record_offset(),
                         closed: meta.closed,
@@ -543,10 +505,7 @@ impl PicoFrontend {
                 if !read.records.is_empty() {
                     seq = read.next_offset;
                     let closed_at_tail = read.closed && read.up_to_date;
-                    let records = match to_sequenced(&read.records) {
-                        Ok(records) => records,
-                        Err(_) => return,
-                    };
+                    let records = to_sequenced(&read.records);
                     if tx
                         .send(sse_data_event(&records, seq.record_offset()))
                         .await
@@ -654,7 +613,7 @@ impl PicoFrontend {
             return Ok(response);
         }
 
-        let records = to_sequenced(&out.records)?;
+        let records = to_sequenced(&out.records);
         match format.as_str() {
             FORMAT_JSON => {
                 set_header(&mut response, header::CONTENT_TYPE.as_str(), CT_JSON);
@@ -672,13 +631,9 @@ impl PicoFrontend {
                 set_header(
                     &mut response,
                     header::CONTENT_TYPE.as_str(),
-                    &user_ct_of(&out.content_type),
+                    &out.content_type,
                 );
-                let mut body = Vec::new();
-                for record in &records {
-                    body.extend_from_slice(&record.envelope.body);
-                }
-                *response.body_mut() = Body::from(body);
+                *response.body_mut() = Body::from(out.concatenated_values());
             }
             other => return Err(bad_request(format!("invalid format: {other}"))),
         }
@@ -738,7 +693,10 @@ fn options() -> Response {
 fn service_error_response(e: ServiceError) -> Response {
     match e.kind {
         ErrorKind::NotFound => error(404, E_NOT_FOUND, "no such stream", None),
-        ErrorKind::BadRequest => error(400, E_BAD_REQUEST, &e.message, None),
+        ErrorKind::BadRequest | ErrorKind::CorruptBatch => {
+            error(400, E_BAD_REQUEST, &e.message, None)
+        }
+        ErrorKind::SchemaViolation => error(400, E_SCHEMA_VIOLATION, &e.message, None),
         ErrorKind::Fenced => {
             let mut response = error(403, E_FENCED, &e.message, None);
             if let Some(epoch) = e.producer_epoch {
@@ -767,19 +725,31 @@ fn service_error_response(e: ServiceError) -> Response {
     }
 }
 
-fn decode_records(headers: &HeaderMap, body: &Bytes) -> Result<Vec<RecordEnvelope>, ServiceError> {
+/// A batch body carries full records; any other body is one record whose
+/// value is the body (optionally keyed via `Pico-Key`).
+fn decode_records(headers: &HeaderMap, body: &Bytes) -> Result<Vec<LogRecord>, ServiceError> {
     let mime = mime_of(header_str(headers, header::CONTENT_TYPE.as_str()));
-    if mime == CT_BATCH_JSON {
-        return decode_json_append(body).map_err(codec_error);
+    let records = if mime == CT_BATCH_JSON {
+        decode_json_append(body).map_err(codec_error)?
+    } else if mime == CT_BATCH_BINARY {
+        decode_batch_append(body).map_err(codec_error)?
+    } else {
+        let mut record = PicoRecord::new(body.clone());
+        if let Some(key) = header_str(headers, H_KEY) {
+            record.key = Some(Bytes::copy_from_slice(key.as_bytes()));
+        }
+        vec![record]
+    };
+    Ok(records.into_iter().map(to_log_record).collect())
+}
+
+fn to_log_record(record: PicoRecord) -> LogRecord {
+    LogRecord {
+        timestamp_ms: 0,
+        key: record.key,
+        value: record.body,
+        headers: record.headers,
     }
-    if mime == CT_BATCH_BINARY {
-        return decode_batch_append(body).map_err(codec_error);
-    }
-    Ok(vec![RecordEnvelope::new(
-        0,
-        Default::default(),
-        body.clone(),
-    )])
 }
 
 fn producer_of(
@@ -805,11 +775,7 @@ fn producer_of(
 }
 
 fn write_meta(response: &mut Response, meta: &StreamMeta) {
-    set_header(
-        response,
-        header::CONTENT_TYPE.as_str(),
-        &user_ct_of(&meta.content_type),
-    );
+    set_header(response, header::CONTENT_TYPE.as_str(), &meta.content_type);
     set_header(
         response,
         H_START_SEQ,
@@ -824,18 +790,22 @@ fn write_meta(response: &mut Response, meta: &StreamMeta) {
     if let Some(schema_name) = &meta.schema_name {
         set_header(response, H_SCHEMA, schema_name);
     }
+    if let Some(topic) = &meta.kafka_topic {
+        set_header(response, H_KAFKA_TOPIC, topic);
+    }
 }
 
-fn to_sequenced(
-    records: &[picomq_server::StreamRecord],
-) -> Result<Vec<SequencedRecord>, ServiceError> {
+fn to_sequenced(records: &[StreamRecord]) -> Vec<SequencedRecord> {
     records
         .iter()
-        .map(|record| {
-            Ok(SequencedRecord {
-                seq: record.offset.record_offset(),
-                envelope: decode_envelope(&record.payload).map_err(codec_error)?,
-            })
+        .map(|record| SequencedRecord {
+            seq: record.offset.record_offset(),
+            record: PicoRecord {
+                timestamp: record.record.timestamp_ms,
+                key: record.record.key.clone(),
+                headers: record.record.headers.clone(),
+                body: record.record.value.clone(),
+            },
         })
         .collect()
 }

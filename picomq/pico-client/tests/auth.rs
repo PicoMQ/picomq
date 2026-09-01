@@ -13,7 +13,7 @@ use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
 use picomq_client::{ClientConfig, ErrorKind, PicoClient, RetryPolicy, StreamApi};
-use picomq_http::Protocol as ServeProtocol;
+use picomq_http::HttpProtocol as ServeProtocol;
 use picomq_runtime::{AuthMode, MetaBackend, PicoServer, ServerConfig};
 
 async fn secured_server(dir: &std::path::Path) -> (PicoServer, String, AccessToken) {
@@ -21,7 +21,8 @@ async fn secured_server(dir: &std::path::Path) -> (PicoServer, String, AccessTok
     let server = picomq_runtime::start(ServerConfig {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
-        protocol: ServeProtocol::Pico,
+        http_protocol: ServeProtocol::Pico,
+        kafka: None,
         meta_backend: MetaBackend::parse("sqlite::memory:").unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
         wal_uri: Some(format!("2@file://{}", dir.join("wal").display())),

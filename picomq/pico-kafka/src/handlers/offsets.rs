@@ -4,15 +4,15 @@ use kafka_protocol::messages::list_offsets_response::{
 use kafka_protocol::messages::ListOffsetsRequest;
 use kafka_protocol::protocol::Decodable;
 
-use crate::batch::decode_batches;
+use picomq_server::record::decode_batches;
+
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    encode_response, ensure_local_leader, service_error_code, topic_name, EARLIEST_TIMESTAMP,
-    LATEST_TIMESTAMP, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION,
+    encode_response, ensure_local_leader, resolve_topic, service_error_code, topic_name,
+    EARLIEST_TIMESTAMP, LATEST_TIMESTAMP, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
-use crate::topic::{stream_name, validate_topic_name};
 
 pub async fn handle(
     ctx: &BrokerContext,
@@ -26,17 +26,19 @@ pub async fn handle(
     let mut topics = Vec::with_capacity(request.topics.len());
     for topic in request.topics {
         let topic_name_str = topic.name.to_string();
-        if !validate_topic_name(&topic_name_str) {
-            topics.push(
-                ListOffsetsTopicResponse::default()
-                    .with_name(topic_name(&topic_name_str))
-                    .with_partitions(vec![ListOffsetsPartitionResponse::default()
-                        .with_partition_index(0)
-                        .with_error_code(UNKNOWN_TOPIC_OR_PARTITION)]),
-            );
-            continue;
-        }
-        let stream = stream_name(&topic_name_str);
+        let stream = match resolve_topic(ctx, &topic_name_str).await {
+            Ok(stream) => stream,
+            Err(code) => {
+                topics.push(
+                    ListOffsetsTopicResponse::default()
+                        .with_name(topic_name(&topic_name_str))
+                        .with_partitions(vec![ListOffsetsPartitionResponse::default()
+                            .with_partition_index(0)
+                            .with_error_code(code)]),
+                );
+                continue;
+            }
+        };
         if let Err(code) = ensure_local_leader(ctx, &stream).await {
             topics.push(
                 ListOffsetsTopicResponse::default()
@@ -110,8 +112,6 @@ async fn list_offset(
     })
 }
 
-/// Walks batch headers forward from the trim watermark, O(retained batches).
-/// Revisit with a time index if by-timestamp lookups get hot.
 async fn resolve_timestamp(
     ctx: &BrokerContext,
     stream: &str,
@@ -132,19 +132,20 @@ async fn resolve_timestamp(
             break;
         }
         for batch in read.batches {
-            let batches = decode_batches(&batch.payload).map_err(|error| {
+            let records = decode_batches(&batch.payload).map_err(|error| {
                 picomq_server::ServiceError::with_message(
-                    picomq_server::ErrorKind::BadRequest,
+                    picomq_server::ErrorKind::CorruptBatch,
                     None,
                     false,
                     error.to_string(),
                 )
             })?;
-            for decoded in batches {
-                if decoded.info.min_timestamp >= target {
-                    return Ok((decoded.info.min_offset, decoded.info.min_timestamp));
+            for record in records {
+                let offset = record.offset.record_offset() as i64;
+                if record.record.timestamp_ms >= target {
+                    return Ok((offset, record.record.timestamp_ms));
                 }
-                last_match = (decoded.info.min_offset, decoded.info.min_timestamp);
+                last_match = (offset, record.record.timestamp_ms);
             }
         }
         cursor = read.next_offset;

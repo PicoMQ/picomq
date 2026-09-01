@@ -9,16 +9,17 @@ use kafka_protocol::messages::delete_topics_response::{
 };
 use kafka_protocol::messages::{CreateTopicsRequest, DeleteTopicsRequest};
 use kafka_protocol::protocol::Decodable;
-use picomq_server::CreateCommand;
+use picomq_server::{alias, CreateCommand};
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    encode_response, new_topic_id, reject_sys_create, service_error_code, topic_name,
-    INVALID_REQUEST, NO_ERROR, TOPIC_ALREADY_EXISTS, UNKNOWN_TOPIC_OR_PARTITION,
+    encode_response, new_topic_id, resolve_topic, service_error_code, topic_name, INVALID_REQUEST,
+    NO_ERROR, TOPIC_ALREADY_EXISTS, UNKNOWN_TOPIC_OR_PARTITION,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
-use crate::topic::{kafka_content_type, stream_name, validate_topic_name};
+
+pub(crate) const KAFKA_CREATED_CT: &str = "application/octet-stream";
 
 pub const SCHEMA_CONFIG: &str = "pico.schema";
 pub const SCHEMA_VALIDATE_CONFIG: &str = "pico.schema.validate";
@@ -35,16 +36,7 @@ pub async fn create(
     let mut topics = Vec::with_capacity(request.topics.len());
     for topic in request.topics {
         let name = topic.name.to_string();
-        if !validate_topic_name(&name) {
-            topics.push(
-                CreatableTopicResult::default()
-                    .with_name(topic_name(&name))
-                    .with_error_code(INVALID_REQUEST),
-            );
-            continue;
-        }
-        let stream = stream_name(&name);
-        if reject_sys_create(&stream).is_err() {
+        if !alias::is_valid_topic(&name) {
             topics.push(
                 CreatableTopicResult::default()
                     .with_name(topic_name(&name))
@@ -71,8 +63,12 @@ pub async fn create(
                 continue;
             }
         };
-        let mut command =
-            CreateCommand::with_external_id(stream.clone(), kafka_content_type(), new_topic_id());
+        let mut command = CreateCommand::with_external_id(
+            alias::stream_name_for_topic(&name),
+            KAFKA_CREATED_CT,
+            new_topic_id(),
+        )
+        .with_kafka_topic(&name);
         if let Some(schema_name) = schema_name {
             command = command
                 .with_schema_name(schema_name)
@@ -134,23 +130,17 @@ pub async fn delete(
 
     let mut responses = Vec::with_capacity(names.len());
     for name in names {
-        if !validate_topic_name(&name) {
-            responses.push(
-                DeletableTopicResult::default()
-                    .with_name(Some(topic_name(&name)))
-                    .with_error_code(UNKNOWN_TOPIC_OR_PARTITION),
-            );
-            continue;
-        }
-        let stream = stream_name(&name);
-        if reject_sys_create(&stream).is_err() {
-            responses.push(
-                DeletableTopicResult::default()
-                    .with_name(Some(topic_name(&name)))
-                    .with_error_code(INVALID_REQUEST),
-            );
-            continue;
-        }
+        let stream = match resolve_topic(ctx, &name).await {
+            Ok(stream) => stream,
+            Err(code) => {
+                responses.push(
+                    DeletableTopicResult::default()
+                        .with_name(Some(topic_name(&name)))
+                        .with_error_code(code),
+                );
+                continue;
+            }
+        };
         match ctx.service.delete(&stream).await {
             Ok(true) => responses.push(
                 DeletableTopicResult::default()

@@ -3,7 +3,7 @@ use bytes::Bytes;
 use http::{HeaderMap, Method};
 use serde_json::{json, Map, Value};
 
-use crate::error::{ErrorKind, WireError};
+use crate::error::{CodecError, ErrorKind, WireError};
 use crate::mime::{is_json, mime_of};
 use crate::wire::{header_string, header_u64, stream_path, truthy, urlencode, WireRequest};
 
@@ -63,6 +63,34 @@ pub fn encode_json_array(payloads: &[Bytes]) -> Bytes {
     }
     body.push(b']');
     Bytes::from(body)
+}
+
+/// Splits a DS request body into the messages it carries. JSON streams take
+/// a top-level array as one message per element (compacted); any other JSON
+/// value is a single message. Non-JSON bodies are one message as-is. An empty
+/// array is allowed only for `create` (a stream with no initial messages).
+pub fn split_body(
+    content_type: &str,
+    body: &Bytes,
+    create: bool,
+) -> Result<Vec<Bytes>, CodecError> {
+    if !is_json(&mime_of(Some(content_type))) {
+        return Ok(vec![body.clone()]);
+    }
+    let node: Value = serde_json::from_slice(body).map_err(|_| CodecError::new("invalid JSON"))?;
+    let compact = |value: &Value| {
+        serde_json::to_vec(value)
+            .map(Bytes::from)
+            .map_err(|_| CodecError::new("invalid JSON"))
+    };
+    match &node {
+        Value::Array(items) if items.is_empty() && create => Ok(Vec::new()),
+        Value::Array(items) if items.is_empty() => {
+            Err(CodecError::new("empty JSON array not allowed"))
+        }
+        Value::Array(items) => items.iter().map(compact).collect(),
+        other => Ok(vec![compact(other)?]),
+    }
 }
 
 fn concatenated(payloads: &[Bytes]) -> Bytes {
@@ -422,6 +450,30 @@ mod tests {
         let payloads = [Bytes::from_static(b"{\"a\":1}"), Bytes::from_static(b"2")];
         assert_eq!(&encode_json_array(&payloads)[..], b"[{\"a\":1},2]");
         assert_eq!(&encode_json_array(&[])[..], b"[]");
+    }
+
+    #[test]
+    fn json_bodies_split_per_element() {
+        let body = Bytes::from_static(b"[ {\"a\": 1}, 2 ]");
+        let split = split_body("application/json", &body, false).unwrap();
+        assert_eq!(
+            split,
+            [Bytes::from_static(b"{\"a\":1}"), Bytes::from_static(b"2")]
+        );
+        assert_eq!(
+            split_body("application/json", &Bytes::from_static(b"{\"a\":1}"), false).unwrap(),
+            [Bytes::from_static(b"{\"a\":1}")]
+        );
+        assert_eq!(
+            split_body("application/json", &Bytes::from_static(b"[]"), true).unwrap(),
+            Vec::<Bytes>::new()
+        );
+        assert!(split_body("application/json", &Bytes::from_static(b"[]"), false).is_err());
+        assert!(split_body("application/json", &Bytes::from_static(b"nope"), false).is_err());
+        assert_eq!(
+            split_body("text/plain", &Bytes::from_static(b"[1,2]"), false).unwrap(),
+            [Bytes::from_static(b"[1,2]")]
+        );
     }
 
     #[test]

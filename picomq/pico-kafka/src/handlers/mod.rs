@@ -25,8 +25,6 @@ pub enum HandlerError {
     Unimplemented(i16),
     #[error(transparent)]
     Service(#[from] ServiceError),
-    #[error(transparent)]
-    Batch(#[from] crate::batch::BatchParseError),
 }
 
 pub type DeferredOutcome = std::pin::Pin<

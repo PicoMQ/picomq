@@ -1,7 +1,4 @@
 //! TCP listener and per-connection pipeline. Produce requests process
-//! strictly in receive order, other requests process concurrently. All
-//! responses are written in receive order, with `max_in_flight` TCP
-//! backpressure.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -35,19 +32,14 @@ impl Default for ListenerConfig {
     }
 }
 
-/// What the ordered writer does at one sequence slot.
 enum Reply {
     Frame(Bytes),
-    /// Processed, nothing to send (acks=0 produce).
     Skip,
-    /// Flush everything before this slot, then drop the connection
-    /// (malformed or unsupported request, like a real broker).
     Close,
 }
 
 struct Slot {
     reply: Reply,
-    /// Released when the writer consumes the slot, capping outstanding work.
     _permit: OwnedSemaphorePermit,
 }
 
@@ -76,10 +68,6 @@ async fn to_reply(mut result: Result<HandlerOutcome, HandlerError>) -> Reply {
             }
             Err(HandlerError::Service(error)) => {
                 warn!(?error, "closing connection: kafka handler service error");
-                Reply::Close
-            }
-            Err(HandlerError::Batch(error)) => {
-                warn!(?error, "closing connection: kafka batch parse error");
                 Reply::Close
             }
         };

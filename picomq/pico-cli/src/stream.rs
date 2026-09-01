@@ -13,8 +13,9 @@ pub struct Endpoint {
     #[arg(long, env = "PICO_ENDPOINT", global = true)]
     pub endpoint: Option<String>,
 
-    /// Which protocol: the wire client commands speak, and the frontend
-    /// `serve` serves. Defaults to the profile's, else `pico`.
+    /// Which protocol: the wire client commands speak, and the HTTP frontend
+    /// `serve` serves (`pico` or `ds`; `serve` always adds the Kafka listener
+    /// unless `--no-kafka`). Defaults to the profile's, else `pico`.
     #[arg(long, value_enum, env = "PICO_PROTOCOL", global = true)]
     pub protocol: Option<ProtocolArg>,
 
@@ -90,16 +91,6 @@ impl ProtocolArg {
             Self::Kafka => Err(ClientError::unsupported(
                 "kafka has no CLI client; use kcat or a Kafka client library",
             )),
-        }
-    }
-}
-
-impl From<ProtocolArg> for picomq_http::Protocol {
-    fn from(value: ProtocolArg) -> Self {
-        match value {
-            ProtocolArg::Pico => Self::Pico,
-            ProtocolArg::Ds => Self::Ds,
-            ProtocolArg::Kafka => Self::Kafka,
         }
     }
 }

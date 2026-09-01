@@ -82,7 +82,8 @@ impl DsClient {
             vec![Record {
                 position: next.clone(),
                 timestamp: None,
-                headers: Default::default(),
+                key: None,
+                headers: Vec::new(),
                 body,
             }]
         };

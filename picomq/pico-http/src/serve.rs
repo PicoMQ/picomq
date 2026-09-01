@@ -25,20 +25,18 @@ use crate::admin::{self, AdminState};
 use crate::common;
 use crate::{DsFrontend, PicoFrontend, RoutingMode};
 
-/// Which stream protocol this process speaks.
-///
-/// `DurableStreamsServer`).
+/// Which HTTP stream protocol this process mounts on its data listener. The
+/// Kafka listener is separate and runs alongside either one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Protocol {
+pub enum HttpProtocol {
     #[default]
     Pico,
     Ds,
-    Kafka,
 }
 
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
-    pub protocol: Protocol,
+    pub protocol: HttpProtocol,
     /// Where the protocol listener binds. Port 0 binds an ephemeral port. Read
     /// the effective address back from [`RunningServer::local_addr`].
     pub addr: SocketAddr,
@@ -65,7 +63,7 @@ pub struct ServeOptions {
 impl Default for ServeOptions {
     fn default() -> Self {
         Self {
-            protocol: Protocol::Pico,
+            protocol: HttpProtocol::Pico,
             addr: SocketAddr::from(([127, 0, 0, 1], 4437)),
             admin_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9090))),
             routing_mode: RoutingMode::Redirect,
@@ -108,7 +106,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
         options.max_request_size,
     );
     let protocol_router = match options.protocol {
-        Protocol::Pico => common_router.fallback_service(
+        HttpProtocol::Pico => common_router.fallback_service(
             Arc::new(
                 PicoFrontend::with_tuning(
                     node.service(),
@@ -123,7 +121,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
             )
             .router(),
         ),
-        Protocol::Ds => common_router.fallback_service(
+        HttpProtocol::Ds => common_router.fallback_service(
             Arc::new(
                 DsFrontend::with_tuning(
                     node.service(),
@@ -138,7 +136,6 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
             )
             .router(),
         ),
-        Protocol::Kafka => common_router,
     };
 
     let (stop, _) = watch::channel(false);

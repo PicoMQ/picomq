@@ -3,9 +3,9 @@
 use bytes::Bytes;
 
 use crate::error::{ErrorKind, ServiceError};
+use crate::record::LogRecord;
+pub use crate::record::StreamRecord;
 
-/// Opaque stream position token. The wire form is the record offset
-/// zero-padded to 20 digits so lexicographic order equals numeric order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OffsetToken {
     record_offset: u64,
@@ -22,8 +22,6 @@ impl OffsetToken {
         Self { record_offset }
     }
 
-    /// Any negative value such as `"-1"` means the beginning. Empty or
-    /// non-numeric input is an error.
     pub fn parse(raw: Option<&str>) -> Result<Self, ServiceError> {
         let raw = match raw {
             None | Some("-1") => return Ok(Self::beginning()),
@@ -90,13 +88,6 @@ impl Producer {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamRecord {
-    pub offset: OffsetToken,
-    pub payload: Bytes,
-}
-
-/// Numeric idempotent-producer identity on one batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NumericProducer {
     pub id: i64,
@@ -104,49 +95,19 @@ pub struct NumericProducer {
     pub first_seq: i32,
 }
 
-/// One batch inside an append payload. `patch_at` is the byte position of
-/// the 8-byte base-offset field the service rewrites, which must sit outside
-/// any payload checksum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BatchSpan {
-    pub patch_at: usize,
-    pub record_count: u32,
-}
-
-/// One batch-payload append, stored verbatim except for the base-offset
-/// patch of each contained batch.
 #[derive(Debug, Clone)]
 pub struct AppendBatchCommand {
     pub name: String,
     pub payload: Bytes,
-    /// Contained batches in payload order. Non-empty, and a producer is only
-    /// allowed with exactly one batch.
-    pub batches: Vec<BatchSpan>,
-    /// When set, the same identity must be readable from the stored payload
-    /// header (`producer::producer_identity`) for takeover recovery.
-    pub producer: Option<NumericProducer>,
-    pub base_timestamp_ms: i64,
-}
-
-impl AppendBatchCommand {
-    pub fn record_count(&self) -> u32 {
-        self.batches
-            .iter()
-            .fold(0u32, |acc, span| acc.saturating_add(span.record_count))
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppendBatchResult {
-    /// First offset of the batch. For a duplicate this is the offset the
-    /// original attempt landed at.
     pub base_offset: u64,
     pub duplicate: bool,
     pub log_start_offset: u64,
 }
 
-/// A batch append that has been admitted and submitted under the stream gate
-/// but is not yet durable. Pass to `finish_batch_append` to await durability.
 pub struct SubmittedBatchAppend {
     pub(crate) name: String,
     pub(crate) stream_id: u64,
@@ -155,14 +116,12 @@ pub struct SubmittedBatchAppend {
     pub(crate) notify_offset: u64,
     pub(crate) duplicate: bool,
     pub(crate) pending: Option<s3stream::PendingAppend>,
+    pub(crate) batches: Vec<StreamBatch>,
 }
 
-/// One stored batch, returned verbatim. `base_offset` may be below the
-/// requested position when the position falls mid-batch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamBatch {
     pub base_offset: u64,
-    /// Exclusive.
     pub last_offset: u64,
     pub count: u32,
     pub payload: Bytes,
@@ -189,32 +148,45 @@ pub struct CreateCommand {
     pub ttl_seconds: Option<u64>,
     pub expires_at_ms: Option<i64>,
     pub closed: bool,
-    pub initial_payload: Bytes,
+    pub initial_records: Vec<LogRecord>,
     pub external_id: Option<[u8; 16]>,
     pub internal: bool,
     pub schema_name: Option<String>,
     pub schema_validate: bool,
+    pub kafka_topic: Option<String>,
 }
 
 impl CreateCommand {
-    /// An open, empty stream carrying a caller-assigned external identity.
-    pub fn with_external_id(
-        name: impl Into<String>,
-        content_type: impl Into<String>,
-        external_id: [u8; 16],
-    ) -> Self {
+    pub fn new(name: impl Into<String>, content_type: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             content_type: content_type.into(),
             ttl_seconds: None,
             expires_at_ms: None,
             closed: false,
-            initial_payload: Bytes::new(),
-            external_id: Some(external_id),
+            initial_records: Vec::new(),
+            external_id: None,
             internal: false,
             schema_name: None,
             schema_validate: false,
+            kafka_topic: None,
         }
+    }
+
+    pub fn with_external_id(
+        name: impl Into<String>,
+        content_type: impl Into<String>,
+        external_id: [u8; 16],
+    ) -> Self {
+        Self {
+            external_id: Some(external_id),
+            ..Self::new(name, content_type)
+        }
+    }
+
+    pub fn with_kafka_topic(mut self, topic: impl Into<String>) -> Self {
+        self.kafka_topic = Some(topic.into());
+        self
     }
 
     pub fn with_schema_name(mut self, schema_name: impl Into<String>) -> Self {
@@ -245,18 +217,23 @@ pub struct StreamConfig {
     pub name: String,
     pub schema_name: Option<String>,
     pub schema_validate: bool,
+    pub kafka_topic: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UpdateStreamCommand {
     pub name: String,
     pub schema_name: Option<Option<String>>,
     pub schema_validate: Option<bool>,
+    pub kafka_topic: Option<Option<String>>,
 }
 
 impl UpdateStreamCommand {
     pub fn validate(&self) -> Result<(), ServiceError> {
-        if self.schema_name.is_none() && self.schema_validate.is_none() {
+        if self.schema_name.is_none()
+            && self.schema_validate.is_none()
+            && self.kafka_topic.is_none()
+        {
             return Err(ServiceError::with_message(
                 ErrorKind::BadRequest,
                 None,
@@ -274,18 +251,15 @@ pub struct CreateResult {
     pub meta: StreamMeta,
 }
 
-/// `streamSeq` stays a `String` compared
-/// tail record offset.
 #[derive(Debug, Clone, Default)]
 pub struct AppendCommand {
     pub name: String,
-    pub payloads: Vec<Bytes>,
+    pub records: Vec<LogRecord>,
     pub content_type: Option<String>,
     pub stream_seq: Option<String>,
     pub match_seq: Option<u64>,
     pub producer: Option<Producer>,
     pub close_after: bool,
-    pub atomic: bool,
 }
 
 impl AppendCommand {
@@ -297,7 +271,7 @@ impl AppendCommand {
     }
 
     pub fn payload_len(&self) -> usize {
-        self.payloads.iter().map(|p| p.len()).sum()
+        self.records.iter().map(LogRecord::size_hint).sum()
     }
 }
 
@@ -305,6 +279,7 @@ impl AppendCommand {
 pub struct AppendResult {
     pub next_offset: OffsetToken,
     pub applied: bool,
+    pub timestamp_ms: Option<i64>,
     pub closed: bool,
     pub producer_epoch: Option<u64>,
     pub producer_seq: Option<u64>,
@@ -325,10 +300,10 @@ pub struct ReadResult {
 }
 
 impl ReadResult {
-    pub fn concatenated(&self) -> Bytes {
-        let mut out = Vec::with_capacity(self.records.iter().map(|r| r.payload.len()).sum());
+    pub fn concatenated_values(&self) -> Bytes {
+        let mut out = Vec::with_capacity(self.records.iter().map(|r| r.record.value.len()).sum());
         for record in &self.records {
-            out.extend_from_slice(&record.payload);
+            out.extend_from_slice(&record.record.value);
         }
         Bytes::from(out)
     }
@@ -347,6 +322,7 @@ pub struct StreamMeta {
     pub closed: bool,
     pub external_id: [u8; 16],
     pub schema_name: Option<String>,
+    pub kafka_topic: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -412,7 +388,6 @@ mod tests {
             "00000000000000000007"
         );
         assert_eq!(OffsetToken::of_record_offset(7).value().len(), 20);
-        // Lexicographic order == numeric order (the point of the padding).
         assert!(
             OffsetToken::of_record_offset(9).value() < OffsetToken::of_record_offset(10).value()
         );
@@ -421,16 +396,9 @@ mod tests {
     #[test]
     fn create_command_validation() {
         let cmd = CreateCommand {
-            name: "/a".into(),
-            content_type: "text/plain".into(),
             ttl_seconds: Some(5),
             expires_at_ms: Some(10),
-            closed: false,
-            initial_payload: Bytes::new(),
-            external_id: None,
-            internal: false,
-            schema_name: None,
-            schema_validate: false,
+            ..CreateCommand::new("/a", "text/plain")
         };
         assert!(cmd.validate().is_err());
     }

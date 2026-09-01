@@ -1,5 +1,4 @@
-//! Fetch: verbatim batch reads with Kafka long-poll semantics. Waking is
-//! event-driven off the per-stream waiter registry, never a poll loop.
+//! Fetch: verbatim batch reads with Kafka long-poll.
 
 use std::time::{Duration, Instant};
 
@@ -14,20 +13,16 @@ use uuid::Uuid;
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    concat_batches, encode_response, ensure_local_leader, service_error_code, topic_name, NO_ERROR,
-    OFFSET_OUT_OF_RANGE, UNKNOWN_TOPIC_ID, UNKNOWN_TOPIC_OR_PARTITION,
+    concat_batches, encode_response, ensure_local_leader, resolve_topic, service_error_code,
+    topic_name, NO_ERROR, OFFSET_OUT_OF_RANGE, UNKNOWN_TOPIC_ID, UNKNOWN_TOPIC_OR_PARTITION,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
-use crate::topic::{stream_name, topic_from_stream, validate_topic_name};
 
-/// Topics are addressed by name below v13 and by UUID from v13 on.
 const FETCH_TOPIC_ID_VERSION: i16 = 13;
 
 struct ResolvedTopic {
-    /// Identity echoed back to the client (name pre-v13, UUID from v13).
     name: String,
     topic_id: Uuid,
-    /// Stream to serve from, or the error code every partition reports.
     stream: Result<String, i16>,
     partitions: Vec<(i32, i64)>,
 }
@@ -35,7 +30,6 @@ struct ResolvedTopic {
 struct PartitionRead {
     data: PartitionData,
     bytes: usize,
-    /// Stream and the high watermark observed, to park on for growth.
     wait: Option<(String, u64)>,
 }
 
@@ -64,7 +58,7 @@ pub async fn handle(
             .map(|p| (p.partition, p.fetch_offset))
             .collect();
         topics.push(
-            resolve_topic(
+            resolve_fetch_topic(
                 ctx,
                 req.api_version,
                 &topic.topic,
@@ -128,9 +122,6 @@ pub async fn handle(
             )));
         }
 
-        // Park until any requested stream grows past the watermark we just
-        // observed, then re-read. `wait_appended` is waiter-registry backed:
-        // it returns immediately only when the stream already grew.
         let waiters = waits.iter().map(|(stream, high_watermark)| {
             let service = ctx.service.clone();
             let stream = stream.clone();
@@ -141,7 +132,7 @@ pub async fn handle(
     }
 }
 
-async fn resolve_topic(
+async fn resolve_fetch_topic(
     ctx: &BrokerContext,
     api_version: i16,
     requested_name: &kafka_protocol::messages::TopicName,
@@ -154,19 +145,17 @@ async fn resolve_topic(
             .lookup_by_external_id(*requested_id.as_bytes())
             .await
         {
-            Ok(Some(stream)) if topic_from_stream(&stream).is_some() => Ok(stream),
-            Ok(_) => Err(UNKNOWN_TOPIC_ID),
+            Ok(Some(stream)) => match ctx.service.describe(&stream).await {
+                Ok(Some(meta)) if meta.kafka_topic.is_some() => Ok((meta.kafka_topic, stream)),
+                Ok(_) => Err(UNKNOWN_TOPIC_ID),
+                Err(error) => Err(service_error_code(&error)),
+            },
+            Ok(None) => Err(UNKNOWN_TOPIC_ID),
             Err(error) => Err(service_error_code(&error)),
         };
-        let name = stream
-            .as_ref()
-            .ok()
-            .and_then(|s| topic_from_stream(s))
-            .unwrap_or_default()
-            .to_owned();
-        let stream = match stream {
-            Ok(stream) => ensure_leader(ctx, stream).await,
-            Err(code) => Err(code),
+        let (name, stream) = match stream {
+            Ok((topic, stream)) => (topic.unwrap_or_default(), ensure_leader(ctx, stream).await),
+            Err(code) => (String::new(), Err(code)),
         };
         return ResolvedTopic {
             name,
@@ -177,15 +166,10 @@ async fn resolve_topic(
     }
 
     let name = requested_name.to_string();
-    if !validate_topic_name(&name) {
-        return ResolvedTopic {
-            name,
-            topic_id: requested_id,
-            stream: Err(UNKNOWN_TOPIC_OR_PARTITION),
-            partitions,
-        };
-    }
-    let stream = ensure_leader(ctx, stream_name(&name)).await;
+    let stream = match resolve_topic(ctx, &name).await {
+        Ok(stream) => ensure_leader(ctx, stream).await,
+        Err(code) => Err(code),
+    };
     ResolvedTopic {
         name,
         topic_id: requested_id,
@@ -260,8 +244,6 @@ fn partition_data(
         .with_last_stable_offset(watermarks.high_watermark as i64)
         .with_log_start_offset(watermarks.log_start_offset as i64)
         .with_aborted_transactions(None)
-        // Empty, not null. librdkafka only raises partition EOF on an empty
-        // record set.
         .with_records(Some(records.unwrap_or_default()))
 }
 

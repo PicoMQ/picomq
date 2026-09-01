@@ -2,9 +2,9 @@
 # From this directory: docker compose -f compose.cluster.yml up --build
 #
 # Host clients: http://localhost:4437 (node 1) and http://localhost:4438 (node 2).
-# Kafka mode: bootstrap localhost:9092 (node 1) or localhost:9093 (node 2).
+# Kafka clients: bootstrap localhost:9092 (node 1) or localhost:9093 (node 2).
 # RustFS API http://localhost:9000, console http://localhost:9001.
-# Protocol: set PICO_PROTOCOL=pico|ds|kafka in .env (see .env.example).
+# HTTP protocol: set PICO_PROTOCOL=pico|ds in .env (see .env.example).
 
 x-pico: &pico
   build:

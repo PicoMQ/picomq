@@ -14,7 +14,7 @@ use picomq_sql::{
 };
 use s3stream::{IdUri, ObjectStorageTrait, ObjectStoreAdapter};
 
-pub use config::{AuthMode, MetaBackend, ServerConfig};
+pub use config::{AuthMode, KafkaConfig, MetaBackend, ServerConfig};
 
 /// (`MetadataLifecycle`).
 const LIFECYCLE_TICK: Duration = Duration::from_secs(1);
@@ -69,11 +69,10 @@ pub struct PicoServer {
     schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
 }
 
-/// Open the metadata log, start the node, and serve the configured protocol,
+/// Open the metadata log, start the node, and serve the configured listeners,
 /// in that order: metadata first (a node must be registered before it can
 /// own streams), then storage and the engine, then listeners.
 pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
-    let kafka = matches!(config.protocol, picomq_http::Protocol::Kafka);
     if !config.insecure_allow_remote {
         // The Kafka listener carries no authentication, so a non-loopback
         // bind needs the explicit opt-out regardless of auth mode.
@@ -81,7 +80,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         for addr in [
             auth_off.then_some(config.addr),
             auth_off.then_some(config.admin_addr).flatten(),
-            kafka.then_some(config.kafka_listen),
+            config.kafka.as_ref().map(|kafka| kafka.listen),
         ]
         .into_iter()
         .flatten()
@@ -121,27 +120,16 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     };
     // Bind before node registration so a default advertise (port 0 configs)
     // carries the real bound port.
-    let kafka_listener = if kafka {
-        let addr = config.kafka_listen;
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(|source| RuntimeError::Bind { addr, source })?;
-        let bound = listener
-            .local_addr()
-            .map_err(|source| RuntimeError::Bind { addr, source })?;
-        Some((listener, bound))
-    } else {
-        None
+    let kafka_listener = match &config.kafka {
+        Some(kafka) => Some(bind_kafka(kafka.listen).await?),
+        None => None,
     };
-    let protocol_addresses = match &kafka_listener {
-        Some((_, bound)) => {
-            let advertise = config
-                .kafka_advertise
-                .clone()
-                .unwrap_or_else(|| bound.to_string());
+    let protocol_addresses = match (&config.kafka, &kafka_listener) {
+        (Some(kafka), Some((_, bound))) => {
+            let advertise = kafka.advertise.clone().unwrap_or_else(|| bound.to_string());
             std::collections::BTreeMap::from([(picomq_kafka::PROTOCOL_NAME.to_owned(), advertise)])
         }
-        None => Default::default(),
+        _ => Default::default(),
     };
     let node = Arc::new(
         PicoNode::start(
@@ -190,33 +178,8 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         .spawn_ttl_sweep(lease.leadership(), LIFECYCLE_TICK);
     let compaction_check = node.service().spawn_compaction_check(LIFECYCLE_TICK);
 
-    let kafka = if let Some((listener, bound)) = kafka_listener {
-        let broker = Arc::new(picomq_kafka::BrokerContext::new(
-            config.node_id,
-            config.cluster_id.clone(),
-            node.service(),
-            node.ownership(),
-            node.views(),
-            node.metadata().clone(),
-        ));
-        let listener_config = picomq_kafka::ListenerConfig {
-            addr: bound,
-            max_request_bytes: config.max_request_size,
-            ..Default::default()
-        };
-        let task = tokio::spawn(async move {
-            if let Err(error) = picomq_kafka::KafkaListener::new(listener_config, broker)
-                .serve(listener)
-                .await
-            {
-                tracing::error!(%error, "kafka listener stopped");
-            }
-        });
-        tracing::info!(%bound, "kafka listener started");
-        Some((bound, task))
-    } else {
-        None
-    };
+    let kafka = kafka_listener
+        .map(|(listener, bound)| (bound, spawn_kafka(&config, &node, listener, bound)));
 
     let addr = config.addr;
     let authorizer = match config.auth_mode {
@@ -226,7 +189,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     let server = picomq_http::serve(
         node,
         ServeOptions {
-            protocol: config.protocol,
+            protocol: config.http_protocol,
             addr,
             admin_addr: config.admin_addr,
             routing_mode: config.routing_mode,
@@ -253,6 +216,48 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         compaction_check,
         sink,
         schema_registry,
+    })
+}
+
+async fn bind_kafka(
+    addr: std::net::SocketAddr,
+) -> Result<(tokio::net::TcpListener, std::net::SocketAddr), RuntimeError> {
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|source| RuntimeError::Bind { addr, source })?;
+    let bound = listener
+        .local_addr()
+        .map_err(|source| RuntimeError::Bind { addr, source })?;
+    Ok((listener, bound))
+}
+
+fn spawn_kafka(
+    config: &ServerConfig,
+    node: &Arc<PicoNode>,
+    listener: tokio::net::TcpListener,
+    bound: std::net::SocketAddr,
+) -> tokio::task::JoinHandle<()> {
+    let broker = Arc::new(picomq_kafka::BrokerContext::new(
+        config.node_id,
+        config.cluster_id.clone(),
+        node.service(),
+        node.ownership(),
+        node.views(),
+        node.metadata().clone(),
+    ));
+    let listener_config = picomq_kafka::ListenerConfig {
+        addr: bound,
+        max_request_bytes: config.max_request_size,
+        ..Default::default()
+    };
+    tracing::info!(%bound, "kafka listener started");
+    tokio::spawn(async move {
+        if let Err(error) = picomq_kafka::KafkaListener::new(listener_config, broker)
+            .serve(listener)
+            .await
+        {
+            tracing::error!(%error, "kafka listener stopped");
+        }
     })
 }
 
@@ -333,7 +338,7 @@ impl PicoServer {
         self.server.node()
     }
 
-    /// The bound Kafka address, in Kafka mode.
+    /// The bound Kafka address, when the Kafka listener is enabled.
     pub fn kafka_addr(&self) -> Option<std::net::SocketAddr> {
         self.kafka.as_ref().map(|(addr, _)| *addr)
     }

@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use picomq_metadata::{CommandSink, LocalSink};
-use picomq_server::{AppendCommand, CreateCommand, NodeConfig, OffsetToken, PicoNode};
+use picomq_server::{AppendCommand, CreateCommand, LogRecord, NodeConfig, OffsetToken, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
 /// Append durability waits are dominated by the WAL group-commit window
@@ -79,18 +79,10 @@ async fn run_gate(total: u64) {
         let service = create_service.clone();
         async move {
             service
-                .create(CreateCommand {
-                    name: format!("/scale/{i}"),
-                    content_type: "application/octet-stream".into(),
-                    ttl_seconds: None,
-                    expires_at_ms: None,
-                    closed: false,
-                    initial_payload: Bytes::new(),
-                    external_id: None,
-                    internal: false,
-                    schema_name: None,
-                    schema_validate: false,
-                })
+                .create(CreateCommand::new(
+                    format!("/scale/{i}"),
+                    "application/octet-stream",
+                ))
                 .await
                 .unwrap();
         }
@@ -104,10 +96,11 @@ async fn run_gate(total: u64) {
         (create_rss - base_rss) * 1024.0 / total as f64
     );
 
-    // One registry entry + one `idx/sid/` record per stream.
+    // One registry entry, one `idx/sid/` and one `idx/topic/` record per
+    // stream.
     {
         let view = node.views().load();
-        assert_eq!(view.state.kv.len() as u64, 2 * total);
+        assert_eq!(view.state.kv.len() as u64, 3 * total);
         assert!(view.state.kv_bytes > 0);
         println!(
             "kv entries: {}, kv bytes: {} ({:.0} B/stream)",
@@ -126,7 +119,7 @@ async fn run_gate(total: u64) {
             let appended = service
                 .append(AppendCommand {
                     name: format!("/scale/{i}"),
-                    payloads: vec![Bytes::from_static(&[7u8; 128])],
+                    records: vec![LogRecord::value(Bytes::from_static(&[7u8; 128]))],
                     content_type: Some("application/octet-stream".into()),
                     ..Default::default()
                 })
@@ -170,7 +163,7 @@ async fn run_gate(total: u64) {
             service
                 .append(AppendCommand {
                     name,
-                    payloads: vec![Bytes::from_static(&[8u8; 128])],
+                    records: vec![LogRecord::value(Bytes::from_static(&[8u8; 128]))],
                     content_type: Some("application/octet-stream".into()),
                     ..Default::default()
                 })

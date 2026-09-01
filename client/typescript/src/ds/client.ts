@@ -103,6 +103,9 @@ export class DsClient implements StreamApi {
     if (Object.keys(envelope.headers).length > 0) {
       throw ClientError.unsupported('the Durable Streams protocol has no record headers')
     }
+    if (envelope.key !== undefined) {
+      throw ClientError.unsupported('the Durable Streams protocol has no record keys')
+    }
     const response = await expectDs(
       await this.http.send({
         method: 'POST',

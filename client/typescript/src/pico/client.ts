@@ -25,6 +25,7 @@ import type {
   AppendInput,
   AppendOptions,
   CallOptions,
+  HeaderValue,
   Live,
   ProducerAck,
   ProducerRef,
@@ -314,12 +315,16 @@ export class PicoClient implements StreamApi {
     let records: StreamRecord[] = []
     if (!empty && body.length > 0) {
       try {
-        records = decodeBatchRead(body).map((record) => ({
-          position: record.seq.toString(),
-          timestamp: Number(record.envelope.timestamp),
-          headers: record.envelope.headers,
-          body: record.envelope.body,
-        }))
+        records = decodeBatchRead(body).map((record) => {
+          const out: StreamRecord = {
+            position: record.seq.toString(),
+            timestamp: Number(record.envelope.timestamp),
+            headers: record.envelope.headers,
+            body: record.envelope.body,
+          }
+          if (record.envelope.key !== undefined) out.key = record.envelope.key
+          return out
+        })
       } catch (err) {
         throw new ClientError(
           'other',
@@ -458,19 +463,28 @@ function parsePicoData(data: string): StreamRecord[] {
     const row = node as {
       seq?: number | string
       timestamp?: number
+      key?: string
+      key_b64?: string
       headers?: { [key: string]: string }
+      headers_b64?: { [key: string]: string }
       body?: string
       body_b64?: string
     }
+    const headers: { [key: string]: HeaderValue } = { ...(row.headers ?? {}) }
+    for (const [name, value] of Object.entries(row.headers_b64 ?? {})) {
+      headers[name] = base64Decode(value)
+    }
     const record: StreamRecord = {
       position: String(row.seq ?? ''),
-      headers: row.headers ?? {},
+      headers,
       body:
         row.body_b64 !== undefined
           ? base64Decode(row.body_b64)
           : new TextEncoder().encode(row.body ?? ''),
     }
     if (row.timestamp !== undefined) record.timestamp = row.timestamp
+    if (row.key_b64 !== undefined) record.key = base64Decode(row.key_b64)
+    else if (row.key !== undefined) record.key = new TextEncoder().encode(row.key)
     return record
   })
 }

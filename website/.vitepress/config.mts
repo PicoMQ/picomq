@@ -61,6 +61,7 @@ const docsSidebar = [
       { text: 'HTTP API', link: '/docs/api' },
       { text: 'Kafka protocol', link: '/docs/kafka' },
       { text: 'Schemas', link: '/docs/schemas' },
+      { text: 'Protocol facades', link: '/docs/extending' },
       {
         text: 'Clients',
         collapsed: true,

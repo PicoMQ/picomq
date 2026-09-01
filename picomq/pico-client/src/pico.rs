@@ -1,13 +1,11 @@
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
 use bytes::Bytes;
-use picomq_protocol::envelope::RecordEnvelope;
 use picomq_protocol::pico::{
     decode_error, AppendRequest, AppendResponse, CloseRequest, CloseResponse, CreateRequest,
     CreateResponse, DeleteRequest, DeleteResponse, HeadRequest, HeadResponse, ListRequest, Listing,
     ReadRequest, ReadResponse, TrimRequest, TrimResponse, LIVE_LONG_POLL, SEQ_BEGINNING,
 };
+use picomq_protocol::record::PicoRecord;
 use picomq_protocol::WireRequest;
 use reqwest::Response;
 
@@ -56,8 +54,8 @@ impl PicoClient {
         records: &[Bytes],
         producer: &ProducerRef<'_>,
     ) -> Result<ProducerAck> {
-        let envelopes = envelopes(records);
-        let mut request = AppendRequest::new(name, &envelopes);
+        let records_wire = wire_records(records);
+        let mut request = AppendRequest::new(name, &records_wire);
         request.producer = Some(*producer);
         let response = self.call(request.encode()).await?;
         let ack = AppendResponse::decode(response.headers());
@@ -134,9 +132,10 @@ impl PicoClient {
                 .into_iter()
                 .map(|record| Record {
                     position: record.seq.to_string(),
-                    timestamp: Some(record.envelope.timestamp),
-                    headers: record.envelope.headers,
-                    body: record.envelope.body,
+                    timestamp: Some(record.record.timestamp),
+                    key: record.record.key,
+                    headers: record.record.headers,
+                    body: record.record.body,
                 })
                 .collect(),
             next: read
@@ -214,9 +213,9 @@ impl StreamApi for PicoClient {
         records: &[Bytes],
         _content_type: &str,
     ) -> Result<AppendAck> {
-        let envelopes = envelopes(records);
+        let records_wire = wire_records(records);
         let response = self
-            .call(AppendRequest::new(name, &envelopes).encode())
+            .call(AppendRequest::new(name, &records_wire).encode())
             .await?;
         let ack = AppendResponse::decode(response.headers());
         let next = seq_string(ack.next_seq);
@@ -259,10 +258,10 @@ impl StreamApi for PicoClient {
     }
 }
 
-fn envelopes(records: &[Bytes]) -> Vec<RecordEnvelope> {
+fn wire_records(records: &[Bytes]) -> Vec<PicoRecord> {
     records
         .iter()
-        .map(|body| RecordEnvelope::new(0, BTreeMap::new(), body.clone()))
+        .map(|body| PicoRecord::new(body.clone()))
         .collect()
 }
 

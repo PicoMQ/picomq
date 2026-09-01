@@ -17,7 +17,9 @@ picomq-schema = { workspace = true }
 
 async-trait = { workspace = true }
 bytes = { workspace = true }
+crc32c = { workspace = true }
 futures = { workspace = true }
+kafka-protocol = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

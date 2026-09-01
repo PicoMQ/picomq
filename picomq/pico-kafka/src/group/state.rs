@@ -60,8 +60,6 @@ pub(super) struct Rebalance {
 }
 
 pub(super) struct Group {
-    /// Stream epoch the durable offsets were replayed at. A change means the
-    /// stream moved owners and the state must be rebuilt.
     pub(super) loaded_epoch: i64,
     pub(super) phase: GroupPhase,
     pub(super) generation: i32,
@@ -70,7 +68,6 @@ pub(super) struct Group {
     pub(super) leader: String,
     pub(super) members: BTreeMap<String, Member>,
     pub(super) offsets: OffsetTable,
-    /// Records appended to the group stream since the last snapshot+trim.
     pub(super) appends_since_snapshot: u64,
     pub(super) next_rebalance_id: u64,
     pub(super) rebalance: Option<Rebalance>,
@@ -132,8 +129,6 @@ pub(super) fn remove_member(state: &mut Group, member_id: &str) {
     }
 }
 
-/// Drop empty groups and lazily expire members so idle groups do not pin
-/// memory.
 pub(super) fn prune_empty_groups(groups: &mut HashMap<String, Arc<Mutex<Group>>>) {
     let now = Instant::now();
     groups.retain(|_, group| match group.try_lock() {
@@ -145,8 +140,6 @@ pub(super) fn prune_empty_groups(groups: &mut HashMap<String, Arc<Mutex<Group>>>
     });
 }
 
-/// Returns the responses owed to parked JoinGroup requests, which the caller
-/// sends outside the lock.
 pub(super) fn complete_rebalance(
     state: &mut Group,
     timed_out: bool,
@@ -250,8 +243,6 @@ pub(super) fn complete_rebalance(
         .collect()
 }
 
-/// First protocol in the leader's preference list supported by every joined
-/// member, mirroring Kafka's selection rule.
 fn select_protocol(state: &Group, leader: &str, members: &BTreeSet<String>) -> Option<String> {
     state
         .members
@@ -292,7 +283,6 @@ pub(super) fn member_from_input(input: &JoinInput, now: Instant) -> Member {
     }
 }
 
-/// Kafka treats a non-positive rebalance timeout as "use the session timeout".
 fn rebalance_timeout_of(input: &JoinInput) -> Duration {
     let ms = if input.rebalance_timeout_ms <= 0 {
         input.session_timeout_ms
@@ -331,8 +321,6 @@ pub(super) fn new_member_id(client_id: &str) -> String {
     format!("{client_id}-{}", uuid::Uuid::new_v4())
 }
 
-/// Hex-encode the client-chosen group id so arbitrary bytes cannot collide
-/// with or escape the `/_sys/groups/` namespace.
 pub(super) fn group_stream_name(group_id: &str) -> String {
     let mut encoded = String::with_capacity(group_id.len() * 2);
     for byte in group_id.as_bytes() {

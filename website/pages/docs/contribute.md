@@ -11,7 +11,7 @@ If you are new to the project, new to Rust, or just unsure whether a change belo
 The workspace is split into two areas with a hard boundary between them:
 
 - **`s3stream/`** is the stream engine: WAL, object layout, caching, compaction. It is a self-contained library (crates, wire specification, conformance fixtures).
-- **`picomq/`** is the host: metadata plane, server, HTTP frontends (Pico protocol and Durable Streams), client, and the `pico` CLI. Host crates depend only on the `s3stream` facade crate, never on engine internals. The wire vocabulary (header constants, record envelope codec) lives in `picomq-protocol`, a small crate shared by the frontends and `picomq-client`, which keeps the client publishable as a standalone SDK with no server dependencies.
+- **`picomq/`** is the host: metadata plane, server, HTTP frontends (Pico protocol and Durable Streams), client, and the `pico` CLI. Host crates depend only on the `s3stream` facade crate, never on engine internals. The wire vocabulary (header constants, Pico record codec) lives in `picomq-protocol`, a small crate shared by the frontends and `picomq-client`, which keeps the client publishable as a standalone SDK with no server dependencies.
 
 Keeping that boundary intact is a review criterion. If a change in `picomq/*` needs something from inside the engine, the right move is to widen the facade.
 
@@ -63,6 +63,6 @@ AI-generated (or largely generated) pull requests are welcome, provided that you
 - Keep PR discussion human. Descriptions, comments, and review replies.
 - Have reviewed the diff yourself before opening the PR.
 
-For anything larger than a bug fix (a new protocol facade, a WAL backend, a metadata backend), [open an issue](https://github.com/picomq/picomq/issues) first so the design can be discussed before the code shows up.
+For anything larger than a bug fix (a new [protocol facade](/docs/extending), a WAL backend, a metadata backend), [open an issue](https://github.com/picomq/picomq/issues) first so the design can be discussed before the code shows up.
 
 By contributing, you agree your work is licensed under Apache 2.0.

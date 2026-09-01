@@ -25,6 +25,7 @@ pub struct Server {
     child: Child,
     pub base_url: String,
     pub admin_url: String,
+    pub kafka_addr: String,
 }
 
 impl Drop for Server {
@@ -41,6 +42,7 @@ pub fn start(dir: &std::path::Path, protocol: &str) -> Server {
 pub fn start_with(dir: &std::path::Path, protocol: &str, extra: &[&str]) -> Server {
     let http = free_port();
     let admin = free_port();
+    let kafka = free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_pico"))
         .args([
             "serve",
@@ -50,6 +52,8 @@ pub fn start_with(dir: &std::path::Path, protocol: &str, extra: &[&str]) -> Serv
             &format!("127.0.0.1:{http}"),
             "--admin-listen",
             &format!("127.0.0.1:{admin}"),
+            "--kafka-listen",
+            &format!("127.0.0.1:{kafka}"),
             "--meta-url",
             &format!("sqlite:{}", dir.join("meta.db").display()),
             "--storage",
@@ -70,6 +74,7 @@ pub fn start_with(dir: &std::path::Path, protocol: &str, extra: &[&str]) -> Serv
         child,
         base_url: format!("http://127.0.0.1:{http}"),
         admin_url: format!("http://127.0.0.1:{admin}"),
+        kafka_addr: format!("127.0.0.1:{kafka}"),
     }
 }
 

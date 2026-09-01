@@ -89,6 +89,12 @@ humantime = "2"
 rust-embed = "8"
 
 bytes = "1"
+# The storage record format is Kafka RecordBatch v2 for every stream, so the
+# codec sits under the service (pico-server), not only under the Kafka
+# listener. Compression features cover what Kafka producers send.
+kafka-protocol = { version = "0.18", default-features = false, features = ["broker", "client", "gzip", "zstd", "snappy", "lz4"] }
+# RecordBatch v2 checksums are CRC-32C (Castagnoli), unlike the WAL's CRC-32.
+crc32c = "0.6"
 # Latency percentiles for `pico bench`; Java's BenchStats reports averages only.
 hdrhistogram = "7"
 # Java's WALUtil.crc32 is java.util.zip.CRC32 = CRC-32/ISO-HDLC (proved by

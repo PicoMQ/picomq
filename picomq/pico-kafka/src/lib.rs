@@ -1,6 +1,5 @@
 //! Kafka wire-protocol frontend for PicoMQ.
 
-mod batch;
 mod broker;
 mod dispatch;
 mod error;
@@ -8,7 +7,6 @@ mod frame;
 mod group;
 mod handlers;
 mod listener;
-mod topic;
 mod versions;
 
 pub const PROTOCOL_NAME: &str = "kafka";
