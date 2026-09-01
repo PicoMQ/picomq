@@ -456,6 +456,25 @@ html {
   color: var(--vp-c-text-2);
 }
 
+.pico-hero-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.85rem 0 0;
+}
+
+.pico-hero-tags span {
+  display: inline-block;
+  padding: 0.18rem 0.5rem;
+  border: 1px solid var(--pico-hairline);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vp-c-text-2);
+}
+
 .VPHero .actions {
   padding-top: 2rem;
 }
