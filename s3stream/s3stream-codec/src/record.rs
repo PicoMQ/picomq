@@ -236,7 +236,7 @@ mod tests {
         );
     }
 
-    /// Golden vectors produced by the Java implementation.
+    /// Golden vectors
     /// Fixtures: conformance/fixtures/record/*.bin + manifest.json.
     #[test]
     fn golden_vectors_match_java() {

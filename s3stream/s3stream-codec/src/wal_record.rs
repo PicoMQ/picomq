@@ -216,7 +216,7 @@ mod tests {
         assert_eq!(decoded, record);
     }
 
-    /// Golden vectors: framed records produced by the Java implementation.
+    /// Golden vectors: framed records
     #[test]
     fn golden_vectors_match_java() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
