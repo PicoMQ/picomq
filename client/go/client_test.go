@@ -1,0 +1,77 @@
+package picomq
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+
+	"github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+var _ = ginkgo.Describe("Pico client", func() {
+	ginkgo.It("creates, appends, and reads with the Pico wire contract", func() {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch calls.Add(1) {
+			case 1:
+				Expect(r.Method).To(Equal(http.MethodPut))
+				Expect(r.URL.Path).To(Equal("/orders"))
+				w.WriteHeader(http.StatusCreated)
+			case 2:
+				Expect(r.Method).To(Equal(http.MethodPost))
+				Expect(r.Header.Get("Content-Type")).To(Equal("application/vnd.picomq.batch"))
+				w.Header().Set("Pico-Start-Seq", "0")
+				w.Header().Set("Pico-Next-Seq", "1")
+			case 3:
+				Expect(r.URL.Query().Get("format")).To(Equal("binary"))
+				Expect(r.URL.Query().Get("seq")).To(Equal("0"))
+				w.Header().Set("Pico-Next-Seq", "1")
+				w.Header().Set("Pico-Up-To-Date", "true")
+				w.Write([]byte{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 'x'})
+			}
+		}))
+		defer server.Close()
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+		created, err := client.Create(context.Background(), "/orders", "application/json", 0)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(created).To(BeTrue())
+		ack, err := client.Append(context.Background(), "/orders", []AppendRecord{{Body: []byte("x")}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ack.Next).To(Equal("1"))
+		page, err := client.Read(context.Background(), "/orders", "0", ReadOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(page.Records).To(HaveLen(1))
+		Expect(page.Records[0].Body).To(Equal([]byte("x")))
+	})
+
+	ginkgo.It("reattaches credentials across ownership redirects", func() {
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			Expect(r.Header.Get("Authorization")).To(Equal("Bearer secret"))
+			w.WriteHeader(http.StatusCreated)
+		}))
+		defer target.Close()
+		origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+		}))
+		defer origin.Close()
+		client, err := NewPico(origin.URL, WithToken("secret"))
+		Expect(err).NotTo(HaveOccurred())
+		created, err := client.Create(context.Background(), "redirected", "application/octet-stream", 0)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(created).To(BeTrue())
+	})
+
+	ginkgo.It("preserves context cancellation", func() {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+		defer server.Close()
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err = client.Head(ctx, "wait")
+		Expect(err).To(MatchError(context.Canceled))
+	})
+})

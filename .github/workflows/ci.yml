@@ -36,3 +36,29 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+  go-client:
+    name: go client
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/go
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: client/go/go.mod
+          cache-dependency-path: client/go/go.sum
+
+      - name: Format
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Race test
+        run: go test -race ./...
