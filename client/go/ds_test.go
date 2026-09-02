@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -43,5 +44,24 @@ var _ = ginkgo.Describe("Durable Streams client", func() {
 		var clientError *ClientError
 		Expect(errors.As(err, &clientError)).To(BeTrue())
 		Expect(clientError.Code).To(Equal("unsupported"))
+	})
+
+	ginkgo.It("rounds positive TTLs up to seconds", func() {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			Expect(r.Header.Get("Stream-TTL")).To(Equal("1"))
+			w.WriteHeader(http.StatusCreated)
+		}))
+		defer server.Close()
+		client, err := NewDurableStreams(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = client.Create(context.Background(), "events", "application/octet-stream", time.Nanosecond)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	ginkgo.It("rejects record keys as unsupported", func() {
+		client, err := NewDurableStreams("http://127.0.0.1:4437")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = client.Append(context.Background(), "events", []AppendRecord{{Key: []byte("key"), Body: []byte("value")}})
+		Expect(IsKind(err, ErrorUnsupported)).To(BeTrue())
 	})
 })

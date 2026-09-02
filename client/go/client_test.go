@@ -1,10 +1,13 @@
 package picomq
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
+	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,7 +32,16 @@ var _ = ginkgo.Describe("Pico client", func() {
 				Expect(r.URL.Query().Get("seq")).To(Equal("0"))
 				w.Header().Set("Pico-Next-Seq", "1")
 				w.Header().Set("Pico-Up-To-Date", "true")
-				w.Write([]byte{1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 'x'})
+				var payload bytes.Buffer
+				payload.WriteByte(1)
+				_ = binary.Write(&payload, binary.BigEndian, uint32(1))
+				_ = binary.Write(&payload, binary.BigEndian, uint64(0))
+				_ = binary.Write(&payload, binary.BigEndian, int64(0))
+				_ = binary.Write(&payload, binary.BigEndian, int32(-1))
+				_ = binary.Write(&payload, binary.BigEndian, uint32(0))
+				_ = binary.Write(&payload, binary.BigEndian, uint32(1))
+				payload.WriteByte('x')
+				_, _ = w.Write(payload.Bytes())
 			}
 		}))
 		defer server.Close()
@@ -45,6 +57,29 @@ var _ = ginkgo.Describe("Pico client", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(page.Records).To(HaveLen(1))
 		Expect(page.Records[0].Body).To(Equal([]byte("x")))
+	})
+
+	ginkgo.It("authenticates requests without explicit headers", func() {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			Expect(r.Header.Get("Authorization")).To(Equal("Bearer secret"))
+		}))
+		defer server.Close()
+		client, err := NewPico(server.URL, WithToken("secret"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = client.Head(context.Background(), "orders")
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	ginkgo.It("rounds positive TTLs up to seconds", func() {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			Expect(r.Header.Get("Pico-TTL")).To(Equal("2"))
+			w.WriteHeader(http.StatusCreated)
+		}))
+		defer server.Close()
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = client.Create(context.Background(), "orders", "application/octet-stream", time.Second+time.Nanosecond)
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	ginkgo.It("reattaches credentials across ownership redirects", func() {

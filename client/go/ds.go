@@ -17,7 +17,7 @@ func (c *DurableStreamsClient) Create(ctx context.Context, name, contentType str
 		h := make(http.Header)
 		h.Set("Content-Type", contentType)
 		if ttl > 0 {
-			h.Set("Stream-TTL", strconv.FormatInt(int64(ttl/time.Second), 10))
+			h.Set("Stream-TTL", strconv.FormatInt(durationSecondsCeil(ttl), 10))
 		}
 		response, e := c.core.send(ctx, wireRequest{method: http.MethodPut, url: c.core.streamURL(name, nil), headers: h})
 		if e != nil {
@@ -56,6 +56,9 @@ func (c *DurableStreamsClient) Append(ctx context.Context, name string, records 
 	}
 	if len(records[0].Headers) > 0 {
 		return AppendAck{}, unsupported("the Durable Streams protocol does not support record headers")
+	}
+	if records[0].Key != nil {
+		return AppendAck{}, unsupported("the Durable Streams protocol does not support record keys")
 	}
 	h := make(http.Header)
 	contentType := records[0].ContentType

@@ -162,7 +162,11 @@ func (c *coreClient) send(ctx context.Context, request wireRequest) (*http.Respo
 		if err != nil {
 			return nil, err
 		}
-		req.Header = request.headers.Clone()
+		if request.headers == nil {
+			req.Header = make(http.Header)
+		} else {
+			req.Header = request.headers.Clone()
+		}
 		if c.token != "" && req.Header.Get("Authorization") == "" {
 			req.Header.Set("Authorization", "Bearer "+c.token)
 		}
@@ -355,7 +359,14 @@ func cloneRecords(records []AppendRecord) []AppendRecord {
 				headers[name] = value
 			}
 		}
-		out[i] = AppendRecord{Body: append([]byte(nil), record.Body...), Headers: headers, Timestamp: record.Timestamp, ContentType: record.ContentType}
+		out[i] = AppendRecord{Body: append([]byte(nil), record.Body...), Key: cloneBytes(record.Key), Headers: headers, Timestamp: record.Timestamp, ContentType: record.ContentType}
 	}
 	return out
+}
+
+func cloneBytes(value []byte) []byte {
+	if value == nil {
+		return nil
+	}
+	return append([]byte(nil), value...)
 }

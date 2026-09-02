@@ -16,7 +16,7 @@ func (c *PicoClient) Create(ctx context.Context, name, contentType string, ttl t
 		headers := make(http.Header)
 		headers.Set("Content-Type", contentType)
 		if ttl > 0 {
-			headers.Set("Pico-TTL", strconv.FormatInt(int64(ttl/time.Second), 10))
+			headers.Set("Pico-TTL", strconv.FormatInt(durationSecondsCeil(ttl), 10))
 		}
 		response, callErr := c.core.send(ctx, wireRequest{method: http.MethodPut, url: c.core.streamURL(name, nil), headers: headers})
 		if callErr != nil {

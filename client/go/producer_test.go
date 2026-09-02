@@ -65,17 +65,32 @@ var _ = ginkgo.Describe("Pico producer", func() {
 		producer := client.Stream("orders").NewProducer("writer-1", &config)
 
 		body := []byte("original-body")
+		key := []byte("original-key")
 		headers := map[string]string{"source": "original"}
-		pending, err := producer.Send(context.Background(), AppendRecord{Body: body, Headers: headers})
+		pending, err := producer.Send(context.Background(), AppendRecord{Body: body, Key: key, Headers: headers})
 		Expect(err).NotTo(HaveOccurred())
 		copy(body, []byte("mutated-body!"))
+		copy(key, []byte("mutated-key!"))
 		headers["source"] = "mutated"
 		headers["added"] = "later"
 
 		_, err = pending.Await(context.Background())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(<-received).To(Equal(AppendRecord{Body: []byte("original-body"), Headers: map[string]string{"source": "original"}}))
+		Expect(<-received).To(Equal(AppendRecord{Body: []byte("original-body"), Key: []byte("original-key"), Headers: map[string]string{"source": "original"}}))
 		Expect(producer.Close(context.Background())).To(Succeed())
+	})
+
+	ginkgo.It("allows Await to be retried after its context is canceled", func() {
+		result := make(chan pendingResult, 1)
+		pending := &Pending{result: result}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := pending.Await(ctx)
+		Expect(err).To(MatchError(context.Canceled))
+		result <- pendingResult{seq: 12}
+		seq, err := pending.Await(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(seq).To(Equal(uint64(12)))
 	})
 })
 
@@ -90,6 +105,10 @@ func decodeAppendBatchForTest(data []byte) ([]AppendRecord, error) {
 	}
 	records := make([]AppendRecord, 0, count)
 	for i := uint32(0); i < count; i++ {
+		key, err := readKey(r)
+		if err != nil {
+			return nil, err
+		}
 		headers, err := readHeaders(r)
 		if err != nil {
 			return nil, err
@@ -98,7 +117,7 @@ func decodeAppendBatchForTest(data []byte) ([]AppendRecord, error) {
 		if err != nil {
 			return nil, err
 		}
-		records = append(records, AppendRecord{Body: value, Headers: headers})
+		records = append(records, AppendRecord{Body: value, Key: key, Headers: headers})
 	}
 	return records, nil
 }

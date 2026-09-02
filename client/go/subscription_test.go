@@ -2,6 +2,7 @@ package picomq
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ var _ = ginkgo.Describe("SSE subscriptions", func() {
 				return
 			}
 			Expect(r.Header.Get("Last-Event-ID")).To(Equal("event-1"))
+			Expect(r.URL.Query().Has("seq")).To(BeFalse())
 			_, _ = io.WriteString(w, "event: control\ndata: {\"next_seq\":1,\"up_to_date\":true,\"closed\":true}\n\n")
 		}))
 		defer server.Close()
@@ -46,6 +48,38 @@ var _ = ginkgo.Describe("SSE subscriptions", func() {
 		Expect(event.Closed).To(BeTrue())
 		_, err = subscription.Next()
 		Expect(err).To(MatchError(io.EOF))
+	})
+
+	ginkgo.It("decodes text and binary Pico keys", func() {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "event: data\ndata: [{\"seq\":0,\"key\":\"text\",\"headers\":{},\"body\":\"a\"},{\"seq\":1,\"key_b64\":\"AP8=\",\"headers\":{},\"body\":\"b\"}]\n\n")
+		}))
+		defer server.Close()
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+		subscription := client.Subscribe(context.Background(), "events", "0", SubscribeOptions{DisableReconnect: true})
+		ginkgo.DeferCleanup(subscription.Close)
+		event, err := subscription.Next()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(event.Records[0].Key).To(Equal([]byte("text")))
+		Expect(event.Records[1].Key).To(Equal([]byte{0, 255}))
+	})
+
+	ginkgo.It("limits aggregate multiline event data", func() {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: 12345\ndata: 67890\n\n")
+		}))
+		defer server.Close()
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+		subscription := client.Subscribe(context.Background(), "events", "0", SubscribeOptions{DisableReconnect: true, MaxEventBytes: 10})
+		ginkgo.DeferCleanup(subscription.Close)
+		_, err = subscription.Next()
+		var clientErr *ClientError
+		Expect(errors.As(err, &clientErr)).To(BeTrue())
+		Expect(clientErr.Code).To(Equal("sse_event_too_large"))
 	})
 
 	ginkgo.It("can disable reconnects", func() {

@@ -112,6 +112,7 @@ type rawEvent struct{ kind, id, data string }
 func (s *Subscription) readEvent() (rawEvent, bool, error) {
 	var event rawEvent
 	var data []string
+	dataBytes := 0
 	for s.scanner.Scan() {
 		line := s.scanner.Text()
 		if line == "" {
@@ -140,6 +141,13 @@ func (s *Subscription) readEvent() (rawEvent, bool, error) {
 				event.id = value
 			}
 		case "data":
+			if len(data) > 0 {
+				dataBytes++
+			}
+			dataBytes += len(value)
+			if dataBytes > s.options.MaxEventBytes {
+				return rawEvent{}, false, &ClientError{Kind: ErrorOther, Code: "sse_event_too_large", Message: "SSE event exceeds MaxEventBytes"}
+			}
 			data = append(data, value)
 		}
 	}
@@ -154,9 +162,9 @@ func (s *Subscription) readEvent() (rawEvent, bool, error) {
 
 func (s *Subscription) open() error {
 	query := url.Values{"live": {"sse"}}
-	if s.protocol == ProtocolPico {
+	if s.protocol == ProtocolPico && s.lastEventID == "" {
 		query.Set("seq", s.offset)
-	} else {
+	} else if s.protocol == ProtocolDS {
 		query.Set("offset", s.offset)
 	}
 	headers := make(http.Header)
@@ -227,6 +235,8 @@ func (s *Subscription) decode(raw rawEvent) (Event, error) {
 		var rows []struct {
 			Seq       json.Number       `json:"seq"`
 			Timestamp int64             `json:"timestamp"`
+			Key       *string           `json:"key"`
+			Key64     *string           `json:"key_b64"`
 			Headers   map[string]string `json:"headers"`
 			Body      string            `json:"body"`
 			Body64    string            `json:"body_b64"`
@@ -245,7 +255,17 @@ func (s *Subscription) decode(raw rawEvent) (Event, error) {
 				}
 				value = decoded
 			}
-			event.Records = append(event.Records, Record{Position: row.Seq.String(), Timestamp: row.Timestamp, Headers: row.Headers, Body: value})
+			var key []byte
+			if row.Key64 != nil {
+				decodedKey, decodeErr := base64.StdEncoding.DecodeString(*row.Key64)
+				if decodeErr != nil {
+					return Event{}, invalidResponse(decodeErr)
+				}
+				key = decodedKey
+			} else if row.Key != nil {
+				key = []byte(*row.Key)
+			}
+			event.Records = append(event.Records, Record{Position: row.Seq.String(), Timestamp: row.Timestamp, Key: key, Headers: row.Headers, Body: value})
 		}
 	} else {
 		value := []byte(raw.data)

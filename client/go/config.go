@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+func durationSecondsCeil(value time.Duration) int64 {
+	return int64((value-1)/time.Second) + 1
+}
+
 type RetryPolicy struct {
 	MaxAttempts    int
 	InitialBackoff time.Duration

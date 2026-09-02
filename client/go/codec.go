@@ -11,6 +11,11 @@ import (
 
 const batchVersion byte = 1
 
+const (
+	maxDecodedRecords uint32 = 4096
+	maxDecodedHeaders uint32 = 1024
+)
+
 func encodeBatch(records []AppendRecord) ([]byte, error) {
 	var out bytes.Buffer
 	out.WriteByte(batchVersion)
@@ -18,6 +23,21 @@ func encodeBatch(records []AppendRecord) ([]byte, error) {
 		return nil, err
 	}
 	for _, record := range records {
+		if record.Key == nil {
+			if err := binary.Write(&out, binary.BigEndian, int32(-1)); err != nil {
+				return nil, err
+			}
+		} else {
+			if uint64(len(record.Key)) > uint64(^uint32(0)>>1) {
+				return nil, fmt.Errorf("record key is too large")
+			}
+			if err := binary.Write(&out, binary.BigEndian, int32(len(record.Key))); err != nil {
+				return nil, err
+			}
+			if _, err := out.Write(record.Key); err != nil {
+				return nil, err
+			}
+		}
 		keys := make([]string, 0, len(record.Headers))
 		for key := range record.Headers {
 			keys = append(keys, key)
@@ -58,13 +78,17 @@ func decodeBatch(data []byte) ([]Record, error) {
 	if err != nil {
 		return nil, fmt.Errorf("truncated batch: %w", err)
 	}
-	records := make([]Record, 0, count)
+	records := make([]Record, 0, minU32(count, maxDecodedRecords))
 	for i := uint32(0); i < count; i++ {
 		seq, err := readU64(r)
 		if err != nil {
 			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
 		timestamp, err := readI64(r)
+		if err != nil {
+			return nil, fmt.Errorf("record %d: %w", i, err)
+		}
+		key, err := readKey(r)
 		if err != nil {
 			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
@@ -76,7 +100,7 @@ func decodeBatch(data []byte) ([]Record, error) {
 		if err != nil {
 			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
-		records = append(records, Record{Position: fmt.Sprint(seq), Timestamp: timestamp, Headers: headers, Body: body})
+		records = append(records, Record{Position: fmt.Sprint(seq), Timestamp: timestamp, Key: key, Headers: headers, Body: body})
 	}
 	if r.Len() != 0 {
 		return nil, fmt.Errorf("batch has %d trailing bytes", r.Len())
@@ -110,6 +134,26 @@ func readI64(r io.Reader) (int64, error) {
 	err := binary.Read(r, binary.BigEndian, &v)
 	return v, err
 }
+func readI32(r io.Reader) (int32, error) {
+	var v int32
+	err := binary.Read(r, binary.BigEndian, &v)
+	return v, err
+}
+func readKey(r *bytes.Reader) ([]byte, error) {
+	n, err := readI32(r)
+	if err != nil {
+		return nil, err
+	}
+	if n < 0 {
+		return nil, nil
+	}
+	if int64(n) > int64(r.Len()) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	data := make([]byte, int(n))
+	_, err = io.ReadFull(r, data)
+	return data, err
+}
 func readBytes(r *bytes.Reader) ([]byte, error) {
 	n, err := readU32(r)
 	if err != nil {
@@ -127,7 +171,7 @@ func readHeaders(r *bytes.Reader) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	headers := make(map[string]string, n)
+	headers := make(map[string]string, minU32(n, maxDecodedHeaders))
 	for i := uint32(0); i < n; i++ {
 		key, err := readBytes(r)
 		if err != nil {
@@ -143,4 +187,11 @@ func readHeaders(r *bytes.Reader) (map[string]string, error) {
 		headers[string(key)] = string(value)
 	}
 	return headers, nil
+}
+
+func minU32(value, limit uint32) uint32 {
+	if value < limit {
+		return value
+	}
+	return limit
 }

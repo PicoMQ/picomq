@@ -35,17 +35,23 @@ type Pending struct {
 	result <-chan pendingResult
 	once   sync.Once
 	value  pendingResult
+	done   chan struct{}
 }
 
 func (p *Pending) Await(ctx context.Context) (uint64, error) {
 	p.once.Do(func() {
-		select {
-		case p.value = <-p.result:
-		case <-ctx.Done():
-			p.value = pendingResult{err: ctx.Err()}
-		}
+		p.done = make(chan struct{})
+		go func() {
+			p.value = <-p.result
+			close(p.done)
+		}()
 	})
-	return p.value.seq, p.value.err
+	select {
+	case <-p.done:
+		return p.value.seq, p.value.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
 }
 
 type Producer struct {
