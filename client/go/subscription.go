@@ -155,6 +155,9 @@ func (s *Subscription) readEvent() (rawEvent, bool, error) {
 		if s.ctx.Err() != nil {
 			return rawEvent{}, false, s.ctx.Err()
 		}
+		if errors.Is(err, bufio.ErrTooLong) {
+			return rawEvent{}, false, &ClientError{Kind: ErrorOther, Code: "sse_event_too_large", Message: "SSE event exceeds MaxEventBytes", Cause: err}
+		}
 		return rawEvent{}, false, &ClientError{Kind: ErrorTransport, Code: "sse_read", Message: err.Error(), Cause: err}
 	}
 	return rawEvent{}, false, nil

@@ -38,7 +38,7 @@ func main() {
 }
 ```
 
-All network operations accept `context.Context`. Positions are opaque strings; continue reads using the `Next` value returned by the server.
+All network operations accept `context.Context`. Positions are opaque strings. Continue reads using the `Next` value returned by the server.
 
 `Connect` returns the union `Client` interface for applications that select a protocol dynamically. Unsupported protocol operations return a structured `ClientError` with kind `ErrorUnsupported`.
 

@@ -12,8 +12,8 @@ import (
 const batchVersion byte = 1
 
 const (
-	maxDecodedRecords uint32 = 4096
-	maxDecodedHeaders uint32 = 1024
+	minRecordBytes = 8 + 8 + 4 + 4 + 4
+	minHeaderBytes = 4 + 4
 )
 
 func encodeBatch(records []AppendRecord) ([]byte, error) {
@@ -78,7 +78,10 @@ func decodeBatch(data []byte) ([]Record, error) {
 	if err != nil {
 		return nil, fmt.Errorf("truncated batch: %w", err)
 	}
-	records := make([]Record, 0, minU32(count, maxDecodedRecords))
+	if uint64(count)*minRecordBytes > uint64(r.Len()) {
+		return nil, fmt.Errorf("truncated batch: %d records cannot fit in %d bytes", count, r.Len())
+	}
+	records := make([]Record, 0, count)
 	for i := uint32(0); i < count; i++ {
 		seq, err := readU64(r)
 		if err != nil {
@@ -171,7 +174,10 @@ func readHeaders(r *bytes.Reader) (map[string][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	headers := make(map[string][]byte, minU32(n, maxDecodedHeaders))
+	if uint64(n)*minHeaderBytes > uint64(r.Len()) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	headers := make(map[string][]byte, n)
 	for i := uint32(0); i < n; i++ {
 		key, err := readBytes(r)
 		if err != nil {
@@ -187,11 +193,4 @@ func readHeaders(r *bytes.Reader) (map[string][]byte, error) {
 		headers[string(key)] = value
 	}
 	return headers, nil
-}
-
-func minU32(value, limit uint32) uint32 {
-	if value < limit {
-		return value
-	}
-	return limit
 }
