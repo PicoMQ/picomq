@@ -10,7 +10,7 @@ import (
 
 var _ = ginkgo.Describe("Pico batch codec", func() {
 	ginkgo.It("encodes append records deterministically", func() {
-		encoded, err := encodeBatch([]AppendRecord{{Body: []byte("body"), Key: []byte("key"), Headers: map[string]string{"z": "last", "a": "first"}}})
+		encoded, err := encodeBatch([]AppendRecord{{Body: []byte("body"), Key: []byte("key"), Headers: map[string][]byte{"z": []byte("last"), "a": []byte("first")}}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(encoded[0]).To(Equal(byte(1)))
 		Expect(binary.BigEndian.Uint32(encoded[1:5])).To(Equal(uint32(1)))
@@ -29,12 +29,12 @@ var _ = ginkgo.Describe("Pico batch codec", func() {
 		payload.WriteString("key")
 		Expect(binary.Write(&payload, binary.BigEndian, uint32(1))).To(Succeed())
 		Expect(writeBytes(&payload, []byte("kind"))).To(Succeed())
-		Expect(writeBytes(&payload, []byte("test"))).To(Succeed())
+		Expect(writeBytes(&payload, []byte{0xff, 0x00})).To(Succeed())
 		Expect(writeBytes(&payload, []byte("value"))).To(Succeed())
 
 		records, err := decodeBatch(payload.Bytes())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(records).To(Equal([]Record{{Position: "42", Timestamp: 99, Key: []byte("key"), Headers: map[string]string{"kind": "test"}, Body: []byte("value")}}))
+		Expect(records).To(Equal([]Record{{Position: "42", Timestamp: 99, Key: []byte("key"), Headers: map[string][]byte{"kind": []byte{0xff, 0x00}}, Body: []byte("value")}}))
 	})
 
 	ginkgo.It("encodes nil keys with the no-key sentinel", func() {

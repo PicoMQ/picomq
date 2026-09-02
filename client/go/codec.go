@@ -48,13 +48,13 @@ func encodeBatch(records []AppendRecord) ([]byte, error) {
 		}
 		for _, key := range keys {
 			value := record.Headers[key]
-			if !utf8.ValidString(key) || !utf8.ValidString(value) {
-				return nil, fmt.Errorf("record headers must be valid UTF-8")
+			if !utf8.ValidString(key) {
+				return nil, fmt.Errorf("record header names must be valid UTF-8")
 			}
 			if err := writeBytes(&out, []byte(key)); err != nil {
 				return nil, err
 			}
-			if err := writeBytes(&out, []byte(value)); err != nil {
+			if err := writeBytes(&out, value); err != nil {
 				return nil, err
 			}
 		}
@@ -166,12 +166,12 @@ func readBytes(r *bytes.Reader) ([]byte, error) {
 	_, err = io.ReadFull(r, data)
 	return data, err
 }
-func readHeaders(r *bytes.Reader) (map[string]string, error) {
+func readHeaders(r *bytes.Reader) (map[string][]byte, error) {
 	n, err := readU32(r)
 	if err != nil {
 		return nil, err
 	}
-	headers := make(map[string]string, minU32(n, maxDecodedHeaders))
+	headers := make(map[string][]byte, minU32(n, maxDecodedHeaders))
 	for i := uint32(0); i < n; i++ {
 		key, err := readBytes(r)
 		if err != nil {
@@ -181,10 +181,10 @@ func readHeaders(r *bytes.Reader) (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !utf8.Valid(key) || !utf8.Valid(value) {
-			return nil, fmt.Errorf("invalid UTF-8 in headers")
+		if !utf8.Valid(key) {
+			return nil, fmt.Errorf("invalid UTF-8 in header name")
 		}
-		headers[string(key)] = string(value)
+		headers[string(key)] = value
 	}
 	return headers, nil
 }

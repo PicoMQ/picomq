@@ -103,6 +103,9 @@ func newCore(protocol Protocol, endpoint string, options ...Option) (*coreClient
 	if cfg.h2c && cfg.httpClient != nil {
 		return nil, errors.New("picomq: WithH2C cannot be combined with WithHTTPClient")
 	}
+	if cfg.h2c && base.Scheme != "http" {
+		return nil, errors.New("picomq: WithH2C requires an http endpoint")
+	}
 	if cfg.httpClient == nil {
 		if cfg.h2c {
 			cfg.httpClient = &http.Client{Transport: &http2.Transport{AllowHTTP: true, DialTLSContext: func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
@@ -199,6 +202,9 @@ func (c *coreClient) send(ctx context.Context, request wireRequest) (*http.Respo
 		next = base.ResolveReference(next)
 		if next.Scheme != "http" && next.Scheme != "https" {
 			return nil, &ClientError{Kind: ErrorInvalidResponse, Code: "unsafe_redirect", Message: "ownership redirect uses an unsupported scheme"}
+		}
+		if base.Scheme == "https" && next.Scheme == "http" {
+			return nil, &ClientError{Kind: ErrorInvalidResponse, Code: "unsafe_redirect", Message: "ownership redirect cannot downgrade from HTTPS to HTTP"}
 		}
 		current = next.String()
 	}
@@ -352,11 +358,11 @@ func expectDS(response *http.Response, expected ...int) ([]byte, error) {
 func cloneRecords(records []AppendRecord) []AppendRecord {
 	out := make([]AppendRecord, len(records))
 	for i, record := range records {
-		var headers map[string]string
+		var headers map[string][]byte
 		if record.Headers != nil {
-			headers = make(map[string]string, len(record.Headers))
+			headers = make(map[string][]byte, len(record.Headers))
 			for name, value := range record.Headers {
-				headers[name] = value
+				headers[name] = cloneBytes(value)
 			}
 		}
 		out[i] = AppendRecord{Body: append([]byte(nil), record.Body...), Key: cloneBytes(record.Key), Headers: headers, Timestamp: record.Timestamp, ContentType: record.ContentType}

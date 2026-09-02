@@ -2,6 +2,7 @@ package picomq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -93,9 +94,12 @@ func (s *PicoStream) NewProducer(id string, config *ProducerConfig) *Producer {
 }
 
 func (p *Producer) Send(ctx context.Context, record AppendRecord) (*Pending, error) {
-	size := len(record.Body)
+	size := recordBytes(record)
 	if size > p.config.MaxBufferedBytes {
 		return nil, &ClientError{Kind: ErrorBadRequest, Code: "record_too_large", Message: fmt.Sprintf("record of %d bytes exceeds producer budget of %d bytes", size, p.config.MaxBufferedBytes)}
+	}
+	if size > p.config.MaxBatchBytes {
+		return nil, &ClientError{Kind: ErrorBadRequest, Code: "record_too_large", Message: fmt.Sprintf("record of %d bytes exceeds batch limit of %d bytes", size, p.config.MaxBatchBytes)}
 	}
 	p.mu.Lock()
 	if p.closed {
@@ -191,22 +195,31 @@ func (p *Producer) Close(ctx context.Context) error {
 func (p *Producer) run() {
 	defer close(p.done)
 	var seq uint64
+	var carried *producerItem
 	for {
 		var first *producerItem
-		select {
-		case first = <-p.queue:
-		case <-p.closeReq:
-			return
+		if carried != nil {
+			first, carried = carried, nil
+		} else {
+			select {
+			case first = <-p.queue:
+			case <-p.closeReq:
+				return
+			}
 		}
 		batch := []*producerItem{first}
-		bytes := len(first.record.Body)
+		bytes := first.size
 		deadline := time.NewTimer(p.config.Linger)
 	collect:
 		for len(batch) < p.config.MaxBatchRecords && bytes < p.config.MaxBatchBytes {
 			select {
 			case item := <-p.queue:
+				if bytes+item.size > p.config.MaxBatchBytes {
+					carried = item
+					break collect
+				}
 				batch = append(batch, item)
-				bytes += len(item.record.Body)
+				bytes += item.size
 			case <-p.closeReq:
 				break collect
 			case <-deadline.C:
@@ -240,26 +253,37 @@ func (p *Producer) sendBatch(records []AppendRecord, seq uint64) (uint64, error)
 	for attempt := 0; ; attempt++ {
 		ack, err := p.client.AppendAs(context.Background(), p.name, records, ProducerRef{ID: p.id, Epoch: p.config.Epoch, Seq: seq})
 		if err == nil {
-			position := ack.Ack.Start
 			if ack.Duplicate {
-				next, nerr := strconv.ParseUint(ack.Ack.Next, 10, 64)
-				if nerr != nil || next < uint64(len(records)) {
-					return 0, invalidResponse(fmt.Errorf("invalid duplicate next position %q", ack.Ack.Next))
-				}
-				return next - uint64(len(records)), nil
+				return 0, &ClientError{Kind: ErrorInvalidResponse, Code: "duplicate_position_unknown", Message: "producer retry was accepted as a duplicate, but the server did not return the original record position"}
 			}
-			start, nerr := strconv.ParseUint(position, 10, 64)
+			start, nerr := strconv.ParseUint(ack.Ack.Start, 10, 64)
 			if nerr != nil {
 				return 0, invalidResponse(nerr)
 			}
 			return start, nil
 		}
 		delay, again := p.config.Retry.delay(attempt)
-		if !again || !retryable(err) {
+		if !again || !producerRetryable(err) {
 			return 0, err
 		}
 		time.Sleep(delay)
 	}
+}
+
+func producerRetryable(err error) bool {
+	var clientErr *ClientError
+	return (errors.As(err, &clientErr) && clientErr.Code == "sequence_gap") || retryable(err)
+}
+
+func recordBytes(record AppendRecord) int {
+	size := len(record.Body) + len(record.Key)
+	for name, value := range record.Headers {
+		size += len(name) + len(value)
+	}
+	if size < 1 {
+		return 1
+	}
+	return size
 }
 func (p *Producer) fail(batch []*producerItem, err error) {
 	p.mu.Lock()

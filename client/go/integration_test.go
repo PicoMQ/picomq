@@ -27,7 +27,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		created, err := stream.Create(context.Background(), "application/octet-stream", 0)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(created).To(BeTrue())
-		ack, err := stream.Append(context.Background(), AppendRecord{Body: []byte("hello"), Headers: map[string]string{"source": "go"}})
+		ack, err := stream.Append(context.Background(), AppendRecord{Body: []byte("hello"), Headers: map[string][]byte{"source": []byte("go")}})
 		Expect(err).NotTo(HaveOccurred())
 		page, err := stream.Read(context.Background(), client.Beginning(), ReadOptions{})
 		Expect(err).NotTo(HaveOccurred())

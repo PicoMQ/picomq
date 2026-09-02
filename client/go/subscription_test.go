@@ -1,11 +1,13 @@
 package picomq
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -38,7 +40,7 @@ var _ = ginkgo.Describe("SSE subscriptions", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(event.Type).To(Equal(EventData))
 		Expect(event.ID).To(Equal("event-1"))
-		Expect(event.Records).To(ConsistOf(Record{Position: "0", Timestamp: 7, Headers: map[string]string{}, Body: []byte("hello")}))
+		Expect(event.Records).To(ConsistOf(Record{Position: "0", Timestamp: 7, Headers: map[string][]byte{}, Body: []byte("hello")}))
 
 		event, err = subscription.Next()
 		Expect(err).NotTo(HaveOccurred())
@@ -53,7 +55,7 @@ var _ = ginkgo.Describe("SSE subscriptions", func() {
 	ginkgo.It("decodes text and binary Pico keys", func() {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(w, "event: data\ndata: [{\"seq\":0,\"key\":\"text\",\"headers\":{},\"body\":\"a\"},{\"seq\":1,\"key_b64\":\"AP8=\",\"headers\":{},\"body\":\"b\"}]\n\n")
+			_, _ = io.WriteString(w, "event: data\ndata: [{\"seq\":0,\"key\":\"text\",\"headers\":{\"text\":\"ok\"},\"headers_b64\":{\"binary\":\"/wA=\"},\"body\":\"a\"},{\"seq\":1,\"key_b64\":\"AP8=\",\"headers\":{},\"body\":\"b\"}]\n\n")
 		}))
 		defer server.Close()
 		client, err := NewPico(server.URL)
@@ -63,7 +65,29 @@ var _ = ginkgo.Describe("SSE subscriptions", func() {
 		event, err := subscription.Next()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(event.Records[0].Key).To(Equal([]byte("text")))
+		Expect(event.Records[0].Headers).To(Equal(map[string][]byte{"text": []byte("ok"), "binary": []byte{0xff, 0x00}}))
 		Expect(event.Records[1].Key).To(Equal([]byte{0, 255}))
+	})
+
+	ginkgo.It("allows SSE framing in addition to the data limit", func() {
+		payload := strings.Repeat("x", 10)
+		subscription := &Subscription{options: SubscribeOptions{MaxEventBytes: len(payload)}}
+		subscription.scanner = bufio.NewScanner(strings.NewReader("data: " + payload + "\n\n"))
+		subscription.scanner.Buffer(make([]byte, 1), scannerLimit(len(payload)))
+		event, found, err := subscription.readEvent()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(event.data).To(Equal(payload))
+	})
+
+	ginkgo.It("caps the initial reconnect delay", func() {
+		client, err := NewPico("http://127.0.0.1:4437")
+		Expect(err).NotTo(HaveOccurred())
+		subscription := newSubscription(context.Background(), client.core, "events", "0", SubscribeOptions{ReconnectDelay: time.Second, MaxReconnectDelay: time.Millisecond})
+		started := time.Now()
+		Expect(subscription.recover(errors.New("dropped"))).To(Succeed())
+		Expect(time.Since(started)).To(BeNumerically("<", 100*time.Millisecond))
+		Expect(subscription.Close()).To(Succeed())
 	})
 
 	ginkgo.It("limits aggregate multiline event data", func() {

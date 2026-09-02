@@ -94,7 +94,7 @@ func (c *DurableStreamsClient) Read(ctx context.Context, name, from string, opti
 		next := defaultString(response.Header.Get("Stream-Next-Offset"), from)
 		page = ReadPage{Next: next, UpToDate: headerBool(response.Header, "Stream-Up-To-Date") || response.StatusCode == http.StatusNoContent, Closed: headerBool(response.Header, "Stream-Closed")}
 		if len(data) > 0 {
-			page.Records = []Record{{Position: next, Headers: map[string]string{}, Body: data}}
+			page.Records = []Record{{Position: next, Headers: map[string][]byte{}, Body: data}}
 		}
 		return nil
 	})

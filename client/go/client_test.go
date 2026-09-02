@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -108,5 +109,29 @@ var _ = ginkgo.Describe("Pico client", func() {
 		cancel()
 		_, err = client.Head(ctx, "wait")
 		Expect(err).To(MatchError(context.Canceled))
+	})
+
+	ginkgo.It("rejects H2C for HTTPS endpoints", func() {
+		_, err := NewPico("https://example.com", WithH2C())
+		Expect(err).To(MatchError("picomq: WithH2C requires an http endpoint"))
+	})
+
+	ginkgo.It("rejects HTTPS to HTTP ownership redirects", func() {
+		var targetCalls atomic.Int32
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			targetCalls.Add(1)
+		}))
+		defer target.Close()
+		origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+		}))
+		defer origin.Close()
+		client, err := NewPico(origin.URL, WithHTTPClient(origin.Client()), WithToken("secret"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = client.Create(context.Background(), "orders", "application/octet-stream", 0)
+		var clientErr *ClientError
+		Expect(errors.As(err, &clientErr)).To(BeTrue())
+		Expect(clientErr.Code).To(Equal("unsafe_redirect"))
+		Expect(targetCalls.Load()).To(BeZero())
 	})
 })

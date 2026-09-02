@@ -29,7 +29,7 @@ type StreamInfo struct {
 type AppendRecord struct {
 	Body        []byte
 	Key         []byte
-	Headers     map[string]string
+	Headers     map[string][]byte
 	Timestamp   int64
 	ContentType string
 }
@@ -38,7 +38,7 @@ type Record struct {
 	Position  string
 	Timestamp int64
 	Key       []byte
-	Headers   map[string]string
+	Headers   map[string][]byte
 	Body      []byte
 }
 

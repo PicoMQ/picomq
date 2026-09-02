@@ -193,7 +193,7 @@ func (s *Subscription) open() error {
 	s.response = response
 	s.encoding = response.Header.Get("Stream-SSE-Data-Encoding")
 	s.scanner = bufio.NewScanner(response.Body)
-	s.scanner.Buffer(make([]byte, 4096), s.options.MaxEventBytes)
+	s.scanner.Buffer(make([]byte, 4096), scannerLimit(s.options.MaxEventBytes))
 	s.mu.Unlock()
 	return nil
 }
@@ -233,13 +233,14 @@ func (s *Subscription) decode(raw rawEvent) (Event, error) {
 	event.Type = EventData
 	if s.protocol == ProtocolPico {
 		var rows []struct {
-			Seq       json.Number       `json:"seq"`
-			Timestamp int64             `json:"timestamp"`
-			Key       *string           `json:"key"`
-			Key64     *string           `json:"key_b64"`
-			Headers   map[string]string `json:"headers"`
-			Body      string            `json:"body"`
-			Body64    string            `json:"body_b64"`
+			Seq           json.Number       `json:"seq"`
+			Timestamp     int64             `json:"timestamp"`
+			Key           *string           `json:"key"`
+			KeyBase64     *string           `json:"key_b64"`
+			Headers       map[string]string `json:"headers"`
+			HeadersBase64 map[string]string `json:"headers_b64"`
+			Body          string            `json:"body"`
+			Body64        string            `json:"body_b64"`
 		}
 		decoder := json.NewDecoder(strings.NewReader(raw.data))
 		decoder.UseNumber()
@@ -256,8 +257,8 @@ func (s *Subscription) decode(raw rawEvent) (Event, error) {
 				value = decoded
 			}
 			var key []byte
-			if row.Key64 != nil {
-				decodedKey, decodeErr := base64.StdEncoding.DecodeString(*row.Key64)
+			if row.KeyBase64 != nil {
+				decodedKey, decodeErr := base64.StdEncoding.DecodeString(*row.KeyBase64)
 				if decodeErr != nil {
 					return Event{}, invalidResponse(decodeErr)
 				}
@@ -265,7 +266,18 @@ func (s *Subscription) decode(raw rawEvent) (Event, error) {
 			} else if row.Key != nil {
 				key = []byte(*row.Key)
 			}
-			event.Records = append(event.Records, Record{Position: row.Seq.String(), Timestamp: row.Timestamp, Key: key, Headers: row.Headers, Body: value})
+			headers := make(map[string][]byte, len(row.Headers)+len(row.HeadersBase64))
+			for name, header := range row.Headers {
+				headers[name] = []byte(header)
+			}
+			for name, encoded := range row.HeadersBase64 {
+				header, decodeErr := base64.StdEncoding.DecodeString(encoded)
+				if decodeErr != nil {
+					return Event{}, invalidResponse(decodeErr)
+				}
+				headers[name] = header
+			}
+			event.Records = append(event.Records, Record{Position: row.Seq.String(), Timestamp: row.Timestamp, Key: key, Headers: headers, Body: value})
 		}
 	} else {
 		value := []byte(raw.data)
@@ -276,7 +288,7 @@ func (s *Subscription) decode(raw rawEvent) (Event, error) {
 			}
 			value = decoded
 		}
-		event.Records = []Record{{Headers: map[string]string{}, Body: value}}
+		event.Records = []Record{{Headers: map[string][]byte{}, Body: value}}
 	}
 	return event, nil
 }
@@ -293,6 +305,9 @@ func (s *Subscription) recover(cause error) error {
 		return cause
 	}
 	delay := s.options.ReconnectDelay
+	if delay > s.options.MaxReconnectDelay {
+		delay = s.options.MaxReconnectDelay
+	}
 	for i := 1; i < s.drops; i++ {
 		if delay >= s.options.MaxReconnectDelay/2 {
 			delay = s.options.MaxReconnectDelay
@@ -310,6 +325,15 @@ func (s *Subscription) recover(cause error) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func scannerLimit(maxEventBytes int) int {
+	const framingAllowance = 1024
+	maxInt := int(^uint(0) >> 1)
+	if maxEventBytes > maxInt-framingAllowance {
+		return maxInt
+	}
+	return maxEventBytes + framingAllowance
 }
 
 func (s *Subscription) Close() error {
