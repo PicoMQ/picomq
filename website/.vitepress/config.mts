@@ -66,6 +66,7 @@ const docsSidebar = [
         text: 'Clients',
         collapsed: true,
         items: [
+          { text: 'Go', link: '/docs/client/go' },
           { text: 'Rust', link: '/docs/client/rust' },
           { text: 'TypeScript', link: '/docs/client/typescript' },
         ],
