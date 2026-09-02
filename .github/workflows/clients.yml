@@ -2,30 +2,71 @@ name: clients
 
 on:
   push:
-    tags:
-      - 'ts-v*'
-      - 'rust-v*'
-  workflow_dispatch:
-    inputs:
-      typescript:
-        description: TypeScript (@picomq/client)
-        type: boolean
-        default: false
-      rust:
-        description: Rust (picomq-client + picomq-protocol)
-        type: boolean
-        default: false
+    branches: [main]
+    paths:
+      - client/**
+      - .github/workflows/clients.yml
+  pull_request:
+    paths:
+      - client/**
+      - .github/workflows/clients.yml
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
+  changes:
+    name: detect changed clients
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      typescript: ${{ steps.filter.outputs.typescript }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go:
+              - client/go/**
+              - .github/workflows/clients.yml
+            typescript:
+              - client/typescript/**
+              - .github/workflows/clients.yml
+
+  go:
+    name: go
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/go
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: client/go/go.mod
+          cache-dependency-path: client/go/go.sum
+
+      - name: Format
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Race test
+        run: go test -race ./...
+
   typescript:
     name: typescript
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.typescript) ||
-      (github.event_name == 'push' && startsWith(github.ref_name, 'ts-v'))
+    needs: changes
+    if: needs.changes.outputs.typescript == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -36,96 +77,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
           cache: npm
           cache-dependency-path: client/typescript/package-lock.json
 
-      - name: Check tag matches package version
-        if: github.ref_type == 'tag'
-        run: |
-          tag="${GITHUB_REF_NAME#ts-v}"
-          version="$(node -p "require('./package.json').version")"
-          if [ "$tag" != "$version" ]; then
-            echo "tag $GITHUB_REF_NAME does not match package.json version $version"
-            exit 1
-          fi
-
       - run: npm ci
+      - run: npm run check
       - run: npm run build
       - run: npm test
-
-      - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          if npm view "@picomq/client@$version" version > /dev/null 2>&1; then
-            echo "@picomq/client@$version is already published, skipping"
-            exit 0
-          fi
-          npm publish --access public --provenance
-
-  rust:
-    name: rust
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.rust) ||
-      (github.event_name == 'push' && startsWith(github.ref_name, 'rust-v'))
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Resolve workspace version
-        run: |
-          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="picomq-client") | .version')"
-          echo "VERSION=$version" >> "$GITHUB_ENV"
-
-      - name: Check tag matches workspace version
-        if: github.ref_type == 'tag'
-        run: |
-          tag="${GITHUB_REF_NAME#rust-v}"
-          if [ "$tag" != "$VERSION" ]; then
-            echo "tag $GITHUB_REF_NAME does not match picomq-client version $VERSION"
-            exit 1
-          fi
-
-      - name: Test client crates
-        run: cargo test -p picomq-protocol -p picomq-client
-
-      # Publishes are skipped when the version is already on the index, so a
-      # rerun after a partial failure picks up where it left off.
-      - name: Publish picomq-protocol
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          if curl -sf https://index.crates.io/pi/co/picomq-protocol | jq -r .vers | grep -qx "$VERSION"; then
-            echo "picomq-protocol $VERSION is already published, skipping"
-            exit 0
-          fi
-          cargo publish -p picomq-protocol --locked
-
-      - name: Publish picomq-client
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          if curl -sf https://index.crates.io/pi/co/picomq-client | jq -r .vers | grep -qx "$VERSION"; then
-            echo "picomq-client $VERSION is already published, skipping"
-            exit 0
-          fi
-          for attempt in $(seq 1 20); do
-            if cargo publish -p picomq-client --locked; then
-              exit 0
-            fi
-            echo "waiting for crates.io to index picomq-protocol (attempt $attempt)"
-            sleep 15
-          done
-          exit 1

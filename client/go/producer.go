@@ -254,7 +254,11 @@ func (p *Producer) sendBatch(records []AppendRecord, seq uint64) (uint64, error)
 		ack, err := p.client.AppendAs(context.Background(), p.name, records, ProducerRef{ID: p.id, Epoch: p.config.Epoch, Seq: seq})
 		if err == nil {
 			if ack.Duplicate {
-				return 0, &ClientError{Kind: ErrorInvalidResponse, Code: "duplicate_position_unknown", Message: "producer retry was accepted as a duplicate, but the server did not return the original record position"}
+				next, nerr := strconv.ParseUint(ack.Ack.Next, 10, 64)
+				if nerr != nil || next < uint64(len(records)) {
+					return 0, &ClientError{Kind: ErrorInvalidResponse, Code: "invalid_response", Message: fmt.Sprintf("duplicate ack has unusable Pico-Next-Seq %q", ack.Ack.Next)}
+				}
+				return next - uint64(len(records)), nil
 			}
 			start, nerr := strconv.ParseUint(ack.Ack.Start, 10, 64)
 			if nerr != nil {

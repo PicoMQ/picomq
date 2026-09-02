@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -149,7 +148,7 @@ var _ = ginkgo.Describe("Pico producer", func() {
 		Expect(<-counts).To(Equal(uint32(1)))
 	})
 
-	ginkgo.It("reports duplicate positions as unknown", func() {
+	ginkgo.It("derives duplicate positions from the next sequence", func() {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Pico-Next-Seq", "99")
 		}))
@@ -157,10 +156,52 @@ var _ = ginkgo.Describe("Pico producer", func() {
 		client, err := NewPico(server.URL)
 		Expect(err).NotTo(HaveOccurred())
 		producer := &Producer{client: client, name: "orders", id: "writer", config: DefaultProducerConfig()}
-		_, err = producer.sendBatch([]AppendRecord{{Body: []byte("value")}}, 0)
-		var clientErr *ClientError
-		Expect(errors.As(err, &clientErr)).To(BeTrue())
-		Expect(clientErr.Code).To(Equal("duplicate_position_unknown"))
+		start, err := producer.sendBatch([]AppendRecord{{Body: []byte("a")}, {Body: []byte("b")}, {Body: []byte("c")}}, 0)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(start).To(Equal(uint64(96)))
+	})
+
+	ginkgo.It("rejects duplicate acks whose next position cannot cover the batch", func() {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Pico-Next-Seq", "1")
+		}))
+		defer server.Close()
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+		producer := &Producer{client: client, name: "orders", id: "writer", config: DefaultProducerConfig()}
+		_, err = producer.sendBatch([]AppendRecord{{Body: []byte("a")}, {Body: []byte("b")}}, 0)
+		Expect(IsKind(err, ErrorInvalidResponse)).To(BeTrue())
+	})
+
+	ginkgo.It("resolves positions for a batch the server already applied", func() {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch calls.Add(1) {
+			case 1:
+				w.WriteHeader(http.StatusBadGateway)
+			default:
+				w.Header().Set("Pico-Next-Seq", "12")
+			}
+		}))
+		defer server.Close()
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+		config := DefaultProducerConfig()
+		config.Linger = 20 * time.Millisecond
+		config.Retry = RetryPolicy{MaxAttempts: 3}
+		producer := client.Stream("orders").NewProducer("writer", &config)
+		first, err := producer.Send(context.Background(), AppendRecord{Body: []byte("a")})
+		Expect(err).NotTo(HaveOccurred())
+		second, err := producer.Send(context.Background(), AppendRecord{Body: []byte("b")})
+		Expect(err).NotTo(HaveOccurred())
+		seq, err := first.Await(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(seq).To(Equal(uint64(10)))
+		seq, err = second.Await(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(seq).To(Equal(uint64(11)))
+		Expect(producer.Close(context.Background())).To(Succeed())
+		Expect(calls.Load()).To(Equal(int32(2)))
 	})
 
 	ginkgo.It("retries sequence gaps", func() {
