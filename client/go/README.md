@@ -64,3 +64,11 @@ For a listener running the Durable Streams protocol:
 ```sh
 PICOMQ_DS_INTEGRATION=1 PICOMQ_DS_ENDPOINT=http://127.0.0.1:4437 go test ./...
 ```
+
+Run the Pico performance and correctness benchmark against a live server:
+
+```sh
+go run ./test/pico/bench.go -endpoint http://127.0.0.1:4437
+```
+
+Use `-sequential`, `-batch`, and `-large` to adjust the workload sizes. The benchmark verifies producer ordering, final stream positions, and read-back counts in addition to reporting throughput.
