@@ -8,13 +8,14 @@ The native Go SDK supports PicoMQ's Pico and Durable Streams HTTP protocols with
 go get github.com/PicoMQ/picomq/client/go
 ```
 
-## Connect and append
+## Usage
 
 ```go
 package main
 
 import (
     "context"
+    "fmt"
     "log"
 
     picomq "github.com/PicoMQ/picomq/client/go"
@@ -30,8 +31,18 @@ func main() {
     if _, err := stream.Create(ctx, "application/json", 0); err != nil {
         log.Fatal(err)
     }
-    if _, err := stream.Append(ctx, picomq.AppendRecord{Body: []byte(`{"item":"widget"}`)}); err != nil {
+    ack, err := stream.Append(ctx, picomq.AppendRecord{Body: []byte(`{"item":"widget"}`)})
+    if err != nil {
         log.Fatal(err)
+    }
+    fmt.Printf("appended at %s\n", ack.Start)
+
+    page, err := stream.Read(ctx, client.Beginning(), picomq.ReadOptions{})
+    if err != nil {
+        log.Fatal(err)
+    }
+    for _, record := range page.Records {
+        fmt.Printf("%s: %s\n", record.Position, record.Body)
     }
 }
 ```
