@@ -62,38 +62,28 @@ protobuf-json-mapping = "3.7"
 protobuf-parse = "3.7"
 url = "2"
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
-
-# CLI (PORT of Java `cli`: picocli -> clap; slf4j/logback -> tracing).
 clap = { version = "4", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# HTTP frontends (PORT of Java `frontend/*`: Javalin/Jetty -> axum/hyper).
 axum = "0.8"
 http = "1"
-# Listener backlog: std/tokio give no way to set it.
 socket2 = "0.5"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-# Locating the user config directory per platform.
 dirs = "5"
 base64 = "0.22"
-# picomq-auth: opaque token verifier (uniform secret, not a password KDF).
 sha2 = "0.10"
 subtle = "2"
 zeroize = { version = "1", features = ["derive"] }
 getrandom = "0.2"
 tokio-stream = "0.1"
-# RFC3339 instants for Pico-Expires-At (PORT of Java `Instant.parse/toString`).
 humantime = "2"
-# The admin dashboard's prebuilt assets, compiled into the binary.
 rust-embed = "8"
 
 bytes = "1"
-# Latency percentiles for `pico bench`; Java's BenchStats reports averages only.
+kafka-protocol = { version = "0.18", default-features = false, features = ["broker", "client", "gzip", "zstd", "snappy", "lz4"] }
+crc32c = "0.6"
 hdrhistogram = "7"
-# Java's WALUtil.crc32 is java.util.zip.CRC32 = CRC-32/ISO-HDLC (proved by
-# conformance/fixtures/crc: check("123456789") = 0x4BF43926 = standard 0xCBF43926
-# masked to 31 bits). crc32fast implements ISO-HDLC.
 crc32fast = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "io-util"] }
@@ -106,14 +96,8 @@ hex = "0.4"
 tracing = "0.1"
 lru = "0.12"
 metrics = "0.24"
-# Persistent (structurally shared) maps: the metadata state machine's primary
-# stores — O(1) fork for snapshots/views, cheap copy-on-write mutation.
 im = "15"
-# Lock-free published metadata views (single writer, many readers).
 arc-swap = "1"
-# The metadata plane's durable command log lives in a SQL database
-# (delegate durability/ordering to SQLite or Postgres instead
-# of embedding consensus). The DB only ever sees opaque codec blobs.
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
@@ -127,11 +111,6 @@ tempfile = "3"
 serde_json = "1"
 criterion = "0.5"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-# The official Durable Streams Rust client (dev-only): our DS frontend is
-# implemented from the protocol spec; e2e tests drive it through this client
-# as an independent conformance check. Git-pinned — the client crate
-# (`packages/client-rust`) is not published (the crates.io `durable-streams`
-# name carries a server binary).
 durable-streams = { git = "https://github.com/durable-streams/durable-streams", rev = "a172acc389351cb3db6deb5cd60e3dec11e7ff39" }
 
 [workspace.lints.rust]

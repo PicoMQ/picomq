@@ -2283,11 +2283,14 @@ dependencies = [
 name = "picomq-runtime"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "humantime",
  "picomq-auth",
  "picomq-common",
  "picomq-http",
  "picomq-kafka",
  "picomq-metadata",
+ "picomq-protocol",
  "picomq-schema",
  "picomq-server",
  "picomq-sql",
@@ -2329,7 +2332,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "crc32c",
  "futures",
+ "kafka-protocol",
  "object_store",
  "picomq-auth",
  "picomq-common",

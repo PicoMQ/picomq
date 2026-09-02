@@ -1,4 +1,6 @@
 # Pico only. Postgres + object storage are external (see .env.example).
+# Kafka stays on loopback. To expose it, set PICO_KAFKA_LISTEN=0.0.0.0:9092,
+# PICO_KAFKA_ADVERTISE, PICO_INSECURE_ALLOW_REMOTE=true, and publish 9092.
 
 services:
   pico:

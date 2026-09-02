@@ -29,12 +29,13 @@ The node id is the one value worth care. Reusing an id for a different machine i
 | `--admin-listen` | `127.0.0.1:9090` | The admin API and dashboard. |
 | `--no-admin` | off | Disables the admin listener entirely. |
 | `--http-address` | `http://{listen}` | The public URL other nodes redirect clients to. |
-| `--kafka-listen` | `127.0.0.1:9092` | The Kafka listener, bound in `--protocol kafka` mode. |
+| `--kafka-listen` | `127.0.0.1:9092` | The Kafka listener. |
+| `--no-kafka` | off | Disables the Kafka listener. |
 | `--kafka-advertise` | `{kafka-listen}` | The Kafka address registered in metadata and returned to clients. |
 | `--backlog` | `1024` | Listener accept queue depth. |
 | `--shutdown-drain-sec` | `0` | How long to fail readiness before closing listeners on shutdown. |
 
-`--protocol` is a global flag rather than a serve flag, selecting the client protocol this node serves: `pico`, `ds`, or `kafka`. In Kafka mode the data moves on the Kafka listener, and the HTTP stream listener keeps only the [schema routes](/docs/schemas). The [Kafka protocol](/docs/kafka) page covers what that mode supports.
+`--protocol` is a global flag rather than a serve flag. It selects the HTTP protocol the stream listener speaks, `pico` or `ds`. Kafka is a separate listener and is covered on the [Kafka protocol](/docs/kafka) page.
 
 `--http-address` and `--kafka-advertise` matter in any multi-node deployment. Both are registered in the metadata state and handed to clients verbatim, in redirects for HTTP and in metadata responses for Kafka, so they must be addresses clients can actually reach, not bind addresses. The defaults only work single-node on localhost.
 

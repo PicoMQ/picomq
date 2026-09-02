@@ -1,11 +1,10 @@
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::{BrokerId, ResponseHeader, TopicName};
 use kafka_protocol::protocol::{Encodable, HeaderVersion, StrBytes};
-use picomq_server::{ErrorKind, ServiceError};
+use picomq_server::{alias, ErrorKind, ServiceError};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
-use crate::topic;
 
 #[derive(Debug, Clone)]
 pub struct ResponseFrame(pub Bytes);
@@ -24,6 +23,7 @@ pub const REBALANCE_IN_PROGRESS: i16 = 27;
 pub const UNSUPPORTED_VERSION: i16 = 35;
 pub const TOPIC_ALREADY_EXISTS: i16 = 36;
 pub const INVALID_REQUEST: i16 = 42;
+pub const POLICY_VIOLATION: i16 = 44;
 pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 pub const INVALID_PRODUCER_EPOCH: i16 = 47;
 pub const KAFKA_STORAGE_ERROR: i16 = 56;
@@ -73,11 +73,11 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
         ErrorKind::NotFound => UNKNOWN_TOPIC_OR_PARTITION,
         ErrorKind::Conflict => TOPIC_ALREADY_EXISTS,
         ErrorKind::BadRequest => INVALID_REQUEST,
-        // Idempotent-producer rejections carry the exact codes clients key
-        // their retry and fencing behavior off.
+        ErrorKind::CorruptBatch => CORRUPT_MESSAGE,
+        ErrorKind::SchemaViolation => INVALID_RECORD,
         ErrorKind::Fenced => INVALID_PRODUCER_EPOCH,
         ErrorKind::SequenceGap => OUT_OF_ORDER_SEQUENCE_NUMBER,
-        ErrorKind::Closed => UNKNOWN_TOPIC_OR_PARTITION,
+        ErrorKind::Closed => POLICY_VIOLATION,
         ErrorKind::Durability => KAFKA_STORAGE_ERROR,
         _ => INVALID_REQUEST,
     }
@@ -97,8 +97,6 @@ pub async fn ensure_local_leader(ctx: &BrokerContext, stream_name: &str) -> Resu
     }
 }
 
-/// Split an advertised address into host and port, tolerating an optional
-/// scheme prefix and bracketed IPv6 literals. Defaults to Kafka's 9092.
 pub fn parse_host_port(address: &str) -> (String, i32) {
     let address = address
         .strip_prefix("http://")
@@ -115,17 +113,22 @@ pub fn parse_host_port(address: &str) -> (String, i32) {
     }
 }
 
-pub fn reject_sys_create(name: &str) -> Result<(), i16> {
-    if topic::is_sys_name(name) {
-        Err(INVALID_REQUEST)
-    } else {
-        Ok(())
+pub async fn resolve_topic(ctx: &BrokerContext, topic: &str) -> Result<String, i16> {
+    if !alias::is_valid_topic(topic) {
+        return Err(UNKNOWN_TOPIC_OR_PARTITION);
     }
+    ctx.service
+        .lookup_by_topic(topic)
+        .await
+        .map_err(|error| service_error_code(&error))?
+        .ok_or(UNKNOWN_TOPIC_OR_PARTITION)
+}
+
+pub fn is_internal_topic(topic: &str) -> bool {
+    topic.starts_with('_')
 }
 
 pub fn concat_batches(batches: &[picomq_server::StreamBatch]) -> Bytes {
-    // The common case is a single stored batch: hand back the engine's
-    // zero-copy Bytes untouched.
     if let [only] = batches {
         return only.payload.clone();
     }

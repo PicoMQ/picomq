@@ -1,7 +1,8 @@
 //! `pico serve` arguments.
 //!
 //! One `--meta-url` points at the SQL metadata log, and `--protocol` picks
-//! which frontend is mounted.
+//! which HTTP frontend is mounted. The Kafka listener runs alongside it
+//! unless `--no-kafka` is set.
 //!
 //! This module only *parses*: every field maps to
 //! [`picomq_runtime::ServerConfig`], which owns what starting a server means.
@@ -12,8 +13,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
-use picomq_http::{Protocol, RoutingMode};
-use picomq_runtime::{AuthMode, MetaBackend, ServerConfig};
+use picomq_http::{HttpProtocol, RoutingMode};
+use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, ServerConfig};
+
+use crate::stream::ProtocolArg;
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {
@@ -31,13 +34,17 @@ pub struct ServeArgs {
     #[arg(long, env = "PICO_ADMIN_LISTEN", default_value = "127.0.0.1:9090")]
     admin_listen: SocketAddr,
 
-    /// Kafka listener bind address, used with `--protocol kafka`.
+    /// Kafka listener bind address.
     #[arg(long, env = "PICO_KAFKA_LISTEN", default_value = "127.0.0.1:9092")]
     kafka_listen: SocketAddr,
 
     /// Kafka address advertised to clients. Defaults to `--kafka-listen`.
     #[arg(long, env = "PICO_KAFKA_ADVERTISE")]
     kafka_advertise: Option<String>,
+
+    /// Do not open the Kafka listener.
+    #[arg(long, env = "PICO_NO_KAFKA")]
+    no_kafka: bool,
 
     #[arg(long)]
     no_admin: bool,
@@ -149,11 +156,23 @@ pub enum RoutingArg {
 }
 
 impl ServeArgs {
-    /// `protocol` is the global `--protocol` flag: which frontend to serve
+    /// `protocol` is the global `--protocol` flag: which HTTP frontend to
+    /// serve. Kafka is a listener, not a frontend choice, so `--protocol
+    /// kafka` is rejected here; use `--no-kafka` to turn its listener off.
     pub fn into_config(
         self,
-        protocol: Protocol,
+        protocol: ProtocolArg,
     ) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+        let http_protocol = match protocol {
+            ProtocolArg::Pico => HttpProtocol::Pico,
+            ProtocolArg::Ds => HttpProtocol::Ds,
+            ProtocolArg::Kafka => {
+                return Err(
+                    "`serve` takes --protocol pico or ds; the Kafka listener is always on unless --no-kafka is set"
+                        .into(),
+                );
+            }
+        };
         let defaults = ServerConfig::default();
         let mut engine = s3stream::Config::default();
         if let Some(size) = self.wal_cache_size {
@@ -187,9 +206,11 @@ impl ServeArgs {
             addr: self.listen,
             admin_addr: (!self.no_admin).then_some(self.admin_listen),
             advertised_url: self.http_address,
-            protocol,
-            kafka_listen: self.kafka_listen,
-            kafka_advertise: self.kafka_advertise,
+            http_protocol,
+            kafka: (!self.no_kafka).then_some(KafkaConfig {
+                listen: self.kafka_listen,
+                advertise: self.kafka_advertise,
+            }),
             meta_backend: MetaBackend::parse(&self.meta_url)?,
             storage_uri: self.storage,
             wal_uri: self.wal,

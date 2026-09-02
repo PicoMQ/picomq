@@ -8,11 +8,10 @@ mod http;
 pub mod pico;
 pub mod route;
 pub mod serve;
-pub mod timestamps;
 
 pub use admin::AdminState;
 pub use auth::{gate, Permit};
 pub use ds::DsFrontend;
 pub use pico::PicoFrontend;
 pub use route::RoutingMode;
-pub use serve::{serve, Protocol, RunningServer, ServeOptions};
+pub use serve::{serve, HttpProtocol, RunningServer, ServeOptions};

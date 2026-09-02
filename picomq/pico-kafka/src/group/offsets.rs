@@ -1,6 +1,4 @@
 //! Committed-offset records on the group stream: delta commits with periodic
-//! snapshot+trim. Replay is a fold where later entries win, so the same
-//! decoder serves deltas and snapshots.
 
 use std::collections::BTreeMap;
 
@@ -86,7 +84,6 @@ pub(super) fn decode_into(payload: &[u8], offsets: &mut OffsetTable) -> Result<(
     Ok(())
 }
 
-/// The all-unset response for a group that has never committed.
 pub(super) fn empty_offset_fetch(
     requested: Option<&[(String, Vec<i32>)]>,
 ) -> BTreeMap<String, Vec<(i32, CommittedOffset)>> {

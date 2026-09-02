@@ -279,30 +279,3 @@ async fn stream_config_redirects_to_remote_owner() {
         .unwrap();
     assert_eq!(get.status(), 307);
 }
-
-#[tokio::test]
-async fn kafka_mode_exposes_schemas_only() {
-    let server = common::kafka_http_with_schema(picomq_schema::Registry::new(
-        object_store::memory::InMemory::new(),
-    ))
-    .await;
-    let client = reqwest::Client::new();
-    let schema = r#"{"type":"object","properties":{"value":{"type":"object"}}}"#;
-
-    let put = client
-        .put(format!("{}/_schemas/orders", server.base_url))
-        .header("Content-Type", "application/schema+json")
-        .body(schema)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(put.status(), 204);
-
-    let stream = client
-        .put(format!("{}/orders", server.base_url))
-        .header("Content-Type", "text/plain")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(stream.status(), 404);
-}

@@ -1,6 +1,4 @@
 //! Classic consumer-group coordination backed by one internal stream per
-//! group. Only committed offsets are durable, membership is ephemeral and
-//! rebuilt from client rejoins after a coordinator move.
 
 mod offsets;
 mod state;
@@ -11,7 +9,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use picomq_server::{
-    AppendCommand, CreateCommand, ErrorKind, MetadataOwnershipService, OffsetToken,
+    AppendCommand, CreateCommand, ErrorKind, LogRecord, MetadataOwnershipService, OffsetToken,
     OwnershipService, S3StreamService,
 };
 use tokio::sync::{oneshot, Mutex};
@@ -32,8 +30,6 @@ use state::{
 };
 
 const GROUP_CONTENT_TYPE: &str = "application/vnd.picomq.kafka-group-state";
-/// Delta appends between full-snapshot-and-trim cycles. Bounds both replay
-/// length on takeover and metadata-plane trim traffic on the commit path.
 const OFFSET_SNAPSHOT_INTERVAL: u64 = 64;
 
 #[derive(Debug, Clone)]
@@ -171,10 +167,6 @@ impl GroupCoordinator {
         })
     }
 
-    /// Route the group to its coordinator without creating anything durable:
-    /// FindCoordinator is a read that clients issue for arbitrary group ids,
-    /// so it must not mint streams. The stream is created on the first
-    /// JoinGroup or OffsetCommit, which land on the node answered here.
     pub async fn find_coordinator(&self, group_id: &str) -> Result<CoordinatorEndpoint, i16> {
         validate_group_id(group_id)?;
         let stream = group_stream_name(group_id);
@@ -485,9 +477,6 @@ impl GroupCoordinator {
         results
     }
 
-    /// Append only the changed offsets as one delta record. Every
-    /// [`OFFSET_SNAPSHOT_INTERVAL`] appends, snapshot and trim so takeover
-    /// replay stays bounded.
     pub async fn commit_offsets(
         &self,
         group_id: &str,
@@ -535,9 +524,8 @@ impl GroupCoordinator {
             .service
             .append(AppendCommand {
                 name: stream.clone(),
-                payloads: vec![encode_commits(commits)],
+                records: vec![LogRecord::value(encode_commits(commits))],
                 content_type: Some(GROUP_CONTENT_TYPE.to_owned()),
-                atomic: true,
                 ..Default::default()
             })
             .await
@@ -566,9 +554,8 @@ impl GroupCoordinator {
             .service
             .append(AppendCommand {
                 name: stream.to_owned(),
-                payloads: vec![encode_snapshot(&state.offsets)],
+                records: vec![LogRecord::value(encode_snapshot(&state.offsets))],
                 content_type: Some(GROUP_CONTENT_TYPE.to_owned()),
-                atomic: true,
                 ..Default::default()
             })
             .await
@@ -703,8 +690,6 @@ impl GroupCoordinator {
         listed
     }
 
-    /// Resolve the local in-memory group, verifying this node owns the group
-    /// stream and (re)playing durable offsets when the stream epoch changed.
     async fn local_group(&self, group_id: &str, create: bool) -> Result<Arc<Mutex<Group>>, i16> {
         validate_group_id(group_id)?;
         let stream = group_stream_name(group_id);
@@ -768,27 +753,14 @@ impl GroupCoordinator {
     async fn ensure_stream(&self, stream: &str) -> Result<(), i16> {
         self.service
             .create(CreateCommand {
-                name: stream.to_owned(),
-                content_type: GROUP_CONTENT_TYPE.to_owned(),
-                ttl_seconds: None,
-                expires_at_ms: None,
-                closed: false,
-                initial_payload: Bytes::new(),
-                external_id: None,
                 internal: true,
-                schema_name: None,
-                schema_validate: false,
+                ..CreateCommand::new(stream, GROUP_CONTENT_TYPE)
             })
             .await
             .map(|_| ())
             .map_err(|_| COORDINATOR_NOT_AVAILABLE)
     }
 
-    /// Fold every record from log start to the high watermark: snapshots and
-    /// deltas share one layout, so later entries simply overwrite earlier
-    /// ones. The log is at most one snapshot plus [`OFFSET_SNAPSHOT_INTERVAL`]
-    /// deltas long. Returns the table and the record count so the caller can
-    /// resume the snapshot cadence.
     async fn replay_offsets(&self, stream: &str) -> Result<(OffsetTable, u64), i16> {
         let watermarks = self
             .service
@@ -813,7 +785,7 @@ impl GroupCoordinator {
                 break;
             }
             for record in read.records {
-                decode_into(&record.payload, &mut offsets).map_err(|_| NOT_COORDINATOR)?;
+                decode_into(&record.record.value, &mut offsets).map_err(|_| NOT_COORDINATOR)?;
                 replayed += 1;
             }
             cursor = read.next_offset.record_offset();

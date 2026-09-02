@@ -82,12 +82,19 @@ async fn patch_config(
         Some(Value::Bool(v)) => Some(*v),
         Some(_) => return bad_request("schemaValidate must be a boolean"),
     };
+    let kafka_topic = match obj.get("kafkaTopic") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(s)) if !s.is_empty() => Some(Some(s.clone())),
+        Some(_) => return bad_request("kafkaTopic must be a non-empty string or null"),
+    };
     match state
         .service
         .update_stream(UpdateStreamCommand {
             name,
             schema_name,
             schema_validate,
+            kafka_topic,
         })
         .await
     {
@@ -100,6 +107,7 @@ fn config_json(config: &StreamConfig) -> Value {
     json!({
         "schema": config.schema_name,
         "schemaValidate": config.schema_validate,
+        "kafkaTopic": config.kafka_topic,
     })
 }
 

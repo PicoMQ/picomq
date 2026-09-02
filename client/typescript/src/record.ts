@@ -1,12 +1,17 @@
-import type { AppendInput } from './types'
+import type { AppendInput, HeaderValue } from './types'
 
 export interface RecordEnvelope {
   timestamp: bigint
-  headers: { [key: string]: string }
+  key?: Uint8Array
+  headers: { [key: string]: HeaderValue }
   body: Uint8Array
 }
 
 const ENC = new TextEncoder()
+
+export function toBytes(value: Uint8Array | string): Uint8Array {
+  return typeof value === 'string' ? ENC.encode(value) : value
+}
 
 export function toEnvelope(input: AppendInput): RecordEnvelope {
   if (input instanceof Uint8Array) {
@@ -15,11 +20,13 @@ export function toEnvelope(input: AppendInput): RecordEnvelope {
   if (typeof input === 'string') {
     return { timestamp: 0n, headers: {}, body: ENC.encode(input) }
   }
-  return {
+  const envelope: RecordEnvelope = {
     timestamp: typeof input.timestamp === 'bigint' ? input.timestamp : BigInt(input.timestamp ?? 0),
     headers: input.headers ?? {},
-    body: typeof input.body === 'string' ? ENC.encode(input.body) : input.body,
+    body: toBytes(input.body),
   }
+  if (input.key !== undefined) envelope.key = toBytes(input.key)
+  return envelope
 }
 
 export function toEnvelopes(inputs: AppendInput[]): RecordEnvelope[] {

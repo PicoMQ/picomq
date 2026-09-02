@@ -22,7 +22,7 @@ pico serve \
     --storage=-2@file://./objects
 ```
 
-The server listens on `http://127.0.0.1:4437` and the admin listener on `http://127.0.0.1:9090`. Every flag has a `PICO_*` environment variable equivalent. `--protocol pico|ds|kafka` selects the client protocol, `pico` by default, and Kafka mode also takes `--kafka-listen`.
+The server listens on `http://127.0.0.1:4437`, the admin listener on `http://127.0.0.1:9090`, and Kafka on `127.0.0.1:9092`. Every flag has a `PICO_*` environment variable equivalent. `--protocol pico|ds` selects the HTTP protocol, `pico` by default.
 
 Against real infrastructure the same command points at Postgres and an S3 bucket:
 
@@ -64,7 +64,7 @@ The compose nodes run with auth off for development. Setting `PICO_AUTH=required
 
 ## First stream
 
-Each tab assumes a node started with the matching `--protocol` (or `PICO_PROTOCOL` in the compose `.env`).
+Each tab is one protocol against the same node. Pico and Durable Streams need the matching `--protocol` (or `PICO_PROTOCOL` in the compose `.env`).
 
 :::tabs key:protocol
 
@@ -148,7 +148,7 @@ kcat -C -b localhost:9092 -t orders -o beginning -e
 kcat -G orders-group -b localhost:9092 -X auto.offset.reset=earliest orders
 ```
 
-Topics map to streams one to one, detail in the [Kafka protocol](/docs/kafka) reference.
+Topics map to streams one to one. Detail is in the [Kafka protocol](/docs/kafka) reference.
 
 :::
 

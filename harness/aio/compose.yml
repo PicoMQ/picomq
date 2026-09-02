@@ -2,9 +2,9 @@
 # From this directory: docker compose up --build
 #
 # Host client: http://localhost:4437
-# Kafka mode: bootstrap localhost:9092.
+# Kafka: localhost:9092
 # RustFS API http://localhost:9000, console http://localhost:9001.
-# Protocol: set PICO_PROTOCOL=pico|ds|kafka in .env (see .env.example).
+# HTTP protocol: set PICO_PROTOCOL=pico|ds in .env (see .env.example).
 
 services:
   postgres:
@@ -84,6 +84,7 @@ services:
       PICO_INSECURE_ALLOW_REMOTE: ${PICO_INSECURE_ALLOW_REMOTE:-true}
       PICO_AUTH_BOOTSTRAP_TOKEN: ${PICO_AUTH_BOOTSTRAP_TOKEN:-ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY}
       PICO_META_URL: postgres://picomq:picomq@postgres:5432/picomq
+      PICO_SCHEMA_REGISTRY: "3@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true"
       PICO_STORAGE: "-2@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true"
       # Local RustFS makes S3 requests free, so batch and commit aggressively.
       # On real S3 keep the 250ms default batchInterval.

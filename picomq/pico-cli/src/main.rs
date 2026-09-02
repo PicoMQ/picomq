@@ -38,7 +38,7 @@ struct Cli {
 // client commands.
 #[allow(clippy::large_enum_variant)]
 enum Command {
-    /// Run a PicoMQ node and serve a stream protocol over HTTP.
+    /// Run a PicoMQ node: one HTTP stream protocol plus the Kafka listener.
     Serve(ServeArgs),
 
     #[command(flatten)]
@@ -108,12 +108,15 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
         Command::Stream(command) => Ok(stream::run(&target, command).await?),
         Command::Bench(args) => Ok(bench::run(&target, args).await?),
         Command::Serve(args) => {
-            let server = picomq_runtime::start(args.into_config(target.protocol.into())?).await?;
+            let server = picomq_runtime::start(args.into_config(target.protocol)?).await?;
             println!(
                 "serving on http://{} (advertised {})",
                 server.local_addr(),
                 server.base_url()
             );
+            if let Some(kafka) = server.kafka_addr() {
+                println!("kafka on {kafka}");
+            }
             if let Some(admin) = server.admin_addr() {
                 println!("admin on http://{admin}");
             }

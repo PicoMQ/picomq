@@ -6,9 +6,9 @@ PicoMQ speaks three client protocols.
 - **Durable Streams.** An open HTTP protocol implemented on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers.
 - **[Kafka wire protocol](/docs/kafka).** Serves standard Kafka clients over TCP.
 
-A node serves one of the three, chosen in its configuration, and each is a thin translation over the same stream service. Nothing in the storage or metadata layers knows which protocol a record arrived through.
+A node serves one of the two HTTP protocols on its stream listener, chosen in its configuration, and Kafka on a second listener unless that listener is off. Each frontend is a thin translation over the same stream service, documented in [Protocol facades](/docs/extending). Nothing in the storage or metadata layers knows which protocol a record arrived through.
 
-This page covers the two HTTP protocols, which share a resource model and a stored record format. The Kafka frontend makes different choices for compatibility's sake and has [its own page](/docs/kafka).
+This page covers the resource model and the stored record format. The Kafka frontend's own surface has [its own page](/docs/kafka).
 
 ## The resource model
 
@@ -16,38 +16,36 @@ The deliberate choice here is that a stream is just a URL and the standard metho
 
 The second choice is that all position state travels in response headers: the next offset, whether the reader is at the tail, a cursor for resuming. The server keeps nothing about its consumers, so a reader can disappear for a week, come back with its last offset, and continue. This is also what makes reads through redirects and transfers safe, since any node can answer from just the request.
 
-## Records on the wire
+## Records
 
-Every record is stored as an envelope so nothing about it is lost between protocols.
+Every stream is a log of Kafka **RecordBatch v2** batches.
 
 <div class="pico-diagram">
-<svg viewBox="0 30 680 150" width="680" role="img" aria-label="An envelope is a version byte, a timestamp, a header count with name and value pairs, and the body bytes.">
-  <rect x="20" y="70" width="90" height="52" class="box"/>
-  <text x="65" y="93" text-anchor="middle" class="label">version</text>
-  <text x="65" y="110" text-anchor="middle" class="sub">u8</text>
-  <rect x="110" y="70" width="120" height="52" class="box"/>
-  <text x="170" y="93" text-anchor="middle" class="label">timestamp</text>
-  <text x="170" y="110" text-anchor="middle" class="sub">i64, ms</text>
-  <rect x="230" y="70" width="230" height="52" class="box"/>
-  <text x="345" y="93" text-anchor="middle" class="label">headers</text>
-  <text x="345" y="110" text-anchor="middle" class="sub">count, then name and value pairs</text>
-  <rect x="460" y="70" width="200" height="52" class="box-accent"/>
-  <text x="560" y="93" text-anchor="middle" class="label">body</text>
-  <text x="560" y="110" text-anchor="middle" class="sub">the record bytes</text>
-  <text x="340" y="52" text-anchor="middle" class="sub">one record, one envelope</text>
-  <text x="340" y="152" text-anchor="middle" class="sub">length-prefixed fields, no padding</text>
+<svg viewBox="0 30 680 150" width="680" role="img" aria-label="A RecordBatch v2 is a header with base offset, CRC32C, attributes, timestamps, producer identity and record count, followed by records that each carry an offset delta, a timestamp delta, an optional key, a value and headers.">
+  <rect x="20" y="70" width="330" height="52" class="box"/>
+  <text x="185" y="93" text-anchor="middle" class="label">batch header</text>
+  <text x="185" y="110" text-anchor="middle" class="sub">base offset, CRC32C, attributes, timestamps, producer id, count</text>
+  <rect x="350" y="70" width="310" height="52" class="box-accent"/>
+  <text x="505" y="93" text-anchor="middle" class="label">records</text>
+  <text x="505" y="110" text-anchor="middle" class="sub">offset delta, timestamp delta, key, value, headers</text>
+  <text x="340" y="52" text-anchor="middle" class="sub">one append, one batch</text>
+  <text x="340" y="152" text-anchor="middle" class="sub">Kafka RecordBatch v2, byte for byte</text>
 </svg>
 </div>
 
-The envelope is the reason the two HTTP protocols can share storage. A record appended through one protocol reads back through the other with its timestamp and metadata intact, because the stored form belongs to neither. The timestamp is assigned by the owning node and is monotonic per stream, so equal wall-clock readings still order correctly. Headers are the record's own key-value metadata, distinct from HTTP headers.
+A record has an optional key, a value, ordered headers, and a timestamp. HTTP appends are encoded by the owning node with a per-stream monotonic `LogAppendTime`. Kafka produces keep the client's `CreateTime`. A Kafka fetch returns the stored bytes after the same base-offset patch a Kafka broker writes. HTTP reads decode those batches.
 
-Kafka streams are the deliberate exception: the Kafka frontend stores the client's record batches verbatim rather than re-encoding them into envelopes, so fetches return the exact bytes Kafka clients expect with no per-record work. The two stored forms coexist because streams carry a content type, and a stream is written and read through the protocol family that created it.
+A Pico record is a Kafka record. A Durable Streams record is a value. A Kafka record with a key and headers reads over Pico with them intact and over DS as its value.
 
-Appends come in three shapes, a single body, a JSON batch, and a binary batch, each with its own content type. Records in a batch are ordered under the stream's gate together, so they always occupy consecutive offsets, and the append is acknowledged once the whole batch is durable.
+Appends over Pico come in three shapes: a single body, optionally keyed through `Pico-Key`, a JSON batch, and a binary batch. Reads return JSON, the binary batch, or the raw concatenated values. Durable Streams appends are one body per request, and on a JSON stream a top-level array is one record per element. Records in a batch occupy consecutive offsets and are acknowledged once the whole batch is durable.
+
+## Topic names
+
+Stream names are paths. Kafka topic names cannot contain `/`. Each stream may carry one topic alias, unique across the cluster. Create over HTTP derives one by turning slashes into dots when that name is legal and free. Otherwise set `Pico-Kafka-Topic` on create or `kafkaTopic` on `PATCH /_streams/{name}`. A Kafka `CreateTopics` call creates the stream of the same name with that alias. Reserved streams under `/_sys`, `/_schemas` and `/_streams` never carry a topic.
 
 ## Producers
 
-Exactly-once appends over HTTP need the server to remember, because a client that times out cannot know whether its write landed. Both protocols solve this the same way: a producer identifies itself with an id, an epoch, and a per-record sequence number, the server accepts each sequence once, acknowledges repeats without writing, and rejects stale epochs. A mismatch response includes what the server expected next to what it received, so a producer can tell a lost acknowledgement from a real gap. The state behind this is in the stream's registry entry, described in [Streams](/docs/design/streams), and survives restarts and transfers.
+Exactly-once appends over HTTP need the server to remember, because a client that times out cannot know whether its write landed. Both HTTP protocols solve this the same way: a producer identifies itself with an id, an epoch, and a per-record sequence number, the server accepts each sequence once, acknowledges repeats without writing, and rejects stale epochs. A mismatch response includes what the server expected next to what it received, so a producer can tell a lost acknowledgement from a real gap. Kafka's idempotent producer is the same mechanism, keyed by the producer id, epoch and base sequence in the batch header. The state behind both is in the stream's registry entry, described in [Streams](/docs/design/streams), and survives restarts and transfers.
 
 ## Routing at the edge
 

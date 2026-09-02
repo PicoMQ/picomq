@@ -13,7 +13,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
 use picomq_server::ownership::OwnershipService as _;
-use picomq_server::{AppendCommand, CreateCommand, ErrorKind, NodeConfig, OffsetToken, PicoNode};
+use picomq_server::record::encode_batch;
+use picomq_server::{
+    AppendCommand, CreateCommand, ErrorKind, LogRecord, NodeConfig, OffsetToken, PicoNode,
+};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
 async fn start_node(
@@ -48,24 +51,16 @@ async fn local_node() -> PicoNode {
 }
 
 fn create(name: &str, content_type: &str) -> CreateCommand {
-    CreateCommand {
-        name: name.into(),
-        content_type: content_type.into(),
-        ttl_seconds: None,
-        expires_at_ms: None,
-        closed: false,
-        initial_payload: Bytes::new(),
-        external_id: None,
-        internal: false,
-        schema_name: None,
-        schema_validate: false,
-    }
+    CreateCommand::new(name, content_type)
 }
 
-fn append(name: &str, payloads: &[&[u8]], content_type: &str) -> AppendCommand {
+fn append(name: &str, values: &[&[u8]], content_type: &str) -> AppendCommand {
     AppendCommand {
         name: name.into(),
-        payloads: payloads.iter().map(|p| Bytes::copy_from_slice(p)).collect(),
+        records: values
+            .iter()
+            .map(|v| LogRecord::value(Bytes::copy_from_slice(v)))
+            .collect(),
         content_type: Some(content_type.into()),
         ..Default::default()
     }
@@ -95,7 +90,7 @@ async fn create_append_read_close_via_services() {
         .await
         .unwrap();
     assert_eq!(batch.records.len(), 1);
-    assert_eq!(&batch.records[0].payload[..], b"hello");
+    assert_eq!(&batch.records[0].record.value[..], b"hello");
     assert!(batch.up_to_date);
 
     assert!(
@@ -121,14 +116,11 @@ async fn create_append_read_close_via_services() {
         .await
         .unwrap();
     let appended = services
-        .append(AppendCommand {
-            atomic: true,
-            ..append(
-                "/streams/batch",
-                &[b"a", b"bb", b"ccc"],
-                "application/octet-stream",
-            )
-        })
+        .append(append(
+            "/streams/batch",
+            &[b"a", b"bb", b"ccc"],
+            "application/octet-stream",
+        ))
         .await
         .unwrap();
     assert!(appended.applied);
@@ -139,9 +131,9 @@ async fn create_append_read_close_via_services() {
         .await
         .unwrap();
     assert_eq!(all.records.len(), 3);
-    assert_eq!(&all.records[0].payload[..], b"a");
-    assert_eq!(&all.records[1].payload[..], b"bb");
-    assert_eq!(&all.records[2].payload[..], b"ccc");
+    assert_eq!(&all.records[0].record.value[..], b"a");
+    assert_eq!(&all.records[1].record.value[..], b"bb");
+    assert_eq!(&all.records[2].record.value[..], b"ccc");
     assert_eq!(all.records[0].offset.record_offset(), 0);
     assert_eq!(all.records[1].offset.record_offset(), 1);
     assert_eq!(all.records[2].offset.record_offset(), 2);
@@ -152,7 +144,7 @@ async fn create_append_read_close_via_services() {
         .await
         .unwrap();
     assert_eq!(tail.records.len(), 2);
-    assert_eq!(&tail.records[0].payload[..], b"bb");
+    assert_eq!(&tail.records[0].record.value[..], b"bb");
 
     let limited = services
         .read("/streams/batch", OffsetToken::beginning(), 1024, 2)
@@ -180,7 +172,7 @@ async fn create_append_read_close_via_services() {
         .await
         .unwrap();
     assert_eq!(trimmed.records.len(), 1);
-    assert_eq!(&trimmed.records[0].payload[..], b"ccc");
+    assert_eq!(&trimmed.records[0].record.value[..], b"ccc");
 
     node.close().await;
 }
@@ -228,8 +220,8 @@ async fn concurrent_producers_on_one_stream_pipeline() {
         let seen: Vec<u8> = all
             .records
             .iter()
-            .filter(|r| r.payload[0] == producer)
-            .map(|r| r.payload[1])
+            .filter(|r| r.record.value[0] == producer)
+            .map(|r| r.record.value[1])
             .collect();
         assert_eq!(
             seen,
@@ -309,11 +301,11 @@ async fn core_flow_on_sql_sink() {
         .create(create("/sql/demo", "application/json"))
         .await
         .unwrap();
-    // JSON array body splits into one record per element.
+    // Frontends split JSON arrays; the service stores one record per element.
     let appended = services
         .append(append(
             "/sql/demo",
-            &[br#"[{"a":1},{"b":2}]"#],
+            &[br#"{"a":1}"#, br#"{"b":2}"#],
             "application/json",
         ))
         .await
@@ -325,8 +317,8 @@ async fn core_flow_on_sql_sink() {
         .await
         .unwrap();
     assert_eq!(read.records.len(), 2);
-    assert_eq!(&read.records[0].payload[..], br#"{"a":1}"#);
-    assert_eq!(&read.records[1].payload[..], br#"{"b":2}"#);
+    assert_eq!(&read.records[0].record.value[..], br#"{"a":1}"#);
+    assert_eq!(&read.records[1].record.value[..], br#"{"b":2}"#);
 
     assert!(services.delete("/sql/demo").await.unwrap());
     assert!(services.head("/sql/demo").await.unwrap().is_none());
@@ -657,8 +649,8 @@ async fn transfer_moves_stream_to_target_node() {
         .await
         .unwrap();
     assert_eq!(all.records.len() as u64, 2 + raced);
-    assert_eq!(&all.records[0].payload[..], b"before");
-    assert_eq!(&all.records.last().unwrap().payload[..], b"after");
+    assert_eq!(&all.records[0].record.value[..], b"before");
+    assert_eq!(&all.records.last().unwrap().record.value[..], b"after");
 
     node1.close().await;
     node2.close().await;
@@ -800,53 +792,55 @@ async fn named_streams_survive_restart() {
         .await
         .unwrap();
     assert_eq!(read.records.len(), 1);
-    assert_eq!(&read.records[0].payload[..], b"kept");
+    assert_eq!(&read.records[0].record.value[..], b"kept");
 
     node.close().await;
 }
 
-/// A stand-in Kafka batch: 8-byte base-offset field (patched by the
-/// service) followed by opaque body bytes.
-fn fake_batch(body: &[u8]) -> Bytes {
-    let mut payload = vec![0u8; 8];
-    payload.extend_from_slice(body);
-    Bytes::from(payload)
+/// A Kafka RecordBatch v2 as a client would send it: `values` as records,
+/// optionally stamped with an idempotent-producer identity (inside the CRC
+/// region, so the CRC is recomputed as the client's encoder would).
+fn kafka_batch(producer: Option<(i64, i16, i32)>, values: &[&[u8]]) -> Bytes {
+    let records: Vec<LogRecord> = values
+        .iter()
+        .map(|v| LogRecord::value(Bytes::copy_from_slice(v)))
+        .collect();
+    let mut batch = encode_batch(0, 1, &records).to_vec();
+    if let Some((id, epoch, base_seq)) = producer {
+        batch[43..51].copy_from_slice(&id.to_be_bytes());
+        batch[51..53].copy_from_slice(&epoch.to_be_bytes());
+        batch[53..57].copy_from_slice(&base_seq.to_be_bytes());
+        let crc = crc32c::crc32c(&batch[21..]);
+        batch[17..21].copy_from_slice(&crc.to_be_bytes());
+    }
+    Bytes::from(batch)
 }
 
-fn one_batch(record_count: u32) -> Vec<picomq_server::BatchSpan> {
-    vec![picomq_server::BatchSpan {
-        patch_at: 0,
-        record_count,
-    }]
+fn produce(name: &str, payload: Bytes) -> picomq_server::AppendBatchCommand {
+    picomq_server::AppendBatchCommand {
+        name: name.into(),
+        payload,
+    }
 }
 
 /// Kafka batch append/read/watermarks and idempotent producer dedup at the
-/// service layer.
+/// service layer, plus the record-level read of the same bytes.
 #[tokio::test]
 async fn kafka_batch_append_read_and_idempotency() {
-    use picomq_server::{AppendBatchCommand, NumericProducer};
-
     let node = local_node().await;
     let services = node.service();
     let external_id = *b"0123456789abcdef";
     services
         .create(CreateCommand {
-            name: "/topics/demo".into(),
-            content_type: "application/vnd.kafka.batch".into(),
             external_id: Some(external_id),
-            ..create("/topics/demo", "application/vnd.kafka.batch")
+            ..create("/topics/demo", "application/octet-stream")
         })
         .await
         .unwrap();
 
+    let sent = kafka_batch(None, &[b"k1", b"k2", b"k3"]);
     let appended = services
-        .append_batch(AppendBatchCommand {
-            name: "/topics/demo".into(),
-            payload: fake_batch(b"kafka-batch-bytes"),
-            batches: one_batch(3),
-            producer: None,
-            base_timestamp_ms: 1,
-        })
+        .append_batch(produce("/topics/demo", sent.clone()))
         .await
         .unwrap();
     assert!(!appended.duplicate);
@@ -867,7 +861,7 @@ async fn kafka_batch_append_read_and_idempotency() {
     assert_eq!(from_start.batches[0].count, 3);
     // Stored verbatim except the patched base-offset field.
     assert_eq!(&from_start.batches[0].payload[..8], &0i64.to_be_bytes());
-    assert_eq!(&from_start.batches[0].payload[8..], b"kafka-batch-bytes");
+    assert_eq!(&from_start.batches[0].payload[8..], &sent[8..]);
     assert_eq!(from_start.next_offset, 3);
 
     // Mid-batch fetch returns the covering batch verbatim.
@@ -879,6 +873,21 @@ async fn kafka_batch_append_read_and_idempotency() {
     assert_eq!(mid.batches[0].base_offset, 0);
     assert_eq!(mid.next_offset, 3);
 
+    // The record-level read (the HTTP frontends' path) decodes the same
+    // bytes and skips the leading records of a mid-batch start.
+    let records = services
+        .read("/topics/demo", OffsetToken::of_record_offset(1), 0, 0)
+        .await
+        .unwrap();
+    let values: Vec<&[u8]> = records
+        .records
+        .iter()
+        .map(|r| &r.record.value[..])
+        .collect();
+    assert_eq!(values, [b"k2", b"k3"]);
+    assert_eq!(records.records[0].offset.record_offset(), 1);
+    assert!(records.up_to_date);
+
     // Topic UUID resolves back to the stream.
     assert_eq!(
         services.lookup_by_external_id(external_id).await.unwrap(),
@@ -889,19 +898,11 @@ async fn kafka_batch_append_read_and_idempotency() {
         None
     );
 
-    let producer = NumericProducer {
-        id: 1,
-        epoch: 0,
-        first_seq: 0,
-    };
     let idem = services
-        .append_batch(AppendBatchCommand {
-            name: "/topics/demo".into(),
-            payload: fake_batch(b"idem"),
-            batches: one_batch(2),
-            producer: Some(producer),
-            base_timestamp_ms: 2,
-        })
+        .append_batch(produce(
+            "/topics/demo",
+            kafka_batch(Some((1, 0, 0)), &[b"i1", b"i2"]),
+        ))
         .await
         .unwrap();
     assert!(!idem.duplicate);
@@ -915,91 +916,130 @@ async fn kafka_batch_append_read_and_idempotency() {
     assert_eq!(&second.batches[0].payload[..8], &3i64.to_be_bytes());
 
     let dup = services
-        .append_batch(AppendBatchCommand {
-            name: "/topics/demo".into(),
-            payload: fake_batch(b"idem-retry"),
-            batches: one_batch(2),
-            producer: Some(producer),
-            base_timestamp_ms: 2,
-        })
+        .append_batch(produce(
+            "/topics/demo",
+            kafka_batch(Some((1, 0, 0)), &[b"i1", b"i2"]),
+        ))
         .await
         .unwrap();
     assert!(dup.duplicate);
     assert_eq!(dup.base_offset, 3);
 
     let gap = services
-        .append_batch(AppendBatchCommand {
-            name: "/topics/demo".into(),
-            payload: fake_batch(b"gap"),
-            batches: one_batch(1),
-            producer: Some(NumericProducer {
-                id: 1,
-                epoch: 0,
-                first_seq: 3,
-            }),
-            base_timestamp_ms: 3,
-        })
+        .append_batch(produce(
+            "/topics/demo",
+            kafka_batch(Some((1, 0, 3)), &[b"g"]),
+        ))
         .await
         .unwrap_err();
     assert_eq!(gap.kind, ErrorKind::SequenceGap);
     assert_eq!((gap.expected_seq, gap.received_seq), (Some(2), Some(3)));
 
     let bumped = services
-        .append_batch(AppendBatchCommand {
-            name: "/topics/demo".into(),
-            payload: fake_batch(b"epoch2"),
-            batches: one_batch(1),
-            producer: Some(NumericProducer {
-                id: 1,
-                epoch: 1,
-                first_seq: 0,
-            }),
-            base_timestamp_ms: 4,
-        })
+        .append_batch(produce(
+            "/topics/demo",
+            kafka_batch(Some((1, 1, 0)), &[b"e"]),
+        ))
         .await
         .unwrap();
     assert!(!bumped.duplicate);
     assert_eq!(bumped.base_offset, 5);
 
     let fenced = services
-        .append_batch(AppendBatchCommand {
-            name: "/topics/demo".into(),
-            payload: fake_batch(b"stale"),
-            batches: one_batch(1),
-            producer: Some(NumericProducer {
-                id: 1,
-                epoch: 0,
-                first_seq: 1,
-            }),
-            base_timestamp_ms: 5,
-        })
+        .append_batch(produce(
+            "/topics/demo",
+            kafka_batch(Some((1, 0, 1)), &[b"s"]),
+        ))
         .await
         .unwrap_err();
     assert_eq!(fenced.kind, ErrorKind::Fenced);
     assert_eq!(fenced.producer_epoch, Some(1));
 
+    // Not a record batch at all.
+    let junk = services
+        .append_batch(produce(
+            "/topics/demo",
+            Bytes::from_static(b"definitely not kafka"),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(junk.kind, ErrorKind::CorruptBatch);
+
     node.close().await;
 }
 
-/// A minimal but real Kafka v2 record batch header (61 bytes) plus an opaque
-/// body, so producer identity survives in the stored bytes.
-fn kafka_v2_batch(producer_id: i64, epoch: i16, base_seq: i32, count: u32) -> Bytes {
-    let mut payload = Vec::with_capacity(64);
-    payload.extend_from_slice(&0i64.to_be_bytes()); // base offset (patched)
-    payload.extend_from_slice(&53i32.to_be_bytes()); // batch length
-    payload.extend_from_slice(&(-1i32).to_be_bytes()); // partition leader epoch
-    payload.push(2); // magic
-    payload.extend_from_slice(&0i32.to_be_bytes()); // crc
-    payload.extend_from_slice(&0i16.to_be_bytes()); // attributes
-    payload.extend_from_slice(&(count as i32 - 1).to_be_bytes()); // last offset delta
-    payload.extend_from_slice(&1i64.to_be_bytes()); // base timestamp
-    payload.extend_from_slice(&1i64.to_be_bytes()); // max timestamp
-    payload.extend_from_slice(&producer_id.to_be_bytes());
-    payload.extend_from_slice(&epoch.to_be_bytes());
-    payload.extend_from_slice(&base_seq.to_be_bytes());
-    payload.extend_from_slice(&(count as i32).to_be_bytes());
-    payload.extend_from_slice(b"body");
-    Bytes::from(payload)
+/// HTTP appends and Kafka produces land in one log and read back through
+/// either path, with the HTTP records carrying the service's monotonic
+/// `LogAppendTime`.
+#[tokio::test]
+async fn http_and_kafka_writers_share_one_log() {
+    let node = local_node().await;
+    let services = node.service();
+    services
+        .create(create("/mixed/log", "application/octet-stream"))
+        .await
+        .unwrap();
+
+    let http = services
+        .append(append(
+            "/mixed/log",
+            &[b"h1", b"h2"],
+            "application/octet-stream",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(http.next_offset.record_offset(), 2);
+    let kafka = services
+        .append_batch(produce("/mixed/log", kafka_batch(None, &[b"k1"])))
+        .await
+        .unwrap();
+    assert_eq!(kafka.base_offset, 2);
+    let http = services
+        .append(append("/mixed/log", &[b"h3"], "application/octet-stream"))
+        .await
+        .unwrap();
+    assert_eq!(http.next_offset.record_offset(), 4);
+
+    // Record view: one dense log.
+    let all = services
+        .read("/mixed/log", OffsetToken::beginning(), 0, 0)
+        .await
+        .unwrap();
+    let values: Vec<&[u8]> = all.records.iter().map(|r| &r.record.value[..]).collect();
+    assert_eq!(values, [b"h1", b"h2", b"k1", b"h3"]);
+    let offsets: Vec<u64> = all
+        .records
+        .iter()
+        .map(|r| r.offset.record_offset())
+        .collect();
+    assert_eq!(offsets, [0, 1, 2, 3]);
+    // Server timestamps: equal within a batch, strictly increasing across
+    // HTTP batches, and the Kafka batch keeps its own CreateTime.
+    let ts: Vec<i64> = all.records.iter().map(|r| r.record.timestamp_ms).collect();
+    assert_eq!(ts[0], ts[1]);
+    assert!(ts[3] > ts[0]);
+    assert_eq!(ts[2], 1);
+
+    // Batch view: three batches with the offsets a Kafka consumer expects.
+    let batches = services
+        .read_batches("/mixed/log", 0, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        batches
+            .batches
+            .iter()
+            .map(|b| (b.base_offset, b.last_offset))
+            .collect::<Vec<_>>(),
+        [(0, 2), (2, 3), (3, 4)]
+    );
+    for batch in &batches.batches {
+        let header = picomq_server::record::batch_header(&batch.payload).unwrap();
+        assert_eq!(header.base_offset, batch.base_offset);
+        assert_eq!(header.record_count, batch.count);
+    }
+
+    node.close().await;
 }
 
 /// Producer spans are not durably written per append; after a restart they
@@ -1007,8 +1047,6 @@ fn kafka_v2_batch(producer_id: i64, epoch: i16, base_seq: i32, count: u32) -> By
 /// batch still replays as a duplicate with its original offset.
 #[tokio::test]
 async fn kafka_producer_state_survives_restart_via_rescan() {
-    use picomq_server::{AppendBatchCommand, NumericProducer};
-
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
@@ -1028,23 +1066,14 @@ async fn kafka_producer_state_survives_restart_via_rescan() {
     .await
     .unwrap();
 
-    let batch = |seq: i32, count: u32| AppendBatchCommand {
-        name: "/topics/replayed".into(),
-        payload: kafka_v2_batch(42, 0, seq, count),
-        batches: vec![picomq_server::BatchSpan {
-            patch_at: 0,
-            record_count: count,
-        }],
-        producer: Some(NumericProducer {
-            id: 42,
-            epoch: 0,
-            first_seq: seq,
-        }),
-        base_timestamp_ms: 1,
+    let batch = |seq: i32, count: usize| {
+        let values: Vec<Vec<u8>> = (0..count).map(|i| vec![i as u8]).collect();
+        let values: Vec<&[u8]> = values.iter().map(Vec::as_slice).collect();
+        produce("/topics/replayed", kafka_batch(Some((42, 0, seq)), &values))
     };
 
     node.service()
-        .create(create("/topics/replayed", "application/vnd.kafka.batch"))
+        .create(create("/topics/replayed", "application/octet-stream"))
         .await
         .unwrap();
     let first = node.service().append_batch(batch(0, 3)).await.unwrap();
@@ -1082,70 +1111,57 @@ async fn kafka_producer_state_survives_restart_via_rescan() {
     node.close().await;
 }
 
-/// Multi-batch payloads span summed record counts, each batch header patched
-/// with its own assigned base offset. Producers require single batches, and
+/// Multi-batch payloads sum record counts, each batch header patched with
+/// its own assigned base offset. Producers require single batches, and
 /// client creates cannot claim the reserved subtree.
 #[tokio::test]
 async fn kafka_multi_batch_spans_and_reserved_names() {
-    use picomq_server::{AppendBatchCommand, BatchSpan, NumericProducer};
-
     let node = local_node().await;
     let services = node.service();
     services
-        .create(create("/topics/multi", "application/vnd.kafka.batch"))
+        .create(create("/topics/multi", "application/octet-stream"))
         .await
         .unwrap();
 
-    // Two 12-byte fake batches back to back.
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&fake_batch(b"one!"));
-    payload.extend_from_slice(&fake_batch(b"two!"));
-    let spans = vec![
-        BatchSpan {
-            patch_at: 0,
-            record_count: 2,
-        },
-        BatchSpan {
-            patch_at: 12,
-            record_count: 3,
-        },
-    ];
+    let one = kafka_batch(None, &[b"a", b"b"]);
+    let two = kafka_batch(None, &[b"c", b"d", b"e"]);
+    let payload = Bytes::from([&one[..], &two[..]].concat());
     let appended = services
-        .append_batch(AppendBatchCommand {
-            name: "/topics/multi".into(),
-            payload: Bytes::from(payload.clone()),
-            batches: spans.clone(),
-            producer: None,
-            base_timestamp_ms: 1,
-        })
+        .append_batch(produce("/topics/multi", payload))
         .await
         .unwrap();
     assert_eq!(appended.base_offset, 0);
     let watermarks = services.watermarks("/topics/multi").await.unwrap();
     assert_eq!(watermarks.high_watermark, 5);
 
+    // Each contained batch comes back with its own patched base offset.
     let read = services
         .read_batches("/topics/multi", 0, usize::MAX)
         .await
         .unwrap();
-    assert_eq!(read.batches.len(), 1);
-    let stored = &read.batches[0].payload;
+    let stored: Vec<u8> = read
+        .batches
+        .iter()
+        .flat_map(|b| b.payload.iter().copied())
+        .collect();
+    assert_eq!(stored.len(), one.len() + two.len());
     assert_eq!(&stored[..8], &0i64.to_be_bytes());
-    assert_eq!(&stored[12..20], &2i64.to_be_bytes());
+    assert_eq!(&stored[one.len()..one.len() + 8], &2i64.to_be_bytes());
+    assert_eq!(read.next_offset, 5);
+    let records = services
+        .read("/topics/multi", OffsetToken::beginning(), 0, 0)
+        .await
+        .unwrap();
+    assert_eq!(records.records.len(), 5);
+    assert_eq!(records.records[4].offset.record_offset(), 4);
 
     // Idempotent producers must send exactly one batch.
+    let with_producer = kafka_batch(Some((9, 0, 0)), &[b"x"]);
     let rejected = services
-        .append_batch(AppendBatchCommand {
-            name: "/topics/multi".into(),
-            payload: Bytes::from(payload),
-            batches: spans,
-            producer: Some(NumericProducer {
-                id: 9,
-                epoch: 0,
-                first_seq: 0,
-            }),
-            base_timestamp_ms: 2,
-        })
+        .append_batch(produce(
+            "/topics/multi",
+            Bytes::from([&with_producer[..], &two[..]].concat()),
+        ))
         .await
         .unwrap_err();
     assert_eq!(rejected.kind, ErrorKind::BadRequest);
@@ -1159,6 +1175,101 @@ async fn kafka_multi_batch_spans_and_reserved_names() {
     let mut internal = create("/_sys/groups/g1", "application/json");
     internal.internal = true;
     services.create(internal).await.unwrap();
+
+    node.close().await;
+}
+
+/// Topic aliases: derived from the stream name when legal, explicit when
+/// given, exclusive, and resolvable in both directions.
+#[tokio::test]
+async fn kafka_topic_aliases_derive_claim_and_resolve() {
+    let node = local_node().await;
+    let services = node.service();
+
+    // Derived: slashes become dots.
+    let created = services
+        .create(create("/orders/eu", "application/json"))
+        .await
+        .unwrap();
+    assert_eq!(created.meta.kafka_topic.as_deref(), Some("orders.eu"));
+    assert_eq!(
+        services.lookup_by_topic("orders.eu").await.unwrap(),
+        Some("/orders/eu".to_owned())
+    );
+
+    // A stream whose name cannot be a topic has none.
+    let none = services
+        .create(create("/has space", "application/json"))
+        .await
+        .unwrap();
+    assert_eq!(none.meta.kafka_topic, None);
+
+    // Derived collision: the later stream simply has no topic.
+    let dotted = services
+        .create(create("/orders.eu", "application/json"))
+        .await
+        .unwrap();
+    assert!(dotted.created);
+    assert_eq!(dotted.meta.kafka_topic, None);
+
+    // Explicit alias, and an explicit collision is a conflict.
+    let explicit = services
+        .create(create("/a/b/c", "application/json").with_kafka_topic("abc"))
+        .await
+        .unwrap();
+    assert_eq!(explicit.meta.kafka_topic.as_deref(), Some("abc"));
+    let clash = services
+        .create(create("/other", "application/json").with_kafka_topic("abc"))
+        .await
+        .unwrap_err();
+    assert_eq!(clash.kind, ErrorKind::Conflict);
+    let invalid = services
+        .create(create("/bad", "application/json").with_kafka_topic("no/slash"))
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.kind, ErrorKind::BadRequest);
+
+    // Re-alias through update: the old topic frees up.
+    let config = services
+        .update_stream(picomq_server::UpdateStreamCommand {
+            name: "/a/b/c".into(),
+            kafka_topic: Some(Some("renamed".into())),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(config.kafka_topic.as_deref(), Some("renamed"));
+    assert_eq!(services.lookup_by_topic("abc").await.unwrap(), None);
+    services
+        .create(create("/other", "application/json").with_kafka_topic("abc"))
+        .await
+        .unwrap();
+
+    let topics = services.list_topics();
+    assert_eq!(
+        topics,
+        vec![
+            ("abc".to_owned(), "/other".to_owned()),
+            ("orders.eu".to_owned(), "/orders/eu".to_owned()),
+            ("renamed".to_owned(), "/a/b/c".to_owned()),
+        ]
+    );
+
+    // Delete frees the topic for the dotted stream to claim.
+    assert!(services.delete("/orders/eu").await.unwrap());
+    assert_eq!(services.lookup_by_topic("orders.eu").await.unwrap(), None);
+    services
+        .update_stream(picomq_server::UpdateStreamCommand {
+            name: "/orders.eu".into(),
+            kafka_topic: Some(Some("orders.eu".into())),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        services.lookup_by_topic("orders.eu").await.unwrap(),
+        Some("/orders.eu".to_owned())
+    );
 
     node.close().await;
 }
@@ -1378,7 +1489,7 @@ async fn append_rejects_schema_invalid_records() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(err.kind, ErrorKind::BadRequest);
+    assert_eq!(err.kind, ErrorKind::SchemaViolation);
 
     // Unbound stream ignores the registered schema.
     services
@@ -1397,8 +1508,8 @@ async fn append_rejects_schema_invalid_records() {
     services
         .update_stream(picomq_server::UpdateStreamCommand {
             name: "/streams/orders".into(),
-            schema_name: None,
             schema_validate: Some(false),
+            ..Default::default()
         })
         .await
         .unwrap();

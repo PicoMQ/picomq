@@ -22,17 +22,18 @@ use tokio_stream::StreamExt as _;
 
 use picomq_auth::{Audience, Authorizer};
 use picomq_protocol::ds::{
-    encode_json_array, SseEncoder, H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID,
-    H_PRODUCER_RECEIVED_SEQ, H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR, H_STREAM_EXPIRES_AT,
-    H_STREAM_NEXT_OFFSET, H_STREAM_SCHEMA, H_STREAM_SCHEMA_VALIDATE, H_STREAM_SEQ,
-    H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL, H_STREAM_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE,
-    OFFSET_NOW, Q_CURSOR, Q_LIVE, Q_OFFSET,
+    encode_json_array, split_body, SseEncoder, H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ,
+    H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ, H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR,
+    H_STREAM_EXPIRES_AT, H_STREAM_NEXT_OFFSET, H_STREAM_SCHEMA, H_STREAM_SCHEMA_VALIDATE,
+    H_STREAM_SEQ, H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL, H_STREAM_UP_TO_DATE, LIVE_LONG_POLL,
+    LIVE_SSE, OFFSET_NOW, Q_CURSOR, Q_LIVE, Q_OFFSET,
 };
 use picomq_protocol::mime::{is_json, mime_of};
 use picomq_server::ownership::OwnershipService;
 use picomq_server::types::Producer;
 use picomq_server::{
-    AppendCommand, CreateCommand, ErrorKind, OffsetToken, ReadResult, S3StreamService, ServiceError,
+    AppendCommand, CreateCommand, ErrorKind, LogRecord, OffsetToken, ReadResult, S3StreamService,
+    ServiceError,
 };
 
 use crate::http::{
@@ -206,6 +207,11 @@ impl DsFrontend {
             .filter(|v| !v.is_empty())
             .unwrap_or(DEFAULT_CT)
             .to_owned();
+        let initial_records = if body.is_empty() {
+            Vec::new()
+        } else {
+            records_of(&content_type, &body, true)?
+        };
         let result = self
             .service
             .create(CreateCommand {
@@ -214,13 +220,14 @@ impl DsFrontend {
                 ttl_seconds,
                 expires_at_ms,
                 closed: truthy(headers, H_STREAM_CLOSED),
-                initial_payload: body,
+                initial_records,
                 external_id: None,
                 internal: false,
                 schema_name: header_str(headers, H_STREAM_SCHEMA)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned),
                 schema_validate: truthy(headers, H_STREAM_SCHEMA_VALIDATE),
+                kafka_topic: None,
             })
             .await?;
         let meta = result.meta;
@@ -263,26 +270,23 @@ impl DsFrontend {
         if body.is_empty() && !close {
             return Err(bad_request("Empty body"));
         }
-        if !body.is_empty() && !content_type.as_deref().is_some_and(|ct| !ct.is_empty()) {
-            return Err(bad_request("missing Content-Type"));
-        }
+        let records = match content_type.as_deref().filter(|ct| !ct.is_empty()) {
+            _ if body.is_empty() => Vec::new(),
+            None => return Err(bad_request("missing Content-Type")),
+            Some(ct) => records_of(ct, &body, false)?,
+        };
 
         let result = self
             .service
             .append(
                 AppendCommand {
                     name,
-                    payloads: if body.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![body]
-                    },
+                    records,
                     content_type: content_type.clone(),
                     stream_seq: header_str(headers, H_STREAM_SEQ).map(str::to_owned),
                     match_seq: None,
                     producer,
                     close_after: close,
-                    atomic: true,
                 }
                 .normalized(),
             )
@@ -446,8 +450,11 @@ impl DsFrontend {
                 };
 
                 if !read.records.is_empty() {
-                    let payloads: Vec<Bytes> =
-                        read.records.iter().map(|r| r.payload.clone()).collect();
+                    let payloads: Vec<Bytes> = read
+                        .records
+                        .iter()
+                        .map(|r| r.record.value.clone())
+                        .collect();
                     if tx.send(encoder.data_event(&payloads)).await.is_err() {
                         return;
                     }
@@ -548,10 +555,11 @@ impl DsFrontend {
 
         if !(empty_tail && live) {
             let body = if json {
-                let payloads: Vec<Bytes> = out.records.iter().map(|r| r.payload.clone()).collect();
+                let payloads: Vec<Bytes> =
+                    out.records.iter().map(|r| r.record.value.clone()).collect();
                 encode_json_array(&payloads)
             } else {
-                out.concatenated()
+                out.concatenated_values()
             };
             *response.body_mut() = Body::from(body);
         }
@@ -608,7 +616,10 @@ fn options() -> Response {
 fn service_error_response(e: ServiceError) -> Response {
     match e.kind {
         ErrorKind::NotFound => respond(404, None, false),
-        ErrorKind::BadRequest | ErrorKind::MatchFailed => fail(400, &e.message),
+        ErrorKind::BadRequest
+        | ErrorKind::CorruptBatch
+        | ErrorKind::SchemaViolation
+        | ErrorKind::MatchFailed => fail(400, &e.message),
         ErrorKind::Fenced => {
             let mut response = fail(403, &e.message);
             if let Some(epoch) = e.producer_epoch {
@@ -637,6 +648,19 @@ fn service_error_response(e: ServiceError) -> Response {
         ErrorKind::Conflict | ErrorKind::Closed => respond(409, e.next_offset.as_ref(), e.closed),
         ErrorKind::Durability => fail(500, &e.message),
     }
+}
+
+/// DS bodies are value-only records; JSON arrays fan out per element.
+fn records_of(
+    content_type: &str,
+    body: &Bytes,
+    create: bool,
+) -> Result<Vec<LogRecord>, ServiceError> {
+    Ok(split_body(content_type, body, create)
+        .map_err(|e| bad_request(e.message))?
+        .into_iter()
+        .map(LogRecord::value)
+        .collect())
 }
 
 fn producer_of(headers: &HeaderMap) -> Result<Option<Producer>, ServiceError> {

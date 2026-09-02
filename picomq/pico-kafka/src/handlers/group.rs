@@ -29,7 +29,7 @@ use crate::handlers::common::{
     UNKNOWN_TOPIC_OR_PARTITION,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
-use crate::topic::validate_topic_name;
+use picomq_server::alias::is_valid_topic as validate_topic_name;
 
 pub async fn handle(
     ctx: &BrokerContext,

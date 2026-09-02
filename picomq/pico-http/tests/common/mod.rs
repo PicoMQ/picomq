@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use picomq_http::{serve, Protocol, RoutingMode, RunningServer, ServeOptions};
+use picomq_http::{serve, HttpProtocol, RoutingMode, RunningServer, ServeOptions};
 use picomq_metadata::LocalSink;
 use picomq_schema::{Registry, SchemaStore};
 use picomq_server::{NodeConfig, PicoNode};
@@ -60,11 +60,11 @@ async fn start_node_inner(schema_registry: Option<Arc<dyn SchemaStore>>) -> Arc<
     )
 }
 
-async fn start(protocol: Protocol) -> TestServer {
+async fn start(protocol: HttpProtocol) -> TestServer {
     start_with_node(protocol, start_node().await).await
 }
 
-async fn start_with_node(protocol: Protocol, node: Arc<PicoNode>) -> TestServer {
+async fn start_with_node(protocol: HttpProtocol, node: Arc<PicoNode>) -> TestServer {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node.clone(),
@@ -92,20 +92,15 @@ async fn start_with_node(protocol: Protocol, node: Arc<PicoNode>) -> TestServer 
 
 #[allow(dead_code)]
 pub async fn picomq_server() -> TestServer {
-    start(Protocol::Pico).await
+    start(HttpProtocol::Pico).await
 }
 
 #[allow(dead_code)]
 pub async fn picomq_server_with_schema(registry: Registry) -> TestServer {
-    start_with_node(Protocol::Pico, start_node_with_schema(registry).await).await
-}
-
-#[allow(dead_code)]
-pub async fn kafka_http_with_schema(registry: Registry) -> TestServer {
-    start_with_node(Protocol::Kafka, start_node_with_schema(registry).await).await
+    start_with_node(HttpProtocol::Pico, start_node_with_schema(registry).await).await
 }
 
 #[allow(dead_code)]
 pub async fn ds_server() -> TestServer {
-    start(Protocol::Ds).await
+    start(HttpProtocol::Ds).await
 }

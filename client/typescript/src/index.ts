@@ -4,6 +4,7 @@ export type {
   AppendOptions,
   CallOptions,
   ClientConfig,
+  HeaderValue,
   Live,
   ProducerAck,
   ProducerRef,

@@ -1,11 +1,12 @@
 //! Named-stream service over the s3stream engine (no HTTP, no metadata backend choice).
 
+pub mod alias;
 pub mod auth;
 pub mod error;
-pub mod framing;
 pub mod node;
 pub mod ownership;
 pub mod producer;
+pub mod record;
 pub mod registry;
 pub mod service;
 pub mod transfer;
@@ -20,12 +21,13 @@ pub use picomq_schema::{
     Batch as SchemaBatch, Record as SchemaRecord, Registry as SchemaRegistry, SchemaFormat,
     SchemaStore,
 };
+pub use record::{LogRecord, StreamRecord};
 pub use service::{is_reserved_name, S3StreamService};
 pub use transfer::TransferWatcher;
 pub use types::{
-    AppendBatchCommand, AppendBatchResult, AppendCommand, AppendResult, BatchReadResult, BatchSpan,
+    AppendBatchCommand, AppendBatchResult, AppendCommand, AppendResult, BatchReadResult,
     CloseResult, CreateCommand, CreateResult, NodeMeta, NumericProducer, OffsetToken, Owner,
-    ReadResult, StreamBatch, StreamConfig, StreamList, StreamMeta, StreamRecord, StreamWatermarks,
+    ReadResult, StreamBatch, StreamConfig, StreamList, StreamMeta, StreamWatermarks,
     SubmittedBatchAppend, UpdateStreamCommand,
 };
 pub use waiter::StreamWaiterRegistry;

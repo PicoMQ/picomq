@@ -36,19 +36,24 @@ describe.runIf(up)('live pico server', () => {
       'one',
       { body: 'two', headers: { kind: 'demo', n: '2' } },
       new Uint8Array([1, 2, 3]),
+      { body: 'four', key: 'user-7', headers: { raw: new Uint8Array([0xff, 0x00]) } },
     ])
     expect(ack.start).toBe('0')
-    expect(ack.next).toBe('3')
+    expect(ack.next).toBe('4')
 
     const page = await stream.read('0', 'off')
-    expect(page.records).toHaveLength(3)
+    expect(page.records).toHaveLength(4)
     expect(page.upToDate).toBe(true)
     expect(text(page.records[0]!)).toBe('one')
     expect(page.records[0]!.position).toBe('0')
+    expect(page.records[0]!.key).toBeUndefined()
+    expect(page.records[0]!.timestamp).toBeGreaterThan(0)
     expect(text(page.records[1]!)).toBe('two')
     expect(page.records[1]!.headers).toEqual({ kind: 'demo', n: '2' })
     expect(page.records[2]!.body).toEqual(new Uint8Array([1, 2, 3]))
     expect(page.records[2]!.position).toBe('2')
+    expect(page.records[3]!.key).toEqual(new TextEncoder().encode('user-7'))
+    expect(page.records[3]!.headers).toEqual({ raw: new Uint8Array([0xff, 0x00]) })
   })
 
   it('paginates records() across many pages', async () => {
@@ -140,6 +145,53 @@ describe.runIf(up)('live pico server', () => {
     expect(again.applied).toBe(false)
     expect(again.duplicate).toBe(true)
     expect(again.ack.next).toBe(first.ack.next)
+  })
+
+  it('rejects a producer sequence gap', async () => {
+    const stream = pico.stream(`${base}/gap`)
+    await stream.create(CT)
+    await stream.appendAs(['first'], { id: 'writer-g', epoch: 0, seq: 0 })
+    await expect(
+      stream.appendAs(['skip'], { id: 'writer-g', epoch: 0, seq: 2 }),
+    ).rejects.toMatchObject({ kind: 'conflict', code: 'sequence_gap' })
+    const page = await stream.read('0', 'off')
+    expect(page.records).toHaveLength(1)
+  })
+
+  it('keeps concurrent producers independent', { timeout: 30_000 }, async () => {
+    const stream = pico.stream(`${base}/multi`)
+    await stream.create(CT)
+    const writers = 4
+    const each = 20
+    await Promise.all(
+      Array.from({ length: writers }, async (_, w) => {
+        for (let i = 0; i < each; i++) {
+          const result = await stream.appendAs([`w${w}-${i}`], {
+            id: `w${w}`,
+            epoch: 0,
+            seq: i,
+          })
+          expect(result.applied).toBe(true)
+        }
+      }),
+    )
+    const bodies: string[] = []
+    for await (const record of stream.records('0', { batch: { count: 200 } })) {
+      bodies.push(text(record))
+    }
+    expect(bodies).toHaveLength(writers * each)
+  })
+
+  it('creates with a ttl and expires', { timeout: 20_000 }, async () => {
+    const stream = pico.stream(`${base}/ttl`)
+    await stream.create(CT, 2)
+    expect((await stream.head())!.ttlSeconds).toBe(2)
+    const deadline = Date.now() + 15_000
+    while (Date.now() < deadline) {
+      if ((await stream.head()) === null) return
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    throw new Error('ttl stream still present')
   })
 
   it('rejects stale producer epochs', async () => {

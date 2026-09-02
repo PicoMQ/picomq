@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use picomq_client::{connect, ErrorKind, Live, Protocol, ReadLimits};
-use picomq_http::Protocol as ServeProtocol;
+use picomq_http::HttpProtocol as ServeProtocol;
 use picomq_runtime::{MetaBackend, PicoServer, ServerConfig};
 
 struct Server {
@@ -19,7 +19,8 @@ async fn start(protocol: Protocol, dir: &std::path::Path) -> Server {
     let server = picomq_runtime::start(ServerConfig {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
-        protocol: match protocol {
+        kafka: None,
+        http_protocol: match protocol {
             Protocol::Pico => ServeProtocol::Pico,
             Protocol::Ds => ServeProtocol::Ds,
         },

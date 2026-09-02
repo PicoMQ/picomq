@@ -1,6 +1,6 @@
 # Playground
 
-Two-node Docker cluster, then stream and auth exercises against it. The cluster serves one client protocol, chosen in `.env` before startup, so pick a protocol tab once and follow it through the page. Tabs stay in sync.
+Two-node Docker cluster, then stream and auth exercises against it. The cluster serves one HTTP protocol, chosen in `.env` before startup, and Kafka on every node. Pick a protocol tab once and follow it through the page. Tabs stay in sync.
 
 ## Tooling
 
@@ -92,11 +92,7 @@ PICO_AUTH_BOOTSTRAP_TOKEN=ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJS
 
 == Kafka
 
-```bash
-PICO_PROTOCOL=kafka
-```
-
-The Kafka listener carries no client auth. `PICO_AUTH` gates only the admin API in this mode, so the auth sections below do not apply. See [exposure](/docs/kafka#exposure).
+Kafka is already on. Leave `PICO_PROTOCOL` at `pico` or `ds`. The Kafka listener carries no client auth, so the auth sections below do not apply to it. See [exposure](/docs/kafka#exposure).
 
 :::
 
@@ -251,7 +247,7 @@ Topic deletion goes through `DeleteTopics`, which `kcat` does not expose. Use an
 
 ## Auth gate
 
-The auth sections need `PICO_AUTH=required` from the cluster step and apply to the HTTP protocols. In Kafka mode the token gates only the admin API.
+The auth sections need `PICO_AUTH=required` from the cluster step and apply to the HTTP protocols.
 
 Health stays open. Protocol calls need the bearer.
 
@@ -417,7 +413,7 @@ pico --endpoint $ENDPOINT --http2 --token "$PICO_TOKEN" bench \
 
 == Kafka
 
-`pico bench` speaks the Pico protocol. For Kafka mode use standard Kafka load tools, for example `kafka-producer-perf-test` or `librdkafka`'s `rdkafka_performance`.
+`pico bench` speaks the Pico protocol. For Kafka use standard Kafka load tools, for example `kafka-producer-perf-test` or `librdkafka`'s `rdkafka_performance`.
 
 :::
 

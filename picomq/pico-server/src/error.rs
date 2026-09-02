@@ -12,6 +12,12 @@ pub enum ErrorKind {
     Conflict,
     Closed,
     BadRequest,
+    /// A record batch that does not parse as Kafka RecordBatch v2 (bad
+    /// magic, truncated, CRC mismatch). Kafka: `CORRUPT_MESSAGE`.
+    CorruptBatch,
+    /// Well-formed records the stream's bound schema rejects. Kafka:
+    /// `INVALID_RECORD`.
+    SchemaViolation,
     Fenced,
     SequenceGap,
     MatchFailed,

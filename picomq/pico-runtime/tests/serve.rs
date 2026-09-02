@@ -7,20 +7,25 @@ use std::path::Path;
 use std::time::Duration;
 
 use picomq_auth::AccessToken;
-use picomq_http::Protocol;
-use picomq_runtime::{AuthMode, MetaBackend, RuntimeError, ServerConfig};
+use picomq_http::HttpProtocol;
+use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, RuntimeError, ServerConfig};
 
 fn loopback() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 0))
 }
 
-/// A config with ephemeral ports, a SQLite log and storage under `dir`.
-fn config(dir: &Path, protocol: Protocol, node_epoch: i64) -> ServerConfig {
+/// A config with ephemeral ports (HTTP, admin and Kafka), a SQLite log and
+/// storage under `dir`.
+fn config(dir: &Path, protocol: HttpProtocol, node_epoch: i64) -> ServerConfig {
     ServerConfig {
         node_epoch,
         addr: loopback(),
         admin_addr: Some(loopback()),
-        protocol,
+        http_protocol: protocol,
+        kafka: Some(KafkaConfig {
+            listen: loopback(),
+            advertise: None,
+        }),
         meta_backend: MetaBackend::parse(&format!("sqlite:{}", dir.join("meta.db").display()))
             .unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
@@ -36,7 +41,7 @@ fn config(dir: &Path, protocol: Protocol, node_epoch: i64) -> ServerConfig {
 #[tokio::test]
 async fn pico_protocol_over_a_started_process() {
     let dir = tempfile::tempdir().unwrap();
-    let server = picomq_runtime::start(config(dir.path(), Protocol::Pico, 1))
+    let server = picomq_runtime::start(config(dir.path(), HttpProtocol::Pico, 1))
         .await
         .unwrap();
     let http = reqwest::Client::new();
@@ -84,7 +89,7 @@ async fn pico_protocol_over_a_started_process() {
 #[tokio::test]
 async fn ds_protocol_over_a_started_process() {
     let dir = tempfile::tempdir().unwrap();
-    let server = picomq_runtime::start(config(dir.path(), Protocol::Ds, 1))
+    let server = picomq_runtime::start(config(dir.path(), HttpProtocol::Ds, 1))
         .await
         .unwrap();
     let http = reqwest::Client::new();
@@ -115,20 +120,11 @@ async fn ds_protocol_over_a_started_process() {
     server.shutdown().await;
 }
 
-/// Kafka mode: the TCP listener answers ApiVersions, the HTTP data routers
-/// are not mounted, and the admin surface stays up.
-#[tokio::test]
-async fn kafka_protocol_over_a_started_process() {
+/// ApiVersions v0 request framed by hand (api_key, version, correlation id,
+/// null client id); returns the response body.
+async fn kafka_api_versions(addr: SocketAddr) -> Vec<u8> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = config(dir.path(), Protocol::Kafka, 1);
-    config.kafka_listen = loopback();
-    let server = picomq_runtime::start(config).await.unwrap();
-    let kafka_addr = server.kafka_addr().unwrap();
-
-    // ApiVersions v0 request, framed by hand: api_key, version,
-    // correlation id, null client id.
     let mut frame = Vec::new();
     frame.extend_from_slice(&18i16.to_be_bytes());
     frame.extend_from_slice(&0i16.to_be_bytes());
@@ -137,7 +133,7 @@ async fn kafka_protocol_over_a_started_process() {
     let mut request = (frame.len() as i32).to_be_bytes().to_vec();
     request.extend_from_slice(&frame);
 
-    let mut socket = tokio::net::TcpStream::connect(kafka_addr).await.unwrap();
+    let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
     socket.write_all(&request).await.unwrap();
     let mut len = [0u8; 4];
     tokio::time::timeout(Duration::from_secs(2), socket.read_exact(&mut len))
@@ -146,26 +142,65 @@ async fn kafka_protocol_over_a_started_process() {
         .unwrap();
     let mut body = vec![0u8; i32::from_be_bytes(len) as usize];
     socket.read_exact(&mut body).await.unwrap();
-    assert_eq!(&body[..4], &77i32.to_be_bytes());
+    body
+}
+
+/// The Kafka listener runs alongside whichever HTTP protocol is mounted: it
+/// answers ApiVersions while the HTTP data router and admin surface serve.
+#[tokio::test]
+async fn kafka_listener_runs_alongside_each_http_protocol() {
+    for protocol in [HttpProtocol::Pico, HttpProtocol::Ds] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = picomq_runtime::start(config(dir.path(), protocol, 1))
+            .await
+            .unwrap();
+        let kafka_addr = server.kafka_addr().expect("kafka listener bound");
+
+        let body = kafka_api_versions(kafka_addr).await;
+        assert_eq!(&body[..4], &77i32.to_be_bytes());
+
+        let http = reqwest::Client::new();
+        let admin = format!("http://{}", server.admin_addr().unwrap());
+        let ready: serde_json::Value = http
+            .get(format!("{admin}/ready"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(ready["ready"], true);
+
+        let created = http
+            .put(format!("http://{}/streams/orders", server.local_addr()))
+            .header("Content-Type", "text/plain")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), 201, "{protocol:?} data router mounted");
+
+        server.shutdown().await;
+    }
+}
+
+/// `kafka: None` opens no Kafka socket and does not register a Kafka
+/// address for the node.
+#[tokio::test]
+async fn kafka_listener_can_be_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path(), HttpProtocol::Pico, 1);
+    config.kafka = None;
+    let server = picomq_runtime::start(config).await.unwrap();
+    assert!(server.kafka_addr().is_none());
 
     let http = reqwest::Client::new();
-    let admin = format!("http://{}", server.admin_addr().unwrap());
-    let ready: serde_json::Value = http
-        .get(format!("{admin}/ready"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(ready["ready"], true);
-
-    let data = http
-        .get(format!("http://{}/streams/orders", server.local_addr()))
+    let created = http
+        .put(format!("http://{}/streams/orders", server.local_addr()))
+        .header("Content-Type", "text/plain")
         .send()
         .await
         .unwrap();
-    assert_eq!(data.status(), 404, "no HTTP data router in kafka mode");
+    assert_eq!(created.status(), 201);
 
     server.shutdown().await;
 }
@@ -173,14 +208,14 @@ async fn kafka_protocol_over_a_started_process() {
 #[tokio::test]
 async fn auth_off_refuses_non_loopback_binds() {
     let dir = tempfile::tempdir().unwrap();
-    let mut refused = config(dir.path(), Protocol::Pico, 1);
+    let mut refused = config(dir.path(), HttpProtocol::Pico, 1);
     refused.addr = SocketAddr::from(([0, 0, 0, 0], 0));
     assert!(matches!(
         picomq_runtime::start(refused).await,
         Err(RuntimeError::InsecureBind { .. })
     ));
 
-    let mut refused_admin = config(dir.path(), Protocol::Pico, 1);
+    let mut refused_admin = config(dir.path(), HttpProtocol::Pico, 1);
     refused_admin.admin_addr = Some(SocketAddr::from(([0, 0, 0, 0], 0)));
     assert!(matches!(
         picomq_runtime::start(refused_admin).await,
@@ -193,9 +228,12 @@ async fn auth_off_refuses_non_loopback_binds() {
 #[tokio::test]
 async fn kafka_non_loopback_bind_refused_regardless_of_auth() {
     let dir = tempfile::tempdir().unwrap();
-    let mut refused = config(dir.path(), Protocol::Kafka, 1);
+    let mut refused = config(dir.path(), HttpProtocol::Pico, 1);
     refused.auth_mode = AuthMode::Required;
-    refused.kafka_listen = SocketAddr::from(([0, 0, 0, 0], 0));
+    refused.kafka = Some(KafkaConfig {
+        listen: SocketAddr::from(([0, 0, 0, 0], 0)),
+        advertise: None,
+    });
     assert!(matches!(
         picomq_runtime::start(refused).await,
         Err(RuntimeError::InsecureBind { .. })
@@ -205,7 +243,7 @@ async fn kafka_non_loopback_bind_refused_regardless_of_auth() {
 #[tokio::test]
 async fn insecure_allow_remote_permits_non_loopback_binds() {
     let dir = tempfile::tempdir().unwrap();
-    let mut allowed = config(dir.path(), Protocol::Pico, 1);
+    let mut allowed = config(dir.path(), HttpProtocol::Pico, 1);
     allowed.addr = SocketAddr::from(([0, 0, 0, 0], 0));
     allowed.admin_addr = Some(SocketAddr::from(([0, 0, 0, 0], 0)));
     allowed.insecure_allow_remote = true;
@@ -221,7 +259,7 @@ async fn bootstrap_enforces_and_stays_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let (root, _) = AccessToken::issue("ops/root").unwrap();
     let secured = |epoch: i64, wire: String| {
-        let mut config = config(dir.path(), Protocol::Pico, epoch);
+        let mut config = config(dir.path(), HttpProtocol::Pico, epoch);
         config.auth_mode = AuthMode::Required;
         config.bootstrap_token = Some(wire);
         config
@@ -272,7 +310,7 @@ async fn state_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let http = reqwest::Client::new();
 
-    let first = picomq_runtime::start(config(dir.path(), Protocol::Pico, 1))
+    let first = picomq_runtime::start(config(dir.path(), HttpProtocol::Pico, 1))
         .await
         .unwrap();
     let url = format!("http://{}/streams/durable", first.local_addr());
@@ -301,7 +339,7 @@ async fn state_survives_a_restart() {
     first.shutdown().await;
 
     // `nodeEpoch = System.currentTimeMillis()`).
-    let second = picomq_runtime::start(config(dir.path(), Protocol::Pico, 2))
+    let second = picomq_runtime::start(config(dir.path(), HttpProtocol::Pico, 2))
         .await
         .unwrap();
     let url = format!("http://{}/streams/durable", second.local_addr());

@@ -9,8 +9,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use picomq_http::Protocol;
-use picomq_runtime::{MetaBackend, PicoServer, ServerConfig};
+use picomq_runtime::{KafkaConfig, MetaBackend, PicoServer, ServerConfig};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
@@ -27,8 +26,10 @@ fn config(dir: &Path, node_epoch: i64) -> ServerConfig {
         node_epoch,
         addr: loopback(),
         admin_addr: None,
-        protocol: Protocol::Kafka,
-        kafka_listen: loopback(),
+        kafka: Some(KafkaConfig {
+            listen: loopback(),
+            advertise: None,
+        }),
         meta_backend: MetaBackend::parse(&format!("sqlite:{}", dir.join("meta.db").display()))
             .unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),

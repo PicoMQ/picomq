@@ -34,6 +34,7 @@ Creates the stream. Idempotent: `201` when created, `200` when it already exists
 | `Pico-Closed` | `true` creates the stream already sealed. |
 | `Pico-Schema` | Binds a registered [schema](/docs/schemas) by name. |
 | `Pico-Schema-Validate` | `true` validates appends against the bound schema. Defaults to `false`. |
+| `Pico-Kafka-Topic` | Kafka topic for this stream. Derived from the name when unset. |
 
 ## Append
 
@@ -45,6 +46,7 @@ Appends records. The body is a single record in the stream's content type, a JSO
 
 | Request header | Meaning |
 | --- | --- |
+| `Pico-Key` | Record key for a single-record body. Batch bodies carry keys inline. |
 | `Pico-Producer-Id`, `Pico-Producer-Epoch`, `Pico-Producer-Seq` | Idempotent producer identity. A repeated seq is acknowledged without writing. |
 | `Pico-Match-Seq` | Conditional append: succeeds only if the tail is at this sequence. |
 | `Pico-Closed` | `true` seals the stream after this append. |
@@ -72,6 +74,8 @@ Reads records from a sequence. Without `live` it returns what exists and stops. 
 | `format` | `json` (default), `binary` batch, or `raw` concatenated bodies. |
 | `live` | `long-poll` waits for the next record, `sse` holds the response open as an event stream. |
 
+A JSON record is `seq`, `timestamp`, `key`, `headers`, and `body`. Non-UTF-8 bytes use `key_b64`, `body_b64`, or `headers_b64`.
+
 | Response header | Meaning |
 | --- | --- |
 | `Pico-Next-Seq` | Where to resume. Pass it as the next `seq`. |
@@ -87,7 +91,7 @@ Catch-up responses include an `ETag` and honor `If-None-Match` with `304`, so po
 HEAD /{stream}
 ```
 
-Returns the stream's metadata in headers with no body: `Pico-Next-Seq`, `Pico-Start-Seq`, `Pico-TTL`, `Pico-Expires-At`, `Pico-Closed`, and `Pico-Schema` when bound. `404` when the stream does not exist.
+Returns the stream's metadata in headers with no body: `Pico-Next-Seq`, `Pico-Start-Seq`, `Pico-TTL`, `Pico-Expires-At`, `Pico-Closed`, `Pico-Schema` when bound, and `Pico-Kafka-Topic` when set. `404` when the stream does not exist.
 
 ## Delete
 
@@ -107,7 +111,7 @@ Lists streams as JSON. `prefix` filters by name prefix, `limit` caps the page, a
 
 ## Schemas
 
-Schema registration (`/_schemas/{name}`) and stream schema config (`GET`/`PATCH /_streams/{name}`) share this listener and are covered in [Schemas](/docs/schemas).
+Schema registration (`/_schemas/{name}`) and stream config (`GET`/`PATCH /_streams/{name}`) share this listener and are covered in [Schemas](/docs/schemas). The config document also carries `kafkaTopic`.
 
 ## Admin API
 
@@ -115,4 +119,4 @@ Admin endpoints, the token control plane (`/admin/tokens`), and the dashboard ar
 
 ## Durable Streams
 
-A listener started with `--protocol ds` speaks the Durable Streams open protocol on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers, raw record bodies, and one record per append. Streams created through either protocol are readable through both. Auth rejections on this listener are plain text `401`/`403` with no headers beyond the spec's own, so producer fencing (`403` with `Producer-Epoch`) stays distinguishable from a scope denial.
+A listener started with `--protocol ds` speaks the Durable Streams open protocol on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers, raw record bodies, and one record per append. Streams created through either HTTP protocol or Kafka are readable through both. Auth rejections on this listener are plain text `401`/`403` with no headers beyond the spec's own, so producer fencing (`403` with `Producer-Epoch`) stays distinguishable from a scope denial.

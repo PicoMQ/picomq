@@ -2,10 +2,10 @@ use bytes::Bytes;
 use http::{HeaderMap, Method};
 use serde_json::{json, Map, Value};
 
-use crate::envelope::{
-    decode_batch_read, encode_batch_append, encode_json_read, RecordEnvelope, SequencedRecord,
-};
 use crate::error::{CodecError, ErrorKind, WireError};
+use crate::record::{
+    decode_batch_read, encode_batch_append, encode_json_read, PicoRecord, SequencedRecord,
+};
 use crate::wire::{
     header_i64, header_string, header_u64, stream_path, truthy, urlencode, WireRequest,
 };
@@ -29,12 +29,14 @@ pub const H_PRODUCER_EPOCH: &str = "Pico-Producer-Epoch";
 pub const H_PRODUCER_SEQ: &str = "Pico-Producer-Seq";
 pub const H_EXPECTED_SEQ: &str = "Pico-Expected-Seq";
 pub const H_RECEIVED_SEQ: &str = "Pico-Received-Seq";
+/// Record key for a single-record append; batch bodies carry keys inline.
+pub const H_KEY: &str = "Pico-Key";
+/// The stream's Kafka topic alias (create request and metadata responses).
+pub const H_KAFKA_TOPIC: &str = "Pico-Kafka-Topic";
 pub const CT_BATCH_JSON: &str = "application/vnd.picomq.batch+json";
 pub const CT_BATCH_BINARY: &str = "application/vnd.picomq.batch";
 pub const CT_JSON: &str = "application/json";
 pub const CT_EVENT_STREAM: &str = "text/event-stream";
-pub const CT_CORE: &str = "application/x-picomq";
-pub const CT_CORE_PARAM: &str = "ct";
 pub const DEFAULT_CT: &str = "application/octet-stream";
 pub const Q_SEQ: &str = "seq";
 pub const Q_COUNT: &str = "count";
@@ -54,6 +56,7 @@ pub const SEQ_NOW: &str = "now";
 pub const SEQ_BEGINNING: &str = "0";
 pub const E_NOT_FOUND: &str = "not_found";
 pub const E_BAD_REQUEST: &str = "bad_request";
+pub const E_SCHEMA_VIOLATION: &str = "schema_violation";
 pub const E_FENCED: &str = "fenced";
 pub const E_SEQUENCE_GAP: &str = "sequence_gap";
 pub const E_MATCH_FAILED: &str = "match_failed";
@@ -62,21 +65,6 @@ pub const E_CLOSED: &str = "closed";
 pub const E_DURABILITY: &str = "durability";
 pub const E_UNAUTHENTICATED: &str = "unauthenticated";
 pub const E_PERMISSION_DENIED: &str = "permission_denied";
-
-pub fn engine_ct(user_ct: &str) -> String {
-    format!("{CT_CORE}; {CT_CORE_PARAM}={user_ct}")
-}
-
-pub fn user_ct_of(engine_ct: &str) -> String {
-    let Some((_, params)) = engine_ct.split_once(';') else {
-        return DEFAULT_CT.to_owned();
-    };
-    let params = params.trim();
-    match params.strip_prefix(&format!("{CT_CORE_PARAM}=")) {
-        Some(user) => user.to_owned(),
-        None => DEFAULT_CT.to_owned(),
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErrorBody {
@@ -234,6 +222,7 @@ pub struct CreateRequest<'a> {
     pub closed: bool,
     pub schema: Option<&'a str>,
     pub schema_validate: bool,
+    pub kafka_topic: Option<&'a str>,
 }
 
 impl<'a> CreateRequest<'a> {
@@ -246,6 +235,7 @@ impl<'a> CreateRequest<'a> {
             closed: false,
             schema: None,
             schema_validate: false,
+            kafka_topic: None,
         }
     }
 
@@ -257,6 +247,7 @@ impl<'a> CreateRequest<'a> {
             .flag(H_CLOSED, self.closed)
             .header_opt(H_SCHEMA, self.schema)
             .flag(H_SCHEMA_VALIDATE, self.schema_validate)
+            .header_opt(H_KAFKA_TOPIC, self.kafka_topic)
     }
 }
 
@@ -282,14 +273,14 @@ impl CreateResponse {
 #[derive(Debug, Clone)]
 pub struct AppendRequest<'a> {
     pub stream: &'a str,
-    pub records: &'a [RecordEnvelope],
+    pub records: &'a [PicoRecord],
     pub producer: Option<Producer<'a>>,
     pub match_seq: Option<u64>,
     pub close: bool,
 }
 
 impl<'a> AppendRequest<'a> {
-    pub fn new(stream: &'a str, records: &'a [RecordEnvelope]) -> Self {
+    pub fn new(stream: &'a str, records: &'a [PicoRecord]) -> Self {
         Self {
             stream,
             records,
@@ -387,6 +378,7 @@ pub struct HeadResponse {
     pub ttl_seconds: Option<u64>,
     pub expires_at: Option<String>,
     pub schema: Option<String>,
+    pub kafka_topic: Option<String>,
 }
 
 impl HeadResponse {
@@ -402,6 +394,7 @@ impl HeadResponse {
             ttl_seconds: header_u64(headers, H_TTL),
             expires_at: header_string(headers, H_EXPIRES_AT),
             schema: header_string(headers, H_SCHEMA),
+            kafka_topic: header_string(headers, H_KAFKA_TOPIC),
         })
     }
 }
@@ -566,20 +559,6 @@ pub fn decode_error(status: u16, headers: &HeaderMap, body: &str) -> WireError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn engine_content_type_round_trip() {
-        assert_eq!(
-            engine_ct("text/plain"),
-            "application/x-picomq; ct=text/plain"
-        );
-        assert_eq!(
-            user_ct_of("application/x-picomq; ct=text/plain"),
-            "text/plain"
-        );
-        assert_eq!(user_ct_of("application/x-picomq"), DEFAULT_CT);
-        assert_eq!(user_ct_of("application/x-picomq; other=1"), DEFAULT_CT);
-    }
 
     #[test]
     fn error_body_round_trip() {

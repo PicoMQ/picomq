@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use picomq_common::now_ms;
-use picomq_http::{Protocol, RoutingMode};
+use picomq_http::{HttpProtocol, RoutingMode};
 
 /// Where the metadata command log lives.
 ///
@@ -66,6 +66,25 @@ pub enum AuthMode {
     Required,
 }
 
+/// The Kafka listener. Every stream is reachable over Kafka regardless of
+/// which HTTP protocol wrote it; this only decides whether the socket exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KafkaConfig {
+    pub listen: SocketAddr,
+    /// `host:port` advertised in Metadata responses. Defaults to the bound
+    /// address.
+    pub advertise: Option<String>,
+}
+
+impl Default for KafkaConfig {
+    fn default() -> Self {
+        Self {
+            listen: SocketAddr::from(([127, 0, 0, 1], 9092)),
+            advertise: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub node_id: i32,
@@ -73,11 +92,10 @@ pub struct ServerConfig {
     pub addr: SocketAddr,
     pub admin_addr: Option<SocketAddr>,
     pub advertised_url: Option<String>,
-    pub protocol: Protocol,
-    /// Only used when `protocol` is [`Protocol::Kafka`].
-    pub kafka_listen: SocketAddr,
-    /// Defaults to `kafka_listen`.
-    pub kafka_advertise: Option<String>,
+    /// Which HTTP protocol the data listener speaks.
+    pub http_protocol: HttpProtocol,
+    /// `None` disables the Kafka listener.
+    pub kafka: Option<KafkaConfig>,
     pub meta_backend: MetaBackend,
     pub storage_uri: String,
     /// WAL bucket URI. Defaults to the data bucket (with the next bucket id)
@@ -105,8 +123,9 @@ pub struct ServerConfig {
     pub engine: s3stream::Config,
 }
 
-/// Defaults: 127.0.0.1:4437, admin 9090, redirect routing, 25s long poll,
-/// 55s SSE, 64 KiB chunks, 32 MiB request bodies, no drain, storage under `./objects`.
+/// Defaults: Pico on 127.0.0.1:4437, Kafka on 127.0.0.1:9092, admin 9090,
+/// redirect routing, 25s long poll, 55s SSE, 64 KiB chunks, 32 MiB request
+/// bodies, no drain, storage under `./objects`.
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -115,9 +134,8 @@ impl Default for ServerConfig {
             addr: SocketAddr::from(([127, 0, 0, 1], 4437)),
             admin_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9090))),
             advertised_url: None,
-            protocol: Protocol::Pico,
-            kafka_listen: SocketAddr::from(([127, 0, 0, 1], 9092)),
-            kafka_advertise: None,
+            http_protocol: HttpProtocol::Pico,
+            kafka: Some(KafkaConfig::default()),
             meta_backend: MetaBackend::Sqlite(Some(PathBuf::from("./data/meta.db"))),
             storage_uri: "-2@file://./objects".to_owned(),
             wal_uri: None,

@@ -1,27 +1,33 @@
 # Kafka protocol
 
-A node started with `--protocol kafka` serves the Kafka wire protocol. Standard Kafka clients, the Java client, librdkafka and everything built on it, connect with nothing but a bootstrap address. There is no PicoMQ client for Kafka because none is needed. That is the point of the compatibility surface.
+A node serves the Kafka wire protocol on `--kafka-listen` unless `--no-kafka` is set. Standard Kafka clients, the Java client, librdkafka and everything built on it, connect with a bootstrap address. There is no PicoMQ client for Kafka because none is needed.
 
 ```bash
-pico serve --protocol kafka \
+pico serve \
     --kafka-listen 0.0.0.0:9092 --kafka-advertise node1.internal:9092 \
+    --insecure-allow-remote \
     --meta-url postgres://user:pass@pg:5432/picomq \
     --storage=-2@s3://bucket?region=us-east-1
 ```
 
-The admin API and dashboard keep working in Kafka mode. The HTTP stream routes do not: a node serves one client protocol, and in Kafka mode that protocol is Kafka.
+The HTTP stream listener and the admin API keep serving next to it. A stream written over HTTP is a topic to Kafka clients, and a topic a Kafka client created is a stream to HTTP clients.
 
 ```bash
 # Any Kafka tooling works against the listener.
 kcat -b 127.0.0.1:9092 -t orders -P   # produce
 kcat -b 127.0.0.1:9092 -t orders -C   # consume
+
+# The same records over HTTP.
+curl http://127.0.0.1:4437/orders
 ```
 
 ## Topics are streams
 
-A topic maps to the stream `/{topic}` with a single partition. Topic names cannot contain `/`, so a topic can never collide with the reserved `/_sys/` subtree, and Kafka-created streams appear in the admin API like any other. Kafka offsets are the stream's record offsets, so `earliest` is the trim watermark and `latest` is the high watermark.
+A topic is a stream with a single partition. A stream created over HTTP as `/orders/eu` is the topic `orders.eu` when that name is legal and free. `CreateTopics` from a Kafka client creates the stream of the same name. Topic names cannot contain `/`, and reserved streams under `/_sys`, `/_schemas` and `/_streams` have no topic. Kafka-created streams appear in the admin API like any other.
 
-Record batches are stored verbatim. The broker patches each batch's base-offset field to the assigned offset, the one rewrite a real Kafka broker also performs and one the batch CRC deliberately excludes, and hands the same bytes back on fetch with no per-record decode. Produce and fetch are zero-copy translations over the stream service, and everything below the frontend (durability, ownership, transfers, garbage collection) behaves exactly as the [design docs](/docs/design/overview) describe.
+Kafka offsets are the stream's record offsets, so `earliest` is the trim watermark and `latest` is the high watermark.
+
+Produce and fetch are a copy of the stored [RecordBatch v2](/docs/design/protocols) bytes. The broker patches each produced batch's base offset, the one rewrite a Kafka broker also performs and one the batch CRC excludes. HTTP appends land in the same format. Everything below the frontend (durability, ownership, transfers, garbage collection) behaves exactly as the [design docs](/docs/design/overview) describe.
 
 ## What is supported
 

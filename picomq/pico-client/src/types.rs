@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
 use bytes::Bytes;
 
@@ -43,7 +41,10 @@ pub struct AppendAck {
 pub struct Record {
     pub position: String,
     pub timestamp: Option<i64>,
-    pub headers: BTreeMap<String, String>,
+    /// Kafka-shaped: an optional key and ordered headers with byte values.
+    /// DS reads carry neither.
+    pub key: Option<Bytes>,
+    pub headers: Vec<(String, Bytes)>,
     pub body: Bytes,
 }
 

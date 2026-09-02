@@ -24,7 +24,7 @@ for await (const record of stream.records()) {
 }
 ```
 
-Records accept `Uint8Array`, `string`, or `{ body, headers, timestamp }`. Pass `{ live: true }` to `records()` to keep tailing after catching up instead of returning.
+Records accept `Uint8Array`, `string`, or `{ body, key, headers }`. Header values are strings or `Uint8Array`. Records read back carry the server timestamp and the key when one was set. Pass `{ live: true }` to `records()` to keep tailing after catching up instead of returning.
 
 ## Configuration
 
