@@ -20,7 +20,7 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config cmake
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config cmake libcurl4-openssl-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -52,7 +52,7 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config cmake
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config cmake libcurl4-openssl-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
