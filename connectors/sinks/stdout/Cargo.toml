@@ -1,0 +1,24 @@
+[package]
+name = "picomq-connector-stdout-sink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "PicoMQ connector sink that prints consumed batches to the runtime log."
+repository.workspace = true
+publish = false
+
+[lib]
+name = "picomq_connector_stdout_sink"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+async-trait = { workspace = true }
+dashmap = { workspace = true }
+picomq-connector-sdk = { path = "../../sdk" }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints.rust]
+unsafe_code = "allow"

@@ -1,0 +1,31 @@
+[package]
+name = "picomq-connector-postgres-sink"
+version.workspace = true
+description = "PicoMQ PostgreSQL sink connector for storing stream messages into PostgreSQL database"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "picomq_connector_postgres_sink"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+humantime = { workspace = true }
+picomq-connector-sdk = { path = "../../sdk" }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+missing_safety_doc = "allow"

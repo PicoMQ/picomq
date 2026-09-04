@@ -1,0 +1,39 @@
+[package]
+name = "picomq-connector-redshift-sink"
+version.workspace = true
+description = "PicoMQ Redshift sink connector for loading stream messages into Redshift through S3 staging and COPY."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "picomq_connector_redshift_sink"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+arrow = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+humantime = { workspace = true }
+parquet = { workspace = true }
+picomq-connector-sdk = { path = "../../sdk" }
+rust-s3 = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+simd-json = { workspace = true }
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+missing_safety_doc = "allow"

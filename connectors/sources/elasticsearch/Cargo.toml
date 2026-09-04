@@ -1,0 +1,36 @@
+[package]
+name = "picomq-connector-elasticsearch-source"
+version.workspace = true
+description = "PicoMQ Elasticsearch source connector"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "picomq_connector_elasticsearch_source"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+elasticsearch = { workspace = true }
+humantime = { workspace = true }
+picomq-connector-sdk = { path = "../../sdk" }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rmp-serde = { workspace = true }
+wiremock = { workspace = true }
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+missing_safety_doc = "allow"
