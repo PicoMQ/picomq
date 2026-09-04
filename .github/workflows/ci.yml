@@ -7,19 +7,22 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  check:
-    name: fmt / clippy / test
+  core:
+    name: core / fmt / clippy / test
     runs-on: ubuntu-latest
+    env:
+      SCOPE: --workspace --exclude picomq-connectors --exclude 'picomq-connector-*'
     steps:
       - uses: actions/checkout@v7
 
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config libcurl4-openssl-dev cmake
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config cmake
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -27,13 +30,48 @@ jobs:
           toolchain: 1.98.1
           components: rustfmt, clippy
 
+      - uses: rui314/setup-mold@v1
+
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: core
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy $SCOPE --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test $SCOPE
+
+  connectors:
+    name: connectors / clippy / test
+    runs-on: ubuntu-latest
+    env:
+      SCOPE: -p picomq-connectors -p 'picomq-connector-*'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config cmake
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: clippy
+
+      - uses: rui314/setup-mold@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: connectors
+
+      - name: cargo clippy
+        run: cargo clippy $SCOPE --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test $SCOPE
