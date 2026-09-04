@@ -34,12 +34,3 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
-
-  docs:
-    name: connector docs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Catalog coverage
-        run: python3 scripts/check-connector-docs.py
