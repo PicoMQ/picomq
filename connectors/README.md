@@ -1,6 +1,6 @@
 # PicoMQ connectors
 
-Runtime, SDK and plugins for moving data between PicoMQ and external systems over the Kafka protocol. User documentation is at [picomq.com/docs/connectors](https://picomq.com/docs/connectors), source in [`website/pages/docs/connectors.md`](../website/pages/docs/connectors.md).
+Runtime, SDK and plugins for moving data between PicoMQ and external systems over the Kafka protocol. Documentation: [picomq.com/docs/connectors](https://picomq.com/docs/connectors).
 
 ```text
 connectors/
@@ -19,7 +19,7 @@ PICOMQ_CONNECTORS_CONNECTORS__CONFIG_DIR=harness/aio/connectors \
     target/release/pico-connectors
 ```
 
-Plugin `path` values in `harness/aio/connectors/*.toml` are bare names; the runtime finds them next to the binary in `target/release`.
+Plugin `path` values in `harness/aio/connectors/*.toml` are bare names. The runtime finds them next to the binary in `target/release`.
 
 Heavy sinks (`doris`, `iceberg`, `delta`, `redshift`) are workspace members but not default members, so `cargo build` skips them. Build with `-p picomq-connector-iceberg-sink` and so on.
 
