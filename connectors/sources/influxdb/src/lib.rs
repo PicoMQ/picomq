@@ -876,9 +876,13 @@ mod tests {
         assert_eq!(redelivered.messages[0].key, produced.messages[0].key);
         assert_eq!(redelivered.messages[1].key, produced.messages[1].key);
         assert_eq!(
-            redelivered.messages[0].payload,
-            produced.messages[0].payload
+            payload_json(&redelivered.messages[0]),
+            payload_json(&produced.messages[0])
         );
+    }
+
+    fn payload_json(message: &ProducedMessage) -> serde_json::Value {
+        serde_json::from_slice(&message.payload).unwrap()
     }
 
     #[tokio::test]

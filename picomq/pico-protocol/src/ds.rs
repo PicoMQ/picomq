@@ -498,13 +498,24 @@ mod tests {
             "event: data\ndata:/w==\n\n"
         );
 
+        let (head, body) = control_frame(&text.control_event("42", Some(7), true, false));
+        assert_eq!(head, "event: control");
         assert_eq!(
-            std::str::from_utf8(&text.control_event("42", Some(7), true, false)).unwrap(),
-            "event: control\ndata:{\"streamCursor\":\"7\",\"streamNextOffset\":\"42\",\"upToDate\":true}\n\n"
+            body,
+            json!({"streamCursor": "7", "streamNextOffset": "42", "upToDate": true})
         );
+        let (head, body) = control_frame(&text.control_event("42", Some(7), true, true));
+        assert_eq!(head, "event: control");
         assert_eq!(
-            std::str::from_utf8(&text.control_event("42", Some(7), true, true)).unwrap(),
-            "event: control\ndata:{\"streamClosed\":true,\"streamNextOffset\":\"42\",\"upToDate\":true}\n\n"
+            body,
+            json!({"streamClosed": true, "streamNextOffset": "42", "upToDate": true})
         );
+    }
+
+    fn control_frame(frame: &[u8]) -> (String, Value) {
+        let text = std::str::from_utf8(frame).unwrap();
+        let (head, rest) = text.split_once("\ndata:").unwrap();
+        let body = rest.strip_suffix("\n\n").unwrap();
+        (head.to_owned(), serde_json::from_str(body).unwrap())
     }
 }
