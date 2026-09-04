@@ -1,16 +1,16 @@
+use kafka_protocol::messages::MetadataRequest;
 use kafka_protocol::messages::metadata_response::{
     MetadataResponse, MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
 };
-use kafka_protocol::messages::MetadataRequest;
 use kafka_protocol::protocol::{Decodable, StrBytes};
-use picomq_server::{alias, CreateCommand, OwnershipService};
+use picomq_server::{CreateCommand, OwnershipService, alias};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    broker_id, encode_response, is_internal_topic, new_topic_id, parse_host_port,
-    service_error_code, topic_name, topic_uuid, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION,
+    NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_id, encode_response, is_internal_topic,
+    new_topic_id, parse_host_port, service_error_code, topic_name, topic_uuid,
 };
 use crate::handlers::topics::KAFKA_CREATED_CT;
 use crate::handlers::{HandlerError, HandlerOutcome};

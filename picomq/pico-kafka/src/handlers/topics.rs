@@ -9,13 +9,13 @@ use kafka_protocol::messages::delete_topics_response::{
 };
 use kafka_protocol::messages::{CreateTopicsRequest, DeleteTopicsRequest};
 use kafka_protocol::protocol::Decodable;
-use picomq_server::{alias, CreateCommand};
+use picomq_server::{CreateCommand, alias};
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    encode_response, new_topic_id, resolve_topic, service_error_code, topic_name, INVALID_REQUEST,
-    NO_ERROR, TOPIC_ALREADY_EXISTS, UNKNOWN_TOPIC_OR_PARTITION,
+    INVALID_REQUEST, NO_ERROR, TOPIC_ALREADY_EXISTS, UNKNOWN_TOPIC_OR_PARTITION, encode_response,
+    new_topic_id, resolve_topic, service_error_code, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 

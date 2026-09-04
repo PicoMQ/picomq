@@ -3,8 +3,9 @@
 //! Run: cargo bench -p s3stream-codec
 
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use s3stream_codec::{wal_crc32, StreamRecordBatch};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use s3stream_codec::{StreamRecordBatch, wal_crc32};
+use std::hint::black_box;
 
 fn bench_codec(c: &mut Criterion) {
     for payload_size in [128usize, 4096, 65536] {

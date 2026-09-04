@@ -10,8 +10,8 @@ pub mod route;
 pub mod serve;
 
 pub use admin::AdminState;
-pub use auth::{gate, Permit};
+pub use auth::{Permit, gate};
 pub use ds::DsFrontend;
 pub use pico::PicoFrontend;
 pub use route::RoutingMode;
-pub use serve::{serve, HttpProtocol, RunningServer, ServeOptions};
+pub use serve::{HttpProtocol, RunningServer, ServeOptions, serve};

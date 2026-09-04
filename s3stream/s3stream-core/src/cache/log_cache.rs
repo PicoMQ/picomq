@@ -43,15 +43,15 @@ impl StreamCache {
     }
 
     fn add(&mut self, record: StreamRecordBatch) -> bool {
-        if let Some(end) = self.end_offset {
-            if record.base_offset() != end {
-                tracing::error!(
-                    stream_id = record.stream_id(),
-                    expect = end,
-                    actual = record.base_offset(),
-                    "[FATAL] record batch base offset mismatch"
-                );
-            }
+        if let Some(end) = self.end_offset
+            && record.base_offset() != end
+        {
+            tracing::error!(
+                stream_id = record.stream_id(),
+                expect = end,
+                actual = record.base_offset(),
+                "[FATAL] record batch base offset mismatch"
+            );
         }
         let effective_start = self.start_offset.unwrap_or(record.base_offset());
         if record.last_offset().wrapping_sub(effective_start) > i32::MAX as u64 {
@@ -277,14 +277,13 @@ impl LogCacheBlock {
     /// Swap a record in place (recovery link-record materialization).
     pub fn replace_record(&self, stream_id: u64, base_offset: u64, decoded: StreamRecordBatch) {
         let mut inner = self.inner.lock().expect("block poisoned");
-        if let Some(cache) = inner.map.get_mut(&stream_id) {
-            if let Some(slot) = cache
+        if let Some(cache) = inner.map.get_mut(&stream_id)
+            && let Some(slot) = cache
                 .records
                 .iter_mut()
                 .find(|r| r.base_offset() == base_offset)
-            {
-                *slot = decoded;
-            }
+        {
+            *slot = decoded;
         }
     }
 
@@ -827,13 +826,17 @@ mod tests {
         assert!(cache.archive_current_block_if_contains(2).is_none());
         assert!(cache.archive_current_block_if_contains(1).is_some());
         // MATCH_ALL only when non-empty.
-        assert!(cache
-            .archive_current_block_if_contains(MATCH_ALL_STREAMS)
-            .is_none());
+        assert!(
+            cache
+                .archive_current_block_if_contains(MATCH_ALL_STREAMS)
+                .is_none()
+        );
         assert!(cache.put(record(3, 0, 1, 8)));
-        assert!(cache
-            .archive_current_block_if_contains(MATCH_ALL_STREAMS)
-            .is_some());
+        assert!(
+            cache
+                .archive_current_block_if_contains(MATCH_ALL_STREAMS)
+                .is_some()
+        );
     }
 
     /// The archived block carries the last confirmed record offset for WAL trimming.

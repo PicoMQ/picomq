@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 use crate::handlers::common::{
     INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, REBALANCE_IN_PROGRESS,

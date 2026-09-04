@@ -1,5 +1,5 @@
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -8,7 +8,7 @@ use picomq_auth::Operation;
 use picomq_server::SchemaFormat;
 use serde_json::json;
 
-use super::{gate, service_error, CommonState};
+use super::{CommonState, gate, service_error};
 
 pub const SCHEMA_PATH_PREFIX: &str = "/_schemas";
 
@@ -120,15 +120,14 @@ fn schema_format_from_headers(
     if let Some(ct) = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
+        && let Some(format) = SchemaFormat::from_content_type(ct)
     {
-        if let Some(format) = SchemaFormat::from_content_type(ct) {
-            return Ok(format);
-        }
+        return Ok(format);
     }
-    if let Some(ext) = name.rsplit('.').next().filter(|_| name.contains('.')) {
-        if let Some(format) = SchemaFormat::from_extension(ext) {
-            return Ok(format);
-        }
+    if let Some(ext) = name.rsplit('.').next().filter(|_| name.contains('.'))
+        && let Some(format) = SchemaFormat::from_extension(ext)
+    {
+        return Ok(format);
     }
     Err(Box::new(
         (

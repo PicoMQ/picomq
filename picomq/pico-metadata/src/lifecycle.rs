@@ -5,11 +5,11 @@
 //! [`ViewPublisher`], so the same lifecycle runs over `LocalSink` and
 //! `SqlSink`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use s3stream::{gen_object_key, CompactOperations, ObjectPath, ObjectStorageTrait};
+use s3stream::{CompactOperations, ObjectPath, ObjectStorageTrait, gen_object_key};
 
 use crate::command::MetadataCommand;
 use crate::error::MetadataError;
@@ -74,22 +74,22 @@ impl ObjectCleaner {
         }
 
         let mut cleaned = catalog_only;
-        if !deletable.is_empty() {
-            if let Some(storage) = &self.object_storage {
-                let bucket_id = storage.bucket_id();
-                let paths: Vec<ObjectPath> = deletable
-                    .iter()
-                    .map(|id| ObjectPath {
-                        bucket_id,
-                        key: gen_object_key(0, *id),
-                    })
-                    .collect();
-                tokio::time::timeout(CLEAN_STEP_TIMEOUT, storage.delete(&paths))
-                    .await
-                    .map_err(|_| CleanError::Timeout)?
-                    .map_err(|e| CleanError::Storage(e.to_string()))?;
-                cleaned.append(&mut deletable);
-            }
+        if !deletable.is_empty()
+            && let Some(storage) = &self.object_storage
+        {
+            let bucket_id = storage.bucket_id();
+            let paths: Vec<ObjectPath> = deletable
+                .iter()
+                .map(|id| ObjectPath {
+                    bucket_id,
+                    key: gen_object_key(0, *id),
+                })
+                .collect();
+            tokio::time::timeout(CLEAN_STEP_TIMEOUT, storage.delete(&paths))
+                .await
+                .map_err(|_| CleanError::Timeout)?
+                .map_err(|e| CleanError::Storage(e.to_string()))?;
+            cleaned.append(&mut deletable);
         }
 
         if cleaned.is_empty() {
@@ -335,11 +335,13 @@ mod tests {
         assert!(views.load().state.peek_destroyed_objects(10).is_empty());
 
         // Idempotent: nothing left to clean.
-        assert!(cleaner
-            .clean(MAX_DELETE_BATCH_COUNT)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            cleaner
+                .clean(MAX_DELETE_BATCH_COUNT)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -348,11 +350,13 @@ mod tests {
         destroyed_object_fixture(&sink).await;
 
         let cleaner = ObjectCleaner::new(sink.clone(), views.clone(), None);
-        assert!(cleaner
-            .clean(MAX_DELETE_BATCH_COUNT)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            cleaner
+                .clean(MAX_DELETE_BATCH_COUNT)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(views.load().state.peek_destroyed_objects(10).len(), 1);
     }
 

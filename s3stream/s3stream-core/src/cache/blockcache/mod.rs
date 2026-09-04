@@ -14,10 +14,10 @@ mod size_limiter;
 mod stream_reader;
 mod stream_readers;
 
-pub use data_block::{DataBlock, DataBlockCache, GetOptions, DATA_TTL_MS};
-pub use object_reader_cache::{ObjectReaderCache, MAX_OBJECT_READER_SIZE};
+pub use data_block::{DATA_TTL_MS, DataBlock, DataBlockCache, GetOptions};
+pub use object_reader_cache::{MAX_OBJECT_READER_SIZE, ObjectReaderCache};
 pub use size_limiter::AsyncSizeLimiter;
-pub use stream_reader::{max_readahead_size, GET_OBJECT_STEP, READAHEAD_SIZE_UNIT};
+pub use stream_reader::{GET_OBJECT_STEP, READAHEAD_SIZE_UNIT, max_readahead_size};
 pub use stream_readers::StreamReaders;
 
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -5,9 +5,9 @@ use axum::routing::get;
 use axum::{Json, Router};
 use picomq_auth::Operation;
 use picomq_server::{StreamConfig, UpdateStreamCommand};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::{gate, service_error, CommonState};
+use super::{CommonState, gate, service_error};
 use crate::route::route;
 
 pub const STREAM_CONFIG_PATH_PREFIX: &str = "/_streams";

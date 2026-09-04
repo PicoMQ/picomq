@@ -1,7 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::{BrokerId, ResponseHeader, TopicName};
 use kafka_protocol::protocol::{Encodable, HeaderVersion, StrBytes};
-use picomq_server::{alias, ErrorKind, ServiceError};
+use picomq_server::{ErrorKind, ServiceError, alias};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
@@ -102,10 +102,10 @@ pub fn parse_host_port(address: &str) -> (String, i32) {
         .strip_prefix("http://")
         .or_else(|| address.strip_prefix("https://"))
         .unwrap_or(address);
-    if let Some(host) = address.strip_prefix('[') {
-        if let Some((host, port)) = host.split_once("]:") {
-            return (host.to_owned(), port.parse().unwrap_or(9092));
-        }
+    if let Some(host) = address.strip_prefix('[')
+        && let Some((host, port)) = host.split_once("]:")
+    {
+        return (host.to_owned(), port.parse().unwrap_or(9092));
     }
     match address.rsplit_once(':') {
         Some((host, port)) => (host.to_owned(), port.parse().unwrap_or(9092)),

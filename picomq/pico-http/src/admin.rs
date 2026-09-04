@@ -8,24 +8,24 @@
 //! term) are intentionally never added: the metadata plane is a SQL-backed
 //! log, and maintenance leadership is a lease, reported as `leaseHolder`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::extract::{Path, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use picomq_auth::{
-    check_issue, scope_from_json, scope_to_json, AccessToken, Audience, AuthError, Authorizer,
-    Operation, TokenRecord, TokenStore as _,
+    AccessToken, Audience, AuthError, Authorizer, Operation, TokenRecord, TokenStore as _,
+    check_issue, scope_from_json, scope_to_json,
 };
 use picomq_metadata::MetadataState;
 use picomq_server::registry::RegistryEntry;
 use picomq_server::{OwnershipService, PicoNode};
 use s3stream::StreamState;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::common::{auth_error, authenticate, gate, service_error};
@@ -427,10 +427,10 @@ async fn list_tokens(State(state): State<AdminState>, headers: HeaderMap) -> Res
         Ok(principal) => principal,
         Err(response) => return *response,
     };
-    if let Some(principal) = &principal {
-        if !principal.scope.allows_operation(Operation::ListTokens) {
-            return auth_error(&AuthError::Denied);
-        }
+    if let Some(principal) = &principal
+        && !principal.scope.allows_operation(Operation::ListTokens)
+    {
+        return auth_error(&AuthError::Denied);
     }
     let records = match state.node.tokens().store().list_prefix("").await {
         Ok(records) => records,

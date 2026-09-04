@@ -6,8 +6,8 @@
 //! the same next state and result.
 
 use s3stream::{
-    CommitStreamSetObjectRequest, CompactOperations, CompactStreamObjectRequest, S3ObjectMetadata,
-    S3ObjectType, StreamOffsetRange, StreamState, NOOP_OBJECT_ID,
+    CommitStreamSetObjectRequest, CompactOperations, CompactStreamObjectRequest, NOOP_OBJECT_ID,
+    S3ObjectMetadata, S3ObjectType, StreamOffsetRange, StreamState,
 };
 
 use crate::command::{MetadataCommand, MetadataResult};
@@ -146,16 +146,16 @@ fn register_node(
     slots: u32,
     protocol_addresses: &std::collections::BTreeMap<String, String>,
 ) -> Result<MetadataResult, MetadataError> {
-    if let Some(node) = state.nodes.get(&node_id) {
-        if node.epoch > node_epoch {
-            return Err(MetadataError::NodeEpochMismatch {
-                node_id,
-                message: format!(
-                    "node {node_id} epoch {} fences register with epoch {node_epoch}",
-                    node.epoch
-                ),
-            });
-        }
+    if let Some(node) = state.nodes.get(&node_id)
+        && node.epoch > node_epoch
+    {
+        return Err(MetadataError::NodeEpochMismatch {
+            node_id,
+            message: format!(
+                "node {node_id} epoch {} fences register with epoch {node_epoch}",
+                node.epoch
+            ),
+        });
     }
     let http_address = if http_address.is_empty() {
         state
@@ -810,14 +810,14 @@ fn check_object_id_free(
             message: format!("object {object_id} is already a committed stream-set object"),
         });
     }
-    if let Some(existing) = state.stream_object_ids.get(&object_id) {
-        if new_key != Some(*existing) {
-            return Err(MetadataError::Unexpected {
-                message: format!(
-                    "object {object_id} is already committed as stream object {existing:?}"
-                ),
-            });
-        }
+    if let Some(existing) = state.stream_object_ids.get(&object_id)
+        && new_key != Some(*existing)
+    {
+        return Err(MetadataError::Unexpected {
+            message: format!(
+                "object {object_id} is already committed as stream object {existing:?}"
+            ),
+        });
     }
     Ok(())
 }
@@ -1023,11 +1023,11 @@ fn compact_stream_object(
         );
     }
     for &source_id in &request.source_object_ids {
-        if let Some(key) = state.stream_object_ids.get(&source_id).copied() {
-            if key.0 == stream_id {
-                state.stream_objects.remove(&key);
-                state.stream_object_ids.remove(&source_id);
-            }
+        if let Some(key) = state.stream_object_ids.get(&source_id).copied()
+            && key.0 == stream_id
+        {
+            state.stream_objects.remove(&key);
+            state.stream_object_ids.remove(&source_id);
         }
     }
     mark_destroy_objects(state, &request.source_object_ids, &request.operations)?;
@@ -1804,15 +1804,17 @@ mod tests {
         )
         .unwrap();
 
-        assert!(apply(
-            &mut state,
-            &MetadataCommand::DeleteKvIfMatches {
-                key: "k".into(),
-                expected: world.clone(),
-            },
-        )
-        .unwrap_err()
-        .is_redundant());
+        assert!(
+            apply(
+                &mut state,
+                &MetadataCommand::DeleteKvIfMatches {
+                    key: "k".into(),
+                    expected: world.clone(),
+                },
+            )
+            .unwrap_err()
+            .is_redundant()
+        );
         assert_eq!(state.kv.get("k"), Some(&hello));
 
         let result = apply(
@@ -1826,15 +1828,17 @@ mod tests {
         assert_eq!(result, MetadataResult::Value(Some(hello)));
         assert!(state.kv.get("k").is_none());
 
-        assert!(apply(
-            &mut state,
-            &MetadataCommand::DeleteKvIfMatches {
-                key: "k".into(),
-                expected: world,
-            },
-        )
-        .unwrap_err()
-        .is_redundant());
+        assert!(
+            apply(
+                &mut state,
+                &MetadataCommand::DeleteKvIfMatches {
+                    key: "k".into(),
+                    expected: world,
+                },
+            )
+            .unwrap_err()
+            .is_redundant()
+        );
     }
 
     /// Determinism over a scripted random command sequence.
@@ -2360,9 +2364,11 @@ mod tests {
         assert!(state.placed_by_node.is_empty());
 
         // Redundant completion.
-        assert!(complete(&mut state, stream_id, 1)
-            .unwrap_err()
-            .is_redundant());
+        assert!(
+            complete(&mut state, stream_id, 1)
+                .unwrap_err()
+                .is_redundant()
+        );
 
         // The target opens with a bumped epoch.
         open(&mut state, NODE_2, EPOCH_2, stream_id, 2).unwrap();

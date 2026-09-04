@@ -1,0 +1,15 @@
+type = "sink"
+key = "stdout"
+enabled = true
+version = 0
+name = "Stdout sink"
+path = "libpicomq_connector_stdout_sink"
+
+[[topics]]
+pattern = "user-.*"
+schema = "json"
+batch_length = 100
+poll_interval = "100ms"
+
+[plugin_config]
+print_payload = true

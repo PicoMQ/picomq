@@ -1,14 +1,14 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use hdrhistogram::sync::{Recorder, SyncHistogram};
 use hdrhistogram::Histogram;
+use hdrhistogram::sync::{Recorder, SyncHistogram};
 use picomq_client::producer::{Pending, Producer, ProducerConfig};
 use picomq_client::{ClientError, DsClient, Live, PicoClient, Protocol, ReadLimits, StreamApi};
 
-use super::{emit, report_progress, BenchArgs, Counters, Schedule};
+use super::{BenchArgs, Counters, Schedule, emit, report_progress};
 use crate::io::note;
 use crate::stream::Target;
 

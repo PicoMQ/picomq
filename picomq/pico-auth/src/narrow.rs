@@ -7,8 +7,8 @@
 //! Fine ops on the child may be satisfied by a parent group or an explicit op.
 //! Fine ops on the parent never authorize a child group.
 
-use crate::scope::{Operation, OperationGroups, ReadWrite, Scope};
 use crate::AuthError;
+use crate::scope::{Operation, OperationGroups, ReadWrite, Scope};
 
 impl Scope {
     /// True when `child` grants no access beyond `self`.

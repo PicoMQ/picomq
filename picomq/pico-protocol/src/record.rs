@@ -2,7 +2,7 @@
 
 use base64::Engine as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::error::CodecError;
 

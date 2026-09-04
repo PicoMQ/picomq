@@ -7,7 +7,7 @@ PicoMQ [serves the Kafka protocol](/docs/kafka). This page explains why Pico's o
 | Funneling | Many producers append to a small number of shared logs. Consumers read each log in full | Telemetry, clickstream ingestion, warehouse loads |
 | Routing | Each entity has its own ordered log. Consumers read individual logs by name | Messaging, feeds, per-entity state, agent sessions |
 
-Both need a durable log. A system designed for one is a poor fit for the other.
+Both need a durable log. Kafka supports funneling only. PicoMQ supports both.
 
 ## Why Kafka is an excellent funnel
 
@@ -143,4 +143,4 @@ Producers write to a named stream, so there is no partitioner. Reading one entit
 | **Rescaling** | Changing partition counts moves data and disrupts all consumers. Hot partitions cannot be split in place | The stream is the unit of placement. A hot stream moves to another node on its own and offsets do not change |
 | **Lifecycle** | Retention applies per topic. One entity's data cannot be trimmed or deleted independently | Retention, trimming, and deletion are per stream operations |
 
-Kafka remains a good fit for funneling, and Pico [serves the Kafka protocol](/docs/kafka) to standard Kafka clients for that case. Routing workloads use streams directly.
+Funneling works the same way on PicoMQ. A topic with N partitions is N streams under one prefix. Producers hash to a stream, consumers fan in across the prefix. Reads are 1x sequential and retention deletes whole segments, as in Kafka. Kafka clients connect through the [Kafka protocol](/docs/kafka).

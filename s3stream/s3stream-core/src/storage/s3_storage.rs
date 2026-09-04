@@ -19,9 +19,9 @@ use s3stream_codec::StreamRecordBatch;
 use s3stream_object::ObjectStorage;
 use s3stream_wal::{RecordOffset, WalError, WriteAheadLog};
 
-use crate::api::results::CacheAccessType;
 use crate::api::LinkRecordDecoder;
 use crate::api::StreamError;
+use crate::api::results::CacheAccessType;
 use crate::cache::block_cache::S3BlockCache;
 use crate::cache::log_cache::{LogCache, LogCacheBlock, MATCH_ALL_STREAMS};
 use crate::cache::snapshot_read::SnapshotReadCache;
@@ -764,7 +764,7 @@ impl StorageInner {
     fn lazy_upload(
         self: &Arc<Self>,
         lazy: LazyCommit,
-    ) -> impl std::future::Future<Output = Result<(), StreamError>> + Send + 'static {
+    ) -> impl std::future::Future<Output = Result<(), StreamError>> + Send + 'static + use<> {
         let state = Arc::new(LazyCommitState {
             commit_cf: Completion::new(),
             trim_cf: Completion::new(),
@@ -1047,7 +1047,7 @@ pub fn continuous_check(records: &[StreamRecordBatch]) -> Result<(), StreamError
                 return Err(StreamError::Unexpected(format!(
                     "continuous check failed, expected offset: {e}, actual: {}",
                     record.base_offset()
-                )))
+                )));
             }
         }
     }

@@ -1,0 +1,29 @@
+[package]
+name = "picomq-connector-quickwit-sink"
+version.workspace = true
+description = "PicoMQ Quickwit sink connector for indexing stream messages into Quickwit"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "picomq_connector_quickwit_sink"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+async-trait = { workspace = true }
+picomq-connector-sdk = { path = "../../sdk" }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_yaml_ng = { workspace = true }
+simd-json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+missing_safety_doc = "allow"

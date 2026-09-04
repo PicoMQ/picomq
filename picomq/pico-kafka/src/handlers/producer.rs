@@ -3,7 +3,7 @@ use kafka_protocol::protocol::Decodable;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
-use crate::handlers::common::{encode_response, INVALID_REQUEST, NO_ERROR};
+use crate::handlers::common::{INVALID_REQUEST, NO_ERROR, encode_response};
 use crate::handlers::{HandlerError, HandlerOutcome};
 
 pub async fn handle(

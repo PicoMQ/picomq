@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use picomq_http::{serve, HttpProtocol, RoutingMode, RunningServer, ServeOptions};
+use picomq_http::{HttpProtocol, RoutingMode, RunningServer, ServeOptions, serve};
 use picomq_metadata::LocalSink;
 use picomq_schema::{Registry, SchemaStore};
 use picomq_server::{NodeConfig, PicoNode};

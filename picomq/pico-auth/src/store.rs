@@ -9,9 +9,9 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::record::TokenRecord;
-use crate::token::{Verifier, ID_MAX_LEN, ID_MIN_LEN};
 use crate::AuthError;
+use crate::record::TokenRecord;
+use crate::token::{ID_MAX_LEN, ID_MIN_LEN, Verifier};
 
 /// Persistence for [`TokenRecord`] values.
 ///

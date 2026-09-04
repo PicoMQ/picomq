@@ -77,10 +77,13 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config cmake
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 

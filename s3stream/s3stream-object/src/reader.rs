@@ -224,7 +224,7 @@ pub fn decode_data_block(block: &Bytes) -> Result<Vec<StreamRecordBatch>, Object
 mod tests {
     use super::*;
     use crate::memory::MemoryObjectStorage;
-    use crate::metadata::{gen_object_key, ObjectAttributes, S3ObjectType, NOOP_OFFSET};
+    use crate::metadata::{NOOP_OFFSET, ObjectAttributes, S3ObjectType, gen_object_key};
     use crate::storage::{ObjectStorage, WriteOptions};
     use crate::writer::ObjectWriter;
 

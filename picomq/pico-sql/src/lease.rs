@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 use picomq_common::now_ms;
 
-use crate::store::{MetaStore, StoreError, DEFAULT_LEASE_TTL_MS};
+use crate::store::{DEFAULT_LEASE_TTL_MS, MetaStore, StoreError};
 
 /// Lease timing knobs.
 #[derive(Debug, Clone)]
@@ -122,11 +122,11 @@ async fn keeper_task(
                 // cannot have expired under us. Past TTL, self-demote. A
                 // successor may legitimately own it now.
                 tracing::warn!(%error, "lease store unreachable");
-                if let Some((_, last_ok)) = held {
-                    if now - last_ok >= config.ttl_ms {
-                        held = None;
-                        tx.send_if_modified(|leader| std::mem::replace(leader, false));
-                    }
+                if let Some((_, last_ok)) = held
+                    && now - last_ok >= config.ttl_ms
+                {
+                    held = None;
+                    tx.send_if_modified(|leader| std::mem::replace(leader, false));
                 }
             }
         }

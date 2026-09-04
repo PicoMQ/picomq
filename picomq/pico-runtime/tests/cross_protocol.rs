@@ -7,8 +7,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use picomq_auth::AccessToken;
 use picomq_http::HttpProtocol;
-use picomq_protocol::record::{decode_batch_read, encode_batch_append, PicoRecord};
+use picomq_protocol::record::{PicoRecord, decode_batch_read, encode_batch_append};
 use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, PicoServer, ServerConfig};
+use rdkafka::Message;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
@@ -16,7 +17,6 @@ use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Headers as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::types::RDKafkaErrorCode;
-use rdkafka::Message;
 use serde_json::Value;
 
 const CT_BATCH_BINARY: &str = "application/vnd.picomq.batch";
@@ -485,10 +485,12 @@ async fn mixed_writers_share_one_offset_space() {
         .map(|c| String::from_utf8(c.value.clone()).unwrap())
         .collect();
     assert_eq!(kafka_values, expected);
-    assert!(consumed
-        .iter()
-        .enumerate()
-        .all(|(i, c)| c.offset == i as i64));
+    assert!(
+        consumed
+            .iter()
+            .enumerate()
+            .all(|(i, c)| c.offset == i as i64)
+    );
 
     let records = pico_read_json(&node, "/mixed").await;
     let pico_values: Vec<&str> = records

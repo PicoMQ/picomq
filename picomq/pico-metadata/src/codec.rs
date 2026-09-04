@@ -627,7 +627,7 @@ fn get_blob(buf: &mut &[u8]) -> Result<Bytes, CodecError> {
 }
 
 macro_rules! checked_get {
-    ($name:ident, $ty:ty, $get:ident, $size:expr) => {
+    ($name:ident, $ty:ty, $get:ident, $size:expr_2021) => {
         fn $name(buf: &mut &[u8]) -> Result<$ty, CodecError> {
             if buf.remaining() < $size {
                 return Err(CodecError::Corrupt(

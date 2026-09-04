@@ -1,6 +1,6 @@
 # PicoMQ
 
-PicoMQ is durable, real-time streams over HTTP, built on S3-compatible object storage.
+PicoMQ is durable, real-time streams over HTTP and Kafka, built on S3-compatible object storage.
 
 [Documentation](https://picomq.com/docs/) · [Discord](https://discord.gg/qsMy5sSpYX) · [Quick start](https://picomq.com/docs/quick-start)
 
@@ -41,9 +41,10 @@ cp .env.example .env
 docker compose up --build                          # Postgres + RustFS, 1 node
 docker compose -f compose.cluster.yml up --build   # same stack, 2 nodes
 docker compose -f compose.lite.yml up --build      # SQLite + file://, no deps
+docker compose -f compose.lite.yml -f compose.connectors.yml up --build   # + connectors runtime
 ```
 
-Pico: `http://localhost:4437` (cluster also `:4438`). Dashboard: `:9090`. 
+Pico: `http://localhost:4437` (cluster also `:4438`). Dashboard: `:9090`. Connectors API: `:8081`.
 `harness/byo` is the same against an existing Postgres and object store, configured through `.env`.
 
 ## Use it

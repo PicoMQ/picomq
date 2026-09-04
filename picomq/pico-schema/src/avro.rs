@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use apache_avro::{schema::Schema as AvroSchema, types::Value, Reader};
+use apache_avro::{Reader, schema::Schema as AvroSchema, types::Value};
 use bytes::Bytes;
 
 use crate::record::Batch;
@@ -128,7 +128,9 @@ fn decode(validator: Option<&AvroSchema>, encoded: Option<Bytes>) -> Result<Opti
     debug!(?validator, ?encoded);
     validator.map_or(Ok(None), |schema| {
         encoded.map_or(Err(crate::Error::InvalidRecord), |encoded| {
-            Reader::with_schema(schema, &encoded[..])
+            Reader::builder(&encoded[..])
+                .reader_schema(schema)
+                .build()
                 .and_then(|reader| reader.into_iter().next().transpose())
                 .inspect(|value| debug!(?value))
                 .inspect_err(|err| debug!(?err))
@@ -177,7 +179,7 @@ pub fn r<'a>(
 #[doc(hidden)]
 pub fn schema_write(schema: &AvroSchema, value: Value) -> Result<Bytes> {
     debug!(?schema, ?value);
-    let mut writer = apache_avro::Writer::new(schema, vec![]);
-    _ = writer.append(value)?;
+    let mut writer = apache_avro::Writer::new(schema, vec![])?;
+    _ = writer.append_value(value)?;
     writer.into_inner().map(Bytes::from).map_err(Into::into)
 }

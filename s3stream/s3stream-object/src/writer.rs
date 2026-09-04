@@ -9,7 +9,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use s3stream_codec::StreamRecordBatch;
 
 use crate::error::ObjectError;
-use crate::index::{DataBlockIndex, BLOCK_INDEX_SIZE};
+use crate::index::{BLOCK_INDEX_SIZE, DataBlockIndex};
 use crate::metadata::gen_object_key;
 use crate::storage::{MultipartWriter, ObjectStorage, WriteOptions};
 

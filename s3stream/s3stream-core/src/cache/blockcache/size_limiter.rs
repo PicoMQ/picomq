@@ -47,10 +47,10 @@ impl AsyncSizeLimiter {
     pub fn release(&self, required: u64) {
         let mut state = self.state.lock().expect("limiter poisoned");
         state.permits += required as i64;
-        if state.permits > 0 {
-            if let Some(waiter) = state.waiters.pop_front() {
-                let _ = waiter.send(());
-            }
+        if state.permits > 0
+            && let Some(waiter) = state.waiters.pop_front()
+        {
+            let _ = waiter.send(());
         }
     }
 

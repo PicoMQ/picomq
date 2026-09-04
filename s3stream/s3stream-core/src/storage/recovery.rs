@@ -11,7 +11,7 @@ use futures::StreamExt;
 use s3stream_wal::{RecoverResult, RecoverStream};
 
 use crate::api::{LinkRecordDecoder, StreamError};
-use crate::cache::log_cache::{LogCacheBlock, DEFAULT_MAX_BLOCK_STREAM_COUNT};
+use crate::cache::log_cache::{DEFAULT_MAX_BLOCK_STREAM_COUNT, LogCacheBlock};
 
 /// Recover records from the WAL stream, grouping them into `LogCacheBlock`s.
 ///

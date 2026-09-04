@@ -318,7 +318,7 @@ fn get_str(buf: &mut &[u8]) -> Result<String, SnapshotError> {
 }
 
 macro_rules! checked_get {
-    ($name:ident, $ty:ty, $get:ident, $size:expr) => {
+    ($name:ident, $ty:ty, $get:ident, $size:expr_2021) => {
         fn $name(buf: &mut &[u8]) -> Result<$ty, SnapshotError> {
             if buf.remaining() < $size {
                 return Err(SnapshotError::Corrupt(

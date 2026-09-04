@@ -20,7 +20,7 @@ const features = [
   },
   {
     name: 'Easy deployment',
-    body: 'One process per node: storage engine, WAL, SQL metadata log, and HTTP frontend. Run locally with SQLite and a file bucket, or deploy to AWS, GCS, Fly.io and more as a single node or a multi-node cluster.',
+    body: 'One process per node: storage engine, WAL, SQL metadata log, HTTP and Kafka frontends. Run locally with SQLite and a file bucket, or deploy to AWS, GCS, Fly.io and more as a single node or a multi-node cluster.',
   },
 ] as const;
 

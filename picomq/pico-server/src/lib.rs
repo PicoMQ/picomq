@@ -13,7 +13,7 @@ pub mod transfer;
 pub mod types;
 pub mod waiter;
 
-pub use auth::{KvTokenStore, TokenService, TOKEN_KEY_PREFIX};
+pub use auth::{KvTokenStore, TOKEN_KEY_PREFIX, TokenService};
 pub use error::{ErrorKind, ServiceError};
 pub use node::{NodeConfig, PicoNode};
 pub use ownership::{MetadataOwnershipService, OwnershipService};
@@ -22,7 +22,7 @@ pub use picomq_schema::{
     SchemaStore,
 };
 pub use record::{LogRecord, StreamRecord};
-pub use service::{is_reserved_name, S3StreamService};
+pub use service::{S3StreamService, is_reserved_name};
 pub use transfer::TransferWatcher;
 pub use types::{
     AppendBatchCommand, AppendBatchResult, AppendCommand, AppendResult, BatchReadResult,

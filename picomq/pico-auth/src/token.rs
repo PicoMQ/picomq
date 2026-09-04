@@ -4,8 +4,8 @@
 //! opaque utf-8 after decode. The secret is 32 random bytes. Only a hash of
 //! the secret is stored server-side.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -27,7 +27,7 @@ pub struct Secret([u8; SECRET_LEN]);
 impl Secret {
     pub fn generate() -> Result<Self, AuthError> {
         let mut bytes = [0u8; SECRET_LEN];
-        getrandom::getrandom(&mut bytes).map_err(|e| AuthError::Store(e.to_string()))?;
+        getrandom::fill(&mut bytes).map_err(|e| AuthError::Store(e.to_string()))?;
         Ok(Self(bytes))
     }
 

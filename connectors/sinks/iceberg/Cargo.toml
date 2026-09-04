@@ -1,0 +1,38 @@
+[package]
+name = "picomq-connector-iceberg-sink"
+version.workspace = true
+description = "PicoMQ Iceberg sink connector for writing stream messages into Apache Iceberg tables through a REST catalog."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "picomq_connector_iceberg_sink"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+arrow-array = { workspace = true }
+arrow-json = { workspace = true }
+async-trait = { workspace = true }
+dashmap = { workspace = true }
+iceberg = { workspace = true }
+iceberg-catalog-rest = { workspace = true }
+iceberg-storage-opendal = { workspace = true }
+parquet = { workspace = true }
+picomq-connector-sdk = { path = "../../sdk" }
+serde = { workspace = true }
+simd-json = { workspace = true }
+strum = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+missing_safety_doc = "allow"

@@ -3,7 +3,7 @@
 //! Rejections use existing Pico JSON / DS plain-text builders. DS gets no new
 //! headers. `403` here never sets `Producer-Epoch`.
 
-use axum::http::{header, HeaderMap, Method, Uri};
+use axum::http::{HeaderMap, Method, Uri, header};
 use axum::response::Response;
 use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
 use picomq_protocol::ds::H_STREAM_CLOSED;
@@ -296,16 +296,18 @@ mod tests {
         );
         let (auth, wire) = authorizer(read_scope()).await;
         let headers = headers_with(&[("authorization", &format!("Bearer {wire}"))]);
-        assert!(gate(
-            Some(&auth),
-            Audience::Pico,
-            &Method::OPTIONS,
-            &uri,
-            &headers
-        )
-        .await
-        .unwrap()
-        .is_none());
+        assert!(
+            gate(
+                Some(&auth),
+                Audience::Pico,
+                &Method::OPTIONS,
+                &uri,
+                &headers
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[tokio::test]

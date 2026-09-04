@@ -12,12 +12,12 @@ pub mod plan;
 pub mod stream_compactor;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 
-use s3stream_object::{ObjectAttributes, ObjectStorage, S3ObjectMetadata, NOOP_OBJECT_ID};
+use s3stream_object::{NOOP_OBJECT_ID, ObjectAttributes, ObjectStorage, S3ObjectMetadata};
 
 use crate::api::StreamError;
 use crate::manager::{
@@ -26,14 +26,14 @@ use crate::manager::{
 use crate::storage::upload::AsyncRateLimiter;
 
 pub use executor::{
-    build_data_block_indices_from_group, build_object_stream_ranges_from_group, CompactionUploader,
-    DataBlockReader, DataBlockWriter, FetchedBlock, S3_OBJECT_MAX_READ_BATCH,
-    S3_OBJECT_TTL_MINUTES,
+    CompactionUploader, DataBlockReader, DataBlockWriter, FetchedBlock, S3_OBJECT_MAX_READ_BATCH,
+    S3_OBJECT_TTL_MINUTES, build_data_block_indices_from_group,
+    build_object_stream_ranges_from_group,
 };
 pub use plan::{
-    filter_blocks_to_compact, group_stream_data_blocks, sort_stream_range_positions,
     CompactOperations, CompactResult, CompactedObject, CompactionAnalyzer, CompactionPlan,
     CompactionType, GroupByLimitPredicate, GroupByOffsetPredicate, StreamDataBlock,
+    filter_blocks_to_compact, group_stream_data_blocks, sort_stream_range_positions,
 };
 pub use stream_compactor::{CompactionLevel, StreamObjectCompactor, StreamView};
 

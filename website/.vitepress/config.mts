@@ -35,6 +35,51 @@ const docsSidebar = [
     ],
   },
   {
+    text: 'Connectors',
+    collapsed: true,
+    items: [
+      { text: 'Overview', link: '/docs/connectors/' },
+      { text: 'First connector', link: '/docs/connectors/first-connector' },
+      { text: 'Sources', link: '/docs/connectors/sources' },
+      { text: 'Sinks', link: '/docs/connectors/sinks' },
+      { text: 'Routing & templating', link: '/docs/connectors/routing' },
+      { text: 'Delivery guarantees', link: '/docs/connectors/delivery' },
+      { text: 'Transforms', link: '/docs/connectors/transforms' },
+      { text: 'Writing a plugin', link: '/docs/connectors/plugin-sdk' },
+      {
+        text: 'Source catalog',
+        collapsed: true,
+        items: [
+          { text: 'Postgres', link: '/docs/connectors/sources/postgres' },
+          { text: 'Elasticsearch', link: '/docs/connectors/sources/elasticsearch' },
+          { text: 'InfluxDB', link: '/docs/connectors/sources/influxdb' },
+          { text: 'Random', link: '/docs/connectors/sources/random' },
+        ],
+      },
+      {
+        text: 'Sink catalog',
+        collapsed: true,
+        items: [
+          { text: 'Postgres', link: '/docs/connectors/sinks/postgres' },
+          { text: 'ClickHouse', link: '/docs/connectors/sinks/clickhouse' },
+          { text: 'Elasticsearch', link: '/docs/connectors/sinks/elasticsearch' },
+          { text: 'Quickwit', link: '/docs/connectors/sinks/quickwit' },
+          { text: 'MongoDB', link: '/docs/connectors/sinks/mongodb' },
+          { text: 'Meilisearch', link: '/docs/connectors/sinks/meilisearch' },
+          { text: 'SurrealDB', link: '/docs/connectors/sinks/surrealdb' },
+          { text: 'InfluxDB', link: '/docs/connectors/sinks/influxdb' },
+          { text: 'S3', link: '/docs/connectors/sinks/s3' },
+          { text: 'HTTP', link: '/docs/connectors/sinks/http' },
+          { text: 'stdout', link: '/docs/connectors/sinks/stdout' },
+          { text: 'Doris', link: '/docs/connectors/sinks/doris' },
+          { text: 'Iceberg', link: '/docs/connectors/sinks/iceberg' },
+          { text: 'Delta Lake', link: '/docs/connectors/sinks/delta' },
+          { text: 'Redshift', link: '/docs/connectors/sinks/redshift' },
+        ],
+      },
+    ],
+  },
+  {
     text: 'Operations',
     collapsed: true,
     items: [
@@ -51,6 +96,7 @@ const docsSidebar = [
         ],
       },
       { text: 'Admin API & dashboard', link: '/docs/operations/admin' },
+      { text: 'Connectors runtime', link: '/docs/operations/connectors' },
       { text: 'Tuning', link: '/docs/operations/tuning' },
     ],
   },
@@ -90,7 +136,7 @@ const docsSidebar = [
 export default defineConfig({
   title: 'PicoMQ',
   description:
-    'PicoMQ is durable, real-time streams over HTTP, built on S3-compatible object storage.',
+    'PicoMQ is durable, real-time streams over HTTP and Kafka, built on S3-compatible object storage.',
   base: process.env.BASE_PATH ?? '/',
   cleanUrls: true,
   appearance: false,

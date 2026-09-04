@@ -81,10 +81,10 @@ pub fn start_with(dir: &std::path::Path, protocol: &str, extra: &[&str]) -> Serv
 pub async fn await_ready(client: &reqwest::Client, admin_url: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if let Ok(response) = client.get(format!("{admin_url}/ready")).send().await {
-            if response.status() == 200 {
-                return;
-            }
+        if let Ok(response) = client.get(format!("{admin_url}/ready")).send().await
+            && response.status() == 200
+        {
+            return;
         }
         assert!(Instant::now() < deadline, "server never became ready");
         tokio::time::sleep(Duration::from_millis(100)).await;

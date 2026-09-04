@@ -6,14 +6,14 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tracing::{debug, warn};
 
+use crate::KafkaError;
 use crate::broker::BrokerContext;
 use crate::dispatch::dispatch;
 use crate::frame::{read_frame, write_frame};
 use crate::handlers::{HandlerError, HandlerOutcome};
-use crate::KafkaError;
 
 #[derive(Debug, Clone)]
 pub struct ListenerConfig {

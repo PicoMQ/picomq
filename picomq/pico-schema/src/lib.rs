@@ -10,7 +10,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use jsonschema::ValidationError;
-use object_store::{path::Path, DynObjectStore, ObjectStore};
+use object_store::{DynObjectStore, ObjectStore, ObjectStoreExt, path::Path};
 use tracing::{debug, instrument};
 
 pub mod avro;
@@ -445,7 +445,7 @@ impl SchemaStore for Registry {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use object_store::{memory::InMemory, PutPayload};
+    use object_store::{PutPayload, memory::InMemory};
     use pretty_assertions::assert_eq;
 
     #[tokio::test]

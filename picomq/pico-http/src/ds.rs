@@ -10,23 +10,23 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::routing::any;
-use axum::Router;
 use bytes::Bytes;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::ReceiverStream;
 
 use picomq_auth::{Audience, Authorizer};
 use picomq_protocol::ds::{
-    encode_json_array, split_body, SseEncoder, H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ,
-    H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ, H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR,
-    H_STREAM_EXPIRES_AT, H_STREAM_NEXT_OFFSET, H_STREAM_SCHEMA, H_STREAM_SCHEMA_VALIDATE,
-    H_STREAM_SEQ, H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL, H_STREAM_UP_TO_DATE, LIVE_LONG_POLL,
-    LIVE_SSE, OFFSET_NOW, Q_CURSOR, Q_LIVE, Q_OFFSET,
+    H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ,
+    H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR, H_STREAM_EXPIRES_AT, H_STREAM_NEXT_OFFSET,
+    H_STREAM_SCHEMA, H_STREAM_SCHEMA_VALIDATE, H_STREAM_SEQ, H_STREAM_SSE_DATA_ENCODING,
+    H_STREAM_TTL, H_STREAM_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, OFFSET_NOW, Q_CURSOR, Q_LIVE,
+    Q_OFFSET, SseEncoder, encode_json_array, split_body,
 };
 use picomq_protocol::mime::{is_json, mime_of};
 use picomq_server::ownership::OwnershipService;
@@ -40,7 +40,7 @@ use crate::http::{
     bad_request, base_response, cursor, etag, format_instant, header_str, parse_instant_header,
     parse_strict_u64_header, query_param, set_header, truthy,
 };
-use crate::route::{route, stream_name, RoutingMode};
+use crate::route::{RoutingMode, route, stream_name};
 
 const CT_EVENT_STREAM: &str = "text/event-stream";
 const CT_TEXT: &str = "text/plain; charset=utf-8";

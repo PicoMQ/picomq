@@ -52,12 +52,12 @@ pub fn lookup(profile: &str) -> Result<Option<String>, String> {
 
 /// Returns where the token landed.
 pub fn store(profile: &str, token: &str) -> Result<&'static str, String> {
-    if let Some(entry) = keyring_entry(profile) {
-        if entry.set_password(token).is_ok() {
-            // The file copy is now stale at best.
-            file_remove(profile)?;
-            return Ok("keyring");
-        }
+    if let Some(entry) = keyring_entry(profile)
+        && entry.set_password(token).is_ok()
+    {
+        // The file copy is now stale at best.
+        file_remove(profile)?;
+        return Ok("keyring");
     }
     file_set(profile, token)?;
     Ok("credentials file")
@@ -235,10 +235,13 @@ mod tests {
     /// One test body: these mutate process env (`PICO_CONFIG`), which is not
     /// safe across parallel tests.
     #[test]
+    #[allow(unsafe_code)]
     fn file_fallback_round_trip_private_and_removable() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("PICO_CONFIG", dir.path().join("config.toml"));
-        std::env::set_var("PICO_NO_KEYRING", "1");
+        unsafe {
+            std::env::set_var("PICO_CONFIG", dir.path().join("config.toml"));
+            std::env::set_var("PICO_NO_KEYRING", "1");
+        }
 
         assert_eq!(profile_name(Some("prod")).unwrap(), "prod");
         assert_eq!(profile_name(None).unwrap(), "default");

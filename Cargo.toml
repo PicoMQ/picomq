@@ -24,12 +24,69 @@ members = [
     "picomq/pico-client",
     "picomq/pico-cli",
     "picomq/pico-schema",
+    "connectors/sdk",
+    "connectors/runtime",
+    "connectors/sinks/stdout",
+    "connectors/sinks/postgres",
+    "connectors/sinks/clickhouse",
+    "connectors/sinks/elasticsearch",
+    "connectors/sinks/http",
+    "connectors/sinks/influxdb",
+    "connectors/sinks/meilisearch",
+    "connectors/sinks/mongodb",
+    "connectors/sinks/quickwit",
+    "connectors/sinks/s3",
+    "connectors/sinks/surrealdb",
+    "connectors/sinks/doris",
+    "connectors/sinks/iceberg",
+    "connectors/sinks/delta",
+    "connectors/sinks/redshift",
+    "connectors/sources/random",
+    "connectors/sources/postgres",
+    "connectors/sources/elasticsearch",
+    "connectors/sources/influxdb",
+]
+default-members = [
+    "s3stream/s3stream-codec",
+    "s3stream/s3stream-object",
+    "s3stream/s3stream-wal",
+    "s3stream/s3stream-core",
+    "s3stream/s3stream",
+    "picomq/pico-common",
+    "picomq/pico-protocol",
+    "picomq/pico-auth",
+    "picomq/pico-metadata",
+    "picomq/pico-sql",
+    "picomq/pico-server",
+    "picomq/pico-kafka",
+    "picomq/pico-http",
+    "picomq/pico-runtime",
+    "picomq/pico-client",
+    "picomq/pico-cli",
+    "picomq/pico-schema",
+    "connectors/sdk",
+    "connectors/runtime",
+    "connectors/sinks/stdout",
+    "connectors/sinks/postgres",
+    "connectors/sinks/clickhouse",
+    "connectors/sinks/elasticsearch",
+    "connectors/sinks/http",
+    "connectors/sinks/influxdb",
+    "connectors/sinks/meilisearch",
+    "connectors/sinks/mongodb",
+    "connectors/sinks/quickwit",
+    "connectors/sinks/s3",
+    "connectors/sinks/surrealdb",
+    "connectors/sources/random",
+    "connectors/sources/postgres",
+    "connectors/sources/elasticsearch",
+    "connectors/sources/influxdb",
 ]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.80"
+edition = "2024"
+rust-version = "1.98"
 license = "Apache-2.0"
 description = "A durable stream engine on object storage."
 repository = "https://github.com/PicoMQ/picomq"
@@ -53,65 +110,130 @@ picomq-client = { path = "picomq/pico-client", version = "0.1.0" }
 picomq-schema = { path = "picomq/pico-schema" }
 
 # Schema registry / validation (picomq-schema)
-anyhow = "1"
-apache-avro = "0.21"
-jsonschema = "0.45"
-pretty_assertions = "1"
-protobuf = { version = "3.7", features = ["with-bytes"] }
-protobuf-json-mapping = "3.7"
-protobuf-parse = "3.7"
-url = "2"
-uuid = { version = "1", features = ["serde", "v4", "v7"] }
-clap = { version = "4", features = ["derive", "env"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0.104"
+apache-avro = "0.22.0"
+jsonschema = "0.53.0"
+pretty_assertions = "1.4.1"
+protobuf = { version = "3.7.2", features = ["with-bytes"] }
+protobuf-json-mapping = "3.7.2"
+protobuf-parse = "3.7.2"
+url = "2.5.8"
+uuid = { version = "1.26.0", features = ["serde", "v4", "v7"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
-axum = "0.8"
-http = "1"
-socket2 = "0.5"
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-dirs = "5"
-base64 = "0.22"
-sha2 = "0.10"
-subtle = "2"
-zeroize = { version = "1", features = ["derive"] }
-getrandom = "0.2"
-tokio-stream = "0.1"
-humantime = "2"
-rust-embed = "8"
+axum = "0.8.9"
+http = "1.5.0"
+socket2 = "0.6.5"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.5"
+dirs = "6.0.0"
+base64 = "0.23.1"
+sha2 = "0.11.0"
+subtle = "2.6.1"
+zeroize = { version = "1.9.0", features = ["derive"] }
+getrandom = "0.4.3"
+tokio-stream = "0.1.19"
+humantime = "2.4.0"
+rust-embed = "8.12.0"
 
-bytes = "1"
-kafka-protocol = { version = "0.18", default-features = false, features = ["broker", "client", "gzip", "zstd", "snappy", "lz4"] }
-crc32c = "0.6"
-hdrhistogram = "7"
-crc32fast = "1"
-thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "io-util"] }
-async-trait = "0.1"
-futures = "0.3"
-object_store = { version = "0.12", features = ["aws"] }
-fastrand = "2"
-md-5 = "0.10"
-hex = "0.4"
-tracing = "0.1"
-lru = "0.12"
-metrics = "0.24"
-im = "15"
-arc-swap = "1"
-sqlx = { version = "0.8", default-features = false, features = [
+bytes = "1.12.1"
+kafka-protocol = { version = "0.18.0", default-features = false, features = ["broker", "client", "gzip", "zstd", "snappy", "lz4"] }
+rdkafka = { version = "0.39.0", default-features = false, features = ["cmake-build", "tokio"] }
+crc32c = "0.6.8"
+hdrhistogram = "7.6.0"
+crc32fast = "1.5.1"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "io-util"] }
+async-trait = "0.1.92"
+futures = "0.3.34"
+object_store = { version = "0.14.1", features = ["aws"] }
+fastrand = "2.5.0"
+md-5 = "0.11.0"
+hex = "0.4.3"
+tracing = "0.1.44"
+lru = "0.18.4"
+metrics = "0.24.6"
+im = "15.1.0"
+arc-swap = "1.9.2"
+sqlx = { version = "0.9.0", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
     "postgres",
+    "chrono",
+    "json",
 ] }
+keyring = { version = "4.2.0", features = ["apple-native-keyring-store", "windows-native-keyring-store", "linux-keyutils-keyring-store"] }
+
+# connectors
+chrono = { version = "0.4.45", features = ["serde"] }
+dashmap = "6.2.1"
+flatbuffers = "25.12.19"
+postcard = { version = "1.1.3", features = ["alloc"] }
+prost = "0.14.4"
+prost-types = "0.14.4"
+protox = "0.9.1"
+protox-parse = "0.9.0"
+rand = "0.10.2"
+regex = "1.13.1"
+reqwest-middleware = { version = "0.5.2", features = ["json", "query"] }
+rmp-serde = "1.3.1"
+simd-json = { version = "0.18.1", features = ["serde_impl"] }
+strum = { version = "0.28.0", features = ["derive"] }
+strum_macros = "0.28.0"
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+derive_more = { version = "2.1.1", features = ["full"] }
+dlopen2 = "0.9.0"
+dotenvy = "0.15.7"
+figlet-rs = "1.0.0"
+figment = { version = "0.10.19", features = ["toml", "env"] }
+flume = "0.12.0"
+humantime-serde = "1.1.1"
+mimalloc = "0.1.52"
+murmur2 = "0.1.0"
+opentelemetry = { version = "0.32.0", features = ["trace", "logs"] }
+opentelemetry-appender-tracing = { version = "0.32.0", features = ["log"] }
+opentelemetry-otlp = { version = "0.32.0", features = ["logs", "trace", "grpc-tonic", "http", "http-proto", "reqwest-client"] }
+opentelemetry-semantic-conventions = "0.32.1"
+opentelemetry_sdk = { version = "0.32.1", features = ["logs", "trace", "experimental_async_runtime", "experimental_logs_batch_log_processor_with_async_runtime", "experimental_trace_batch_span_processor_with_async_runtime"] }
+prometheus-client = "0.25.1"
+reqwest-retry = "0.9.1"
+reqwest-tracing = "0.7.1"
+secrecy = { version = "0.10.3", features = ["serde"] }
+semver = "1.0.28"
+serde_with = { version = "3.22.0", features = ["base64", "macros"] }
+serde_yaml_ng = "0.10.0"
+sysinfo = "0.39.6"
+tower-http = { version = "0.7.1", features = ["add-extension", "cors", "trace"] }
+tracing-opentelemetry = "0.33.0"
+wiremock = "0.6.5"
+ahash = { version = "0.8.12", features = ["serde"] }
+blake3 = "1.8.7"
+byte-unit = { version = "5.2.5", default-features = false, features = ["serde", "byte", "std"] }
+csv = "1.4.0"
+elasticsearch = { version = "9.1.0-alpha.1", default-features = false, features = ["rustls-tls"] }
+meilisearch-sdk = { version = "0.33.0", default-features = false, features = ["reqwest", "tls", "jwt_rust_crypto"] }
+mongodb = { version = "3.9.0", features = ["rustls-tls"] }
+rust-s3 = { version = "0.37.2", default-features = false, features = ["tokio-rustls-tls", "tags"] }
 
 # test/dev
-proptest = "1"
-tokio-test = "0.4"
-tempfile = "3"
-serde_json = "1"
-criterion = "0.5"
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+proptest = "1.11.0"
+tokio-test = "0.4.5"
+tempfile = "3.27.0"
+serde_json = "1.0.151"
+criterion = "0.8.2"
+reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 durable-streams = { git = "https://github.com/durable-streams/durable-streams", rev = "a172acc389351cb3db6deb5cd60e3dec11e7ff39" }
+
+# heavy connector sinks (lakehouse + warehouse), excluded from default-members
+arrow = "58.4.0"
+arrow-array = "58.4.0"
+arrow-json = "58.4.0"
+parquet = "58.4.0"
+iceberg = "0.10.1"
+iceberg-catalog-rest = "0.10.1"
+iceberg-storage-opendal = "0.10.1"
+deltalake = { version = "0.32.4", features = ["azure", "gcs", "s3"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

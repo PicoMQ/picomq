@@ -70,14 +70,14 @@ impl MetadataState {
         let mut sso = self
             .sso_ranges
             .range((stream_id, 0, 0)..=(stream_id, u64::MAX, u64::MAX))
-            .take_while(|(&(_, range_start, _), _)| range_start < end_offset)
-            .filter(|(&(_, range_start, _), &range_end)| overlaps(range_start, range_end))
+            .take_while(|&(&(_, range_start, _), _)| range_start < end_offset)
+            .filter(|&(&(_, range_start, _), &range_end)| overlaps(range_start, range_end))
             .map(|(&(_, range_start, object_id), _)| (range_start, object_id))
             .peekable();
         let mut stream_objs = self
             .stream_objects
             .range((stream_id, 0, 0)..=(stream_id, u64::MAX, u64::MAX))
-            .take_while(|(&(_, range_start, _), _)| range_start < end_offset)
+            .take_while(|&(&(_, range_start, _), _)| range_start < end_offset)
             .filter(|(_, row)| {
                 let range = &row.object.offset_ranges[0];
                 overlaps(range.start_offset, range.end_offset)
@@ -86,7 +86,10 @@ impl MetadataState {
 
         let mut result = Vec::new();
         while result.len() < limit {
-            match (sso.peek().copied(), stream_objs.peek().map(|(&key, _)| key)) {
+            match (
+                sso.peek().copied(),
+                stream_objs.peek().map(|&(&key, _)| key),
+            ) {
                 (Some((sso_start, object_id)), stream_next) => {
                     if !stream_next.is_some_and(|(_, so_start, _)| so_start < sso_start) {
                         result.push(self.stream_set_objects[&object_id].object.clone());
@@ -112,7 +115,7 @@ impl MetadataState {
     ) -> Vec<S3ObjectMetadata> {
         self.stream_objects
             .range((stream_id, 0, 0)..=(stream_id, u64::MAX, u64::MAX))
-            .take_while(|(&(_, range_start, _), _)| range_start < end_offset)
+            .take_while(|&(&(_, range_start, _), _)| range_start < end_offset)
             .filter(|(_, row)| {
                 let range = &row.object.offset_ranges[0];
                 range.end_offset > start_offset && range.start_offset < end_offset
@@ -405,9 +408,11 @@ mod tests {
             objects.iter().map(|o| o.object_id).collect::<Vec<_>>(),
             vec![1]
         );
-        assert!(state
-            .get_stream_objects(stream_id, 4, u64::MAX, 100)
-            .is_empty());
+        assert!(
+            state
+                .get_stream_objects(stream_id, 4, u64::MAX, 100)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -457,9 +462,11 @@ mod tests {
         let (state, stream_id) = populated();
         let all = state.stream_object_keys_page(None, 100);
         assert_eq!(all, vec![(stream_id, 0, 1)]);
-        assert!(state
-            .stream_object_keys_page(Some((stream_id, 0, 1)), 100)
-            .is_empty());
+        assert!(
+            state
+                .stream_object_keys_page(Some((stream_id, 0, 1)), 100)
+                .is_empty()
+        );
         assert!(state.stream_object_keys_page(None, 0).is_empty());
     }
 }

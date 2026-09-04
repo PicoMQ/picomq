@@ -1,0 +1,77 @@
+[package]
+name = "picomq-connectors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Connectors runtime for PicoMQ."
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "pico-connectors"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true }
+axum-server = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+dashmap = { workspace = true }
+derive_more = { workspace = true }
+dirs = { workspace = true }
+dlopen2 = { workspace = true }
+dotenvy = { workspace = true }
+figlet-rs = { workspace = true }
+figment = { workspace = true }
+flume = { workspace = true }
+futures = { workspace = true }
+humantime = { workspace = true }
+humantime-serde = { workspace = true }
+mimalloc = { workspace = true }
+murmur2 = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-appender-tracing = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+picomq-connector-sdk = { path = "../sdk", features = ["api"] }
+postcard = { workspace = true }
+prometheus-client = { workspace = true }
+rdkafka = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true, features = ["rustls"] }
+reqwest-middleware = { workspace = true }
+reqwest-retry = { workspace = true }
+reqwest-tracing = { workspace = true }
+secrecy = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_with = { workspace = true }
+serde_yaml_ng = { workspace = true }
+simd-json = { workspace = true }
+strum = { workspace = true }
+subtle = { workspace = true }
+sysinfo = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["signal", "process"] }
+toml = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+picomq-runtime = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+todo = "allow"

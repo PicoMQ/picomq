@@ -204,7 +204,7 @@ async fn compaction_scheduler(
             return;
         }
         ticks += 1;
-        let level = if ticks % major_every == 0 {
+        let level = if ticks.is_multiple_of(major_every) {
             CompactionLevel::MajorV1
         } else {
             CompactionLevel::MinorV1

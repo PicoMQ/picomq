@@ -10,15 +10,15 @@ use std::time::{Duration, Instant};
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use s3stream_codec::{wal_crc32, StreamRecordBatch, WalRecordHeader, WAL_RECORD_HEADER_SIZE};
+use s3stream_codec::{StreamRecordBatch, WAL_RECORD_HEADER_SIZE, WalRecordHeader, wal_crc32};
 use s3stream_object::{ObjectPath, ObjectStorage, WriteOptions};
 
 use crate::{AppendListener, AppendResult, OpenMode, PendingAppend, RecordOffset, WalError};
 
 use super::config::ObjectWalConfig;
-use super::header::{WalObjectHeader, TRIM_OFFSET_NONE};
+use super::header::{TRIM_OFFSET_NONE, WalObjectHeader};
 use super::keys::{
-    ceil_align_offset, node_prefix, WalObject, DATA_FILE_ALIGN_SIZE, TRIM_RECORD_SENTINEL,
+    DATA_FILE_ALIGN_SIZE, TRIM_RECORD_SENTINEL, WalObject, ceil_align_offset, node_prefix,
 };
 
 fn object_path(object_prefix: &str, start_offset: u64, end_offset: u64) -> String {
@@ -181,15 +181,15 @@ impl ObjectWalWriter {
             });
         }
 
-        if let Some(last) = objects.last() {
-            if last.epoch > config.epoch {
-                tracing::warn!(
-                    largest_epoch = last.epoch,
-                    "detected newer epoch WAL started, exit current WAL start"
-                );
-                inner.fenced.store(true, Ordering::SeqCst);
-                return Ok(());
-            }
+        if let Some(last) = objects.last()
+            && last.epoch > config.epoch
+        {
+            tracing::warn!(
+                largest_epoch = last.epoch,
+                "detected newer epoch WAL started, exit current WAL start"
+            );
+            inner.fenced.store(true, Ordering::SeqCst);
+            return Ok(());
         }
 
         let total: u64 = objects.iter().map(|o| o.size).sum();
@@ -721,10 +721,10 @@ fn complete_bulk(inner: &Arc<Inner>, bulk: UploadingBulk, fenced: bool) {
                 },
             };
             // Skip the trim fake record. It is WAL-internal, not user data.
-            if record.record.stream_id() != TRIM_RECORD_SENTINEL {
-                if let Some(listener) = &listener {
-                    listener(&record.record, result.record_offset, result.next_offset);
-                }
+            if record.record.stream_id() != TRIM_RECORD_SENTINEL
+                && let Some(listener) = &listener
+            {
+                listener(&record.record, result.record_offset, result.next_offset);
             }
             Ok(result)
         };
@@ -892,9 +892,11 @@ mod tests {
         // object. Every covered object except the newest is deleted.
         writer.trim(r3.record_offset).await.unwrap();
         let objects = writer.object_list().unwrap();
-        assert!(objects
-            .iter()
-            .all(|o| o.start_offset > r1.record_offset.offset));
+        assert!(
+            objects
+                .iter()
+                .all(|o| o.start_offset > r1.record_offset.offset)
+        );
         // The newest data object (containing r3 or the fake record) survives.
         assert!(!objects.is_empty());
 

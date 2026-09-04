@@ -17,5 +17,5 @@ pub use crc::wal_crc32;
 pub use error::CodecError;
 pub use record::StreamRecordBatch;
 pub use wal_record::{
-    decode_record, frame_record, WalRecordHeader, RECORD_DATA_MAGIC, WAL_RECORD_HEADER_SIZE,
+    RECORD_DATA_MAGIC, WAL_RECORD_HEADER_SIZE, WalRecordHeader, decode_record, frame_record,
 };

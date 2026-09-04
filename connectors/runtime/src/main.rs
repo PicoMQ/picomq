@@ -1,0 +1,545 @@
+// Modified from Apache Iggy for PicoMQ.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+use crate::configs::connectors::{ConnectorsConfigProvider, create_connectors_config_provider};
+use clap::Parser;
+use configs::connectors::ConfigFormat;
+use configs::runtime::ConnectorsRuntimeConfig;
+use dlopen2::wrapper::{Container, WrapperApi};
+use dotenvy::dotenv;
+use error::RuntimeError;
+use figlet_rs::FIGlet;
+use kafka::KafkaClients;
+use mimalloc::MiMalloc;
+use picomq_connector_sdk::{
+    StreamDecoder, StreamEncoder,
+    api::ConnectorStatus,
+    sink::ConsumeCallback,
+    source::{BatchResultCallback, HandleCallback, SendCallback},
+    transforms::Transform,
+};
+use rdkafka::consumer::StreamConsumer;
+use rdkafka::producer::FutureProducer;
+use router::TopicRouter;
+use state::StateStorage;
+use std::{
+    collections::HashMap,
+    env,
+    sync::{Arc, atomic::AtomicU32},
+    time::Duration,
+};
+use tracing::{error, info};
+
+mod api;
+mod benchmark;
+pub(crate) mod configs;
+pub(crate) mod context;
+pub(crate) mod error;
+pub(crate) mod kafka;
+mod log;
+mod manager;
+pub(crate) mod metrics;
+pub(crate) mod router;
+mod sink;
+mod source;
+mod state;
+pub(crate) mod stats;
+mod transform;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
+#[derive(Parser, Debug)]
+#[command(name = "pico-connectors", version)]
+struct Args {}
+
+static PLUGIN_ID: AtomicU32 = AtomicU32::new(1);
+const ALLOWED_PLUGIN_EXTENSIONS: [&str; 3] = ["so", "dylib", "dll"];
+const DEFAULT_CONFIG_PATH: &str = "connectors/runtime/config.toml";
+
+#[derive(WrapperApi, Debug)]
+pub(crate) struct SourceApi {
+    pico_source_open: extern "C" fn(
+        id: u32,
+        config_ptr: *const u8,
+        config_len: usize,
+        state_ptr: *const u8,
+        state_len: usize,
+        log_callback: picomq_connector_sdk::LogCallback,
+    ) -> i32,
+    pico_source_handle_v2: extern "C" fn(id: u32, callback: SendCallback) -> i32,
+    pico_source_batch_result: extern "C" fn(plugin_id: u32, batch_id: u64, result: u8) -> i32,
+    pico_source_close: extern "C" fn(id: u32) -> i32,
+    pico_source_version: extern "C" fn() -> *const std::ffi::c_char,
+}
+
+#[derive(WrapperApi, Debug)]
+pub(crate) struct SinkApi {
+    pico_sink_open: extern "C" fn(
+        id: u32,
+        config_ptr: *const u8,
+        config_len: usize,
+        log_callback: picomq_connector_sdk::LogCallback,
+    ) -> i32,
+    #[allow(clippy::too_many_arguments)]
+    pico_sink_consume: extern "C" fn(
+        id: u32,
+        topic_meta_ptr: *const u8,
+        topic_meta_len: usize,
+        messages_meta_ptr: *const u8,
+        messages_meta_len: usize,
+        messages_ptr: *const u8,
+        messages_len: usize,
+    ) -> i32,
+    pico_sink_close: extern "C" fn(id: u32) -> i32,
+    pico_sink_version: extern "C" fn() -> *const std::ffi::c_char,
+}
+
+fn print_ascii_art(text: &str) {
+    let standard_font = FIGlet::standard().unwrap();
+    let figure = standard_font.convert(text);
+    println!("{}", figure.unwrap());
+}
+
+#[tokio::main]
+async fn main() -> Result<(), RuntimeError> {
+    Args::parse();
+    print_ascii_art("PicoMQ Connectors");
+
+    if let Ok(env_path) = std::env::var("PICOMQ_CONNECTORS_ENV_PATH") {
+        if dotenvy::from_path(&env_path).is_ok() {
+            println!("Loaded environment variables from path: {env_path}");
+        }
+    } else if let Ok(path) = dotenv() {
+        println!(
+            "Loaded environment variables from .env file at path: {}",
+            path.display()
+        );
+    }
+
+    let config_path = env::var("PICOMQ_CONNECTORS_CONFIG_PATH")
+        .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
+    println!("Starting PicoMQ Connectors Runtime, loading configuration from: {config_path}...");
+
+    let config = ConnectorsRuntimeConfig::load(&config_path)?;
+
+    log::init_logging(&config.telemetry, &config.logging, VERSION);
+
+    let state_factory = state::factory_from_config(&config.state)?;
+
+    let kafka = Arc::new(KafkaClients::new(config.kafka.clone())?);
+
+    let connectors_config_provider: Box<dyn ConnectorsConfigProvider> =
+        create_connectors_config_provider(&config.connectors).await?;
+
+    let connectors_config = connectors_config_provider.get_active_configs().await?;
+    info!(
+        "Found {} source and {} sink configurations.",
+        connectors_config.sources().len(),
+        connectors_config.sinks().len()
+    );
+    let sources_config = connectors_config.sources();
+    let (sources, failed_sources) =
+        source::init(sources_config.clone(), &kafka, &state_factory).await?;
+
+    let sinks_config = connectors_config.sinks();
+    let (sinks, failed_sinks) = sink::init(sinks_config.clone(), &kafka).await?;
+
+    let mut sink_wrappers = vec![];
+    let mut sink_containers_by_key: HashMap<String, Arc<Container<SinkApi>>> = HashMap::new();
+    for (_path, sink) in sinks {
+        let container = Arc::new(sink.container);
+        let callback = container.pico_sink_consume;
+        for plugin in &sink.plugins {
+            sink_containers_by_key.insert(plugin.key.clone(), container.clone());
+        }
+        sink_wrappers.push(SinkConnectorWrapper {
+            callback,
+            plugins: sink.plugins,
+        });
+    }
+
+    let mut source_wrappers = vec![];
+    let mut source_containers_by_key: HashMap<String, Arc<Container<SourceApi>>> = HashMap::new();
+    for (_path, source) in sources {
+        let container = Arc::new(source.container);
+        let handle_callback = container.pico_source_handle_v2;
+        let batch_result_callback = container.pico_source_batch_result;
+        for plugin in &source.plugins {
+            source_containers_by_key.insert(plugin.key.clone(), container.clone());
+        }
+        source_wrappers.push(SourceConnectorWrapper {
+            handle_callback,
+            batch_result_callback,
+            plugins: source.plugins,
+        });
+    }
+
+    let context = context::init(
+        &config,
+        sinks_config,
+        sources_config,
+        &sink_wrappers,
+        &source_wrappers,
+        &failed_sinks,
+        &failed_sources,
+        connectors_config_provider,
+        kafka.clone(),
+        state_factory,
+    );
+    for (key, container) in sink_containers_by_key {
+        if let Some(details) = context.sinks.get(&key).await {
+            let mut details = details.lock().await;
+            details.container = Some(container);
+        }
+    }
+    for (key, container) in source_containers_by_key {
+        if let Some(details) = context.sources.get(&key).await {
+            let mut details = details.lock().await;
+            details.container = Some(container);
+        }
+    }
+
+    let context = Arc::new(context);
+
+    let source_handles = source::handle(source_wrappers, context.clone());
+    for (key, handler_tasks) in source_handles {
+        if let Some(details) = context.sources.get(&key).await {
+            let mut details = details.lock().await;
+            details.handler_tasks = handler_tasks;
+        }
+    }
+
+    let sink_handles = sink::consume(sink_wrappers, context.clone());
+    for (key, shutdown_tx, task_handles) in sink_handles {
+        if let Some(details) = context.sinks.get(&key).await {
+            let mut details = details.lock().await;
+            details.shutdown_tx = Some(shutdown_tx);
+            details.task_handles = task_handles;
+        }
+        context
+            .sinks
+            .update_status(&key, ConnectorStatus::Running, Some(&context.metrics))
+            .await;
+    }
+
+    info!("All sources and sinks spawned.");
+    api::init(&config.http, context.clone()).await;
+
+    #[cfg(unix)]
+    let (mut ctrl_c, mut sigterm) = {
+        use tokio::signal::unix::{SignalKind, signal};
+        (
+            signal(SignalKind::interrupt()).expect("Failed to create SIGINT signal"),
+            signal(SignalKind::terminate()).expect("Failed to create SIGTERM signal"),
+        )
+    };
+
+    #[cfg(unix)]
+    tokio::select! {
+        _ = ctrl_c.recv() => {
+            info!("Received SIGINT. Shutting down connectors runtime...");
+        },
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM. Shutting down connectors runtime...");
+        }
+    }
+
+    let source_keys: Vec<String> = context
+        .sources
+        .get_all()
+        .await
+        .into_iter()
+        .map(|s| s.key)
+        .collect();
+    for key in &source_keys {
+        if let Err(err) = context
+            .sources
+            .stop_connector_with_guard(key, &context.metrics)
+            .await
+        {
+            error!("Failed to stop source connector: {key}. {err}");
+        }
+    }
+
+    let sink_keys: Vec<String> = context
+        .sinks
+        .get_all()
+        .await
+        .into_iter()
+        .map(|s| s.key)
+        .collect();
+    for key in &sink_keys {
+        if let Err(err) = context
+            .sinks
+            .stop_connector_with_guard(key, &context.metrics)
+            .await
+        {
+            error!("Failed to stop sink connector: {key}. {err}");
+        }
+    }
+
+    info!("All connectors closed. Runtime shutdown complete.");
+    Ok(())
+}
+
+pub(crate) fn resolve_plugin_path(path: &str) -> Result<String, RuntimeError> {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    let with_extension = if ALLOWED_PLUGIN_EXTENSIONS.contains(&extension) {
+        path.to_string()
+    } else {
+        let os_extension = match std::env::consts::OS {
+            "macos" => "dylib",
+            "windows" => "dll",
+            _ => "so",
+        };
+        format!("{path}.{os_extension}")
+    };
+
+    let candidate = std::path::Path::new(&with_extension);
+
+    if candidate.exists() {
+        info!("Resolved plugin path: {with_extension}");
+        return Ok(with_extension);
+    }
+
+    if candidate.is_relative() {
+        let Some(file_name) = candidate.file_name() else {
+            return Err(RuntimeError::InvalidConfiguration(format!(
+                "Invalid plugin path: '{with_extension}'"
+            )));
+        };
+
+        let search_dirs: Vec<std::path::PathBuf> = [
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf())),
+            std::env::current_dir().ok(),
+            Some(std::path::PathBuf::from("/usr/lib")),
+            Some(std::path::PathBuf::from("/usr/lib64")),
+            Some(std::path::PathBuf::from("/lib")),
+            Some(std::path::PathBuf::from("/lib64")),
+            Some(std::path::PathBuf::from("/usr/local/lib")),
+            Some(std::path::PathBuf::from("/usr/local/lib64")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        for dir in &search_dirs {
+            let full = dir.join(file_name);
+            if full.exists() {
+                let resolved = match full.to_str() {
+                    Some(s) => s.to_owned(),
+                    None => continue,
+                };
+                info!(
+                    "Resolved plugin path: {resolved} (found in {})",
+                    dir.display()
+                );
+                return Ok(resolved);
+            }
+        }
+
+        let searched: Vec<String> = std::iter::once(with_extension.clone())
+            .chain(search_dirs.iter().filter_map(|d| {
+                let full = d.join(file_name);
+                full.to_str().map(|s| s.to_owned())
+            }))
+            .collect();
+
+        return Err(RuntimeError::InvalidConfiguration(format!(
+            "Plugin library not found. Searched paths:\n{}\n\
+             Ensure the shared library (.so/.dylib/.dll) is built and placed in one of these locations.",
+            searched
+                .iter()
+                .map(|p| format!("  - {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )));
+    }
+
+    Err(RuntimeError::InvalidConfiguration(format!(
+        "Plugin library not found at '{with_extension}'. \
+         Ensure the shared library file exists at this path."
+    )))
+}
+
+struct SinkConnector {
+    container: Container<SinkApi>,
+    plugins: Vec<SinkConnectorPlugin>,
+}
+
+struct SinkConnectorPlugin {
+    id: u32,
+    key: String,
+    name: String,
+    path: String,
+    version: String,
+    config_format: Option<ConfigFormat>,
+    consumers: Vec<SinkConnectorConsumer>,
+    error: Option<String>,
+    verbose: bool,
+    benchmark: bool,
+}
+
+struct SinkConnectorConsumer {
+    batch_size: u32,
+    poll_interval: Duration,
+    consumer: StreamConsumer,
+    decoder: Arc<dyn StreamDecoder>,
+    transforms: Vec<Arc<dyn Transform>>,
+}
+
+struct SinkConnectorWrapper {
+    callback: ConsumeCallback,
+    plugins: Vec<SinkConnectorPlugin>,
+}
+
+struct SourceConnector {
+    container: Container<SourceApi>,
+    plugins: Vec<SourceConnectorPlugin>,
+}
+
+struct SourceConnectorPlugin {
+    id: u32,
+    key: String,
+    name: String,
+    path: String,
+    version: String,
+    config_format: Option<ConfigFormat>,
+    transforms: Vec<Arc<dyn Transform>>,
+    producer: Option<SourceConnectorProducer>,
+    state_storage: StateStorage,
+    error: Option<String>,
+    verbose: bool,
+    benchmark: bool,
+}
+
+struct SourceConnectorProducer {
+    encoder: Arc<dyn StreamEncoder>,
+    producer: FutureProducer,
+    router: TopicRouter,
+    topic_config: configs::connectors::TopicProducerConfig,
+    kafka: Arc<KafkaClients>,
+}
+
+struct SourceConnectorWrapper {
+    handle_callback: HandleCallback,
+    batch_result_callback: BatchResultCallback,
+    plugins: Vec<SourceConnectorPlugin>,
+}
+
+pub(crate) struct FailedPlugin {
+    pub id: u32,
+    pub key: String,
+    pub name: String,
+    pub path: String,
+    pub config_format: Option<ConfigFormat>,
+    pub error: String,
+    pub enabled: bool,
+}
+
+impl FailedPlugin {
+    pub(crate) fn new(
+        id: u32,
+        key: &str,
+        name: &str,
+        path: &str,
+        config_format: Option<ConfigFormat>,
+        enabled: bool,
+        error: String,
+    ) -> Self {
+        Self {
+            id,
+            key: key.to_owned(),
+            name: name.to_owned(),
+            path: path.to_owned(),
+            config_format,
+            error,
+            enabled,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn path_with_known_extension_is_preserved() {
+        let result = resolve_plugin_path("/tmp/nonexistent_test_plugin.so");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent_test_plugin.so"),
+            "Error should mention the .so path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn path_without_extension_gets_os_suffix() {
+        let result = resolve_plugin_path("/tmp/nonexistent_test_plugin");
+        let err = result.unwrap_err().to_string();
+        let expected_ext = match std::env::consts::OS {
+            "macos" => "dylib",
+            _ => "so",
+        };
+        assert!(
+            err.contains(&format!("nonexistent_test_plugin.{expected_ext}")),
+            "Error should mention OS-specific extension, got: {err}"
+        );
+    }
+
+    #[test]
+    fn nonexistent_relative_path_lists_searched_locations() {
+        let result = resolve_plugin_path("nonexistent_test_plugin.so");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Searched paths:"),
+            "Should list searched paths, got: {err}"
+        );
+    }
+
+    #[test]
+    fn nonexistent_absolute_path_returns_specific_error() {
+        let result = resolve_plugin_path("/no/such/dir/plugin.so");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("/no/such/dir/plugin.so"),
+            "Should mention the exact path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn existing_file_resolves_directly() {
+        let dir = TempDir::new().unwrap();
+        let plugin_path = dir.path().join("test_plugin.so");
+        fs::write(&plugin_path, b"fake-plugin").unwrap();
+
+        let result = resolve_plugin_path(plugin_path.to_str().unwrap())
+            .expect("should resolve existing file");
+        assert_eq!(result, plugin_path.to_str().unwrap());
+    }
+}

@@ -3,12 +3,12 @@
 //! Decoding is strict: unknown keys, operations, audiences, and matcher kinds
 //! are [`AuthError::Malformed`], never ignored.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
+use crate::AuthError;
 use crate::scope::{
     Audience, Operation, OperationGroups, ReadWrite, ResourceMatcher, ResourceSet, Scope,
 };
-use crate::AuthError;
 
 pub fn operation_name(op: Operation) -> &'static str {
     match op {

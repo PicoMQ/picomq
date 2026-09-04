@@ -6,7 +6,7 @@ mod common;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use picomq_http::{serve, HttpProtocol, ServeOptions};
+use picomq_http::{HttpProtocol, ServeOptions, serve};
 
 #[tokio::test]
 async fn health_and_ready() {
@@ -260,10 +260,12 @@ async fn dashboard_is_served_at_root() {
         .await
         .unwrap();
     assert_eq!(index.status(), 200);
-    assert!(index.headers()["Content-Type"]
-        .to_str()
-        .unwrap()
-        .starts_with("text/html"));
+    assert!(
+        index.headers()["Content-Type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
     let body = index.text().await.unwrap();
     assert!(body.contains("PicoMQ"), "{body}");
 

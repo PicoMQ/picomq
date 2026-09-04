@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::{ErrorKind, ServiceError};
-use crate::producer::{NumericProducerEntry, ProducerSpan, PRODUCER_SPAN_WINDOW};
+use crate::producer::{NumericProducerEntry, PRODUCER_SPAN_WINDOW, ProducerSpan};
 use crate::types::Producer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

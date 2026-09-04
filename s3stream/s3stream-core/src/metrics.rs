@@ -400,19 +400,27 @@ mod tests {
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].0, "kafka_stream_operation_latency");
-        assert!(events[0]
-            .1
-            .contains(&("operation_type".into(), "S3Stream".into())));
-        assert!(events[0]
-            .1
-            .contains(&("operation_name".into(), "append".into())));
+        assert!(
+            events[0]
+                .1
+                .contains(&("operation_type".into(), "S3Stream".into()))
+        );
+        assert!(
+            events[0]
+                .1
+                .contains(&("operation_name".into(), "append".into()))
+        );
         assert_eq!(events[0].2, 42.0);
-        assert!(events[1]
-            .1
-            .contains(&("operation_type".into(), "S3Storage".into())));
-        assert!(events[1]
-            .1
-            .contains(&("operation_name".into(), "upload_wal".into())));
+        assert!(
+            events[1]
+                .1
+                .contains(&("operation_type".into(), "S3Storage".into()))
+        );
+        assert!(
+            events[1]
+                .1
+                .contains(&("operation_name".into(), "upload_wal".into()))
+        );
         assert!(events[1].1.contains(&("stage".into(), "commit".into())));
     }
 

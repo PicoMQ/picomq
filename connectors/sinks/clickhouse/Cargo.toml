@@ -1,0 +1,35 @@
+[package]
+name = "picomq-connector-clickhouse-sink"
+version.workspace = true
+description = "PicoMQ ClickHouse sink connector for streaming messages into ClickHouse"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "picomq_connector_clickhouse_sink"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+picomq-connector-sdk = { path = "../../sdk" }
+rand = { workspace = true }
+reqwest = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+simd-json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+missing_safety_doc = "allow"

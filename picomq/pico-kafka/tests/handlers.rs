@@ -8,12 +8,12 @@ use kafka_protocol::messages::{
     ApiKey, ApiVersionsRequest, ApiVersionsResponse, FetchRequest, MetadataRequest, ProduceRequest,
     RequestHeader, ResponseHeader, TopicName,
 };
-use kafka_protocol::protocol::{encode_request_header_into_buffer, Decodable, Encodable, StrBytes};
+use kafka_protocol::protocol::{Decodable, Encodable, StrBytes, encode_request_header_into_buffer};
 use kafka_protocol::records::{
-    Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
-    NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, NO_SEQUENCE,
+    Compression, NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, NO_SEQUENCE, Record,
+    RecordBatchEncoder, RecordEncodeOptions, TimestampType,
 };
-use picomq_kafka::{dispatch, BrokerContext, HandlerOutcome, KafkaListener, ListenerConfig};
+use picomq_kafka::{BrokerContext, HandlerOutcome, KafkaListener, ListenerConfig, dispatch};
 use picomq_metadata::{CommandSink, LocalSink};
 use picomq_server::{NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
@@ -122,10 +122,12 @@ async fn api_versions_handler_lists_supported_apis() {
     ResponseHeader::decode(&mut buf, 0).unwrap();
     let response = ApiVersionsResponse::decode(&mut buf, 3).unwrap();
     assert_eq!(response.error_code, 0);
-    assert!(response
-        .api_keys
-        .iter()
-        .any(|api| api.api_key == ApiKey::Metadata as i16));
+    assert!(
+        response
+            .api_keys
+            .iter()
+            .any(|api| api.api_key == ApiKey::Metadata as i16)
+    );
 }
 
 async fn resolve(outcome: HandlerOutcome) -> HandlerOutcome {
@@ -154,7 +156,7 @@ async fn metadata_create_produce_and_fetch_roundtrip() {
         2,
         &MetadataRequest::default()
             .with_topics(Some(vec![
-                MetadataRequestTopic::default().with_name(Some(tn("events")))
+                MetadataRequestTopic::default().with_name(Some(tn("events"))),
             ]))
             .with_allow_auto_topic_creation(true),
     );
@@ -174,9 +176,11 @@ async fn metadata_create_produce_and_fetch_roundtrip() {
             &ProduceRequest::default().with_acks(1).with_topic_data(vec![
                 TopicProduceData::default()
                     .with_name(tn("events"))
-                    .with_partition_data(vec![PartitionProduceData::default()
-                        .with_index(0)
-                        .with_records(Some(kafka_batch(payload)))]),
+                    .with_partition_data(vec![
+                        PartitionProduceData::default()
+                            .with_index(0)
+                            .with_records(Some(kafka_batch(payload))),
+                    ]),
             ]),
         );
         let mut buf = response_body(&broker, &produce_req).await;
@@ -195,11 +199,15 @@ async fn metadata_create_produce_and_fetch_roundtrip() {
         &FetchRequest::default()
             .with_max_wait_ms(0)
             .with_min_bytes(1)
-            .with_topics(vec![FetchTopic::default()
-                .with_topic_id(topic_id)
-                .with_partitions(vec![FetchPartition::default()
-                    .with_partition(0)
-                    .with_fetch_offset(0)])]),
+            .with_topics(vec![
+                FetchTopic::default()
+                    .with_topic_id(topic_id)
+                    .with_partitions(vec![
+                        FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0),
+                    ]),
+            ]),
     );
     let mut buf = response_body(&broker, &fetch_req).await;
     ResponseHeader::decode(&mut buf, 1).unwrap();
@@ -225,11 +233,15 @@ async fn metadata_create_produce_and_fetch_roundtrip() {
         &FetchRequest::default()
             .with_max_wait_ms(0)
             .with_min_bytes(1)
-            .with_topics(vec![FetchTopic::default()
-                .with_topic_id(uuid::Uuid::new_v4())
-                .with_partitions(vec![FetchPartition::default()
-                    .with_partition(0)
-                    .with_fetch_offset(0)])]),
+            .with_topics(vec![
+                FetchTopic::default()
+                    .with_topic_id(uuid::Uuid::new_v4())
+                    .with_partitions(vec![
+                        FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0),
+                    ]),
+            ]),
     );
     let mut buf = response_body(&broker, &unknown_req).await;
     ResponseHeader::decode(&mut buf, 1).unwrap();
@@ -245,11 +257,15 @@ async fn metadata_create_produce_and_fetch_roundtrip() {
         &FetchRequest::default()
             .with_max_wait_ms(0)
             .with_min_bytes(1)
-            .with_topics(vec![FetchTopic::default()
-                .with_topic_id(topic_id)
-                .with_partitions(vec![FetchPartition::default()
-                    .with_partition(0)
-                    .with_fetch_offset(50)])]),
+            .with_topics(vec![
+                FetchTopic::default()
+                    .with_topic_id(topic_id)
+                    .with_partitions(vec![
+                        FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(50),
+                    ]),
+            ]),
     );
     let mut buf = response_body(&broker, &oor_req).await;
     ResponseHeader::decode(&mut buf, 1).unwrap();
@@ -324,7 +340,7 @@ async fn listener_pipeline_survives_acks_zero() {
         1,
         &MetadataRequest::default()
             .with_topics(Some(vec![
-                MetadataRequestTopic::default().with_name(Some(tn("fire")))
+                MetadataRequestTopic::default().with_name(Some(tn("fire"))),
             ]))
             .with_allow_auto_topic_creation(true),
     );
@@ -350,13 +366,15 @@ async fn listener_pipeline_survives_acks_zero() {
         ApiKey::Produce,
         10,
         7,
-        &ProduceRequest::default()
-            .with_acks(0)
-            .with_topic_data(vec![TopicProduceData::default()
+        &ProduceRequest::default().with_acks(0).with_topic_data(vec![
+            TopicProduceData::default()
                 .with_name(tn("fire"))
-                .with_partition_data(vec![PartitionProduceData::default()
-                    .with_index(0)
-                    .with_records(Some(kafka_batch(b"fire-and-forget")))])]),
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(0)
+                        .with_records(Some(kafka_batch(b"fire-and-forget"))),
+                ]),
+        ]),
     );
     let versions_req = encode_request(
         ApiKey::ApiVersions,
@@ -420,12 +438,14 @@ async fn find_coordinator_probe_creates_nothing() {
 
     // hex("probe") under the reserved namespace: no stream may exist.
     let stream = "/_sys/groups/70726f6265";
-    assert!(broker
-        .service
-        .lookup_stream_id(stream)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        broker
+            .service
+            .lookup_stream_id(stream)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     let fetch = encode_request(
         ApiKey::OffsetFetch,
@@ -433,21 +453,25 @@ async fn find_coordinator_probe_creates_nothing() {
         31,
         &OffsetFetchRequest::default()
             .with_group_id(GroupId(StrBytes::from_static_str("probe")))
-            .with_topics(Some(vec![OffsetFetchRequestTopic::default()
-                .with_name(tn("events"))
-                .with_partition_indexes(vec![0])])),
+            .with_topics(Some(vec![
+                OffsetFetchRequestTopic::default()
+                    .with_name(tn("events"))
+                    .with_partition_indexes(vec![0]),
+            ])),
     );
     let mut buf = response_body(&broker, &fetch).await;
     ResponseHeader::decode(&mut buf, OffsetFetchResponse::header_version(7)).unwrap();
     let fetched = OffsetFetchResponse::decode(&mut buf, 7).unwrap();
     assert_eq!(fetched.error_code, 0);
     assert_eq!(fetched.topics[0].partitions[0].committed_offset, -1);
-    assert!(broker
-        .service
-        .lookup_stream_id(stream)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        broker
+            .service
+            .lookup_stream_id(stream)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// Join, rebalance, fencing, and expiry across two members.
@@ -476,9 +500,11 @@ async fn classic_group_two_member_rebalance_and_expiry() {
                 .with_rebalance_timeout_ms(10_000)
                 .with_member_id(member_id)
                 .with_protocol_type(StrBytes::from_static_str("consumer"))
-                .with_protocols(vec![JoinGroupRequestProtocol::default()
-                    .with_name(StrBytes::from_static_str("range"))
-                    .with_metadata(Bytes::from_static(b"subscription"))]),
+                .with_protocols(vec![
+                    JoinGroupRequestProtocol::default()
+                        .with_name(StrBytes::from_static_str("range"))
+                        .with_metadata(Bytes::from_static(b"subscription")),
+                ]),
         )
     };
     let decode_join = |mut buf: Bytes| {
@@ -534,9 +560,11 @@ async fn classic_group_two_member_rebalance_and_expiry() {
             &sync_req(
                 member1.clone(),
                 1,
-                vec![SyncGroupRequestAssignment::default()
-                    .with_member_id(member1.clone())
-                    .with_assignment(Bytes::from_static(b"all"))],
+                vec![
+                    SyncGroupRequestAssignment::default()
+                        .with_member_id(member1.clone())
+                        .with_assignment(Bytes::from_static(b"all")),
+                ],
                 42,
             ),
         )
@@ -634,9 +662,11 @@ async fn static_membership_rejoin_and_fencing() {
                 .with_member_id(member_id)
                 .with_group_instance_id(Some(instance.clone()))
                 .with_protocol_type(StrBytes::from_static_str("consumer"))
-                .with_protocols(vec![JoinGroupRequestProtocol::default()
-                    .with_name(StrBytes::from_static_str("range"))
-                    .with_metadata(Bytes::from_static(b"subscription"))]),
+                .with_protocols(vec![
+                    JoinGroupRequestProtocol::default()
+                        .with_name(StrBytes::from_static_str("range"))
+                        .with_metadata(Bytes::from_static(b"subscription")),
+                ]),
         )
     };
     let decode_join = |mut buf: Bytes| {
@@ -722,9 +752,11 @@ async fn classic_group_lifecycle_and_offset_replay() {
                 .with_rebalance_timeout_ms(10_000)
                 .with_member_id(member_id)
                 .with_protocol_type(StrBytes::from_static_str("consumer"))
-                .with_protocols(vec![JoinGroupRequestProtocol::default()
-                    .with_name(StrBytes::from_static_str("range"))
-                    .with_metadata(Bytes::from_static(b"subscription"))]),
+                .with_protocols(vec![
+                    JoinGroupRequestProtocol::default()
+                        .with_name(StrBytes::from_static_str("range"))
+                        .with_metadata(Bytes::from_static(b"subscription")),
+                ]),
         )
     };
     let mut buf = response_body(&broker, &join(StrBytes::default(), 21)).await;
@@ -752,9 +784,11 @@ async fn classic_group_lifecycle_and_offset_replay() {
             .with_member_id(joined.member_id.clone())
             .with_protocol_type(Some(StrBytes::from_static_str("consumer")))
             .with_protocol_name(Some(StrBytes::from_static_str("range")))
-            .with_assignments(vec![SyncGroupRequestAssignment::default()
-                .with_member_id(joined.member_id.clone())
-                .with_assignment(assignment.clone())]),
+            .with_assignments(vec![
+                SyncGroupRequestAssignment::default()
+                    .with_member_id(joined.member_id.clone())
+                    .with_assignment(assignment.clone()),
+            ]),
     );
     let mut buf = response_body(&broker, &sync).await;
     ResponseHeader::decode(&mut buf, SyncGroupResponse::header_version(5)).unwrap();
@@ -786,15 +820,17 @@ async fn classic_group_lifecycle_and_offset_replay() {
             .with_group_id(group_id.clone())
             .with_generation_id_or_member_epoch(joined.generation_id)
             .with_member_id(joined.member_id.clone())
-            .with_topics(vec![OffsetCommitRequestTopic::default()
-                .with_name(tn("events"))
-                .with_partitions(vec![OffsetCommitRequestPartition::default()
-                    .with_partition_index(0)
-                    .with_committed_offset(42)
-                    .with_committed_leader_epoch(3)
-                    .with_committed_metadata(Some(StrBytes::from_static_str(
-                        "checkpoint",
-                    )))])]),
+            .with_topics(vec![
+                OffsetCommitRequestTopic::default()
+                    .with_name(tn("events"))
+                    .with_partitions(vec![
+                        OffsetCommitRequestPartition::default()
+                            .with_partition_index(0)
+                            .with_committed_offset(42)
+                            .with_committed_leader_epoch(3)
+                            .with_committed_metadata(Some(StrBytes::from_static_str("checkpoint"))),
+                    ]),
+            ]),
     );
     let mut buf = response_body(&broker, &commit).await;
     ResponseHeader::decode(&mut buf, OffsetCommitResponse::header_version(7)).unwrap();
@@ -815,9 +851,11 @@ async fn classic_group_lifecycle_and_offset_replay() {
         26,
         &OffsetFetchRequest::default()
             .with_group_id(group_id.clone())
-            .with_topics(Some(vec![OffsetFetchRequestTopic::default()
-                .with_name(tn("events"))
-                .with_partition_indexes(vec![0])]))
+            .with_topics(Some(vec![
+                OffsetFetchRequestTopic::default()
+                    .with_name(tn("events"))
+                    .with_partition_indexes(vec![0]),
+            ]))
             .with_require_stable(true),
     );
     let mut buf = response_body(&restarted, &fetch).await;
@@ -910,18 +948,20 @@ async fn create_topics_binds_picomq_schema_and_validates_produce() {
         1,
         &CreateTopicsRequest::default()
             .with_timeout_ms(5_000)
-            .with_topics(vec![CreatableTopic::default()
-                .with_name(tn("orders"))
-                .with_num_partitions(1)
-                .with_replication_factor(1)
-                .with_configs(vec![
-                    CreatableTopicConfig::default()
-                        .with_name(StrBytes::from_static_str("pico.schema"))
-                        .with_value(Some(StrBytes::from_static_str("person"))),
-                    CreatableTopicConfig::default()
-                        .with_name(StrBytes::from_static_str("pico.schema.validate"))
-                        .with_value(Some(StrBytes::from_static_str("true"))),
-                ])]),
+            .with_topics(vec![
+                CreatableTopic::default()
+                    .with_name(tn("orders"))
+                    .with_num_partitions(1)
+                    .with_replication_factor(1)
+                    .with_configs(vec![
+                        CreatableTopicConfig::default()
+                            .with_name(StrBytes::from_static_str("pico.schema"))
+                            .with_value(Some(StrBytes::from_static_str("person"))),
+                        CreatableTopicConfig::default()
+                            .with_name(StrBytes::from_static_str("pico.schema.validate"))
+                            .with_value(Some(StrBytes::from_static_str("true"))),
+                    ]),
+            ]),
     );
     let mut buf = response_body(&broker, &create_req).await;
     ResponseHeader::decode(&mut buf, 1).unwrap();
@@ -943,13 +983,15 @@ async fn create_topics_binds_picomq_schema_and_validates_produce() {
         ApiKey::Produce,
         10,
         2,
-        &ProduceRequest::default()
-            .with_acks(1)
-            .with_topic_data(vec![TopicProduceData::default()
+        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
+            TopicProduceData::default()
                 .with_name(tn("orders"))
-                .with_partition_data(vec![PartitionProduceData::default()
-                    .with_index(0)
-                    .with_records(Some(kafka_batch(br#"{"name":1}"#)))])]),
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(0)
+                        .with_records(Some(kafka_batch(br#"{"name":1}"#))),
+                ]),
+        ]),
     );
     let mut buf = response_body(&broker, &bad).await;
     ResponseHeader::decode(&mut buf, 1).unwrap();
@@ -960,13 +1002,15 @@ async fn create_topics_binds_picomq_schema_and_validates_produce() {
         ApiKey::Produce,
         10,
         3,
-        &ProduceRequest::default()
-            .with_acks(1)
-            .with_topic_data(vec![TopicProduceData::default()
+        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
+            TopicProduceData::default()
                 .with_name(tn("orders"))
-                .with_partition_data(vec![PartitionProduceData::default()
-                    .with_index(0)
-                    .with_records(Some(kafka_batch(br#"{"name":"alice"}"#)))])]),
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(0)
+                        .with_records(Some(kafka_batch(br#"{"name":"alice"}"#))),
+                ]),
+        ]),
     );
     let mut buf = response_body(&broker, &ok).await;
     ResponseHeader::decode(&mut buf, 1).unwrap();
