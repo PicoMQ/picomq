@@ -1,3 +1,21 @@
+// Modified from Apache Iggy for PicoMQ.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 pub(crate) const INSERT_SINGLE_ROW_ALL_TYPES: &str = r#"table public.probe_events: INSERT: id[integer]:2 name[text]:'alice' note[text]:'first note' amount[numeric]:12.50 active[boolean]:true tags[text[]]:'{a,b}' payload[jsonb]:'{"k": 1}' created_at[timestamp with time zone]:'2026-07-05 17:58:23.202192+00' small_int[smallint]:null big_int[bigint]:null real_val[real]:null double_val[double precision]:null numeric_val[numeric]:null uuid_val[uuid]:null bytea_val[bytea]:null date_val[date]:null time_val[time without time zone]:null interval_val[interval]:null int_array[integer[]]:null char_val[character]:null varchar_val[character varying]:null"#;
 
 pub(crate) const INSERT_WITH_NULLS: &str = r#"table public.probe_events: INSERT: id[integer]:3 name[text]:'bob' note[text]:null amount[numeric]:null active[boolean]:null tags[text[]]:null payload[jsonb]:null created_at[timestamp with time zone]:'2026-07-05 17:58:23.924391+00' small_int[smallint]:null big_int[bigint]:null real_val[real]:null double_val[double precision]:null numeric_val[numeric]:null uuid_val[uuid]:null bytea_val[bytea]:null date_val[date]:null time_val[time without time zone]:null interval_val[interval]:null int_array[integer[]]:null char_val[character]:null varchar_val[character varying]:null"#;
