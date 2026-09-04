@@ -1,0 +1,76 @@
+[http]
+enabled = true
+address = "127.0.0.1:8081"
+api_key = ""
+
+[http.cors]
+enabled = false
+allowed_methods = ["GET", "POST", "PUT", "DELETE"]
+allowed_origins = ["*"]
+allowed_headers = ["content-type"]
+exposed_headers = [""]
+allow_credentials = false
+allow_private_network = false
+
+[http.metrics]
+enabled = false
+endpoint = "/metrics"
+
+[http.tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+[kafka]
+bootstrap_servers = "localhost:9092"
+client_id = "picomq-connectors"
+security_protocol = "plaintext"
+
+[kafka.sasl]
+mechanism = "PLAIN"
+username = ""
+password = ""
+
+[kafka.tls]
+ca_file = ""
+cert_file = ""
+key_file = ""
+verify_hostname = true
+
+[kafka.properties]
+
+[state]
+path = "local_state"
+storage = "file"
+
+[state.http]
+url = ""
+load_method = "get"
+save_method = "put"
+timeout = "5s"
+
+[state.http.retry]
+enabled = true
+max_attempts = 4
+initial_backoff = "200ms"
+max_backoff = "2s"
+backoff_multiplier = 2
+
+[connectors]
+config_type = "local"
+config_dir = ""
+
+[telemetry]
+enabled = false
+service_name = "picomq-connectors"
+
+[telemetry.logs]
+transport = "grpc"
+endpoint = "http://localhost:4317"
+
+[telemetry.traces]
+transport = "grpc"
+endpoint = "http://localhost:4317"
+
+[logging]
+format = "text"

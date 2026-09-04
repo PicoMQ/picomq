@@ -1,0 +1,46 @@
+use crate::context::RuntimeContext;
+use axum::body::Body;
+use axum::extract::State;
+use axum::{
+    http::{Request, StatusCode},
+    middleware::Next,
+    response::Response,
+};
+use secrecy::ExposeSecret;
+use std::sync::Arc;
+use subtle::ConstantTimeEq;
+
+const API_KEY_HEADER: &str = "api-key";
+const PUBLIC_PATHS: &[&str] = &["/", "/health"];
+
+pub async fn resolve_api_key(
+    State(context): State<Arc<RuntimeContext>>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if PUBLIC_PATHS.contains(&request.uri().path()) {
+        return Ok(next.run(request).await);
+    }
+
+    if context.api_key.expose_secret().is_empty() {
+        return Ok(next.run(request).await);
+    };
+
+    let Some(api_key) = request
+        .headers()
+        .get(API_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    let matches: bool = api_key
+        .as_bytes()
+        .ct_eq(context.api_key.expose_secret().as_bytes())
+        .into();
+    if !matches {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    Ok(next.run(request).await)
+}

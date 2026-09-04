@@ -11,6 +11,9 @@
 *.db-wal
 *.db-shm
 
+# Connectors runtime checkpoints
+/local_state/
+
 # Property-test failures
 **/proptest-regressions/
 

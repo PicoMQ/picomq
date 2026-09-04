@@ -5,3 +5,9 @@ This product includes software derived from AutoMQ S3Stream
 (https://github.com/AutoMQ/automq).
 Copyright 2023-2025, AutoMQ HK Limited.
 Licensed under the Apache License, Version 2.0.
+
+The connectors runtime, SDK and connector plugins under connectors/
+include software derived from Apache Iggy
+(https://github.com/apache/iggy).
+Copyright 2025-2026, The Apache Software Foundation.
+Licensed under the Apache License, Version 2.0.
