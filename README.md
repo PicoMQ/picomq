@@ -1,6 +1,6 @@
 # PicoMQ
 
-PicoMQ is durable, real-time streams over HTTP, built on S3-compatible object storage.
+PicoMQ is durable, real-time streams over HTTP and Kafka, built on S3-compatible object storage.
 
 [Documentation](https://picomq.com/docs/) · [Discord](https://discord.gg/qsMy5sSpYX) · [Quick start](https://picomq.com/docs/quick-start)
 

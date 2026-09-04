@@ -136,7 +136,7 @@ const docsSidebar = [
 export default defineConfig({
   title: 'PicoMQ',
   description:
-    'PicoMQ is durable, real-time streams over HTTP, built on S3-compatible object storage.',
+    'PicoMQ is durable, real-time streams over HTTP and Kafka, built on S3-compatible object storage.',
   base: process.env.BASE_PATH ?? '/',
   cleanUrls: true,
   appearance: false,
