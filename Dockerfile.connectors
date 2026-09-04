@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+FROM rust:1-bookworm AS build
+WORKDIR /src
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        libsqlite3-dev \
+        pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+RUN --mount=type=cache,id=picomq-connectors-target,sharing=locked,target=/src/target \
+    --mount=type=cache,id=picomq-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=picomq-cargo-git,sharing=locked,target=/usr/local/cargo/git \
+    cargo build --locked --release \
+        -p picomq-connectors \
+        -p picomq-connector-stdout-sink \
+        -p picomq-connector-http-sink \
+        -p picomq-connector-postgres-sink \
+        -p picomq-connector-clickhouse-sink \
+        -p picomq-connector-elasticsearch-sink \
+        -p picomq-connector-quickwit-sink \
+        -p picomq-connector-mongodb-sink \
+        -p picomq-connector-meilisearch-sink \
+        -p picomq-connector-surrealdb-sink \
+        -p picomq-connector-influxdb-sink \
+        -p picomq-connector-s3-sink \
+        -p picomq-connector-random-source \
+        -p picomq-connector-postgres-source \
+        -p picomq-connector-elasticsearch-source \
+        -p picomq-connector-influxdb-source \
+ && mkdir -p /src/out/plugins \
+ && cp /src/target/release/pico-connectors /src/out/ \
+ && cp /src/target/release/libpicomq_connector_*.so /src/out/plugins/
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates libsqlite3-0 zlib1g \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /etc/picomq-connectors/connectors /var/lib/picomq-connectors/state
+
+COPY --from=build /src/out/pico-connectors /usr/local/bin/pico-connectors
+COPY --from=build /src/out/plugins/ /usr/local/lib/
+COPY connectors/runtime/config.toml /etc/picomq-connectors/config.toml
+
+ENV PICOMQ_CONNECTORS_CONFIG_PATH=/etc/picomq-connectors/config.toml \
+    PICOMQ_CONNECTORS_HTTP__ADDRESS=0.0.0.0:8081 \
+    PICOMQ_CONNECTORS_CONNECTORS__CONFIG_DIR=/etc/picomq-connectors/connectors \
+    PICOMQ_CONNECTORS_STATE__PATH=/var/lib/picomq-connectors/state
+
+VOLUME ["/var/lib/picomq-connectors/state"]
+EXPOSE 8081
+ENTRYPOINT ["pico-connectors"]
