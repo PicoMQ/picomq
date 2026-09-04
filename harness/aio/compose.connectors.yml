@@ -1,0 +1,29 @@
+# Connectors runtime next to a pico node. Stack it on any harness file:
+#   docker compose -f compose.lite.yml -f compose.connectors.yml up --build
+#
+# Shares pico's network namespace so the advertised localhost:9092 resolves
+# from inside the container. Connector definitions come from ./connectors,
+# runtime HTTP API on http://localhost:8081.
+
+services:
+  pico:
+    ports:
+      - "8081:8081"
+
+  connectors:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.connectors
+    network_mode: "service:pico"
+    depends_on:
+      - pico
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      PICOMQ_CONNECTORS_KAFKA__BOOTSTRAP_SERVERS: localhost:9092
+    volumes:
+      - ./connectors:/etc/picomq-connectors/connectors:ro
+      - connectors-state:/var/lib/picomq-connectors/state
+    restart: unless-stopped
+
+volumes:
+  connectors-state:

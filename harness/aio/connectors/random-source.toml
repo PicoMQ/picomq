@@ -1,0 +1,19 @@
+type = "source"
+key = "random"
+enabled = true
+version = 0
+name = "Random source"
+path = "libpicomq_connector_random_source"
+
+[[topics]]
+topic = { strategy = "field", path = "user_id", template = "{value}" }
+schema = "json"
+batch_length = 100
+linger_time = "5ms"
+create_topics = true
+
+[plugin_config]
+interval = "1s"
+messages_range = [5, 20]
+payload_size = 64
+user_pool = 4
