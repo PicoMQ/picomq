@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures::future::select_all;
-use kafka_protocol::messages::fetch_response::{FetchableTopicResponse, PartitionData};
 use kafka_protocol::messages::FetchRequest;
+use kafka_protocol::messages::fetch_response::{FetchableTopicResponse, PartitionData};
 use kafka_protocol::protocol::Decodable;
 use picomq_server::OffsetToken;
 use uuid::Uuid;
@@ -13,8 +13,8 @@ use uuid::Uuid;
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    concat_batches, encode_response, ensure_local_leader, resolve_topic, service_error_code,
-    topic_name, NO_ERROR, OFFSET_OUT_OF_RANGE, UNKNOWN_TOPIC_ID, UNKNOWN_TOPIC_OR_PARTITION,
+    NO_ERROR, OFFSET_OUT_OF_RANGE, UNKNOWN_TOPIC_ID, UNKNOWN_TOPIC_OR_PARTITION, concat_batches,
+    encode_response, ensure_local_leader, resolve_topic, service_error_code, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -92,10 +92,10 @@ pub async fn handle(
                 if read.data.error_code != NO_ERROR {
                     any_error = true;
                 }
-                if let Some(wait) = read.wait {
-                    if !waits.contains(&wait) {
-                        waits.push(wait);
-                    }
+                if let Some(wait) = read.wait
+                    && !waits.contains(&wait)
+                {
+                    waits.push(wait);
                 }
                 partitions.push(read.data);
             }

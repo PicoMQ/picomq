@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use s3stream_codec::StreamRecordBatch;
-use s3stream_object::{decode_data_block, ObjectReader, ObjectStorage, S3ObjectMetadata};
+use s3stream_object::{ObjectReader, ObjectStorage, S3ObjectMetadata, decode_data_block};
 use s3stream_wal::{RecordOffset, WriteAheadLog};
 use tokio::sync::oneshot;
 
@@ -440,8 +440,8 @@ impl SnapshotReadCache {
                 }
                 let slot = slots.remove(0);
                 // EventLoop. The CF queue is not held during `put`).
-                let taken = slot.records.lock().expect("slot poisoned").take();
-                taken
+
+                slot.records.lock().expect("slot poisoned").take()
             };
             if let Some(Ok(records)) = records {
                 self.put_locked(state, records);
@@ -579,10 +579,10 @@ async fn notify_commit_if_ahead(
     };
     let mut nodes = HashSet::new();
     for meta in metas {
-        if let Some(bound) = bounds.iter().find(|b| b.stream_id == meta.stream_id) {
-            if (bound.end_offset as i64) > (meta.end_offset as i64) {
-                nodes.insert(meta.node_id);
-            }
+        if let Some(bound) = bounds.iter().find(|b| b.stream_id == meta.stream_id)
+            && (bound.end_offset as i64) > (meta.end_offset as i64)
+        {
+            nodes.insert(meta.node_id);
         }
     }
     let listeners = listeners.lock().expect("listeners poisoned").clone();

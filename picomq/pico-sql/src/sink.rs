@@ -1,16 +1,16 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use picomq_metadata::sink::Proposed;
 use picomq_metadata::snapshot::SnapshotError;
 use picomq_metadata::{
-    apply, codec, CommandSink, MetadataCommand, MetadataError, MetadataResult, MetadataState,
-    MetadataView, SinkStats, ViewPublisher,
+    CommandSink, MetadataCommand, MetadataError, MetadataResult, MetadataState, MetadataView,
+    SinkStats, ViewPublisher, apply, codec,
 };
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::store::{MetaStore, StoreError};
 
@@ -227,18 +227,18 @@ async fn tailer_task(
             // An empty tail is ambiguous: nothing new, or the rows we need
             // were folded into a snapshot and truncated away by another
             // node. The snapshot index (payload-free) disambiguates.
-            if let Ok(Some(snap_idx)) = shared.store.snapshot_idx().await {
-                if snap_idx > applied {
-                    match restore_from_snapshot(&shared, applied).await {
-                        Restore::Installed(snap_idx, snap_state) => {
-                            state = *snap_state;
-                            applied = snap_idx;
-                        }
-                        Restore::Retry => tokio::time::sleep(config.poll_interval).await,
-                        Restore::Poisoned => return,
+            if let Ok(Some(snap_idx)) = shared.store.snapshot_idx().await
+                && snap_idx > applied
+            {
+                match restore_from_snapshot(&shared, applied).await {
+                    Restore::Installed(snap_idx, snap_state) => {
+                        state = *snap_state;
+                        applied = snap_idx;
                     }
-                    continue;
+                    Restore::Retry => tokio::time::sleep(config.poll_interval).await,
+                    Restore::Poisoned => return,
                 }
+                continue;
             }
             // Nudge (same-process append) or poll (other writers).
             tokio::select! {
@@ -907,10 +907,11 @@ mod tests {
             loop {
                 let snapshot = store.load_snapshot().await.unwrap();
                 let rows = store.fetch_after(0, 10_000).await.unwrap();
-                if let Some((snap_idx, _)) = snapshot {
-                    if snap_idx > 0 && rows.iter().all(|(idx, _)| *idx > snap_idx) {
-                        break;
-                    }
+                if let Some((snap_idx, _)) = snapshot
+                    && snap_idx > 0
+                    && rows.iter().all(|(idx, _)| *idx > snap_idx)
+                {
+                    break;
                 }
                 assert!(
                     tokio::time::Instant::now() < deadline,

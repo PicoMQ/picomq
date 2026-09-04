@@ -28,8 +28,8 @@ dirs = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["signal"] }
 tracing-subscriber = { workspace = true }
-rdkafka = { version = "0.39.0", default-features = false, features = ["cmake-build", "tokio"] }
-keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "linux-native"] }
+rdkafka = { workspace = true }
+keyring = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

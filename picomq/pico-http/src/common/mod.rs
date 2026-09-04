@@ -3,7 +3,7 @@ mod streams;
 
 use std::sync::Arc;
 
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};

@@ -40,7 +40,7 @@ pub use manager::{
 };
 pub use storage::Storage;
 pub use throttle::{
-    build_network_limiters, BandwidthLimiter, MeteredBandwidthLimiter, NetworkBandwidthMode,
-    ThrottledObjectStorage,
+    BandwidthLimiter, MeteredBandwidthLimiter, NetworkBandwidthMode, ThrottledObjectStorage,
+    build_network_limiters,
 };
 pub use version::Version;

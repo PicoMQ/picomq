@@ -3,7 +3,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use picomq_protocol::record::{encode_batch_append, PicoRecord};
+use picomq_protocol::record::{PicoRecord, encode_batch_append};
+use rdkafka::Message;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
@@ -11,7 +12,6 @@ use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Headers as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::types::RDKafkaErrorCode;
-use rdkafka::Message;
 use serde_json::Value;
 
 const CT_BATCH_BINARY: &str = "application/vnd.picomq.batch";

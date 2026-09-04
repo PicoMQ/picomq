@@ -1,13 +1,13 @@
 use bytes::Bytes;
 use http::{HeaderMap, Method};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::error::{CodecError, ErrorKind, WireError};
 use crate::record::{
-    decode_batch_read, encode_batch_append, encode_json_read, PicoRecord, SequencedRecord,
+    PicoRecord, SequencedRecord, decode_batch_read, encode_batch_append, encode_json_read,
 };
 use crate::wire::{
-    header_i64, header_string, header_u64, stream_path, truthy, urlencode, WireRequest,
+    WireRequest, header_i64, header_string, header_u64, stream_path, truthy, urlencode,
 };
 
 pub use crate::wire::Producer;
@@ -610,8 +610,10 @@ mod tests {
             "event: control\nid: 3\ndata:{\"closed\":true,\"next_seq\":3,\"up_to_date\":true}\n\n"
         );
         let data = sse_data_event(&[], 3);
-        assert!(std::str::from_utf8(&data)
-            .unwrap()
-            .starts_with("event: data\nid: 3\ndata:[]"));
+        assert!(
+            std::str::from_utf8(&data)
+                .unwrap()
+                .starts_with("event: data\nid: 3\ndata:[]")
+        );
     }
 }

@@ -8,4 +8,4 @@ pub mod store;
 
 pub use lease::{LeaseConfig, LeaseKeeper};
 pub use sink::{SqlSink, SqlSinkConfig, SqlSinkError};
-pub use store::{MetaStore, PgStore, SqliteStore, StoreError, DEFAULT_LEASE_TTL_MS};
+pub use store::{DEFAULT_LEASE_TTL_MS, MetaStore, PgStore, SqliteStore, StoreError};

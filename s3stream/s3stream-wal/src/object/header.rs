@@ -90,7 +90,7 @@ impl WalObjectHeader {
             other => {
                 return Err(WalError::Recovery(format!(
                     "WALHeader magic code not match, Recovered: [{other:#x}]"
-                )))
+                )));
             }
         };
         if buf.len() < size {

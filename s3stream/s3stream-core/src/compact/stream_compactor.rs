@@ -12,9 +12,9 @@ use bytes::{BufMut, BytesMut};
 
 use s3stream_object::composite::{CompositeObjectReader, CompositeObjectWriter};
 use s3stream_object::{
-    gen_object_key, DataBlockIndex, ObjectPath, ObjectReader, ObjectStorage, ReadOptions,
-    S3ObjectMetadata, ThrottleStrategy, WriteOptions, FOOTER_MAGIC, FOOTER_SIZE, NOOP_OBJECT_ID,
-    NOOP_OFFSET,
+    DataBlockIndex, FOOTER_MAGIC, FOOTER_SIZE, NOOP_OBJECT_ID, NOOP_OFFSET, ObjectPath,
+    ObjectReader, ObjectStorage, ReadOptions, S3ObjectMetadata, ThrottleStrategy, WriteOptions,
+    gen_object_key,
 };
 
 use crate::api::StreamError;

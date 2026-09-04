@@ -208,7 +208,7 @@ mod tests {
     use std::collections::HashMap;
 
     use s3stream_codec::StreamRecordBatch;
-    use s3stream_object::{MemoryObjectStorage, ObjectWriter, WriteOptions, NOOP_OBJECT_ID};
+    use s3stream_object::{MemoryObjectStorage, NOOP_OBJECT_ID, ObjectWriter, WriteOptions};
 
     use crate::api::results::CacheAccessType;
     use crate::manager::{CommitStreamSetObjectRequest, StreamManager, StreamObject};

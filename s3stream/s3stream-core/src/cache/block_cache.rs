@@ -13,10 +13,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use s3stream_object::{decode_data_block, ObjectReader, ObjectStorage};
+use s3stream_object::{ObjectReader, ObjectStorage, decode_data_block};
 
-use crate::api::results::CacheAccessType;
 use crate::api::StreamError;
+use crate::api::results::CacheAccessType;
 use crate::manager::ObjectManager;
 use crate::storage::ReadDataBlock;
 

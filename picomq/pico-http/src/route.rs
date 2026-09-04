@@ -7,7 +7,7 @@
 //! when the owner is a different node with a known address. Routing failures
 //! degrade to 503 with an `X-Error` header rather than guessing.
 
-use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
 
 use picomq_server::ownership::OwnershipService;
@@ -51,11 +51,11 @@ pub async fn route(
 
     let mut location = address.trim_end_matches('/').to_owned();
     location.push_str(uri.path());
-    if let Some(query) = uri.query() {
-        if !query.is_empty() {
-            location.push('?');
-            location.push_str(query);
-        }
+    if let Some(query) = uri.query()
+        && !query.is_empty()
+    {
+        location.push('?');
+        location.push_str(query);
     }
 
     let Ok(location) = HeaderValue::from_str(&location) else {

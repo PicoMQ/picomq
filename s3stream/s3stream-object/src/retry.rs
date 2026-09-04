@@ -47,7 +47,7 @@ fn retry_class(e: &ObjectError) -> RetryClass {
             | object_store::Error::AlreadyExists { .. }
             | object_store::Error::Precondition { .. }
             | object_store::Error::NotSupported { .. }
-            | object_store::Error::NotImplemented
+            | object_store::Error::NotImplemented { .. }
             | object_store::Error::PermissionDenied { .. }
             | object_store::Error::Unauthenticated { .. }
             | object_store::Error::UnknownConfigurationKey { .. } => RetryClass::Abort,
@@ -117,13 +117,13 @@ where
             Err(e) => e,
         };
         let delay = backoff_delay(config, retries);
-        if let Some(deadline) = deadline {
-            if Instant::now() + delay >= deadline {
-                return Err(ObjectError::Timeout {
-                    key: key.to_string(),
-                    last: error.to_string(),
-                });
-            }
+        if let Some(deadline) = deadline
+            && Instant::now() + delay >= deadline
+        {
+            return Err(ObjectError::Timeout {
+                key: key.to_string(),
+                last: error.to_string(),
+            });
         }
         tracing::warn!(
             op,

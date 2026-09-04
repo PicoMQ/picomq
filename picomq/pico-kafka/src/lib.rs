@@ -12,9 +12,9 @@ mod versions;
 pub const PROTOCOL_NAME: &str = "kafka";
 
 pub use broker::BrokerContext;
-pub use dispatch::{dispatch, RequestContext};
+pub use dispatch::{RequestContext, dispatch};
 pub use error::KafkaError;
 pub use frame::{read_frame, write_frame};
 pub use handlers::{HandlerError, HandlerOutcome, ResponseFrame};
 pub use listener::{KafkaListener, ListenerConfig};
-pub use versions::{lookup_versions, supported_apis, SupportedApi};
+pub use versions::{SupportedApi, lookup_versions, supported_apis};

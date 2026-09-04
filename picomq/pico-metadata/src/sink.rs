@@ -6,8 +6,8 @@
 //! row. Delivery concerns (leader forwarding, conflict retry) belong to the
 //! sink, never to callers.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 

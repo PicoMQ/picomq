@@ -4,10 +4,10 @@
 
 use std::net::SocketAddr;
 
+use axum::Router;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::any;
-use axum::Router;
 use bytes::Bytes;
 use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,

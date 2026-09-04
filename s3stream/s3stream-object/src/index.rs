@@ -93,7 +93,7 @@ pub struct IndexBlock {
 impl IndexBlock {
     /// Parse a full index block payload (`len % 36 == 0`).
     pub fn parse(data: &Bytes) -> Result<Self, ObjectError> {
-        if data.len() % BLOCK_INDEX_SIZE != 0 {
+        if !data.len().is_multiple_of(BLOCK_INDEX_SIZE) {
             return Err(ObjectError::InvalidFormat {
                 reason: format!(
                     "index block length {} not a multiple of {BLOCK_INDEX_SIZE}",

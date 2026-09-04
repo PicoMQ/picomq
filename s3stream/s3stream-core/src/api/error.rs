@@ -13,7 +13,9 @@ pub enum StreamError {
     #[error("stream {stream_id} does not exist")]
     NotExist { stream_id: u64 },
 
-    #[error("stream {stream_id} offset out of range: requested [{start},{end}), valid [{valid_start},{valid_end})")]
+    #[error(
+        "stream {stream_id} offset out of range: requested [{start},{end}), valid [{valid_start},{valid_end})"
+    )]
     OffsetOutOfRange {
         stream_id: u64,
         start: u64,

@@ -15,7 +15,7 @@ pub mod scope;
 pub mod store;
 pub mod token;
 
-pub use authorizer::{AuthPrincipal, Authorizer, ANONYMOUS_TOKEN_ID};
+pub use authorizer::{ANONYMOUS_TOKEN_ID, AuthPrincipal, Authorizer};
 pub use error::AuthError;
 pub use json::{scope_from_json, scope_to_json};
 pub use narrow::check_issue;
@@ -24,4 +24,4 @@ pub use scope::{
     Audience, Operation, OperationGroups, ReadWrite, ResourceMatcher, ResourceSet, Scope,
 };
 pub use store::{MemoryTokenStore, TokenStore};
-pub use token::{AccessToken, Secret, Verifier, ID_MAX_LEN, ID_MIN_LEN, SECRET_LEN, VERIFIER_LEN};
+pub use token::{AccessToken, ID_MAX_LEN, ID_MIN_LEN, SECRET_LEN, Secret, VERIFIER_LEN, Verifier};

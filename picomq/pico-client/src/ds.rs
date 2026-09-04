@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use bytes::Bytes;
-use picomq_protocol::ds::{
-    decode_error, AppendRequest, AppendResponse, CloseRequest, CreateRequest, CreateResponse,
-    DeleteRequest, DeleteResponse, HeadRequest, HeadResponse, ReadRequest, ReadResponse,
-    LIVE_LONG_POLL, OFFSET_BEGINNING, OFFSET_NOW,
-};
 use picomq_protocol::WireRequest;
+use picomq_protocol::ds::{
+    AppendRequest, AppendResponse, CloseRequest, CreateRequest, CreateResponse, DeleteRequest,
+    DeleteResponse, HeadRequest, HeadResponse, LIVE_LONG_POLL, OFFSET_BEGINNING, OFFSET_NOW,
+    ReadRequest, ReadResponse, decode_error,
+};
 use reqwest::Response;
 
 use crate::error::{ClientError, Result};

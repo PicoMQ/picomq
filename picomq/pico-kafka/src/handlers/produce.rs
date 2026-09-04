@@ -1,16 +1,16 @@
 use bytes::Bytes;
+use kafka_protocol::messages::ProduceRequest;
 use kafka_protocol::messages::produce_response::{
     PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
 };
-use kafka_protocol::messages::ProduceRequest;
 use kafka_protocol::protocol::Decodable;
 use picomq_server::{AppendBatchCommand, SubmittedBatchAppend};
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    encode_response, ensure_local_leader, resolve_topic, service_error_code, topic_name, NO_ERROR,
-    UNKNOWN_TOPIC_OR_PARTITION,
+    NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, encode_response, ensure_local_leader, resolve_topic,
+    service_error_code, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 

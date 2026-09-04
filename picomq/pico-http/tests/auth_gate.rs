@@ -9,7 +9,7 @@ use std::sync::Arc;
 use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
-use picomq_http::{serve, HttpProtocol, RoutingMode, ServeOptions};
+use picomq_http::{HttpProtocol, RoutingMode, ServeOptions, serve};
 use picomq_server::PicoNode;
 
 fn full_stream_scope(prefix: &str, auto_prefix: bool) -> Scope {
@@ -194,10 +194,12 @@ async fn streaming_reads_refused_at_the_gate() {
     .expect("refusal is immediate")
     .unwrap();
     assert_eq!(sse.status(), 401);
-    assert!(sse.headers()["content-type"]
-        .to_str()
-        .unwrap()
-        .starts_with("text/plain"));
+    assert!(
+        sse.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain")
+    );
 
     let out_of_scope = client
         .get(format!("{base}/other/x?offset=-1&live=sse"))
@@ -442,13 +444,15 @@ async fn ds_gate_rejects_in_plain_text_without_new_vocabulary() {
 
     let response = client.get(format!("{base}/it/x")).send().await.unwrap();
     assert_eq!(response.status(), 401);
-    assert!(response
-        .headers()
-        .get("content-type")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .starts_with("text/plain"));
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain")
+    );
     assert!(response.headers().get("producer-epoch").is_none());
 
     let response = client

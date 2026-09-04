@@ -10,12 +10,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use picomq_runtime::{KafkaConfig, MetaBackend, PicoServer, ServerConfig};
+use rdkafka::Message;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::Message;
 
 fn loopback() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 0))

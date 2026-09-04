@@ -17,7 +17,7 @@ use crate::manager::{
     StreamMetadataListenerHandle, StreamState,
 };
 use s3stream_object::{
-    ObjectAttributes, S3ObjectMetadata, S3ObjectType, StreamOffsetRange, NOOP_OBJECT_ID,
+    NOOP_OBJECT_ID, ObjectAttributes, S3ObjectMetadata, S3ObjectType, StreamOffsetRange,
 };
 
 #[derive(Default)]
@@ -506,14 +506,18 @@ mod tests {
             .await
             .unwrap();
         // Same epoch while opened: fenced. Lower epoch: fenced.
-        assert!(manager
-            .open_stream(stream_id, 1, HashMap::new())
-            .await
-            .is_err());
-        assert!(manager
-            .open_stream(stream_id, 0, HashMap::new())
-            .await
-            .is_err());
+        assert!(
+            manager
+                .open_stream(stream_id, 1, HashMap::new())
+                .await
+                .is_err()
+        );
+        assert!(
+            manager
+                .open_stream(stream_id, 0, HashMap::new())
+                .await
+                .is_err()
+        );
         // Newer epoch wins.
         manager
             .open_stream(stream_id, 2, HashMap::new())
@@ -564,7 +568,7 @@ mod tests {
         assert_eq!(objects.len(), 2);
         assert_eq!(objects[0].object_id, 101); // starts at 0
         assert_eq!(objects[1].object_id, 100); // starts at 10
-                                               // Committed end offset advanced.
+        // Committed end offset advanced.
         let stream = &manager.get_streams(&[stream_id]).await.unwrap()[0];
         assert_eq!(stream.end_offset, 20);
     }

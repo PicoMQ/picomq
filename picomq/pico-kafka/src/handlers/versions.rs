@@ -4,7 +4,7 @@ use kafka_protocol::protocol::Decodable;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
-use crate::handlers::common::{encode_response, UNSUPPORTED_VERSION};
+use crate::handlers::common::{UNSUPPORTED_VERSION, encode_response};
 use crate::handlers::{HandlerError, HandlerOutcome};
 use crate::versions;
 

@@ -12,7 +12,7 @@ picomq-protocol = { workspace = true }
 
 async-trait = { workspace = true }
 bytes = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls", "stream", "http2"] }
+reqwest = { workspace = true, features = ["rustls", "stream", "http2"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 

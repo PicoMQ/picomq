@@ -11,8 +11,8 @@ use async_trait::async_trait;
 
 use s3stream_codec::StreamRecordBatch;
 
-use crate::api::results::CacheAccessType;
 use crate::api::StreamError;
+use crate::api::results::CacheAccessType;
 use crate::context::{AppendContext, FetchContext};
 
 /// Result of a storage-level read: encoded batches + cache provenance.

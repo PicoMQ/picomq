@@ -15,15 +15,15 @@
 
 use std::{io::Write, sync::LazyLock};
 
-use crate::{record::Batch, Error, Result, Validator};
+use crate::{Error, Result, Validator, record::Batch};
 use bytes::{BufMut, Bytes, BytesMut};
 use protobuf::{
-    descriptor, reflect::FileDescriptor, reflect::MessageDescriptor, well_known_types,
-    CodedInputStream, MessageDyn,
+    CodedInputStream, MessageDyn, descriptor, reflect::FileDescriptor, reflect::MessageDescriptor,
+    well_known_types,
 };
 use protobuf_json_mapping::parse_dyn_from_str;
 use serde_json::Value;
-use tempfile::{tempdir, NamedTempFile};
+use tempfile::{NamedTempFile, tempdir};
 use tracing::{debug, error};
 
 #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

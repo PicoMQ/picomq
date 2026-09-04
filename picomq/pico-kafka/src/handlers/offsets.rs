@@ -1,7 +1,7 @@
+use kafka_protocol::messages::ListOffsetsRequest;
 use kafka_protocol::messages::list_offsets_response::{
     ListOffsetsPartitionResponse, ListOffsetsResponse, ListOffsetsTopicResponse,
 };
-use kafka_protocol::messages::ListOffsetsRequest;
 use kafka_protocol::protocol::Decodable;
 
 use picomq_server::record::decode_batches;
@@ -9,8 +9,8 @@ use picomq_server::record::decode_batches;
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    encode_response, ensure_local_leader, resolve_topic, service_error_code, topic_name,
-    EARLIEST_TIMESTAMP, LATEST_TIMESTAMP, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION,
+    EARLIEST_TIMESTAMP, LATEST_TIMESTAMP, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, encode_response,
+    ensure_local_leader, resolve_topic, service_error_code, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -32,9 +32,11 @@ pub async fn handle(
                 topics.push(
                     ListOffsetsTopicResponse::default()
                         .with_name(topic_name(&topic_name_str))
-                        .with_partitions(vec![ListOffsetsPartitionResponse::default()
-                            .with_partition_index(0)
-                            .with_error_code(code)]),
+                        .with_partitions(vec![
+                            ListOffsetsPartitionResponse::default()
+                                .with_partition_index(0)
+                                .with_error_code(code),
+                        ]),
                 );
                 continue;
             }
@@ -43,9 +45,11 @@ pub async fn handle(
             topics.push(
                 ListOffsetsTopicResponse::default()
                     .with_name(topic_name(&topic_name_str))
-                    .with_partitions(vec![ListOffsetsPartitionResponse::default()
-                        .with_partition_index(0)
-                        .with_error_code(code)]),
+                    .with_partitions(vec![
+                        ListOffsetsPartitionResponse::default()
+                            .with_partition_index(0)
+                            .with_error_code(code),
+                    ]),
             );
             continue;
         }

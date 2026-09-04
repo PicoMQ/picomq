@@ -7,7 +7,7 @@ use md5::{Digest, Md5};
 
 use s3stream_object::ObjectInfo;
 
-use super::header::{calculate_end_offset_v0, TRIM_OFFSET_NONE};
+use super::header::{TRIM_OFFSET_NONE, calculate_end_offset_v0};
 
 /// WAL data files align to 64 MiB boundaries.
 pub const DATA_FILE_ALIGN_SIZE: u64 = 64 * 1024 * 1024;

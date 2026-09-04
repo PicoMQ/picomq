@@ -10,11 +10,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::AuthError;
 use crate::record::TokenRecord;
 use crate::scope::{Audience, Operation};
 use crate::store::TokenStore;
 use crate::token::AccessToken;
-use crate::AuthError;
 
 /// Authenticated identity: the stored record after secret verification.
 pub type AuthPrincipal = Arc<TokenRecord>;
@@ -160,10 +160,10 @@ impl Authorizer {
 
     fn intern(&self, fresh: TokenRecord) -> AuthPrincipal {
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(cached) = cache.get(&fresh.id) {
-            if cached.as_ref() == &fresh {
-                return Arc::clone(cached);
-            }
+        if let Some(cached) = cache.get(&fresh.id)
+            && cached.as_ref() == &fresh
+        {
+            return Arc::clone(cached);
         }
         let arc = Arc::new(fresh);
         cache.insert(arc.id.clone(), Arc::clone(&arc));
@@ -363,10 +363,12 @@ mod tests {
             Err(AuthError::Unauthenticated)
         ));
 
-        assert!(store
-            .delete_if(ANONYMOUS_TOKEN_ID, &expected)
-            .await
-            .unwrap());
+        assert!(
+            store
+                .delete_if(ANONYMOUS_TOKEN_ID, &expected)
+                .await
+                .unwrap()
+        );
         assert!(matches!(
             auth.authenticate_anonymous(Audience::Pico, 0).await,
             Err(AuthError::Unauthenticated)

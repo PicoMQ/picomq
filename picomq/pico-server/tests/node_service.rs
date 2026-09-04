@@ -355,33 +355,39 @@ async fn wait_appended_long_poll() {
     assert!(parked.await.unwrap().unwrap());
 
     // Already readable: immediate true.
-    assert!(services
-        .wait_appended(
-            "/poll/a",
-            OffsetToken::beginning(),
-            Duration::from_millis(1)
-        )
-        .await
-        .unwrap());
+    assert!(
+        services
+            .wait_appended(
+                "/poll/a",
+                OffsetToken::beginning(),
+                Duration::from_millis(1)
+            )
+            .await
+            .unwrap()
+    );
     // Unknown stream: false.
-    assert!(!services
-        .wait_appended(
-            "/poll/none",
-            OffsetToken::beginning(),
-            Duration::from_millis(1)
-        )
-        .await
-        .unwrap());
+    assert!(
+        !services
+            .wait_appended(
+                "/poll/none",
+                OffsetToken::beginning(),
+                Duration::from_millis(1)
+            )
+            .await
+            .unwrap()
+    );
     // Closed stream: true.
     services.close("/poll/a").await.unwrap();
-    assert!(services
-        .wait_appended(
-            "/poll/a",
-            OffsetToken::of_record_offset(99),
-            Duration::from_millis(1)
-        )
-        .await
-        .unwrap());
+    assert!(
+        services
+            .wait_appended(
+                "/poll/a",
+                OffsetToken::of_record_offset(99),
+                Duration::from_millis(1)
+            )
+            .await
+            .unwrap()
+    );
 
     node.close().await;
 }
@@ -711,11 +717,13 @@ async fn stale_transfer_completes_when_source_restarts() {
     })
     .await
     .unwrap();
-    assert!(views
-        .load()
-        .state
-        .pending_transfers
-        .contains_key(&stream_id));
+    assert!(
+        views
+            .load()
+            .state
+            .pending_transfers
+            .contains_key(&stream_id)
+    );
 
     // The source restarts at a bumped epoch and its watcher converges the
     // stale transfer.
@@ -1309,10 +1317,11 @@ async fn external_id_lookup_uses_replicated_index() {
             .as_deref(),
         Some(b"/topics/indexed".as_slice())
     );
-    assert!(view
-        .state
-        .get_kv("idx/extid/30313233343536373839616263646566")
-        .is_some());
+    assert!(
+        view.state
+            .get_kv("idx/extid/30313233343536373839616263646566")
+            .is_some()
+    );
 
     assert!(services.delete("/topics/indexed").await.unwrap());
     assert_eq!(
@@ -1321,10 +1330,11 @@ async fn external_id_lookup_uses_replicated_index() {
     );
     let view = node.views().load();
     assert!(view.state.get_kv(&format!("idx/sid/{stream_id}")).is_none());
-    assert!(view
-        .state
-        .get_kv("idx/extid/30313233343536373839616263646566")
-        .is_none());
+    assert!(
+        view.state
+            .get_kv("idx/extid/30313233343536373839616263646566")
+            .is_none()
+    );
 
     node.close().await;
 }
@@ -1339,12 +1349,13 @@ async fn ttl_sweep_expires_untouched_streams() {
     let mut command = create("/streams/ephemeral", "text/plain");
     command.ttl_seconds = Some(1);
     services.create(command).await.unwrap();
-    assert!(node
-        .views()
-        .load()
-        .state
-        .get_kv("/streams/ephemeral")
-        .is_some());
+    assert!(
+        node.views()
+            .load()
+            .state
+            .get_kv("/streams/ephemeral")
+            .is_some()
+    );
 
     let (tx, rx) = tokio::sync::watch::channel(true);
     let sweep = services.spawn_ttl_sweep(rx, Duration::from_millis(20));

@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use picomq_client::{connect, ErrorKind, Live, Protocol, ReadLimits};
+use picomq_client::{ErrorKind, Live, Protocol, ReadLimits, connect};
 use picomq_http::HttpProtocol as ServeProtocol;
 use picomq_runtime::{MetaBackend, PicoServer, ServerConfig};
 
@@ -50,10 +50,12 @@ async fn lifecycle(protocol: Protocol) {
 
     assert!(client.head("/streams/nope").await.unwrap().is_none());
 
-    assert!(client
-        .create("/streams/orders", "text/plain", None)
-        .await
-        .unwrap());
+    assert!(
+        client
+            .create("/streams/orders", "text/plain", None)
+            .await
+            .unwrap()
+    );
     assert!(
         !client
             .create("/streams/orders", "text/plain", None)

@@ -10,8 +10,8 @@
 //! database stays green. The test WIPES the three metadata tables first.
 //! Point it at a dedicated test database.
 
-use picomq_sql::store::contract_suite;
 use picomq_sql::PgStore;
+use picomq_sql::store::contract_suite;
 
 #[tokio::test]
 async fn postgres_contract() {

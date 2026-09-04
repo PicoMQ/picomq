@@ -47,13 +47,13 @@ pub use s3stream_core::{
     StreamError as Error,
 };
 pub use s3stream_object::{
-    ObjectAttributes, ObjectStreamRange, S3ObjectType, StreamOffsetRange, NOOP_OBJECT_ID,
+    NOOP_OBJECT_ID, ObjectAttributes, ObjectStreamRange, S3ObjectType, StreamOffsetRange,
 };
 pub use s3stream_object::{ObjectStorage as ObjectStorageTrait, S3ObjectMetadata};
 // ObjectStorage.delete): hosts deleting engine objects by id need the key
 // scheme and path/error types.
-pub use s3stream_object::{gen_object_key, ObjectError, ObjectPath};
 pub use s3stream_object::{IdUri, MemoryObjectStorage, ObjectStoreAdapter};
+pub use s3stream_object::{ObjectError, ObjectPath, gen_object_key};
 pub use s3stream_wal::object::{ObjectWalConfig, ObjectWalService};
 pub use s3stream_wal::{OpenMode, WriteAheadLog as WriteAheadLogTrait};
 

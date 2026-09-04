@@ -14,7 +14,7 @@ use std::sync::Mutex;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use s3stream_object::{gen_index_key, ObjectStorage, ReadOptions, WriteOptions, NOOP_OBJECT_ID};
+use s3stream_object::{NOOP_OBJECT_ID, ObjectStorage, ReadOptions, WriteOptions, gen_index_key};
 
 use crate::api::StreamError;
 use crate::manager::CommitStreamSetObjectRequest;
@@ -114,18 +114,19 @@ impl SparseRangeIndex {
             if compacted_object_ids.contains(&range.object_id) {
                 continue;
             }
-            if let Some(new_range) = new_range {
-                if !inserted && range.start_offset > new_range.start_offset {
-                    new_list.push(new_range);
-                    inserted = true;
-                }
+            if let Some(new_range) = new_range
+                && !inserted
+                && range.start_offset > new_range.start_offset
+            {
+                new_list.push(new_range);
+                inserted = true;
             }
             new_list.push(*range);
         }
-        if let Some(new_range) = new_range {
-            if !inserted {
-                new_list.push(new_range);
-            }
+        if let Some(new_range) = new_range
+            && !inserted
+        {
+            new_list.push(new_range);
         }
         let old_size = self.size as isize;
         self.ranges = new_list;
@@ -143,7 +144,7 @@ impl SparseRangeIndex {
         } else if len <= 1 + self.compact_num {
             1
         } else {
-            if self.evict_index % len == 0 || self.evict_index >= len - self.compact_num {
+            if self.evict_index.is_multiple_of(len) || self.evict_index >= len - self.compact_num {
                 self.evict_index = 1;
             }
             let i = self.evict_index;

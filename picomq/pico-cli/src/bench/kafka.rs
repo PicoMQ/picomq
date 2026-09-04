@@ -1,18 +1,18 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use hdrhistogram::sync::{Recorder, SyncHistogram};
 use hdrhistogram::Histogram;
+use hdrhistogram::sync::{Recorder, SyncHistogram};
 use picomq_client::ClientError;
+use rdkafka::Message;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::Message;
 
-use super::{emit, report_progress, BenchArgs, Counters, Schedule};
+use super::{BenchArgs, Counters, Schedule, emit, report_progress};
 use crate::io::note;
 use crate::stream::Target;
 

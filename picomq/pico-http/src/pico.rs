@@ -8,31 +8,31 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::routing::any;
-use axum::Router;
 use bytes::Bytes;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::ReceiverStream;
 
 use picomq_auth::{Audience, Authorizer};
 use picomq_protocol::mime::{mime_equals, mime_of};
 use picomq_protocol::pico::{
-    sse_control_event, sse_data_event, ErrorBody, Listing, StreamEntry, CT_BATCH_BINARY,
-    CT_BATCH_JSON, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT, E_BAD_REQUEST, E_CLOSED, E_CONFLICT,
-    E_DURABILITY, E_FENCED, E_MATCH_FAILED, E_NOT_FOUND, E_SCHEMA_VIOLATION, E_SEQUENCE_GAP,
-    FORMAT_BINARY, FORMAT_JSON, FORMAT_RAW, H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT,
-    H_KAFKA_TOPIC, H_KEY, H_MATCH_SEQ, H_NEXT_SEQ, H_PRODUCER_EPOCH, H_PRODUCER_ID, H_PRODUCER_SEQ,
-    H_RECEIVED_SEQ, H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL,
-    H_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, Q_BYTES, Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT, Q_LIVE,
-    Q_PREFIX, Q_SEQ, Q_START_AFTER, SEQ_NOW,
+    CT_BATCH_BINARY, CT_BATCH_JSON, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT, E_BAD_REQUEST, E_CLOSED,
+    E_CONFLICT, E_DURABILITY, E_FENCED, E_MATCH_FAILED, E_NOT_FOUND, E_SCHEMA_VIOLATION,
+    E_SEQUENCE_GAP, ErrorBody, FORMAT_BINARY, FORMAT_JSON, FORMAT_RAW, H_CLOSED, H_CURSOR,
+    H_EXPECTED_SEQ, H_EXPIRES_AT, H_KAFKA_TOPIC, H_KEY, H_MATCH_SEQ, H_NEXT_SEQ, H_PRODUCER_EPOCH,
+    H_PRODUCER_ID, H_PRODUCER_SEQ, H_RECEIVED_SEQ, H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ,
+    H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, Listing, Q_BYTES,
+    Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT, Q_LIVE, Q_PREFIX, Q_SEQ, Q_START_AFTER, SEQ_NOW,
+    StreamEntry, sse_control_event, sse_data_event,
 };
 use picomq_protocol::record::{
-    decode_batch_append, decode_json_append, encode_batch_read, encode_json_read, PicoRecord,
-    SequencedRecord,
+    PicoRecord, SequencedRecord, decode_batch_append, decode_json_append, encode_batch_read,
+    encode_json_read,
 };
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{
@@ -46,7 +46,7 @@ use crate::http::{
     parse_instant_header, parse_strict_u64, parse_strict_u64_header, query_param, set_header,
     truthy,
 };
-use crate::route::{route, stream_name, RoutingMode};
+use crate::route::{RoutingMode, route, stream_name};
 
 const CACHE_CATCH_UP: &str = "public, max-age=60, stale-while-revalidate=300";
 

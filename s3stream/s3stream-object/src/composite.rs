@@ -13,8 +13,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use tokio::sync::OnceCell;
 
 use crate::error::ObjectError;
-use crate::index::{DataBlockIndex, FindIndexResult, IndexBlock, BLOCK_INDEX_SIZE};
-use crate::metadata::{gen_object_key, S3ObjectMetadata};
+use crate::index::{BLOCK_INDEX_SIZE, DataBlockIndex, FindIndexResult, IndexBlock};
+use crate::metadata::{S3ObjectMetadata, gen_object_key};
 use crate::storage::{ObjectPath, ObjectStorage, ReadOptions, WriteOptions};
 use crate::writer::FOOTER_SIZE;
 

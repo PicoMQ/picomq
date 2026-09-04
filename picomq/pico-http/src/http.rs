@@ -141,10 +141,10 @@ pub(crate) fn cursor(raw: Option<&str>) -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before unix epoch");
     let mut interval = (now.as_millis() / 20_000) as u64;
-    if let Some(client) = raw.and_then(|raw| raw.parse::<u64>().ok()) {
-        if interval <= client {
-            interval = client + 1 + (now.subsec_nanos() as u64) % 60;
-        }
+    if let Some(client) = raw.and_then(|raw| raw.parse::<u64>().ok())
+        && interval <= client
+    {
+        interval = client + 1 + (now.subsec_nanos() as u64) % 60;
     }
     interval
 }

@@ -314,8 +314,8 @@ impl StorageFailureHandler for HaltStorageFailureHandler {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -329,8 +329,8 @@ mod tests {
     use crate::cache::block_cache::DirectBlockCache;
     use crate::context::{AppendContext, FetchContext};
     use crate::memory::MemoryMetadataManager;
-    use crate::storage::s3_storage::{S3Storage, S3StorageConfig};
     use crate::storage::Storage;
+    use crate::storage::s3_storage::{S3Storage, S3StorageConfig};
     use crate::stream_client::{S3StreamClient, StreamClientConfig};
     use crate::{ObjectManager, RecordBatch, StreamClient, StreamManager};
 

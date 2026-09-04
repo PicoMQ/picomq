@@ -9,11 +9,11 @@ use std::collections::BTreeSet;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use crate::AuthError;
 use crate::scope::{
     Audience, Operation, OperationGroups, ReadWrite, ResourceMatcher, ResourceSet, Scope,
 };
-use crate::token::{Verifier, ID_MAX_LEN, ID_MIN_LEN, VERIFIER_LEN};
-use crate::AuthError;
+use crate::token::{ID_MAX_LEN, ID_MIN_LEN, VERIFIER_LEN, Verifier};
 
 /// Server-side token record. Never contains the secret.
 #[derive(Clone, PartialEq, Eq)]

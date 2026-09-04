@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use picomq_auth::{
-    AuthError, Authorizer, TokenRecord, TokenStore, Verifier, ID_MAX_LEN, ID_MIN_LEN,
+    AuthError, Authorizer, ID_MAX_LEN, ID_MIN_LEN, TokenRecord, TokenStore, Verifier,
 };
 use s3stream::{KVClient, KeyValue};
 

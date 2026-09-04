@@ -51,10 +51,12 @@ async fn appends_over_h2c_negotiate_http2() {
     assert_eq!(response.version(), reqwest::Version::HTTP_2);
 
     let client = PicoClient::with_http(&endpoint, http, Default::default());
-    assert!(client
-        .create("/streams/h2", "text/plain", None)
-        .await
-        .unwrap());
+    assert!(
+        client
+            .create("/streams/h2", "text/plain", None)
+            .await
+            .unwrap()
+    );
     let ack = client
         .append(
             "/streams/h2",

@@ -315,10 +315,12 @@ async fn ds_json_streams_and_live() {
         .await
         .unwrap();
     assert_eq!(sse.status(), 200);
-    assert!(sse.headers()["Content-Type"]
-        .to_str()
-        .unwrap()
-        .starts_with("text/event-stream"));
+    assert!(
+        sse.headers()["Content-Type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream")
+    );
     let body = sse.text().await.unwrap();
     assert!(body.contains("event: data"));
     assert!(body.contains(r#"{"n":1}"#));

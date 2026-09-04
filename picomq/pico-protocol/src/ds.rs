@@ -1,11 +1,11 @@
 use base64::Engine as _;
 use bytes::Bytes;
 use http::{HeaderMap, Method};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::error::{CodecError, ErrorKind, WireError};
 use crate::mime::{is_json, mime_of};
-use crate::wire::{header_string, header_u64, stream_path, truthy, urlencode, WireRequest};
+use crate::wire::{WireRequest, header_string, header_u64, stream_path, truthy, urlencode};
 
 pub use crate::wire::Producer;
 
@@ -147,10 +147,8 @@ impl SseEncoder {
     ) -> Bytes {
         let mut node = Map::new();
         node.insert("streamNextOffset".into(), json!(next_offset));
-        if !closed {
-            if let Some(cursor) = cursor {
-                node.insert("streamCursor".into(), json!(cursor.to_string()));
-            }
+        if !closed && let Some(cursor) = cursor {
+            node.insert("streamCursor".into(), json!(cursor.to_string()));
         }
         node.insert("upToDate".into(), json!(up_to_date));
         if closed {
@@ -417,13 +415,13 @@ pub fn decode_error(status: u16, headers: &HeaderMap, body: &str) -> WireError {
         expected_seq.is_some() || received_seq.is_some(),
     );
     let mut message = Some(body.to_owned()).filter(|b| !b.is_empty());
-    if kind == ErrorKind::StaleEpoch {
-        if let Some(epoch) = epoch {
-            message = Some(format!(
-                "{} (current epoch {epoch})",
-                message.unwrap_or_else(|| "stale producer epoch".to_owned())
-            ));
-        }
+    if kind == ErrorKind::StaleEpoch
+        && let Some(epoch) = epoch
+    {
+        message = Some(format!(
+            "{} (current epoch {epoch})",
+            message.unwrap_or_else(|| "stale producer epoch".to_owned())
+        ));
     }
     if let (Some(expected_seq), Some(received_seq)) = (&expected_seq, &received_seq) {
         message = Some(format!(

@@ -13,10 +13,10 @@ use std::sync::{Arc, OnceLock};
 
 use tokio::sync::Mutex as TokioMutex;
 
-use s3stream_object::{DataBlockIndex, S3ObjectMetadata, NOOP_OFFSET};
+use s3stream_object::{DataBlockIndex, NOOP_OFFSET, S3ObjectMetadata};
 
-use crate::api::results::CacheAccessType;
 use crate::api::StreamError;
+use crate::api::results::CacheAccessType;
 use crate::manager::ObjectManager;
 use crate::storage::ReadDataBlock;
 
@@ -629,10 +629,10 @@ impl StreamReader {
             }
         }
         let mut state = self.state.lock().await;
-        if let Ok(blocks) = &result {
-            if let Some(last) = blocks.last() {
-                state.readahead.next_offset = last.index.end_offset();
-            }
+        if let Ok(blocks) = &result
+            && let Some(last) = blocks.last()
+        {
+            state.readahead.next_offset = last.index.end_offset();
         }
         state.readahead.inflight = false;
     }

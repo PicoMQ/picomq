@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{pico_raw, Run};
+use common::{Run, pico_raw};
 use tempfile::TempDir;
 
 fn run(dir: &TempDir, args: &[&str]) -> Run {

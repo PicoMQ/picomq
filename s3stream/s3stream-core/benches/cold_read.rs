@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 
 use s3stream_codec::StreamRecordBatch;
 use s3stream_core::cache::block_cache::S3BlockCache;
@@ -15,7 +15,7 @@ use s3stream_core::manager::{
 };
 use s3stream_core::memory::MemoryMetadataManager;
 use s3stream_object::{
-    MemoryObjectStorage, ObjectStorage, ObjectWriter, WriteOptions, NOOP_OBJECT_ID,
+    MemoryObjectStorage, NOOP_OBJECT_ID, ObjectStorage, ObjectWriter, WriteOptions,
 };
 
 const RECORD_PAYLOAD: usize = 1024;

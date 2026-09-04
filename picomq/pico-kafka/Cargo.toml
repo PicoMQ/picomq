@@ -18,7 +18,7 @@ picomq-server = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
 tracing = { workspace = true }
-uuid = { version = "1", features = ["v4"] }
+uuid = { workspace = true }
 
 [dev-dependencies]
 picomq-schema = { workspace = true }

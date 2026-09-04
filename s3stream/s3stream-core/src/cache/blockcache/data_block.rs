@@ -13,12 +13,12 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::watch;
 
 use s3stream_codec::StreamRecordBatch;
-use s3stream_object::{decode_data_block, DataBlockIndex, ObjectReader};
+use s3stream_object::{DataBlockIndex, ObjectReader, decode_data_block};
 
 use crate::api::StreamError;
 
 use super::size_limiter::AsyncSizeLimiter;
-use super::{now_ms, ColdReadInflightRegistry};
+use super::{ColdReadInflightRegistry, now_ms};
 
 pub const DATA_TTL_MS: u64 = 60_000;
 pub const CHECK_EXPIRED_DATA_INTERVAL_MS: u64 = 60_000;
@@ -474,8 +474,8 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use s3stream_object::{
-        gen_object_key, MemoryObjectStorage, ObjectAttributes, ObjectStorage, ObjectWriter,
-        S3ObjectMetadata, S3ObjectType, WriteOptions,
+        MemoryObjectStorage, ObjectAttributes, ObjectStorage, ObjectWriter, S3ObjectMetadata,
+        S3ObjectType, WriteOptions, gen_object_key,
     };
 
     async fn write_object(

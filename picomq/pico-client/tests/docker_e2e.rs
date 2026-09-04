@@ -12,7 +12,7 @@ use bytes::Bytes;
 use picomq_client::pico::ProducerRef;
 use picomq_client::producer::{Producer, ProducerConfig};
 use picomq_client::{
-    connect, ClientConfig, ErrorKind, Live, PicoClient, Protocol, ReadLimits, StreamApi,
+    ClientConfig, ErrorKind, Live, PicoClient, Protocol, ReadLimits, StreamApi, connect,
 };
 
 fn endpoint() -> String {

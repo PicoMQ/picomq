@@ -19,16 +19,16 @@ pub mod storage;
 pub mod writer;
 
 pub use error::ObjectError;
-pub use index::{DataBlockIndex, FindIndexResult, IndexBlock, BLOCK_INDEX_SIZE};
+pub use index::{BLOCK_INDEX_SIZE, DataBlockIndex, FindIndexResult, IndexBlock};
 pub use memory::MemoryObjectStorage;
 pub use metadata::{
-    gen_index_key, gen_index_key_in, gen_object_key, ObjectAttributes, S3ObjectMetadata,
-    S3ObjectType, StreamOffsetRange, NOOP_OBJECT_ID, NOOP_OFFSET,
+    NOOP_OBJECT_ID, NOOP_OFFSET, ObjectAttributes, S3ObjectMetadata, S3ObjectType,
+    StreamOffsetRange, gen_index_key, gen_index_key_in, gen_object_key,
 };
-pub use reader::{decode_data_block, ObjectReader};
+pub use reader::{ObjectReader, decode_data_block};
 pub use retry::{RetryConfig, RetryingObjectStorage};
 pub use storage::{
     IdUri, MultipartWriter, ObjectInfo, ObjectPath, ObjectStorage, ObjectStoreAdapter, ReadOptions,
     ThrottleStrategy, WriteOptions, WriteResult,
 };
-pub use writer::{ObjectStreamRange, ObjectWriter, FOOTER_MAGIC, FOOTER_SIZE};
+pub use writer::{FOOTER_MAGIC, FOOTER_SIZE, ObjectStreamRange, ObjectWriter};

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use s3stream_codec::StreamRecordBatch;
 use s3stream_object::{
-    ObjectAttributes, ObjectStorage, ObjectStreamRange, ObjectWriter, WriteOptions, NOOP_OBJECT_ID,
+    NOOP_OBJECT_ID, ObjectAttributes, ObjectStorage, ObjectStreamRange, ObjectWriter, WriteOptions,
 };
 
 use crate::api::StreamError;

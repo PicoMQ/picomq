@@ -14,14 +14,14 @@ use bytes::{Bytes, BytesMut};
 use tokio::task::JoinHandle;
 
 use s3stream_codec::{
-    wal_crc32, StreamRecordBatch, WalRecordHeader, RECORD_DATA_MAGIC, WAL_RECORD_HEADER_SIZE,
+    RECORD_DATA_MAGIC, StreamRecordBatch, WAL_RECORD_HEADER_SIZE, WalRecordHeader, wal_crc32,
 };
 use s3stream_object::{ObjectError, ObjectStorage, ReadOptions, ThrottleStrategy};
 
 use crate::{RecordOffset, RecoverResult, RecoverStream, WalError};
 
-use super::header::{WalObjectHeader, MAX_WAL_HEADER_SIZE, TRIM_OFFSET_NONE};
-use super::keys::{parse_wal_objects, skip_overlap_objects, WalObject, TRIM_RECORD_SENTINEL};
+use super::header::{MAX_WAL_HEADER_SIZE, TRIM_OFFSET_NONE, WalObjectHeader};
+use super::keys::{TRIM_RECORD_SENTINEL, WalObject, parse_wal_objects, skip_overlap_objects};
 
 /// Discover this WAL's objects: LIST under the node prefix, parse keys, sort
 /// by `(epoch, start_offset)`, apply `skip_overlap_objects`.

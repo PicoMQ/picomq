@@ -12,7 +12,7 @@ use picomq_server::{
     AppendCommand, CreateCommand, ErrorKind, LogRecord, MetadataOwnershipService, OffsetToken,
     OwnershipService, S3StreamService,
 };
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 use crate::handlers::common::{
     COORDINATOR_NOT_AVAILABLE, FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND, GROUP_MAX_SIZE_REACHED,
@@ -22,11 +22,11 @@ use crate::handlers::common::{
 
 pub use offsets::{CommittedOffset, OffsetCommit};
 
-use offsets::{decode_into, empty_offset_fetch, encode_commits, encode_snapshot, OffsetTable};
+use offsets::{OffsetTable, decode_into, empty_offset_fetch, encode_commits, encode_snapshot};
 use state::{
-    complete_rebalance, group_stream_name, member_from_input, new_member_id, prune_empty_groups,
-    remove_member, send_join_completions, validate_group_id, validate_join, Group, GroupPhase,
-    Rebalance, MAX_GROUPS, MAX_MEMBERS_PER_GROUP,
+    Group, GroupPhase, MAX_GROUPS, MAX_MEMBERS_PER_GROUP, Rebalance, complete_rebalance,
+    group_stream_name, member_from_input, new_member_id, prune_empty_groups, remove_member,
+    send_join_completions, validate_group_id, validate_join,
 };
 
 const GROUP_CONTENT_TYPE: &str = "application/vnd.picomq.kafka-group-state";
@@ -205,14 +205,13 @@ impl GroupCoordinator {
 
             let mut member_id = input.member_id.clone();
             if member_id.is_empty() {
-                if let Some(instance_id) = input.group_instance_id.as_deref() {
-                    if let Some((existing, _)) = state
+                if let Some(instance_id) = input.group_instance_id.as_deref()
+                    && let Some((existing, _)) = state
                         .members
                         .iter()
                         .find(|(_, member)| member.instance_id.as_deref() == Some(instance_id))
-                    {
-                        member_id = existing.clone();
-                    }
+                {
+                    member_id = existing.clone();
                 }
                 if member_id.is_empty() {
                     if state.members.len() >= MAX_MEMBERS_PER_GROUP {
@@ -293,8 +292,7 @@ impl GroupCoordinator {
             let coordinator = Arc::clone(self);
             let group_id = input.group_id.clone();
             tokio::spawn(async move {
-                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-                coordinator.finish_rebalance(&group_id, id).await;
+                coordinator.watch_rebalance(&group_id, id, deadline).await;
             });
         }
         receiver
@@ -302,7 +300,13 @@ impl GroupCoordinator {
             .unwrap_or_else(|_| JoinOutcome::error(REBALANCE_IN_PROGRESS, input.member_id))
     }
 
-    async fn finish_rebalance(&self, group_id: &str, rebalance_id: u64) {
+    /// Drives a pending rebalance to completion without waiting for the full
+    /// rebalance timeout when the only missing members are dead. Kafka removes
+    /// a member once its session expires and completes the rebalance as soon as
+    /// every surviving member has joined; the timer here wakes at the earliest
+    /// such expiry so a crashed consumer's replacement is not blocked for
+    /// `max.poll.interval.ms`.
+    async fn watch_rebalance(&self, group_id: &str, rebalance_id: u64, deadline: Instant) {
         let group = {
             let groups = self.groups.lock().expect("group map lock");
             groups.get(group_id).cloned()
@@ -310,14 +314,40 @@ impl GroupCoordinator {
         let Some(group) = group else {
             return;
         };
-        let completion = {
-            let mut state = group.lock().await;
-            if state.rebalance.as_ref().map(|r| r.id) != Some(rebalance_id) {
+        loop {
+            let (completion, next_wake) = {
+                let mut state = group.lock().await;
+                if state.rebalance.as_ref().map(|r| r.id) != Some(rebalance_id) {
+                    return;
+                }
+                let now = Instant::now();
+                state.expire_members(now);
+                let Some(rebalance) = state.rebalance.as_ref() else {
+                    return;
+                };
+                if rebalance.joined == rebalance.expected {
+                    (Some(complete_rebalance(&mut state, false)), None)
+                } else if now >= deadline {
+                    (Some(complete_rebalance(&mut state, true)), None)
+                } else {
+                    let next_expiry = rebalance
+                        .expected
+                        .difference(&rebalance.joined)
+                        .filter_map(|id| state.members.get(id))
+                        .map(|member| member.last_heartbeat + member.session_timeout)
+                        .min()
+                        .unwrap_or(deadline);
+                    (None, Some(next_expiry.min(deadline)))
+                }
+            };
+            if let Some(completion) = completion {
+                send_join_completions(Some(completion));
                 return;
             }
-            complete_rebalance(&mut state, true)
-        };
-        send_join_completions(Some(completion));
+            if let Some(wake) = next_wake {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(wake)).await;
+            }
+        }
     }
 
     pub async fn sync(&self, input: SyncInput) -> SyncOutcome {

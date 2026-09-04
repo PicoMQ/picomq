@@ -67,10 +67,8 @@ async fn process(
             .streams
             .get(&stream_id)
             .is_some_and(|row| row.node_id == node_id && row.state == StreamState::Closed);
-        if owned {
-            if let Err(error) = service.ensure_open(stream_id).await {
-                tracing::debug!(%error, stream_id, "transfer pre-warm open failed");
-            }
+        if owned && let Err(error) = service.ensure_open(stream_id).await {
+            tracing::debug!(%error, stream_id, "transfer pre-warm open failed");
         }
     }
 }

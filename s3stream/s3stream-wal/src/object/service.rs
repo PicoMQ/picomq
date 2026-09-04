@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use s3stream_codec::{decode_record, StreamRecordBatch};
+use s3stream_codec::{StreamRecordBatch, decode_record};
 use s3stream_object::{ObjectStorage, ReadOptions, ThrottleStrategy};
 
 use crate::{PendingAppend, RecordOffset, RecoverStream, WalError, WalMetadata, WriteAheadLog};
@@ -15,8 +15,8 @@ use crate::{PendingAppend, RecordOffset, RecoverStream, WalError, WalMetadata, W
 use super::config::ObjectWalConfig;
 use super::header::WAL_HEADER_SIZE_V1;
 use super::keys::{
-    floor_align_offset, gen_object_path_v1_aligned, node_prefix, parse_wal_objects,
-    DATA_FILE_ALIGN_SIZE, TRIM_RECORD_SENTINEL,
+    DATA_FILE_ALIGN_SIZE, TRIM_RECORD_SENTINEL, floor_align_offset, gen_object_path_v1_aligned,
+    node_prefix, parse_wal_objects,
 };
 use super::recover::recover_stream;
 use super::writer::ObjectWalWriter;

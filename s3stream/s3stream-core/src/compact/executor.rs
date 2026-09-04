@@ -12,8 +12,8 @@ use std::sync::Arc;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use s3stream_object::{
-    gen_object_key, DataBlockIndex, MultipartWriter, ObjectReader, ObjectStorage, ReadOptions,
-    S3ObjectMetadata, ThrottleStrategy, WriteOptions, BLOCK_INDEX_SIZE, FOOTER_MAGIC, FOOTER_SIZE,
+    BLOCK_INDEX_SIZE, DataBlockIndex, FOOTER_MAGIC, FOOTER_SIZE, MultipartWriter, ObjectReader,
+    ObjectStorage, ReadOptions, S3ObjectMetadata, ThrottleStrategy, WriteOptions, gen_object_key,
 };
 
 use crate::api::StreamError;
@@ -21,8 +21,8 @@ use crate::manager::{ObjectManager, StreamObject};
 use crate::storage::upload::AsyncRateLimiter;
 
 use super::plan::{
-    group_stream_data_blocks, CompactedObject, CompactionType, GroupByLimitPredicate,
-    StreamDataBlock,
+    CompactedObject, CompactionType, GroupByLimitPredicate, StreamDataBlock,
+    group_stream_data_blocks,
 };
 
 pub const S3_OBJECT_TTL_MINUTES: u64 = 24 * 60;
@@ -84,12 +84,12 @@ impl DataBlockReader {
         let mut start = 0;
         let mut offset: Option<u64> = None;
         for end in 0..blocks.len() {
-            if let Some(expected) = offset {
-                if blocks[end].block_start_position() != expected {
-                    self.read_continuous(&blocks[start..end], max_read_batch_size, &mut fetched)
-                        .await?;
-                    start = end;
-                }
+            if let Some(expected) = offset
+                && blocks[end].block_start_position() != expected
+            {
+                self.read_continuous(&blocks[start..end], max_read_batch_size, &mut fetched)
+                    .await?;
+                start = end;
             }
             offset = Some(blocks[end].index.end_position());
         }

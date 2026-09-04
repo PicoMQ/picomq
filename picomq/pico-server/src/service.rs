@@ -18,7 +18,7 @@ use crate::alias;
 use crate::error::{ErrorKind, ServiceError};
 use crate::producer::{self, Admission};
 use crate::record::{self, BatchHeader, LogRecord};
-use crate::registry::{validate_producer, ClosedBy, ProducerDecision, RegistryEntry};
+use crate::registry::{ClosedBy, ProducerDecision, RegistryEntry, validate_producer};
 use crate::types::{
     AppendBatchCommand, AppendBatchResult, AppendCommand, AppendResult, BatchReadResult,
     CloseResult, CreateCommand, CreateResult, NumericProducer, OffsetToken, ReadResult,
@@ -391,10 +391,10 @@ impl S3StreamService {
             .unwrap()
             .insert(name.clone(), current.clone());
         self.write_stream_index(&name, &current).await?;
-        if let Some(topic) = &topic {
-            if current.kafka_topic.as_deref() != Some(topic) {
-                self.release_topic(topic, &name).await;
-            }
+        if let Some(topic) = &topic
+            && current.kafka_topic.as_deref() != Some(topic)
+        {
+            self.release_topic(topic, &name).await;
         }
 
         if current.stream_id != candidate.stream_id {
@@ -590,35 +590,37 @@ impl S3StreamService {
             .producer
             .as_ref()
             .map(|p| validate_producer(&entry, p));
-        if let Some(decision) = decision {
-            if !matches!(decision, ProducerDecision::Accepted { .. }) {
-                return self.handle_producer_reject(&entry, next, decision, &command);
-            }
+        if let Some(decision) = decision
+            && !matches!(decision, ProducerDecision::Accepted { .. })
+        {
+            return self.handle_producer_reject(&entry, next, decision, &command);
         }
         if entry.closed {
             return append_to_closed(&entry, &command, next);
         }
-        if let Some(match_seq) = command.match_seq {
-            if match_seq != next.record_offset() {
-                return Err(ServiceError::with_message(
-                    ErrorKind::MatchFailed,
-                    Some(next),
-                    false,
-                    format!(
-                        "match failed: expected tail {match_seq}, actual {}",
-                        next.record_offset()
-                    ),
-                ));
-            }
+        if let Some(match_seq) = command.match_seq
+            && match_seq != next.record_offset()
+        {
+            return Err(ServiceError::with_message(
+                ErrorKind::MatchFailed,
+                Some(next),
+                false,
+                format!(
+                    "match failed: expected tail {match_seq}, actual {}",
+                    next.record_offset()
+                ),
+            ));
         }
 
         let close_only = command.records.is_empty() && command.close_after;
         validate_append(&entry, &command, decision, next, close_only)?;
-        if !close_only && entry.schema_validate && self.schema_registry.is_some() {
-            if let Some(schema_name) = entry.schema_name.as_deref() {
-                self.validate_schema(schema_name, &schema_batch(&command.records))
-                    .await?;
-            }
+        if !close_only
+            && entry.schema_validate
+            && self.schema_registry.is_some()
+            && let Some(schema_name) = entry.schema_name.as_deref()
+        {
+            self.validate_schema(schema_name, &schema_batch(&command.records))
+                .await?;
         }
 
         let mut pendings = Vec::new();
@@ -722,13 +724,12 @@ impl S3StreamService {
         if entry.closed {
             return Err(ServiceError::kind(ErrorKind::Closed));
         }
-        if entry.schema_validate {
-            if let Some(schema_name) = entry.schema_name.as_deref() {
-                let records = record::decode_batches(&command.payload).map_err(corrupt_batch)?;
-                let batch =
-                    schema_batch(&records.into_iter().map(|r| r.record).collect::<Vec<_>>());
-                self.validate_schema(schema_name, &batch).await?;
-            }
+        if entry.schema_validate
+            && let Some(schema_name) = entry.schema_name.as_deref()
+        {
+            let records = record::decode_batches(&command.payload).map_err(corrupt_batch)?;
+            let batch = schema_batch(&records.into_iter().map(|r| r.record).collect::<Vec<_>>());
+            self.validate_schema(schema_name, &batch).await?;
         }
         let stream_id = entry.stream_id;
         let stream = self.ensure_open(stream_id).await?;
@@ -789,10 +790,9 @@ impl S3StreamService {
         if !entry.numeric_producers.is_empty()
             && prev_offset / PRODUCER_CHECKPOINT_INTERVAL
                 != entry.producer_state_offset / PRODUCER_CHECKPOINT_INTERVAL
+            && let Err(error) = self.put_entry(&name, entry).await
         {
-            if let Err(error) = self.put_entry(&name, entry).await {
-                tracing::warn!(%error, stream = %name, "producer state checkpoint failed");
-            }
+            tracing::warn!(%error, stream = %name, "producer state checkpoint failed");
         }
 
         let notify_offset = stream.next_offset();
@@ -1258,11 +1258,12 @@ impl S3StreamService {
         if command.initial_records.is_empty() {
             return Ok(false);
         }
-        if command.schema_validate && self.schema_registry.is_some() {
-            if let Some(schema_name) = command.schema_name.as_deref() {
-                self.validate_schema(schema_name, &schema_batch(&command.initial_records))
-                    .await?;
-            }
+        if command.schema_validate
+            && self.schema_registry.is_some()
+            && let Some(schema_name) = command.schema_name.as_deref()
+        {
+            self.validate_schema(schema_name, &schema_batch(&command.initial_records))
+                .await?;
         }
         let base_offset = stream.next_offset();
         let timestamp_ms = self.next_timestamp(gate, stream.as_ref()).await?;
@@ -1792,10 +1793,10 @@ fn validate_append(
     close_only: bool,
 ) -> Result<(), ServiceError> {
     if !close_only {
-        if let Some(ct) = command.content_type.as_deref() {
-            if !mime_equals(Some(&entry.content_type), Some(ct)) {
-                return Err(ServiceError::at(ErrorKind::Conflict, next, false));
-            }
+        if let Some(ct) = command.content_type.as_deref()
+            && !mime_equals(Some(&entry.content_type), Some(ct))
+        {
+            return Err(ServiceError::at(ErrorKind::Conflict, next, false));
         }
         if command.records.is_empty() {
             return Err(ServiceError::with_message(
@@ -1809,17 +1810,16 @@ fn validate_append(
     if let Some(stream_seq) = &command.stream_seq {
         let accepted =
             decision.is_none() || matches!(decision, Some(ProducerDecision::Accepted { .. }));
-        if accepted {
-            if let Some(last_seq) = &entry.last_seq {
-                if stream_seq.as_str() <= last_seq.as_str() {
-                    return Err(ServiceError::with_message(
-                        ErrorKind::Conflict,
-                        Some(next),
-                        false,
-                        "Sequence conflict",
-                    ));
-                }
-            }
+        if accepted
+            && let Some(last_seq) = &entry.last_seq
+            && stream_seq.as_str() <= last_seq.as_str()
+        {
+            return Err(ServiceError::with_message(
+                ErrorKind::Conflict,
+                Some(next),
+                false,
+                "Sequence conflict",
+            ));
         }
     }
     Ok(())
@@ -2027,11 +2027,7 @@ fn collect_records(
 
 fn live_start_offset(stream: &dyn Stream) -> u64 {
     let start = stream.start_offset();
-    if start == u64::MAX {
-        0
-    } else {
-        start
-    }
+    if start == u64::MAX { 0 } else { start }
 }
 
 fn to_meta_from_stream(name: &str, entry: &RegistryEntry, stream: &dyn Stream) -> StreamMeta {

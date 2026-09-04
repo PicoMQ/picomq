@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use picomq_metadata::{apply, MetadataCommand, MetadataState};
+use picomq_metadata::{MetadataCommand, MetadataState, apply};
 
 const NODE_A: i32 = 1;
 const NODE_B: i32 = 2;
@@ -40,7 +40,7 @@ fn build(total: u64, open_every: u64) -> MetadataState {
         )
         .unwrap();
         if i % open_every == 0 {
-            let node_id = if (i / open_every) % 2 == 0 {
+            let node_id = if (i / open_every).is_multiple_of(2) {
                 NODE_A
             } else {
                 NODE_B

@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use object_store::ObjectStoreExt;
 
 use crate::error::ObjectError;
 
@@ -267,7 +268,7 @@ impl ObjectStoreAdapter {
             other => {
                 return Err(ObjectError::InvalidFormat {
                     reason: format!("unsupported bucket protocol: {other}"),
-                })
+                });
             }
         };
         Ok(Self {

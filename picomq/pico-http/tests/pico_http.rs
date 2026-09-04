@@ -8,7 +8,7 @@ mod common;
 use std::time::Duration;
 
 use bytes::Bytes;
-use picomq_protocol::record::{decode_batch_read, encode_batch_append, PicoRecord};
+use picomq_protocol::record::{PicoRecord, decode_batch_read, encode_batch_append};
 use serde_json::Value;
 
 use common::picomq_server;
@@ -439,10 +439,12 @@ async fn live_reads() {
         .await
         .unwrap();
     assert_eq!(sse.status(), 200);
-    assert!(sse.headers()["Content-Type"]
-        .to_str()
-        .unwrap()
-        .starts_with("text/event-stream"));
+    assert!(
+        sse.headers()["Content-Type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream")
+    );
     let body = sse.text().await.unwrap();
     assert!(body.contains("event: data"));
     assert!(body.contains("id: 2"));
