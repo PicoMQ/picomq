@@ -14,8 +14,6 @@ jobs:
   core:
     name: core / fmt / clippy / test
     runs-on: ubuntu-latest
-    env:
-      SCOPE: --workspace --exclude picomq-connectors --exclude 'picomq-connector-*'
     steps:
       - uses: actions/checkout@v7
 
@@ -40,16 +38,14 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy $SCOPE --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude picomq-connectors --exclude 'picomq-connector-*' --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test $SCOPE
+        run: cargo test --workspace --exclude picomq-connectors --exclude 'picomq-connector-*'
 
   connectors:
     name: connectors / clippy / test
     runs-on: ubuntu-latest
-    env:
-      SCOPE: -p picomq-connectors -p 'picomq-connector-*'
     steps:
       - uses: actions/checkout@v7
 
@@ -71,7 +67,7 @@ jobs:
           key: connectors
 
       - name: cargo clippy
-        run: cargo clippy $SCOPE --all-targets -- -D warnings
+        run: cargo clippy -p picomq-connectors -p 'picomq-connector-*' --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test $SCOPE
+        run: cargo test -p picomq-connectors -p 'picomq-connector-*'
