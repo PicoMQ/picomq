@@ -1,0 +1,24 @@
+type = "sink"
+key = "orders_ch"
+enabled = true
+version = 0
+name = "Orders to ClickHouse"
+path = "libpicomq_connector_clickhouse_sink"
+
+[[topics]]
+pattern = "orders\\..*"
+schema = "json"
+batch_length = 100
+poll_interval = "100ms"
+
+[transforms.unwrap_envelope]
+enabled = true
+field = "data"
+
+[plugin_config]
+url = "http://clickhouse:8123"
+database = "default"
+username = "pico"
+password = "pico"
+table = "order_events"
+insert_format = "json_each_row"

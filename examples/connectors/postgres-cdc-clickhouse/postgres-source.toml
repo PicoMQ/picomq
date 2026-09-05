@@ -1,0 +1,22 @@
+type = "source"
+key = "orders_cdc"
+enabled = true
+version = 0
+name = "Orders CDC"
+path = "libpicomq_connector_postgres_source"
+
+[[topics]]
+topic = { strategy = "field", path = "data.region", template = "orders.{value}" }
+schema = "json"
+batch_length = 100
+linger_time = "5ms"
+create_topics = true
+
+[plugin_config]
+connection_string = "postgres://pico:pico@postgres:5432/example"
+mode = "cdc"
+tables = ["public.order_events"]
+replication_slot = "picomq_orders"
+capture_operations = ["INSERT", "UPDATE"]
+poll_interval = "1s"
+batch_size = 100
