@@ -84,7 +84,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -98,7 +98,7 @@ s3stream-wal = { path = "s3stream/s3stream-wal" }
 s3stream-core = { path = "s3stream/s3stream-core" }
 s3stream = { path = "s3stream/s3stream" }
 picomq-common = { path = "picomq/pico-common" }
-picomq-protocol = { path = "picomq/pico-protocol", version = "0.1.0" }
+picomq-protocol = { path = "picomq/pico-protocol", version = "0.1.1" }
 picomq-auth = { path = "picomq/pico-auth" }
 picomq-metadata = { path = "picomq/pico-metadata" }
 picomq-sql = { path = "picomq/pico-sql" }
@@ -106,7 +106,7 @@ picomq-server = { path = "picomq/pico-server" }
 picomq-kafka = { path = "picomq/pico-kafka" }
 picomq-http = { path = "picomq/pico-http" }
 picomq-runtime = { path = "picomq/pico-runtime" }
-picomq-client = { path = "picomq/pico-client", version = "0.1.0" }
+picomq-client = { path = "picomq/pico-client", version = "0.1.1" }
 picomq-schema = { path = "picomq/pico-schema" }
 
 # Schema registry / validation (picomq-schema)

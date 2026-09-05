@@ -5957,7 +5957,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-auth"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5974,7 +5974,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "clap",
@@ -5998,7 +5998,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -6017,11 +6017,11 @@ dependencies = [
 
 [[package]]
 name = "picomq-common"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "picomq-connector-clickhouse-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6039,7 +6039,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-delta-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6056,7 +6056,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-doris-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6076,7 +6076,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-elasticsearch-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6092,7 +6092,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-elasticsearch-source"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6111,7 +6111,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-http-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6133,7 +6133,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-iceberg-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow-array",
  "arrow-json",
@@ -6154,7 +6154,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-influxdb-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -6174,7 +6174,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-influxdb-source"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "async-trait",
@@ -6199,7 +6199,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-meilisearch-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6216,7 +6216,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-mongodb-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "humantime",
@@ -6231,7 +6231,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-postgres-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6247,7 +6247,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-postgres-source"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6267,7 +6267,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-quickwit-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "picomq-connector-sdk",
@@ -6281,7 +6281,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-random-source"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -6298,7 +6298,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-redshift-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "async-trait",
@@ -6320,7 +6320,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-s3-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6340,7 +6340,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-sdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "apache-avro 0.22.0",
@@ -6377,7 +6377,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-stdout-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -6389,7 +6389,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connector-surrealdb-sink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6406,7 +6406,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-connectors"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -6466,7 +6466,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-http"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -6495,7 +6495,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-kafka"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6516,7 +6516,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-metadata"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -6532,7 +6532,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -6543,7 +6543,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "humantime",
@@ -6568,7 +6568,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-schema"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "apache-avro 0.22.0",
@@ -6590,7 +6590,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6614,7 +6614,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-sql"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8036,7 +8036,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s3stream"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8052,7 +8052,7 @@ dependencies = [
 
 [[package]]
 name = "s3stream-codec"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -8065,7 +8065,7 @@ dependencies = [
 
 [[package]]
 name = "s3stream-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8086,7 +8086,7 @@ dependencies = [
 
 [[package]]
 name = "s3stream-object"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8106,7 +8106,7 @@ dependencies = [
 
 [[package]]
 name = "s3stream-wal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
