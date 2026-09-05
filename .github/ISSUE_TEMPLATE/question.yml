@@ -1,0 +1,23 @@
+name: Ask a question
+description: Questions about using or running PicoMQ.
+title: "[question] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For real-time help, [Discord](https://discord.com/invite/qsMy5sSpYX) is the fastest place to reach us.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Config, code, or output that helps answer it. Optional.
+      render: text

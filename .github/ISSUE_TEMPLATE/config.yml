@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Design discussion
+    url: https://github.com/PicoMQ/picomq/discussions
+    about: Larger features or ideas that need design discussion before becoming an issue.
+  - name: Support and chat
+    url: https://discord.com/invite/qsMy5sSpYX
+    about: Real-time help and everything else, on Discord.

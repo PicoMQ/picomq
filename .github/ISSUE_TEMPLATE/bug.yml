@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a bug in PicoMQ.
+title: "[bug] "
+labels: ["bug"]
+type: Bug
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Server
+        - Pico protocol (HTTP)
+        - Kafka protocol
+        - Storage (WAL, S3)
+        - Connectors
+        - CLI
+        - Dashboard
+        - Docs
+        - Other
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: "v0.7.0, image tag, or commit SHA"
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "Docker compose on macOS, S3 backend MinIO, single node"
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      placeholder: |
+        1. Start with ...
+        2. Produce ...
+        3. Observe ...
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and config
+      description: Server output, connector output, or the `pico serve` flags / `PICO_*` env you run with.
+      render: text
