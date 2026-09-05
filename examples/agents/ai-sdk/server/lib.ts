@@ -25,6 +25,7 @@ export function json(data: unknown, status = 200): Response {
 
 export function requireKey(): Response | null {
   if (process.env.OPENAI_API_KEY) return null
+
   return json({ error: 'Set OPENAI_API_KEY' }, 500)
 }
 
@@ -34,11 +35,13 @@ export function preview(text: string) {
 
 export function sseFrame(event: string, data?: unknown) {
   const payload = data !== undefined ? JSON.stringify(data) : ''
+
   return `event: ${event}\ndata: ${payload}\n\n`
 }
 
 export function broadcastTo(clients: Set<SseClient>, event: string, data?: unknown) {
   const msg = sseFrame(event, data)
+
   for (const c of clients) {
     try {
       c.write(msg)
@@ -55,6 +58,7 @@ export function openSse(res: ServerResponse): SseClient {
     Connection: 'keep-alive',
     'Access-Control-Allow-Origin': '*',
   })
+
   return {
     write: (chunk) => {
       res.write(chunk)
@@ -72,6 +76,7 @@ export async function ensureStream(pico: PicoClient, name: string) {
 export async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = []
   for await (const chunk of req) chunks.push(chunk as Buffer)
+
   return Buffer.concat(chunks).toString('utf8')
 }
 

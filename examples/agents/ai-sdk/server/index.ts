@@ -95,8 +95,10 @@ function serveDemoPage(nav: DemoNav): Response {
 async function serveStatic(path: string): Promise<Response> {
   const demo = DEMO_PATHS[path]
   if (demo) return serveDemoPage(demo)
+
   const full = join(PUBLIC_DIR, path === '/' ? '/index.html' : path)
   if (!full.startsWith(PUBLIC_DIR)) return new Response('Not found', { status: 404 })
+
   try {
     const buf = await readFile(full)
     const type = MIME[extname(full)] ?? 'application/octet-stream'
@@ -113,6 +115,7 @@ function handleSse(path: string, url: URL, res: ServerResponse): boolean {
   else if (path === '/api/agent/events') handleAgentEvents(res, url.searchParams.get('run') ?? '')
   else if (path === '/api/multi/events') handleMultiEvents(res)
   else return false
+
   return true
 }
 
@@ -120,6 +123,7 @@ async function route(req: IncomingMessage, url: URL): Promise<Response> {
   const table = req.method === 'GET' ? GET_ROUTES : req.method === 'POST' ? POST_ROUTES : undefined
   const handler = table?.[url.pathname]
   if (handler) return handler(await asRequest(url, req), url)
+
   return serveStatic(url.pathname)
 }
 
@@ -127,6 +131,7 @@ const pico = connect('pico', ENDPOINT)
 await initChat(pico)
 initAgent(pico)
 await initMulti(pico)
+
 if (!process.env.OPENAI_API_KEY) {
   console.warn('OPENAI_API_KEY is not set. AI routes will fail until it is')
 }

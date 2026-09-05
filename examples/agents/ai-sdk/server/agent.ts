@@ -20,7 +20,7 @@ import {
   type StreamRecordInfo,
 } from './lib'
 
-export const AGENT_PREFIX = process.env.PICO_AGENT_PREFIX ?? '/examples/ai-sdk/agent'
+export const AGENT_PREFIX = process.env.PICO_AGENT_PREFIX ?? '/examples/agents/ai-sdk/agent'
 
 type AgentEvent =
   | { type: 'run_start'; prompt: string; timestamp: string }
@@ -55,8 +55,10 @@ function tokenize(input: string): Token[] {
   const tokens: Token[] = []
   const isDigit = (ch: string) => ch >= '0' && ch <= '9'
   let i = 0
+
   while (i < input.length) {
     const ch = input[i]!
+
     if (' \t\n\r'.includes(ch)) {
       i++
     } else if ('+-*/'.includes(ch)) {
@@ -73,6 +75,7 @@ function tokenize(input: string): Token[] {
         if (dots > 1) throw new Error('Invalid number format')
         i++
       }
+
       const value = Number(input.slice(start, i))
       if (!Number.isFinite(value)) throw new Error(`Invalid number: "${input.slice(start, i)}"`)
       tokens.push({ type: 'number', value })
@@ -80,12 +83,14 @@ function tokenize(input: string): Token[] {
       throw new Error(`Unexpected character: "${ch}"`)
     }
   }
+
   return tokens
 }
 
 function evaluateExpression(input: string): number {
   const tokens = tokenize(input)
   let index = 0
+
   const peek = () => tokens[index]
   const take = () => tokens[index++]
 
@@ -98,8 +103,10 @@ function evaluateExpression(input: string): number {
       const rhs = parseTerm()
       value = t.value === '+' ? value + rhs : value - rhs
     }
+
     return value
   }
+
   const parseTerm = (): number => {
     let value = parseFactor()
     for (;;) {
@@ -109,16 +116,20 @@ function evaluateExpression(input: string): number {
       const rhs = parseFactor()
       value = t.value === '*' ? value * rhs : value / rhs
     }
+
     return value
   }
+
   const parseFactor = (): number => {
     const t = peek()
     if (!t) throw new Error('Unexpected end of expression')
+
     if (t.type === 'op' && (t.value === '+' || t.value === '-')) {
       take()
       const value = parseFactor()
       return t.value === '-' ? -value : value
     }
+
     if (t.type === 'paren' && t.value === '(') {
       take()
       const value = parseExpression()
@@ -126,15 +137,18 @@ function evaluateExpression(input: string): number {
       if (!close || close.type !== 'paren' || close.value !== ')') throw new Error("Expected ')'")
       return value
     }
+
     if (t.type === 'number') {
       take()
       return t.value
     }
+
     throw new Error('Unexpected token')
   }
 
   const result = parseExpression()
   if (index < tokens.length) throw new Error('Unexpected extra input')
+
   return result
 }
 
@@ -166,6 +180,7 @@ const agentTools = {
           description: 'Online payments infrastructure',
         },
       }
+
       return db[name] ?? { error: `No data found for "${name}"` }
     },
   }),
@@ -197,6 +212,7 @@ function isAgentStream(name: string) {
 
 function runMeta(run: RunState) {
   const last = run.records[run.records.length - 1]
+
   return {
     endpoint: ENDPOINT,
     stream: run.stream,
@@ -212,29 +228,36 @@ function runMeta(run: RunState) {
 function eventPreview(event: AgentEvent): string {
   if (event.type === 'step') return event.toolCalls.map((tc) => tc.tool).join(', ') || 'text'
   if (event.type === 'run_start') return preview(event.prompt)
+
   return `${event.steps} steps`
 }
 
 async function loadRunStream(streamName: string) {
   const head = await pico.head(streamName)
   if (!head) return null
+
   const events: AgentEvent[] = []
   const records: StreamRecordInfo[] = []
   let from = pico.beginning()
+
   for (;;) {
     const page = await pico.read(streamName, from, 'off', { count: 500 })
+
     for (const record of page.records) {
       try {
         const event = JSON.parse(dec.decode(record.body)) as AgentEvent
         if (!event?.type) continue
+
         events.push(event)
         records.push({ seq: record.position, type: event.type, preview: eventPreview(event) })
       } catch {
       }
     }
+
     if (page.records.length === 0 || page.upToDate || page.next === from) break
     from = page.next
   }
+
   return {
     events,
     records,
@@ -255,10 +278,13 @@ async function loadRunStream(streamName: string) {
 async function listRecents(): Promise<RecentItem[]> {
   const listing = await pico.list(AGENT_PREFIX + '/', 100)
   const items: RecentItem[] = []
+
   for (const info of listing.streams) {
     if (!isAgentStream(info.name)) continue
+
     const loaded = await loadRunStream(info.name)
     if (!loaded) continue
+
     const start = loaded.events.find((e) => e.type === 'run_start')
     const raw = start && start.type === 'run_start' ? preview(start.prompt).slice(0, 48) : ''
     items.push({
@@ -267,6 +293,7 @@ async function listRecents(): Promise<RecentItem[]> {
       records: loaded.records.length,
     })
   }
+
   items.sort((a, b) => b.stream.localeCompare(a.stream))
   return items
 }
@@ -279,8 +306,10 @@ export async function handleAgentHistory(url: URL): Promise<Response> {
   const streamName = url.searchParams.get('stream')?.trim()
   if (!streamName) return json({ error: 'Missing stream' }, 400)
   if (!isAgentStream(streamName)) return json({ error: 'Invalid stream' }, 400)
+
   const loaded = await loadRunStream(streamName)
   if (!loaded) return json({ error: 'Stream not found' }, 404)
+
   return json({ meta: loaded.meta, events: loaded.events, records: loaded.records })
 }
 
@@ -291,13 +320,16 @@ export async function handleAgentRecents(): Promise<Response> {
 export async function handleAgentDelete(req: Request): Promise<Response> {
   const streamName = ((await req.json()) as { stream?: string }).stream?.trim()
   if (!streamName || !isAgentStream(streamName)) return json({ error: 'Invalid stream' }, 400)
+
   await pico.delete(streamName).catch(() => undefined)
+
   return json({ ok: true, recents: await listRecents() })
 }
 
 export async function handleAgentRun(req: Request): Promise<Response> {
   const denied = requireKey()
   if (denied) return denied
+
   const body = (await req.json()) as { prompt?: string; stream?: string }
   const promptText = body.prompt?.trim()
   if (!promptText) return json({ error: 'empty' }, 400)
@@ -317,6 +349,7 @@ export async function handleAgentRun(req: Request): Promise<Response> {
           history.push({ role: 'assistant', content: ev.text })
         }
       }
+
       if (!loaded.closed) {
         streamName = requested
         priorRecords.push(...loaded.records)
@@ -418,12 +451,15 @@ export function handleAgentEvents(res: ServerResponse, runId: string) {
     res.end(JSON.stringify({ error: 'unknown run' }))
     return
   }
+
   const client = openSse(res)
   for (const { event, data } of run.buffer) client.write(sseFrame(event, data))
+
   if (run.done) {
     res.end()
     return
   }
+
   run.clients.add(client)
   res.on('close', () => {
     run.clients.delete(client)

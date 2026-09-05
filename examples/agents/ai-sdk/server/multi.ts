@@ -16,7 +16,7 @@ import {
   type SseClient,
 } from './lib'
 
-export const MULTI_PREFIX = process.env.PICO_MULTI_PREFIX ?? '/examples/ai-sdk/multi'
+export const MULTI_PREFIX = process.env.PICO_MULTI_PREFIX ?? '/examples/agents/ai-sdk/multi'
 
 type AgentDef = { id: string; name: string; system: string }
 
@@ -94,21 +94,26 @@ async function ensureStream(name: string) {
 async function readAll(streamName: string): Promise<{ position: string; body: Uint8Array }[]> {
   const out: { position: string; body: Uint8Array }[] = []
   let from = pico.beginning()
+
   for (;;) {
     const page = await pico.read(streamName, from, 'off', { count: 500 })
     for (const r of page.records) out.push({ position: r.position, body: r.body })
+
     if (page.records.length === 0 || page.upToDate || page.next === from) break
     from = page.next
   }
+
   return out
 }
 
 function seqGt(a: string | null, b: string | null): boolean {
   if (a == null) return false
   if (b == null) return true
+
   const na = Number(a)
   const nb = Number(b)
   if (Number.isFinite(na) && Number.isFinite(nb)) return na > nb
+
   return a > b
 }
 
@@ -124,10 +129,13 @@ function roomAgentPath(room: string, agentId: string) {
 
 function roomFromBusPath(bus: string): string | null {
   if (bus === `${MULTI_PREFIX}/bus`) return 'legacy'
+
   const prefix = `${MULTI_PREFIX}/`
   if (!bus.startsWith(prefix) || !bus.endsWith('/bus')) return null
+
   const mid = bus.slice(prefix.length, -'/bus'.length)
   if (!mid || mid.includes('/')) return null
+
   return mid
 }
 
@@ -135,6 +143,7 @@ async function closeSession() {
   for (const a of agents) {
     await a.producer.close().catch(() => undefined)
   }
+
   await busProducer?.close().catch(() => undefined)
   agents = []
   busProducer = undefined
@@ -143,6 +152,7 @@ async function closeSession() {
 async function initAgent(room: string, def: AgentDef): Promise<AgentState> {
   const stream = roomAgentPath(room, def.id)
   await ensureStream(stream)
+
   const producer = new Producer(pico, stream, `multi-${room}-${def.id}-${Date.now()}`, {
     lingerMs: 10,
   })
@@ -168,6 +178,7 @@ async function loadRoom(room: string, opts?: { create?: boolean }) {
   await closeSession()
   activeRoom = room
   busStream = roomBusPath(room)
+
   if (opts?.create) await ensureStream(busStream)
   else {
     const head = await pico.head(busStream)
@@ -206,12 +217,15 @@ async function loadRoom(room: string, opts?: { create?: boolean }) {
   if (messages.length > 0) {
     started = true
     agentIndex = turnNumber % agents.length
+
     for (const state of agents) {
       for (const record of busRecords) {
         if (!seqGt(record.position, state.lastBusSeq)) continue
+
         try {
           const msg = JSON.parse(dec.decode(record.body)) as BusMessage
           if (msg.from === state.def.name) continue
+
           const labeled =
             msg.from === 'host' ? `[Host]: ${msg.content}` : `[${msg.from}]: ${msg.content}`
           const already = state.messages.some(
@@ -230,6 +244,7 @@ async function loadRoom(room: string, opts?: { create?: boolean }) {
 
 async function postToBus(msg: BusMessage): Promise<string> {
   const pending = await busProducer!.send(enc.encode(JSON.stringify(msg)))
+
   return String(await pending.durable())
 }
 
@@ -242,6 +257,7 @@ async function saveMemory(
   const rec: MemoryRecord = { type: 'message', role, content, busSeq }
   const pending = await state.producer.send(enc.encode(JSON.stringify(rec)))
   await pending.durable()
+
   state.messages.push({ role, content })
   if (busSeq != null && seqGt(busSeq, state.lastBusSeq)) state.lastBusSeq = busSeq
 }
@@ -279,10 +295,12 @@ function statePayload() {
 async function listMultiRecents(): Promise<RecentItem[]> {
   const listing = await pico.list(MULTI_PREFIX + '/', 200)
   const rooms = new Set<string>()
+
   for (const s of listing.streams) {
     const room = roomFromBusPath(s.name)
     if (room) rooms.add(room)
   }
+
   const legacy = await pico.head(`${MULTI_PREFIX}/bus`)
   if (legacy) rooms.add('legacy')
 
@@ -291,6 +309,7 @@ async function listMultiRecents(): Promise<RecentItem[]> {
     const bus = roomBusPath(room)
     const busRecords = await readAll(bus)
     let title = 'New session'
+
     for (const record of busRecords) {
       try {
         const msg = JSON.parse(dec.decode(record.body)) as BusMessage
@@ -302,14 +321,17 @@ async function listMultiRecents(): Promise<RecentItem[]> {
       } catch {
       }
     }
+
     items.push({ room, title, records: busRecords.length, bus })
   }
+
   items.sort((a, b) => b.room.localeCompare(a.room))
   return items
 }
 
 export async function initMulti(client: PicoClient) {
   pico = client
+
   const recents = await listMultiRecents()
   if (recents.length === 0) {
     const room = shortId()
@@ -341,6 +363,7 @@ export async function handleMultiRecents(): Promise<Response> {
 
 export async function handleMultiNew(): Promise<Response> {
   const room = shortId()
+
   broadcast('restore-start')
   await loadRoom(room, { create: true })
   broadcast('meta', meta())
@@ -350,6 +373,7 @@ export async function handleMultiNew(): Promise<Response> {
     meta: meta(),
   })
   broadcast('recents', { active: activeRoom, recents: await listMultiRecents() })
+
   return json(statePayload())
 }
 
@@ -357,12 +381,15 @@ export async function handleMultiDelete(req: Request): Promise<Response> {
   const body = (await req.json()) as { room?: string }
   const room = body.room?.trim()
   if (!room) return json({ error: 'Missing room' }, 400)
+
   const wasActive = room === activeRoom
   if (wasActive) await closeSession()
+
   const paths = [roomBusPath(room), ...AGENTS.map((a) => roomAgentPath(room, a.id))]
   for (const p of paths) {
     await pico.delete(p).catch(() => undefined)
   }
+
   if (wasActive) {
     const remaining = (await listMultiRecents()).filter((r) => r.room !== room)
     if (remaining.length > 0) {
@@ -372,6 +399,7 @@ export async function handleMultiDelete(req: Request): Promise<Response> {
     }
     broadcast('meta', meta())
   }
+
   broadcast('recents', { active: activeRoom, recents: await listMultiRecents() })
   return json(statePayload())
 }
@@ -380,21 +408,26 @@ export async function handleMultiSelect(req: Request): Promise<Response> {
   const body = (await req.json()) as { room?: string }
   const room = body.room?.trim()
   if (!room) return json({ error: 'Missing room' }, 400)
+
   broadcast('restore-start')
   await new Promise((r) => setTimeout(r, 200))
   await loadRoom(room)
+
   for (const m of messages) {
     if (m.from === 'host') broadcast('host-message', { content: m.content })
     else broadcast('agent-message', { from: m.from, content: m.content, nextAgent: nextAgentName() })
     await new Promise((r) => setTimeout(r, 40))
   }
+
   for (const r of records) broadcast('stream-record', r)
+
   broadcast('restore-end', {
     started,
     nextAgent: started ? nextAgentName() : null,
     meta: meta(),
   })
   broadcast('recents', { active: activeRoom, recents: await listMultiRecents() })
+
   return json(statePayload())
 }
 
@@ -402,6 +435,7 @@ export async function handleMultiStart(req: Request): Promise<Response> {
   const denied = requireKey()
   if (denied) return denied
   if (started) return json({ error: 'Already started. Advance or open a new session' }, 400)
+
   const body = (await req.json()) as { topic?: string }
   const topic = body.topic?.trim()
   if (!topic) return json({ error: 'empty topic' }, 400)
@@ -426,6 +460,7 @@ export async function handleMultiStart(req: Request): Promise<Response> {
   broadcast('started', { nextAgent: nextAgentName(), meta: meta() })
   broadcast('meta', meta())
   broadcast('recents', { active: activeRoom, recents: await listMultiRecents() })
+
   return json({ ok: true, nextAgent: nextAgentName(), meta: meta() })
 }
 
@@ -470,11 +505,13 @@ export async function handleMultiAdvance(): Promise<Response> {
   const next = nextAgentName()
   broadcast('agent-message', { from: state.def.name, content: text, nextAgent: next })
   broadcast('meta', meta())
+
   return json({ ok: true, nextAgent: next })
 }
 
 export async function handleMultiHost(req: Request): Promise<Response> {
   if (!started) return json({ error: 'Start with a topic first' }, 400)
+
   const body = (await req.json()) as { message?: string }
   const text = body.message?.trim()
   if (!text) return json({ error: 'empty' }, 400)
@@ -492,27 +529,34 @@ export async function handleMultiHost(req: Request): Promise<Response> {
   for (const state of agents) {
     await saveMemory(state, 'user', `[Host]: ${text}`, busSeq)
   }
+
   messages.push({ from: 'host', content: text })
   broadcast('host-message', { content: text })
   broadcast('meta', meta())
+
   return json({ ok: true })
 }
 
 export async function handleMultiRestart(): Promise<Response> {
   const room = activeRoom
+
   broadcast('restore-start')
   await new Promise((r) => setTimeout(r, 300))
   await loadRoom(room)
+
   for (const m of messages) {
     if (m.from === 'host') broadcast('host-message', { content: m.content })
     else broadcast('agent-message', { from: m.from, content: m.content, nextAgent: nextAgentName() })
     await new Promise((r) => setTimeout(r, 50))
   }
+
   for (const r of records) broadcast('stream-record', r)
+
   broadcast('restore-end', {
     started,
     nextAgent: started ? nextAgentName() : null,
     meta: meta(),
   })
+
   return json({ ok: true, meta: meta() })
 }

@@ -6,7 +6,7 @@ Needs Docker Pico (`harness/aio`, protocol `pico`) and an OpenAI key.
 export OPENAI_API_KEY=...
 export PICO_ENDPOINT=http://127.0.0.1:4437
 
-cd examples/ai-sdk
+cd examples/agents/ai-sdk
 npm install
 npm run dev
 ```

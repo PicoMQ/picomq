@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 220" width="720" role="img" aria-label="Postgres CDC routes order events onto orders.eu, orders.na, and orders.apac. A pattern sink writes them into one ClickHouse table.">
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0.5 L7.5 4 L0 7.5 Z" fill="#737373"/>
+    </marker>
+  </defs>
+  <rect x="16" y="82" width="150" height="56" rx="6" fill="#fafafa" stroke="#d4d4d4"/>
+  <text x="91" y="106" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#171717">Postgres</text>
+  <text x="91" y="124" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#737373">order_events</text>
+  <rect x="248" y="24" width="150" height="40" rx="6" fill="#ece7db" stroke="#d4d4d4"/>
+  <text x="323" y="49" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" fill="#171717">orders.eu</text>
+  <rect x="248" y="90" width="150" height="40" rx="6" fill="#ece7db" stroke="#d4d4d4"/>
+  <text x="323" y="115" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" fill="#171717">orders.na</text>
+  <rect x="248" y="156" width="150" height="40" rx="6" fill="#ece7db" stroke="#d4d4d4"/>
+  <text x="323" y="181" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" fill="#171717">orders.apac</text>
+  <rect x="554" y="82" width="150" height="56" rx="6" fill="#fafafa" stroke="#d4d4d4"/>
+  <text x="629" y="106" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#171717">ClickHouse</text>
+  <text x="629" y="124" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#737373">order_events</text>
+  <path d="M166 100 L240 44" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M166 110 L240 110" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M166 120 L240 176" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M398 44 L546 100" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M398 110 L546 110" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M398 176 L546 120" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="203" y="20" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#737373">data.region</text>
+  <text x="478" y="20" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#737373">orders.*</text>
+</svg>

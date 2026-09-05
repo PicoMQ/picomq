@@ -1,0 +1,148 @@
+services:
+  postgres:
+    image: postgres:18.6-bookworm
+    command: postgres -c wal_level=logical
+    environment:
+      POSTGRES_USER: pico
+      POSTGRES_PASSWORD: pico
+      POSTGRES_DB: example
+    volumes:
+      - ./sql/postgres.sql:/docker-entrypoint-initdb.d/postgres.sql:ro
+      - ./sql/picomq.sql:/docker-entrypoint-initdb.d/picomq.sql:ro
+      - pg-data:/var/lib/postgresql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pico -d example"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  rustfs:
+    image: rustfs/rustfs:1.0.0-rc.3
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: picomq
+      RUSTFS_SECRET_KEY: picomqpicomq
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_OBS_LOGGER_LEVEL: error
+    volumes:
+      - rustfs-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  createbucket:
+    image: amazon/aws-cli:2.36.28
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: picomq
+      AWS_SECRET_ACCESS_KEY: picomqpicomq
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        aws --endpoint-url http://rustfs:9000 s3 mb s3://picomq 2>/dev/null || true
+        aws --endpoint-url http://rustfs:9000 s3 ls s3://picomq >/dev/null
+    restart: "no"
+
+  pico:
+    image: ghcr.io/picomq/picomq:latest
+    platform: linux/amd64
+    environment:
+      PICO_PROTOCOL: pico
+      PICO_NODE_ID: "1"
+      PICO_LISTEN: 0.0.0.0:4437
+      PICO_ADMIN_LISTEN: 0.0.0.0:9090
+      PICO_HTTP_ADDRESS: http://localhost:4437
+      PICO_KAFKA_LISTEN: 0.0.0.0:9092
+      PICO_KAFKA_ADVERTISE: localhost:9092
+      PICO_AUTH: "off"
+      PICO_INSECURE_ALLOW_REMOTE: "true"
+      PICO_META_URL: postgres://pico:pico@postgres:5432/picomq
+      PICO_SCHEMA_REGISTRY: "3@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true"
+      PICO_STORAGE: "-2@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true"
+      PICO_WAL: "0@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true&batchInterval=5"
+      AWS_ACCESS_KEY_ID: picomq
+      AWS_SECRET_ACCESS_KEY: picomqpicomq
+      AWS_REGION: us-east-1
+    command: ["serve", "--wal-upload-interval-ms", "200", "--wal-upload-threshold", "16777216"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      createbucket:
+        condition: service_completed_successfully
+    ports:
+      - "4437:4437"
+      - "8081:8081"
+      - "9090:9090"
+      - "9092:9092"
+    restart: unless-stopped
+
+  connectors:
+    image: ghcr.io/picomq/picomq-connectors:latest
+    platform: linux/amd64
+    network_mode: service:pico
+    depends_on:
+      pico:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      PICOMQ_CONNECTORS_KAFKA__BOOTSTRAP_SERVERS: localhost:9092
+    volumes:
+      - ./postgres-source.toml:/etc/picomq-connectors/connectors/postgres-source.toml:ro
+      - ./clickhouse-sink.toml:/etc/picomq-connectors/connectors/clickhouse-sink.toml:ro
+      - connectors-state:/var/lib/picomq-connectors/state
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server
+    environment:
+      CLICKHOUSE_USER: pico
+      CLICKHOUSE_PASSWORD: pico
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"
+    volumes:
+      - ./sql/clickhouse.sql:/docker-entrypoint-initdb.d/clickhouse.sql:ro
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  pgweb:
+    image: sosedoff/pgweb:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://pico:pico@postgres:5432/example?sslmode=disable
+    ports:
+      - "8082:8081"
+    restart: unless-stopped
+
+volumes:
+  pg-data:
+  rustfs-data:
+  connectors-state:
+  clickhouse-data:
