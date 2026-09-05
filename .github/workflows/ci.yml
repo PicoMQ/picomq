@@ -11,6 +11,24 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
+  changes:
+    name: path filter
+    runs-on: ubuntu-latest
+    outputs:
+      connectors: ${{ steps.filter.outputs.connectors }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            connectors:
+              - 'connectors/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
+
   core:
     name: core / fmt / clippy / test
     runs-on: ubuntu-latest
@@ -45,6 +63,8 @@ jobs:
 
   connectors:
     name: connectors / clippy / test
+    needs: changes
+    if: needs.changes.outputs.connectors == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
