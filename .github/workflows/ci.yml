@@ -27,7 +27,6 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
-              - '.github/workflows/ci.yml'
 
   core:
     name: core / fmt / clippy / test
