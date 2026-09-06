@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 220" width="720" role="img" aria-label="A poller writes location pings onto fleets.a and fleets.b. A pattern sink writes both into one Iceberg table.">
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0.5 L7.5 4 L0 7.5 Z" fill="#737373"/>
+    </marker>
+  </defs>
+  <rect x="16" y="82" width="150" height="56" rx="6" fill="#fafafa" stroke="#d4d4d4"/>
+  <text x="91" y="106" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#171717">Poller</text>
+  <text x="91" y="124" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#737373">fleet locations</text>
+  <rect x="248" y="52" width="150" height="40" rx="6" fill="#ece7db" stroke="#d4d4d4"/>
+  <text x="323" y="77" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" fill="#171717">fleets.a</text>
+  <rect x="248" y="128" width="150" height="40" rx="6" fill="#ece7db" stroke="#d4d4d4"/>
+  <text x="323" y="153" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" fill="#171717">fleets.b</text>
+  <rect x="554" y="82" width="150" height="56" rx="6" fill="#fafafa" stroke="#d4d4d4"/>
+  <text x="629" y="106" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#171717">Iceberg</text>
+  <text x="629" y="124" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#737373">analytics.locations</text>
+  <path d="M166 100 L240 72" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M166 120 L240 148" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M398 72 L546 100" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M398 148 L546 120" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="203" y="28" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#737373">fleet_id</text>
+  <text x="478" y="28" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#737373">fleets.*</text>
+</svg>

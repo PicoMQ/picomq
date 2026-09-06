@@ -1,0 +1,24 @@
+type = "sink"
+key = "fleets_iceberg"
+enabled = true
+version = 0
+name = "Fleets to Iceberg"
+path = "libpicomq_connector_iceberg_sink"
+
+[[topics]]
+pattern = "fleets\\..*"
+schema = "json"
+batch_length = 100
+poll_interval = "100ms"
+
+[plugin_config]
+tables = ["analytics.locations"]
+catalog_type = "rest"
+uri = "http://iceberg-rest:8181"
+warehouse = "s3://lake/warehouse/"
+store_class = "s3"
+store_url = "http://rustfs:9000"
+store_region = "us-east-1"
+store_access_key_id = "picomq"
+store_secret_access_key = "picomqpicomq"
+store_path_style_access = true
