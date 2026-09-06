@@ -1,0 +1,14 @@
+{
+  "name": "locations",
+  "schema": {
+    "type": "struct",
+    "fields": [
+      {"id": 1, "name": "id", "required": true, "type": "string"},
+      {"id": 2, "name": "fleet_id", "required": true, "type": "string"},
+      {"id": 3, "name": "vehicle_id", "required": true, "type": "string"},
+      {"id": 4, "name": "lat", "required": true, "type": "double"},
+      {"id": 5, "name": "lon", "required": true, "type": "double"},
+      {"id": 6, "name": "ts", "required": true, "type": "string"}
+    ]
+  }
+}
