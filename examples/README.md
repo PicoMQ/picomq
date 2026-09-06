@@ -7,3 +7,4 @@
 | [`agents/ai-sdk`](agents/ai-sdk) | Vercel AI SDK: chat, per-run trail, multi-agent |
 | [`connectors/postgres-cdc-clickhouse`](connectors/postgres-cdc-clickhouse) | Postgres CDC, one stream per region, ClickHouse |
 | [`connectors/fleet-telematics-iceberg`](connectors/fleet-telematics-iceberg) | Fleet locations, one stream per fleet, Iceberg |
+| [`unified`](unified) | One keyed record through Pico HTTP, the CLI, Kafka, and Durable Streams SSE |
