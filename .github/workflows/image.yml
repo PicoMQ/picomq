@@ -86,13 +86,19 @@ jobs:
   plugins:
     name: connector plugins
     runs-on: ubuntu-latest
+    container: rust:1-bookworm
     steps:
       - uses: actions/checkout@v7
 
       - name: Install system deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config cmake
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            jq \
+            libsqlite3-dev \
+            pkg-config
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
