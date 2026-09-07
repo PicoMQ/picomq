@@ -12,10 +12,10 @@ Pico and Durable Streams are alternate HTTP dialects on one listener. `verify.sh
 
 ## Run
 
-Docker, curl, and Bash are required. Compose builds PicoMQ from the current checkout; the pinned Apache Kafka console consumer runs from its container image.
+Docker, curl, and Bash are required. Compose uses `ghcr.io/picomq/picomq:latest`. The pinned Apache Kafka console consumer runs from its container image.
 
 ```bash
-cd examples/unified-protocol
+cd examples/protocols/multi-protocol
 ./verify.sh
 ```
 
