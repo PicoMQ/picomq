@@ -1,0 +1,34 @@
+services:
+  pico:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    environment:
+      PICO_PROTOCOL: ${PICO_PROTOCOL:-pico}
+      PICO_NODE_ID: "1"
+      PICO_LISTEN: 0.0.0.0:4437
+      PICO_ADMIN_LISTEN: 0.0.0.0:9090
+      PICO_HTTP_ADDRESS: http://localhost:4437
+      PICO_KAFKA_LISTEN: 0.0.0.0:9092
+      PICO_KAFKA_ADVERTISE: pico:9092
+      PICO_AUTH: "off"
+      PICO_INSECURE_ALLOW_REMOTE: "true"
+      PICO_META_URL: sqlite:/data/meta.db
+      PICO_STORAGE: "-2@file:///objects"
+    volumes:
+      - pico-data:/data
+      - pico-objects:/objects
+    ports:
+      - "4437:4437"
+      - "9090:9090"
+      - "9092:9092"
+
+  kafka-client:
+    image: apache/kafka:4.3.1
+    profiles: [tools]
+    entrypoint: [/opt/kafka/bin/kafka-console-consumer.sh]
+
+volumes:
+  pico-data:
+  pico-objects:
