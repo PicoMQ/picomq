@@ -16,7 +16,7 @@ wait_for_pico() {
     return 1
 }
 
-PICO_PROTOCOL=pico docker compose up -d pico
+PICO_PROTOCOL=pico docker compose up -d --build pico
 wait_for_pico
 ./pico.sh
 ./kafka.sh
@@ -24,7 +24,7 @@ wait_for_pico
 # One HTTP listener serves one dialect at a time. Restarting the same node with
 # the persistent metadata and object volumes proves that Durable Streams sees
 # the record written through Pico and consumed through Kafka.
-PICO_PROTOCOL=ds docker compose up -d --force-recreate pico
+PICO_PROTOCOL=ds docker compose up -d --build --force-recreate pico
 wait_for_pico
 ./durable-streams.sh
 
