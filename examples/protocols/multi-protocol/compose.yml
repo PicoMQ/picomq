@@ -1,8 +1,6 @@
 services:
   pico:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
+    image: ghcr.io/picomq/picomq:latest
     platform: linux/amd64
     environment:
       PICO_PROTOCOL: ${PICO_PROTOCOL:-pico}
