@@ -93,6 +93,7 @@ const docsSidebar = [
           { text: 'Docker', link: '/docs/operations/deployment/docker' },
           { text: 'Fly', link: '/docs/operations/deployment/fly' },
           { text: 'AWS', link: '/docs/operations/deployment/aws' },
+          { text: 'GCP', link: '/docs/operations/deployment/gcp' },
         ],
       },
       { text: 'Admin API & dashboard', link: '/docs/operations/admin' },
