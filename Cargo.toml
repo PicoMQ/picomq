@@ -16,6 +16,7 @@ members = [
     "picomq/pico-protocol",
     "picomq/pico-auth",
     "picomq/pico-metadata",
+    "picomq/pico-group",
     "picomq/pico-sql",
     "picomq/pico-server",
     "picomq/pico-kafka",
@@ -56,6 +57,7 @@ default-members = [
     "picomq/pico-protocol",
     "picomq/pico-auth",
     "picomq/pico-metadata",
+    "picomq/pico-group",
     "picomq/pico-sql",
     "picomq/pico-server",
     "picomq/pico-kafka",
@@ -101,6 +103,7 @@ picomq-common = { path = "picomq/pico-common" }
 picomq-protocol = { path = "picomq/pico-protocol", version = "0.1.1" }
 picomq-auth = { path = "picomq/pico-auth" }
 picomq-metadata = { path = "picomq/pico-metadata" }
+picomq-group = { path = "picomq/pico-group" }
 picomq-sql = { path = "picomq/pico-sql" }
 picomq-server = { path = "picomq/pico-server" }
 picomq-kafka = { path = "picomq/pico-kafka" }

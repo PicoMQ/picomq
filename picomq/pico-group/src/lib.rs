@@ -14,11 +14,18 @@ use picomq_server::{
 };
 use tokio::sync::{Mutex, oneshot};
 
-use crate::handlers::common::{
-    COORDINATOR_NOT_AVAILABLE, FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND, GROUP_MAX_SIZE_REACHED,
-    ILLEGAL_GENERATION, INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, KAFKA_STORAGE_ERROR,
-    MEMBER_ID_REQUIRED, NOT_COORDINATOR, REBALANCE_IN_PROGRESS, UNKNOWN_MEMBER_ID,
-};
+const COORDINATOR_NOT_AVAILABLE: i16 = 15;
+const NOT_COORDINATOR: i16 = 16;
+const ILLEGAL_GENERATION: i16 = 22;
+const INCONSISTENT_GROUP_PROTOCOL: i16 = 23;
+const UNKNOWN_MEMBER_ID: i16 = 25;
+const REBALANCE_IN_PROGRESS: i16 = 27;
+const INVALID_REQUEST: i16 = 42;
+const KAFKA_STORAGE_ERROR: i16 = 56;
+const GROUP_ID_NOT_FOUND: i16 = 69;
+const MEMBER_ID_REQUIRED: i16 = 79;
+const GROUP_MAX_SIZE_REACHED: i16 = 81;
+const FENCED_INSTANCE_ID: i16 = 82;
 
 pub use offsets::{CommittedOffset, OffsetCommit};
 
@@ -76,7 +83,7 @@ pub struct JoinOutcome {
 }
 
 impl JoinOutcome {
-    pub(super) fn error(error_code: i16, member_id: String) -> Self {
+    pub(crate) fn error(error_code: i16, member_id: String) -> Self {
         Self {
             error_code,
             generation_id: -1,
@@ -145,6 +152,7 @@ pub struct ListedGroup {
 
 pub struct GroupCoordinator {
     node_id: i32,
+    protocol_name: &'static str,
     service: Arc<S3StreamService>,
     ownership: Arc<MetadataOwnershipService>,
     views: Arc<picomq_metadata::ViewPublisher>,
@@ -157,9 +165,11 @@ impl GroupCoordinator {
         service: Arc<S3StreamService>,
         ownership: Arc<MetadataOwnershipService>,
         views: Arc<picomq_metadata::ViewPublisher>,
+        protocol_name: &'static str,
     ) -> Arc<Self> {
         Arc::new(Self {
             node_id,
+            protocol_name,
             service,
             ownership,
             views,
@@ -183,7 +193,7 @@ impl GroupCoordinator {
         let view = self.views.load();
         let address = view
             .state
-            .get_node_protocol_address(node_id, crate::PROTOCOL_NAME)
+            .get_node_protocol_address(node_id, self.protocol_name)
             .filter(|address| !address.is_empty())
             .ok_or(COORDINATOR_NOT_AVAILABLE)?
             .to_owned();

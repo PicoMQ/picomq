@@ -6465,6 +6465,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "picomq-group"
+version = "0.1.1"
+dependencies = [
+ "bytes",
+ "picomq-metadata",
+ "picomq-server",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "picomq-http"
 version = "0.1.1"
 dependencies = [
@@ -6503,6 +6514,7 @@ dependencies = [
  "futures",
  "kafka-protocol",
  "object_store 0.14.1",
+ "picomq-group",
  "picomq-metadata",
  "picomq-schema",
  "picomq-server",

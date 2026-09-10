@@ -7,12 +7,11 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tokio::sync::{Mutex, oneshot};
 
-use crate::handlers::common::{
-    INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, REBALANCE_IN_PROGRESS,
-};
-
 use super::offsets::OffsetTable;
-use super::{JoinInput, JoinMember, JoinOutcome, JoinProtocol, SyncOutcome};
+use super::{
+    INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, JoinInput, JoinMember, JoinOutcome, JoinProtocol,
+    REBALANCE_IN_PROGRESS, SyncOutcome,
+};
 
 pub(super) const MAX_GROUPS: usize = 10_000;
 pub(super) const MAX_MEMBERS_PER_GROUP: usize = 10_000;

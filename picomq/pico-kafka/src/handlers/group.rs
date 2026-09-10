@@ -21,14 +21,14 @@ use kafka_protocol::protocol::{Decodable, StrBytes};
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
-use crate::group::{
-    CommittedOffset, JoinInput, JoinProtocol, OffsetCommit, SyncInput, SyncOutcome,
-};
 use crate::handlers::common::{
     INVALID_REQUEST, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_id, encode_response,
     parse_host_port, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
+use picomq_group::{
+    CommittedOffset, JoinInput, JoinProtocol, OffsetCommit, SyncInput, SyncOutcome,
+};
 use picomq_server::alias::is_valid_topic as validate_topic_name;
 
 pub async fn handle(

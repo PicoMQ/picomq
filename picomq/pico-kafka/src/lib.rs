@@ -4,7 +4,6 @@ mod broker;
 mod dispatch;
 mod error;
 mod frame;
-mod group;
 mod handlers;
 mod listener;
 mod versions;
