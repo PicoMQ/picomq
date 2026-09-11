@@ -101,6 +101,35 @@ const docsSidebar = [
     ],
   },
   {
+    text: 'Examples',
+    collapsed: true,
+    items: [
+      {
+        text: 'Storage',
+        collapsed: true,
+        items: [
+          { text: 'Replay fan-out with Nestor', link: '/docs/examples/storage/nestor-fanout' },
+        ],
+      },
+      {
+        text: 'Connectors',
+        collapsed: true,
+        items: [
+          { text: 'Postgres CDC to ClickHouse', link: '/docs/examples/connectors/postgres-cdc-clickhouse' },
+          { text: 'Fleet telematics to Iceberg', link: '/docs/examples/connectors/fleet-telematics-iceberg' },
+          { text: 'Flink Dynamic Kafka', link: '/docs/examples/connectors/flink-dynamic-kafka' },
+        ],
+      },
+      {
+        text: 'Agents',
+        collapsed: true,
+        items: [
+          { text: 'AI SDK chat', link: '/docs/examples/agents/ai-sdk' },
+        ],
+      },
+    ],
+  },
+  {
     text: 'API reference',
     collapsed: true,
     items: [
