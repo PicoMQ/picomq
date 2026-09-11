@@ -7,12 +7,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tokio::sync::{Mutex, oneshot};
 
-use crate::handlers::common::{
-    INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, REBALANCE_IN_PROGRESS,
-};
-
 use super::offsets::OffsetTable;
-use super::{JoinInput, JoinMember, JoinOutcome, JoinProtocol, SyncOutcome};
+use super::{GroupError, JoinInput, JoinMember, JoinOutcome, JoinProtocol, SyncOutcome};
 
 pub(super) const MAX_GROUPS: usize = 10_000;
 pub(super) const MAX_MEMBERS_PER_GROUP: usize = 10_000;
@@ -166,7 +162,7 @@ pub(super) fn complete_rebalance(
             .map(|sender| {
                 (
                     sender,
-                    JoinOutcome::error(REBALANCE_IN_PROGRESS, String::new()),
+                    JoinOutcome::error(GroupError::RebalanceInProgress, String::new()),
                 )
             })
             .collect();
@@ -186,7 +182,7 @@ pub(super) fn complete_rebalance(
             .map(|(member_id, sender)| {
                 (
                     sender,
-                    JoinOutcome::error(INCONSISTENT_GROUP_PROTOCOL, member_id),
+                    JoinOutcome::error(GroupError::InconsistentProtocol, member_id),
                 )
             })
             .collect();
@@ -230,7 +226,7 @@ pub(super) fn complete_rebalance(
             (
                 sender,
                 JoinOutcome {
-                    error_code: 0,
+                    error: None,
                     generation_id: state.generation,
                     protocol_type: Some(state.protocol_type.clone()),
                     protocol_name: Some(protocol_name.clone()),
@@ -292,15 +288,15 @@ fn rebalance_timeout_of(input: &JoinInput) -> Duration {
     Duration::from_millis(ms.max(1) as u64)
 }
 
-pub(super) fn validate_group_id(group_id: &str) -> Result<(), i16> {
+pub(super) fn validate_group_id(group_id: &str) -> Result<(), GroupError> {
     if group_id.is_empty() || group_id.len() > MAX_GROUP_ID_BYTES {
-        Err(INVALID_REQUEST)
+        Err(GroupError::InvalidRequest)
     } else {
         Ok(())
     }
 }
 
-pub(super) fn validate_join(input: &JoinInput) -> Result<(), i16> {
+pub(super) fn validate_join(input: &JoinInput) -> Result<(), GroupError> {
     validate_group_id(&input.group_id)?;
     if input.member_id.len() > MAX_MEMBER_ID_BYTES
         || input.protocol_type.is_empty()
@@ -312,7 +308,7 @@ pub(super) fn validate_join(input: &JoinInput) -> Result<(), i16> {
             .any(|protocol| protocol.name.is_empty())
         || !(MIN_SESSION_TIMEOUT_MS..=MAX_SESSION_TIMEOUT_MS).contains(&input.session_timeout_ms)
     {
-        return Err(INVALID_REQUEST);
+        return Err(GroupError::InvalidRequest);
     }
     Ok(())
 }

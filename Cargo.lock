@@ -6610,6 +6610,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

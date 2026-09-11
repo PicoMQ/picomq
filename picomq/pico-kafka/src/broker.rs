@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use picomq_metadata::{MetadataNodeHandle, ViewPublisher};
-use picomq_server::{MetadataOwnershipService, S3StreamService};
+use picomq_server::{GroupCoordinator, MetadataOwnershipService, S3StreamService};
 use tokio::sync::Mutex;
-
-use crate::group::GroupCoordinator;
 
 const PRODUCER_ID_BLOCK: u32 = 256;
 
@@ -45,8 +43,13 @@ impl BrokerContext {
         views: Arc<ViewPublisher>,
         metadata: MetadataNodeHandle,
     ) -> Self {
-        let groups =
-            GroupCoordinator::new(node_id, service.clone(), ownership.clone(), views.clone());
+        let groups = GroupCoordinator::new(
+            node_id,
+            service.clone(),
+            ownership.clone(),
+            views.clone(),
+            crate::PROTOCOL_NAME,
+        );
         Self {
             node_id,
             cluster_id,

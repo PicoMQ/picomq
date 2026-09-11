@@ -21,15 +21,34 @@ use kafka_protocol::protocol::{Decodable, StrBytes};
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
-use crate::group::{
-    CommittedOffset, JoinInput, JoinProtocol, OffsetCommit, SyncInput, SyncOutcome,
-};
 use crate::handlers::common::{
-    INVALID_REQUEST, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_id, encode_response,
-    parse_host_port, topic_name,
+    COORDINATOR_NOT_AVAILABLE, FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND, GROUP_MAX_SIZE_REACHED,
+    ILLEGAL_GENERATION, INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, KAFKA_STORAGE_ERROR,
+    MEMBER_ID_REQUIRED, NO_ERROR, NOT_COORDINATOR, REBALANCE_IN_PROGRESS, UNKNOWN_MEMBER_ID,
+    UNKNOWN_TOPIC_OR_PARTITION, broker_id, encode_response, parse_host_port, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 use picomq_server::alias::is_valid_topic as validate_topic_name;
+use picomq_server::{
+    CommittedOffset, GroupError, JoinInput, JoinProtocol, OffsetCommit, SyncInput, SyncOutcome,
+};
+
+fn error_code(error: GroupError) -> i16 {
+    match error {
+        GroupError::CoordinatorNotAvailable => COORDINATOR_NOT_AVAILABLE,
+        GroupError::NotCoordinator => NOT_COORDINATOR,
+        GroupError::IllegalGeneration => ILLEGAL_GENERATION,
+        GroupError::InconsistentProtocol => INCONSISTENT_GROUP_PROTOCOL,
+        GroupError::UnknownMember => UNKNOWN_MEMBER_ID,
+        GroupError::RebalanceInProgress => REBALANCE_IN_PROGRESS,
+        GroupError::InvalidRequest => INVALID_REQUEST,
+        GroupError::Storage => KAFKA_STORAGE_ERROR,
+        GroupError::GroupNotFound => GROUP_ID_NOT_FOUND,
+        GroupError::MemberIdRequired => MEMBER_ID_REQUIRED,
+        GroupError::CapacityExceeded => GROUP_MAX_SIZE_REACHED,
+        GroupError::FencedInstance => FENCED_INSTANCE_ID,
+    }
+}
 
 pub async fn handle(
     ctx: &BrokerContext,
@@ -61,7 +80,7 @@ async fn find_coordinator(
     let result = if request.key_type == 0 {
         ctx.groups.find_coordinator(request.key.as_str()).await
     } else {
-        Err(INVALID_REQUEST)
+        Err(GroupError::InvalidRequest)
     };
     let response = match result {
         Ok(endpoint) => {
@@ -72,8 +91,8 @@ async fn find_coordinator(
                 .with_host(StrBytes::from(host))
                 .with_port(port)
         }
-        Err(code) => FindCoordinatorResponse::default()
-            .with_error_code(code)
+        Err(error) => FindCoordinatorResponse::default()
+            .with_error_code(error_code(error))
             .with_node_id(broker_id(-1))
             .with_host(StrBytes::from_static_str(""))
             .with_port(-1),
@@ -129,7 +148,7 @@ async fn join_group(
         })
         .collect();
     let mut response = JoinGroupResponse::default()
-        .with_error_code(outcome.error_code)
+        .with_error_code(outcome.error.map_or(NO_ERROR, error_code))
         .with_generation_id(outcome.generation_id)
         .with_protocol_name(outcome.protocol_name.map(StrBytes::from))
         .with_leader(StrBytes::from(outcome.leader))
@@ -172,7 +191,7 @@ async fn sync_group(
 
 fn sync_response(req: &RequestContext, outcome: SyncOutcome) -> super::ResponseFrame {
     let mut response = kafka_protocol::messages::SyncGroupResponse::default()
-        .with_error_code(outcome.error_code)
+        .with_error_code(outcome.error.map_or(NO_ERROR, error_code))
         .with_assignment(outcome.assignment);
     if req.api_version >= 5 {
         response = response
@@ -190,7 +209,7 @@ async fn heartbeat(
     let mut body = Bytes::copy_from_slice(body);
     let request = HeartbeatRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
-    let code = ctx
+    let result = ctx
         .groups
         .heartbeat(
             request.group_id.as_str(),
@@ -199,7 +218,8 @@ async fn heartbeat(
             request.group_instance_id.as_ref().map(StrBytes::as_str),
         )
         .await;
-    let response = HeartbeatResponse::default().with_error_code(code);
+    let response =
+        HeartbeatResponse::default().with_error_code(result.err().map_or(NO_ERROR, error_code));
     Ok(HandlerOutcome::Response(encode_response(
         req.correlation_id,
         req.api_version,
@@ -229,24 +249,28 @@ async fn leave_group(
             })
             .collect()
     };
-    let codes = ctx
+    let results = ctx
         .groups
         .leave(request.group_id.as_str(), &identities)
         .await;
     let top_level = if req.api_version <= 2 {
-        codes.first().copied().unwrap_or(NO_ERROR)
+        results
+            .first()
+            .copied()
+            .and_then(Result::err)
+            .map_or(NO_ERROR, error_code)
     } else {
         NO_ERROR
     };
     let members = if req.api_version >= 3 {
         identities
             .into_iter()
-            .zip(codes)
-            .map(|((member_id, instance_id), error_code)| {
+            .zip(results)
+            .map(|((member_id, instance_id), result)| {
                 MemberResponse::default()
                     .with_member_id(StrBytes::from(member_id))
                     .with_group_instance_id(instance_id.map(StrBytes::from))
-                    .with_error_code(error_code)
+                    .with_error_code(result.err().map_or(NO_ERROR, error_code))
             })
             .collect()
     } else {
@@ -292,7 +316,7 @@ async fn describe_groups(
             .collect();
         groups.push(
             DescribedGroup::default()
-                .with_error_code(described.error_code)
+                .with_error_code(described.error.map_or(NO_ERROR, error_code))
                 .with_group_id(group_id)
                 .with_group_state(StrBytes::from(described.state))
                 .with_protocol_type(StrBytes::from(described.protocol_type))
@@ -389,7 +413,7 @@ async fn offset_commit(
             }
         }
     }
-    let code = ctx
+    let result = ctx
         .groups
         .commit_offsets(
             request.group_id.as_str(),
@@ -399,6 +423,7 @@ async fn offset_commit(
             &commits,
         )
         .await;
+    let code = result.err().map_or(NO_ERROR, error_code);
     let topics = request
         .topics
         .into_iter()
@@ -451,7 +476,7 @@ async fn offset_fetch(
         .await;
     let (error_code, values) = match result {
         Ok(values) => (NO_ERROR, values),
-        Err(code) => (code, Default::default()),
+        Err(error) => (error_code(error), Default::default()),
     };
     let topics = values
         .into_iter()

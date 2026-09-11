@@ -1,4 +1,4 @@
-//! Classic consumer-group coordination backed by one internal stream per
+//! Classic consumer-group coordination backed by one internal stream per group.
 
 mod offsets;
 mod state;
@@ -7,18 +7,40 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
-use bytes::Bytes;
-use picomq_server::{
+use crate::{
     AppendCommand, CreateCommand, ErrorKind, LogRecord, MetadataOwnershipService, OffsetToken,
     OwnershipService, S3StreamService,
 };
+use bytes::Bytes;
 use tokio::sync::{Mutex, oneshot};
 
-use crate::handlers::common::{
-    COORDINATOR_NOT_AVAILABLE, FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND, GROUP_MAX_SIZE_REACHED,
-    ILLEGAL_GENERATION, INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, KAFKA_STORAGE_ERROR,
-    MEMBER_ID_REQUIRED, NOT_COORDINATOR, REBALANCE_IN_PROGRESS, UNKNOWN_MEMBER_ID,
-};
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GroupError {
+    #[error("group coordinator is not available")]
+    CoordinatorNotAvailable,
+    #[error("this node is not the group coordinator")]
+    NotCoordinator,
+    #[error("illegal group generation")]
+    IllegalGeneration,
+    #[error("group members use inconsistent protocols")]
+    InconsistentProtocol,
+    #[error("unknown group member")]
+    UnknownMember,
+    #[error("group rebalance is in progress")]
+    RebalanceInProgress,
+    #[error("invalid group request")]
+    InvalidRequest,
+    #[error("group state could not be persisted")]
+    Storage,
+    #[error("group was not found")]
+    GroupNotFound,
+    #[error("the member ID assigned by the coordinator is required")]
+    MemberIdRequired,
+    #[error("group capacity was exceeded")]
+    CapacityExceeded,
+    #[error("static group member was fenced")]
+    FencedInstance,
+}
 
 pub use offsets::{CommittedOffset, OffsetCommit};
 
@@ -66,7 +88,7 @@ pub struct JoinMember {
 
 #[derive(Debug, Clone)]
 pub struct JoinOutcome {
-    pub error_code: i16,
+    pub error: Option<GroupError>,
     pub generation_id: i32,
     pub protocol_type: Option<String>,
     pub protocol_name: Option<String>,
@@ -76,9 +98,9 @@ pub struct JoinOutcome {
 }
 
 impl JoinOutcome {
-    pub(super) fn error(error_code: i16, member_id: String) -> Self {
+    pub(crate) fn error(error: GroupError, member_id: String) -> Self {
         Self {
-            error_code,
+            error: Some(error),
             generation_id: -1,
             protocol_type: None,
             protocol_name: None,
@@ -100,16 +122,16 @@ pub struct SyncInput {
 
 #[derive(Debug, Clone)]
 pub struct SyncOutcome {
-    pub error_code: i16,
+    pub error: Option<GroupError>,
     pub protocol_type: Option<String>,
     pub protocol_name: Option<String>,
     pub assignment: Bytes,
 }
 
 impl SyncOutcome {
-    fn error(error_code: i16) -> Self {
+    fn error(error: GroupError) -> Self {
         Self {
-            error_code,
+            error: Some(error),
             protocol_type: None,
             protocol_name: None,
             assignment: Bytes::new(),
@@ -128,7 +150,7 @@ pub struct MemberDescription {
 
 #[derive(Debug, Clone)]
 pub struct GroupDescription {
-    pub error_code: i16,
+    pub error: Option<GroupError>,
     pub group_id: String,
     pub state: String,
     pub protocol_type: String,
@@ -145,6 +167,7 @@ pub struct ListedGroup {
 
 pub struct GroupCoordinator {
     node_id: i32,
+    protocol_name: &'static str,
     service: Arc<S3StreamService>,
     ownership: Arc<MetadataOwnershipService>,
     views: Arc<picomq_metadata::ViewPublisher>,
@@ -157,9 +180,11 @@ impl GroupCoordinator {
         service: Arc<S3StreamService>,
         ownership: Arc<MetadataOwnershipService>,
         views: Arc<picomq_metadata::ViewPublisher>,
+        protocol_name: &'static str,
     ) -> Arc<Self> {
         Arc::new(Self {
             node_id,
+            protocol_name,
             service,
             ownership,
             views,
@@ -167,25 +192,30 @@ impl GroupCoordinator {
         })
     }
 
-    pub async fn find_coordinator(&self, group_id: &str) -> Result<CoordinatorEndpoint, i16> {
+    pub async fn find_coordinator(
+        &self,
+        group_id: &str,
+    ) -> Result<CoordinatorEndpoint, GroupError> {
         validate_group_id(group_id)?;
         let stream = group_stream_name(group_id);
         let owner = self
             .ownership
             .owner_of(&stream)
             .await
-            .map_err(|_| COORDINATOR_NOT_AVAILABLE)?;
+            .map_err(|_| GroupError::CoordinatorNotAvailable)?;
         let node_id = if owner.local {
             self.node_id
         } else {
-            owner.owner_node_id.ok_or(COORDINATOR_NOT_AVAILABLE)?
+            owner
+                .owner_node_id
+                .ok_or(GroupError::CoordinatorNotAvailable)?
         };
         let view = self.views.load();
         let address = view
             .state
-            .get_node_protocol_address(node_id, crate::PROTOCOL_NAME)
+            .get_node_protocol_address(node_id, self.protocol_name)
             .filter(|address| !address.is_empty())
-            .ok_or(COORDINATOR_NOT_AVAILABLE)?
+            .ok_or(GroupError::CoordinatorNotAvailable)?
             .to_owned();
         Ok(CoordinatorEndpoint { node_id, address })
     }
@@ -215,18 +245,18 @@ impl GroupCoordinator {
                 }
                 if member_id.is_empty() {
                     if state.members.len() >= MAX_MEMBERS_PER_GROUP {
-                        return JoinOutcome::error(GROUP_MAX_SIZE_REACHED, String::new());
+                        return JoinOutcome::error(GroupError::CapacityExceeded, String::new());
                     }
                     member_id = new_member_id(&input.client_id);
                     state
                         .members
                         .insert(member_id.clone(), member_from_input(&input, Instant::now()));
                     if input.require_known_member_id {
-                        return JoinOutcome::error(MEMBER_ID_REQUIRED, member_id);
+                        return JoinOutcome::error(GroupError::MemberIdRequired, member_id);
                     }
                 }
             } else if !state.members.contains_key(&member_id) {
-                return JoinOutcome::error(UNKNOWN_MEMBER_ID, member_id);
+                return JoinOutcome::error(GroupError::UnknownMember, member_id);
             }
 
             if let Some(instance_id) = input.group_instance_id.as_deref() {
@@ -244,15 +274,15 @@ impl GroupCoordinator {
             }
 
             let Some(member) = state.members.get_mut(&member_id) else {
-                return JoinOutcome::error(UNKNOWN_MEMBER_ID, member_id);
+                return JoinOutcome::error(GroupError::UnknownMember, member_id);
             };
             if member.instance_id != input.group_instance_id {
-                return JoinOutcome::error(FENCED_INSTANCE_ID, member_id);
+                return JoinOutcome::error(GroupError::FencedInstance, member_id);
             }
             *member = member_from_input(&input, Instant::now());
 
             if !state.protocol_type.is_empty() && state.protocol_type != input.protocol_type {
-                return JoinOutcome::error(INCONSISTENT_GROUP_PROTOCOL, member_id);
+                return JoinOutcome::error(GroupError::InconsistentProtocol, member_id);
             }
             state.protocol_type = input.protocol_type.clone();
 
@@ -295,9 +325,9 @@ impl GroupCoordinator {
                 coordinator.watch_rebalance(&group_id, id, deadline).await;
             });
         }
-        receiver
-            .await
-            .unwrap_or_else(|_| JoinOutcome::error(REBALANCE_IN_PROGRESS, input.member_id))
+        receiver.await.unwrap_or_else(|_| {
+            JoinOutcome::error(GroupError::RebalanceInProgress, input.member_id)
+        })
     }
 
     /// Drives a pending rebalance to completion without waiting for the full
@@ -359,20 +389,20 @@ impl GroupCoordinator {
             let mut state = group.lock().await;
             state.expire_members(Instant::now());
             let Some(member) = state.members.get(&input.member_id) else {
-                return SyncOutcome::error(UNKNOWN_MEMBER_ID);
+                return SyncOutcome::error(GroupError::UnknownMember);
             };
             if member.instance_id != input.group_instance_id {
-                return SyncOutcome::error(FENCED_INSTANCE_ID);
+                return SyncOutcome::error(GroupError::FencedInstance);
             }
             if state.generation != input.generation_id {
-                return SyncOutcome::error(ILLEGAL_GENERATION);
+                return SyncOutcome::error(GroupError::IllegalGeneration);
             }
             if state.phase == GroupPhase::PreparingRebalance {
-                return SyncOutcome::error(REBALANCE_IN_PROGRESS);
+                return SyncOutcome::error(GroupError::RebalanceInProgress);
             }
             if state.phase == GroupPhase::Stable {
                 return SyncOutcome {
-                    error_code: 0,
+                    error: None,
                     protocol_type: Some(state.protocol_type.clone()),
                     protocol_name: Some(state.protocol_name.clone()),
                     assignment: member.assignment.clone(),
@@ -384,7 +414,7 @@ impl GroupCoordinator {
             if input.member_id == state.leader {
                 let assignments: BTreeMap<String, Bytes> = input.assignments.into_iter().collect();
                 if assignments.keys().any(|id| !state.members.contains_key(id)) {
-                    return SyncOutcome::error(UNKNOWN_MEMBER_ID);
+                    return SyncOutcome::error(GroupError::UnknownMember);
                 }
                 for (id, member) in &mut state.members {
                     member.assignment = assignments.get(id).cloned().unwrap_or_default();
@@ -406,7 +436,7 @@ impl GroupCoordinator {
                         .map(|member| member.assignment.clone())
                         .unwrap_or_default();
                     let _ = sender.send(SyncOutcome {
-                        error_code: 0,
+                        error: None,
                         protocol_type: protocol_type.clone(),
                         protocol_name: protocol_name.clone(),
                         assignment,
@@ -415,7 +445,7 @@ impl GroupCoordinator {
                 (
                     None,
                     Some(SyncOutcome {
-                        error_code: 0,
+                        error: None,
                         protocol_type,
                         protocol_name,
                         assignment: own_assignment,
@@ -434,7 +464,7 @@ impl GroupCoordinator {
         }
         match tokio::time::timeout(timeout, receiver.expect("sync receiver")).await {
             Ok(Ok(outcome)) => outcome,
-            _ => SyncOutcome::error(REBALANCE_IN_PROGRESS),
+            _ => SyncOutcome::error(GroupError::RebalanceInProgress),
         }
     }
 
@@ -444,56 +474,65 @@ impl GroupCoordinator {
         generation_id: i32,
         member_id: &str,
         instance_id: Option<&str>,
-    ) -> i16 {
+    ) -> Result<(), GroupError> {
         let group = match self.local_group(group_id, false).await {
             Ok(group) => group,
-            Err(code) => return code,
+            Err(error) => return Err(error),
         };
         let mut state = group.lock().await;
         state.expire_members(Instant::now());
         let Some(member) = state.members.get(member_id) else {
-            return UNKNOWN_MEMBER_ID;
+            return Err(GroupError::UnknownMember);
         };
         if member.instance_id.as_deref() != instance_id {
-            return FENCED_INSTANCE_ID;
+            return Err(GroupError::FencedInstance);
         }
         if state.generation != generation_id {
-            return ILLEGAL_GENERATION;
+            return Err(GroupError::IllegalGeneration);
         }
         if let Some(member) = state.members.get_mut(member_id) {
             member.last_heartbeat = Instant::now();
         }
         if state.phase != GroupPhase::Stable {
-            return REBALANCE_IN_PROGRESS;
+            return Err(GroupError::RebalanceInProgress);
         }
-        0
+        Ok(())
     }
 
-    pub async fn leave(&self, group_id: &str, members: &[(String, Option<String>)]) -> Vec<i16> {
+    pub async fn leave(
+        &self,
+        group_id: &str,
+        members: &[(String, Option<String>)],
+    ) -> Vec<Result<(), GroupError>> {
         let group = match self.local_group(group_id, false).await {
             Ok(group) => group,
-            Err(code) => return vec![code; members.len()],
+            Err(error) => return vec![Err(error); members.len()],
         };
         let mut state = group.lock().await;
         state.expire_members(Instant::now());
         let mut results = Vec::with_capacity(members.len());
         let mut removed_any = false;
         for (member_id, instance_id) in members {
-            let code = match state.members.get(member_id) {
-                None => UNKNOWN_MEMBER_ID,
-                Some(member) if member.instance_id != *instance_id => FENCED_INSTANCE_ID,
+            let result = match state.members.get(member_id) {
+                None => Err(GroupError::UnknownMember),
+                Some(member) if member.instance_id != *instance_id => {
+                    Err(GroupError::FencedInstance)
+                }
                 Some(_) => {
                     remove_member(&mut state, member_id);
                     removed_any = true;
-                    0
+                    Ok(())
                 }
             };
-            results.push(code);
+            results.push(result);
         }
         if removed_any {
             if let Some(rebalance) = state.rebalance.take() {
                 for (_, sender) in rebalance.waiters {
-                    let _ = sender.send(JoinOutcome::error(REBALANCE_IN_PROGRESS, String::new()));
+                    let _ = sender.send(JoinOutcome::error(
+                        GroupError::RebalanceInProgress,
+                        String::new(),
+                    ));
                 }
             }
             if state.members.is_empty() {
@@ -514,30 +553,30 @@ impl GroupCoordinator {
         member_id: &str,
         instance_id: Option<&str>,
         commits: &[OffsetCommit],
-    ) -> i16 {
+    ) -> Result<(), GroupError> {
         let group = match self.local_group(group_id, true).await {
             Ok(group) => group,
-            Err(code) => return code,
+            Err(error) => return Err(error),
         };
         let stream = group_stream_name(group_id);
         let mut state = group.lock().await;
         state.expire_members(Instant::now());
         if generation_id >= 0 {
             if state.generation != generation_id {
-                return ILLEGAL_GENERATION;
+                return Err(GroupError::IllegalGeneration);
             }
             let Some(member) = state.members.get(member_id) else {
-                return UNKNOWN_MEMBER_ID;
+                return Err(GroupError::UnknownMember);
             };
             if member.instance_id.as_deref() != instance_id {
-                return FENCED_INSTANCE_ID;
+                return Err(GroupError::FencedInstance);
             }
             if state.phase != GroupPhase::Stable {
-                return REBALANCE_IN_PROGRESS;
+                return Err(GroupError::RebalanceInProgress);
             }
         }
         if commits.is_empty() {
-            return 0;
+            return Ok(());
         }
         let new_keys = commits
             .iter()
@@ -548,7 +587,7 @@ impl GroupCoordinator {
             })
             .count();
         if state.offsets.len() + new_keys > offsets::MAX_OFFSETS_PER_GROUP {
-            return GROUP_MAX_SIZE_REACHED;
+            return Err(GroupError::CapacityExceeded);
         }
         if let Err(error) = self
             .service
@@ -560,11 +599,11 @@ impl GroupCoordinator {
             })
             .await
         {
-            return match error.kind {
-                ErrorKind::NotFound | ErrorKind::Fenced => NOT_COORDINATOR,
-                ErrorKind::Durability => KAFKA_STORAGE_ERROR,
-                _ => INVALID_REQUEST,
-            };
+            return Err(match error.kind {
+                ErrorKind::NotFound | ErrorKind::Fenced => GroupError::NotCoordinator,
+                ErrorKind::Durability => GroupError::Storage,
+                _ => GroupError::InvalidRequest,
+            });
         }
         for commit in commits {
             state.offsets.insert(
@@ -576,7 +615,7 @@ impl GroupCoordinator {
         if state.appends_since_snapshot >= OFFSET_SNAPSHOT_INTERVAL {
             self.snapshot_and_trim(&stream, &mut state).await;
         }
-        0
+        Ok(())
     }
 
     async fn snapshot_and_trim(&self, stream: &str, state: &mut Group) {
@@ -604,13 +643,13 @@ impl GroupCoordinator {
         &self,
         group_id: &str,
         requested: Option<&[(String, Vec<i32>)]>,
-    ) -> Result<BTreeMap<String, Vec<(i32, CommittedOffset)>>, i16> {
+    ) -> Result<BTreeMap<String, Vec<(i32, CommittedOffset)>>, GroupError> {
         let group = match self.local_group(group_id, false).await {
             Ok(group) => group,
-            Err(GROUP_ID_NOT_FOUND) => {
+            Err(GroupError::GroupNotFound) => {
                 return Ok(empty_offset_fetch(requested));
             }
-            Err(code) => return Err(code),
+            Err(error) => return Err(error),
         };
         let state = group.lock().await;
         let mut result: BTreeMap<String, Vec<(i32, CommittedOffset)>> = BTreeMap::new();
@@ -646,9 +685,9 @@ impl GroupCoordinator {
     pub async fn describe(&self, group_id: &str) -> GroupDescription {
         let group = match self.local_group(group_id, false).await {
             Ok(group) => group,
-            Err(GROUP_ID_NOT_FOUND) => {
+            Err(GroupError::GroupNotFound) => {
                 return GroupDescription {
-                    error_code: 0,
+                    error: None,
                     group_id: group_id.to_owned(),
                     state: "Dead".to_owned(),
                     protocol_type: String::new(),
@@ -656,9 +695,9 @@ impl GroupCoordinator {
                     members: Vec::new(),
                 };
             }
-            Err(code) => {
+            Err(error) => {
                 return GroupDescription {
-                    error_code: code,
+                    error: Some(error),
                     group_id: group_id.to_owned(),
                     state: String::new(),
                     protocol_type: String::new(),
@@ -687,7 +726,7 @@ impl GroupCoordinator {
             })
             .collect();
         GroupDescription {
-            error_code: 0,
+            error: None,
             group_id: group_id.to_owned(),
             state: state.phase.as_str().to_owned(),
             protocol_type: state.protocol_type.clone(),
@@ -720,7 +759,11 @@ impl GroupCoordinator {
         listed
     }
 
-    async fn local_group(&self, group_id: &str, create: bool) -> Result<Arc<Mutex<Group>>, i16> {
+    async fn local_group(
+        &self,
+        group_id: &str,
+        create: bool,
+    ) -> Result<Arc<Mutex<Group>>, GroupError> {
         validate_group_id(group_id)?;
         let stream = group_stream_name(group_id);
         if create {
@@ -729,25 +772,25 @@ impl GroupCoordinator {
             .service
             .lookup_stream_id(&stream)
             .await
-            .map_err(|_| NOT_COORDINATOR)?
+            .map_err(|_| GroupError::NotCoordinator)?
             .is_none()
         {
-            return Err(GROUP_ID_NOT_FOUND);
+            return Err(GroupError::GroupNotFound);
         }
         let owner = self
             .ownership
             .owner_of(&stream)
             .await
-            .map_err(|_| NOT_COORDINATOR)?;
+            .map_err(|_| GroupError::NotCoordinator)?;
         if !owner.local {
-            return Err(NOT_COORDINATOR);
+            return Err(GroupError::NotCoordinator);
         }
         let stream_id = self
             .service
             .lookup_stream_id(&stream)
             .await
-            .map_err(|_| NOT_COORDINATOR)?
-            .ok_or(NOT_COORDINATOR)?;
+            .map_err(|_| GroupError::NotCoordinator)?
+            .ok_or(GroupError::NotCoordinator)?;
         let epoch = self
             .views
             .load()
@@ -764,7 +807,7 @@ impl GroupCoordinator {
             } else {
                 prune_empty_groups(&mut groups);
                 if groups.len() >= MAX_GROUPS {
-                    return Err(GROUP_MAX_SIZE_REACHED);
+                    return Err(GroupError::CapacityExceeded);
                 }
                 let group = Arc::new(Mutex::new(Group::loaded(i64::MIN, OffsetTable::new(), 0)));
                 groups.insert(group_id.to_owned(), Arc::clone(&group));
@@ -780,7 +823,7 @@ impl GroupCoordinator {
         Ok(group)
     }
 
-    async fn ensure_stream(&self, stream: &str) -> Result<(), i16> {
+    async fn ensure_stream(&self, stream: &str) -> Result<(), GroupError> {
         self.service
             .create(CreateCommand {
                 internal: true,
@@ -788,15 +831,15 @@ impl GroupCoordinator {
             })
             .await
             .map(|_| ())
-            .map_err(|_| COORDINATOR_NOT_AVAILABLE)
+            .map_err(|_| GroupError::CoordinatorNotAvailable)
     }
 
-    async fn replay_offsets(&self, stream: &str) -> Result<(OffsetTable, u64), i16> {
+    async fn replay_offsets(&self, stream: &str) -> Result<(OffsetTable, u64), GroupError> {
         let watermarks = self
             .service
             .watermarks(stream)
             .await
-            .map_err(|_| NOT_COORDINATOR)?;
+            .map_err(|_| GroupError::NotCoordinator)?;
         let mut cursor = watermarks.log_start_offset;
         let mut offsets = OffsetTable::new();
         let mut replayed = 0u64;
@@ -810,12 +853,13 @@ impl GroupCoordinator {
                     1024,
                 )
                 .await
-                .map_err(|_| NOT_COORDINATOR)?;
+                .map_err(|_| GroupError::NotCoordinator)?;
             if read.records.is_empty() {
                 break;
             }
             for record in read.records {
-                decode_into(&record.record.value, &mut offsets).map_err(|_| NOT_COORDINATOR)?;
+                decode_into(&record.record.value, &mut offsets)
+                    .map_err(|_| GroupError::NotCoordinator)?;
                 replayed += 1;
             }
             cursor = read.next_offset.record_offset();
