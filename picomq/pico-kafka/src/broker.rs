@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use picomq_group::GroupCoordinator;
 use picomq_metadata::{MetadataNodeHandle, ViewPublisher};
-use picomq_server::{MetadataOwnershipService, S3StreamService};
+use picomq_server::{GroupCoordinator, MetadataOwnershipService, S3StreamService};
 use tokio::sync::Mutex;
 
 const PRODUCER_ID_BLOCK: u32 = 256;

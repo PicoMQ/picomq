@@ -3,6 +3,7 @@
 pub mod alias;
 pub mod auth;
 pub mod error;
+pub mod group;
 pub mod node;
 pub mod ownership;
 pub mod producer;
@@ -15,6 +16,11 @@ pub mod waiter;
 
 pub use auth::{KvTokenStore, TOKEN_KEY_PREFIX, TokenService};
 pub use error::{ErrorKind, ServiceError};
+pub use group::{
+    CommittedOffset, CoordinatorEndpoint, GroupCoordinator, GroupDescription, GroupError,
+    JoinInput, JoinMember, JoinOutcome, JoinProtocol, ListedGroup, MemberDescription, OffsetCommit,
+    SyncInput, SyncOutcome,
+};
 pub use node::{NodeConfig, PicoNode};
 pub use ownership::{MetadataOwnershipService, OwnershipService};
 pub use picomq_schema::{

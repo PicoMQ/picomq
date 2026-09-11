@@ -13,7 +13,6 @@ bytes = { workspace = true }
 fastrand = { workspace = true }
 futures = { workspace = true }
 kafka-protocol = { workspace = true }
-picomq-group = { workspace = true }
 picomq-metadata = { workspace = true }
 picomq-server = { workspace = true }
 thiserror = { workspace = true }
