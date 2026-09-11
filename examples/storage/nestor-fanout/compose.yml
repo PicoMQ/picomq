@@ -1,0 +1,104 @@
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0-rc.3
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: picomq
+      RUSTFS_SECRET_KEY: picomqpicomq
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_OBS_LOGGER_LEVEL: error
+    volumes:
+      - rustfs-data:/data
+    ports:
+      - "19000:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  createbucket:
+    image: amazon/aws-cli:2.36.28
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: picomq
+      AWS_SECRET_ACCESS_KEY: picomqpicomq
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        aws --endpoint-url http://rustfs:9000 s3 mb s3://picomq 2>/dev/null || true
+        aws --endpoint-url http://rustfs:9000 s3 ls s3://picomq >/dev/null
+    restart: "no"
+
+  nestor:
+    image: ghcr.io/picomq/nestor:latest
+    platform: linux/amd64
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./nestor.toml:/etc/nestor/nestor.toml:ro
+      - nestor-disk:/var/lib/nestor
+    depends_on:
+      createbucket:
+        condition: service_completed_successfully
+    ports:
+      - "9000:9000"
+      - "9100:9100"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/-/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  pico:
+    image: ghcr.io/picomq/picomq:latest
+    platform: linux/amd64
+    environment:
+      PICO_PROTOCOL: pico
+      PICO_NODE_ID: "1"
+      PICO_LISTEN: 0.0.0.0:4437
+      PICO_ADMIN_LISTEN: 0.0.0.0:9090
+      PICO_HTTP_ADDRESS: http://localhost:4437
+      PICO_KAFKA_LISTEN: 0.0.0.0:9092
+      PICO_KAFKA_ADVERTISE: localhost:9092
+      PICO_AUTH: "off"
+      PICO_INSECURE_ALLOW_REMOTE: "true"
+      PICO_META_URL: sqlite:/data/meta.db
+      PICO_STORAGE: "-2@s3://picomq?region=us-east-1&endpoint=http://nestor:9000&pathStyle=true"
+      PICO_WAL: "0@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true&batchInterval=5"
+      AWS_ACCESS_KEY_ID: picomq
+      AWS_SECRET_ACCESS_KEY: picomqpicomq
+      AWS_REGION: us-east-1
+    # Small caches so replays leave the node. Defaults are 200 MiB and 100 MiB.
+    command:
+      - serve
+      - --wal-cache-size
+      - "8388608"
+      - --block-cache-size
+      - "1048576"
+      - --wal-upload-threshold
+      - "2097152"
+      - --wal-upload-interval-ms
+      - "200"
+    volumes:
+      - pico-data:/data
+    depends_on:
+      nestor:
+        condition: service_healthy
+    ports:
+      - "4437:4437"
+      - "9090:9090"
+      - "9092:9092"
+    restart: unless-stopped
+
+volumes:
+  rustfs-data:
+  nestor-disk:
+  pico-data:

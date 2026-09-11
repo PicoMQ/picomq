@@ -674,7 +674,7 @@ html {
 
 .VPSidebarItem.level-1 > .item:has(+ .items) {
   min-height: 2.15rem;
-  padding: 0.35rem 0.65rem;
+  padding: 0.35rem 0 0.35rem 0.65rem;
 }
 
 .VPSidebarItem.level-1 > .item:has(+ .items) .text {

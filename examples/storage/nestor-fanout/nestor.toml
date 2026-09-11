@@ -1,0 +1,28 @@
+[server]
+listen = "0.0.0.0:9000"
+metrics = "0.0.0.0:9100"
+
+[origin]
+endpoint = "http://rustfs:9000"
+region = "us-east-1"
+credentials = { source = "static", access_key = "picomq", secret_key = "picomqpicomq" }
+
+[auth]
+mode = "static"
+access_key = "picomq"
+secret_key = "picomqpicomq"
+
+[cache]
+memory = "256 MiB"
+
+[cache.disk]
+path = "/var/lib/nestor"
+capacity = "2 GiB"
+region_size = "16 MiB"
+
+[buckets]
+block_size = "1 MiB"
+# PicoMQ never reuses an object key.
+consistency = { mode = "immutable" }
+# PicoMQ prefetches for itself.
+readahead = 0

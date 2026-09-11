@@ -9,3 +9,4 @@
 | [`connectors/fleet-telematics-iceberg`](connectors/fleet-telematics-iceberg) | Fleet locations, one stream per fleet, Iceberg |
 | [`connectors/flink-dynamic-kafka`](connectors/flink-dynamic-kafka) | Prefix list, Dynamic Kafka, one file bucket per fleet |
 | [`protocols/multi-protocol`](protocols/multi-protocol) | One keyed record through Pico HTTP, the CLI, Kafka, and Durable Streams SSE |
+| [`storage/nestor-fanout`](storage/nestor-fanout) | Nestor as the S3 endpoint, 32 replays of one stream, one origin fetch per block |
