@@ -81,12 +81,20 @@ resource "aws_ecs_task_definition" "node" {
           hostPort      = 9090
           protocol      = "tcp"
         },
+        {
+          containerPort = 9092
+          hostPort      = 9092
+          protocol      = "tcp"
+        },
       ]
       environment = [
         { name = "PICO_NODE_ID", value = tostring(each.value.id) },
         { name = "PICO_LISTEN", value = "0.0.0.0:4437" },
         { name = "PICO_ADMIN_LISTEN", value = "0.0.0.0:9090" },
         { name = "PICO_HTTP_ADDRESS", value = "http://${each.value.host}" },
+        { name = "PICO_KAFKA_LISTEN", value = "0.0.0.0:9092" },
+        { name = "PICO_KAFKA_ADVERTISE", value = each.value.kafka_advertise },
+        { name = "PICO_INSECURE_ALLOW_REMOTE", value = "true" },
         { name = "PICO_META_URL", value = local.meta_url },
         { name = "PICO_STORAGE", value = local.storage },
         { name = "PICO_AUTH", value = "required" },
@@ -125,6 +133,8 @@ resource "aws_ecs_service" "node" {
 
   platform_version = "LATEST"
 
+  enable_execute_command = true
+
   deployment_minimum_healthy_percent = 0
   deployment_maximum_percent         = 100
 
@@ -145,8 +155,15 @@ resource "aws_ecs_service" "node" {
     container_port   = 4437
   }
 
+  load_balancer {
+    target_group_arn = aws_lb_target_group.kafka[each.key].arn
+    container_name   = "pico"
+    container_port   = 9092
+  }
+
   depends_on = [
     aws_lb_listener_rule.node,
+    aws_lb_listener.kafka,
     aws_db_instance.meta,
     aws_secretsmanager_secret_version.bootstrap,
   ]

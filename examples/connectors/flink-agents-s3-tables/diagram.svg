@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" width="760" role="img" aria-label="The ai-sdk app writes chat and agent streams to PicoMQ. Managed Flink reads them over Kafka and writes two S3 Tables.">
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0.5 L7.5 4 L0 7.5 Z" fill="#737373"/>
+    </marker>
+  </defs>
+  <rect x="16" y="82" width="130" height="56" rx="6" fill="#fafafa" stroke="#d4d4d4"/>
+  <text x="81" y="106" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#171717">ai-sdk app</text>
+  <text x="81" y="124" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#737373">Pico HTTP</text>
+  <rect x="216" y="52" width="170" height="40" rx="6" fill="#ece7db" stroke="#d4d4d4"/>
+  <text x="301" y="77" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" fill="#171717">chat/{id}</text>
+  <rect x="216" y="128" width="170" height="40" rx="6" fill="#ece7db" stroke="#d4d4d4"/>
+  <text x="301" y="153" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" fill="#171717">agent/run-{id}</text>
+  <rect x="456" y="82" width="130" height="56" rx="6" fill="#fafafa" stroke="#d4d4d4"/>
+  <text x="521" y="106" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#171717">Managed Flink</text>
+  <text x="521" y="124" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#737373">Dynamic Kafka</text>
+  <rect x="626" y="52" width="118" height="40" rx="6" fill="#ece7db" stroke="#d4d4d4"/>
+  <text x="685" y="77" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" fill="#171717">conversations</text>
+  <rect x="626" y="128" width="118" height="40" rx="6" fill="#ece7db" stroke="#d4d4d4"/>
+  <text x="685" y="153" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" fill="#171717">agent_events</text>
+  <path d="M146 100 L208 72" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M146 120 L208 148" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M386 72 L448 100" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M386 148 L448 120" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M586 100 L618 72" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M586 120 L618 148" fill="none" stroke="#737373" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="301" y="28" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#737373">PicoMQ streams</text>
+  <text x="685" y="28" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#737373">S3 Tables</text>
+  <text x="421" y="200" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#737373">Kafka 9092</text>
+</svg>

@@ -7,10 +7,26 @@ resource "aws_db_subnet_group" "meta" {
   }
 }
 
+resource "aws_db_parameter_group" "meta" {
+  name   = "${var.project}-meta-pg16"
+  family = "postgres16"
+
+  parameter {
+    name  = "rds.force_ssl"
+    value = "0"
+  }
+
+  tags = {
+    Name = "${var.project}-meta"
+  }
+}
+
 resource "aws_db_instance" "meta" {
   identifier     = "${var.project}-meta"
   engine         = "postgres"
   engine_version = "16"
+
+  parameter_group_name = aws_db_parameter_group.meta.name
 
   instance_class        = var.db_instance_class
   allocated_storage     = 20

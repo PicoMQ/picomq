@@ -11,13 +11,27 @@ The Terraform harness under `harness/terraform/aws` stands up a PicoMQ cluster o
 | S3 | Shared object store. Tasks use a task role, not static keys. |
 | ECS Fargate | One service and task definition per node. |
 | Internal ALB | Host-based routing to each node on protocol port `4437`. Health checks hit `/ready` on admin port `9090`. |
+| Internal NLB | The Kafka listener. One hostname, `kafka.<domain>`, with a TCP listener port per node (`9092` for node 1, `9093` for node 2, and so on). |
 | Private Route53 | Records under `domain` (default `picomq.internal`) that clients and redirects use. |
 | Secrets Manager | Bootstrap token for `--auth required`. |
 
 - `node_count = 1` uses `--routing local` and a single hostname (`domain`)
 - `node_count >= 2` uses `--routing redirect` and per-node hosts `pico-N.<domain>`
 
-The ALB is internal and listens on HTTP. Reach it from inside the VPC (bastion, VPN, SSM, or another workload). There is no public listener in this harness.
+Both load balancers are internal. Reach them from inside the VPC (bastion, VPN, SSM, or another workload). There is no public listener in this harness.
+
+## Kafka
+
+Every node runs the Kafka listener next to the HTTP one. Kafka is TCP with no Host header, so the ALB cannot route it: instead node N advertises `kafka.<domain>:<9092 + N - 1>` and the NLB forwards that port to that node. Clients bootstrap at `kafka.<domain>:9092` and follow the `Metadata` response to whichever node owns a topic.
+
+The Kafka listener carries no authentication (see [Kafka protocol](/docs/kafka#exposure)), so the tasks run with `PICO_INSECURE_ALLOW_REMOTE=true` for that bind. HTTP and admin still require tokens. The VPC boundary is what guards Kafka, which is why nothing in this harness is public.
+
+From inside the VPC:
+
+```bash
+kcat -b kafka.picomq.internal:9092 -L        # brokers and topics
+kcat -b kafka.picomq.internal:9092 -t orders -P
+```
 
 ## Prerequisites
 
@@ -82,8 +96,9 @@ terraform output
 Useful outputs:
 
 - `endpoints` — protocol URLs such as `http://pico-1.picomq.internal`
+- `kafka_bootstrap` — `kafka.picomq.internal:9092`, and `kafka_brokers` for the per-node advertised addresses
 - `bootstrap_secret_arn` — Secrets Manager ARN for the bootstrap token
-- `alb_dns_name`, `vpc_id`, `bucket`, `meta_endpoint` — for wiring clients and debugging
+- `alb_dns_name`, `kafka_nlb_dns_name`, `vpc_id`, `bucket`, `meta_endpoint` — for wiring clients and debugging
 
 Fetch the bootstrap token (value is the secret string):
 
@@ -100,7 +115,7 @@ curl -H "Authorization: Bearer <bootstrap-token>" \
   http://pico-1.picomq.internal/
 ```
 
-Admin API and dashboard listen on `9090` on the tasks. They are not published on the ALB. Reach them with a tunnel, sidecar, or security-group path into the task ENIs, same idea as keeping Fly's admin listener private.
+Admin API and dashboard listen on `9090` on the tasks. They are not published on either load balancer. Reach them with a tunnel, sidecar, or security-group path into the task ENIs, same idea as keeping Fly's admin listener private.
 
 ## Existing VPC
 

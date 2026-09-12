@@ -67,3 +67,21 @@ resource "aws_iam_role_policy" "task_s3" {
   role   = aws_iam_role.task.id
   policy = data.aws_iam_policy_document.task_s3.json
 }
+
+data "aws_iam_policy_document" "task_exec" {
+  statement {
+    actions = [
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "task_exec" {
+  name   = "exec"
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task_exec.json
+}
