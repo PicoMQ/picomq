@@ -1,6 +1,21 @@
-# Testing from your laptop against the AWS harness
+# Running this example against the AWS harness
 
-If you deployed `harness/terraform/aws` and want to run this example from your laptop: the cluster is VPC-only, so tunnel to the ALB through a node task with SSM, then point the example at the node hostnames.
+## Bringing the harness up and down
+
+```bash
+cd harness/terraform/aws
+export AWS_PROFILE=picomq-support AWS_REGION=us-east-1
+terraform init -backend-config=backend.hcl
+terraform apply -auto-approve
+```
+
+```bash
+terraform destroy -auto-approve
+```
+
+## Testing from your laptop
+
+The cluster is VPC-only, so tunnel to the ALB through a node task with SSM, then point the example at the node hostnames.
 
 Once:
 
