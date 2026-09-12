@@ -2,7 +2,8 @@
 //!
 
 use s3stream::{CompactOperations, S3ObjectMetadata, StreamMetadata};
-
+use crate::Protocol;
+use crate::Protocol::Kafka;
 use crate::state::MetadataState;
 
 impl MetadataState {
@@ -42,11 +43,12 @@ impl MetadataState {
     }
 
     /// Advertised listener address of `protocol` (`None` when unregistered
-    /// or the node does not serve that protocol).
-    pub fn get_node_protocol_address(&self, node_id: i32, protocol: &str) -> Option<&str> {
+    /// or the node does not serve that protocol).  Only supports Kafka right now
+    pub fn get_node_protocol_address(&self, node_id: i32, protocol: Protocol) -> Option<&str> {
+        assert_eq!(protocol, Kafka);
         self.nodes
             .get(&node_id)
-            .and_then(|n| n.protocol_addresses.get(protocol))
+            .and_then(|n| n.protocol_addresses.get(protocol.as_str()))
             .map(String::as_str)
             .filter(|a| !a.is_empty())
     }
@@ -218,6 +220,7 @@ mod tests {
 
     use crate::apply::apply;
     use crate::command::{MetadataCommand, MetadataResult};
+    use crate::Protocol::Kafka;
     use crate::state::MetadataState;
 
     const NODE_1: i32 = 1;
@@ -353,11 +356,11 @@ mod tests {
             "empty address is unadvertised"
         );
         assert_eq!(
-            state.get_node_protocol_address(NODE_1, "kafka"),
+            state.get_node_protocol_address(NODE_1, Kafka),
             Some("n1:9092")
         );
-        assert_eq!(state.get_node_protocol_address(NODE_2, "kafka"), None);
-        assert_eq!(state.get_node_protocol_address(999, "kafka"), None);
+        assert_eq!(state.get_node_protocol_address(NODE_2, Kafka), None);
+        assert_eq!(state.get_node_protocol_address(999, Kafka), None);
     }
 
     #[test]

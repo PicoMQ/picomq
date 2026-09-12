@@ -26,3 +26,20 @@ pub use manager::{
 pub use sink::{CommandSink, LocalSink, SinkStats, SnapshotStats};
 pub use state::{MetadataState, StreamOffsetKey};
 pub use view::{MetadataView, ViewPublisher};
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug, Copy)]
+pub enum Protocol {
+    Kafka,
+    Pico,
+    Ds
+}
+
+impl Protocol {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Kafka => "kafka",
+            Self::Pico => "pico",
+            Self::Ds => "ds",
+        }
+    }
+}

@@ -45,6 +45,7 @@ pub enum GroupError {
 pub use offsets::{CommittedOffset, OffsetCommit};
 
 use offsets::{OffsetTable, decode_into, empty_offset_fetch, encode_commits, encode_snapshot};
+use picomq_metadata::Protocol;
 use state::{
     Group, GroupPhase, MAX_GROUPS, MAX_MEMBERS_PER_GROUP, Rebalance, complete_rebalance,
     group_stream_name, member_from_input, new_member_id, prune_empty_groups, remove_member,
@@ -167,7 +168,6 @@ pub struct ListedGroup {
 
 pub struct GroupCoordinator {
     node_id: i32,
-    protocol_name: &'static str,
     service: Arc<S3StreamService>,
     ownership: Arc<MetadataOwnershipService>,
     views: Arc<picomq_metadata::ViewPublisher>,
@@ -180,11 +180,9 @@ impl GroupCoordinator {
         service: Arc<S3StreamService>,
         ownership: Arc<MetadataOwnershipService>,
         views: Arc<picomq_metadata::ViewPublisher>,
-        protocol_name: &'static str,
     ) -> Arc<Self> {
         Arc::new(Self {
             node_id,
-            protocol_name,
             service,
             ownership,
             views,
@@ -195,6 +193,7 @@ impl GroupCoordinator {
     pub async fn find_coordinator(
         &self,
         group_id: &str,
+        protocol: Protocol
     ) -> Result<CoordinatorEndpoint, GroupError> {
         validate_group_id(group_id)?;
         let stream = group_stream_name(group_id);
@@ -211,12 +210,20 @@ impl GroupCoordinator {
                 .ok_or(GroupError::CoordinatorNotAvailable)?
         };
         let view = self.views.load();
-        let address = view
-            .state
-            .get_node_protocol_address(node_id, self.protocol_name)
-            .filter(|address| !address.is_empty())
-            .ok_or(GroupError::CoordinatorNotAvailable)?
-            .to_owned();
+        let address;
+        match protocol {
+            Protocol::Kafka => {
+                address = view
+                    .state
+                    .get_node_protocol_address(node_id, protocol)
+                    .filter(|address| !address.is_empty())
+                    .ok_or(GroupError::CoordinatorNotAvailable)?
+                    .to_owned();
+            }
+            Protocol::Pico | Protocol::Ds => {
+                address = self.ownership.local_node().advertised_address;
+            }
+        }
         Ok(CoordinatorEndpoint { node_id, address })
     }
 

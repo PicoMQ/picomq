@@ -18,7 +18,7 @@ use kafka_protocol::messages::{
     OffsetFetchRequest, SyncGroupRequest,
 };
 use kafka_protocol::protocol::{Decodable, StrBytes};
-
+use picomq_metadata::Protocol::Kafka;
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
@@ -78,7 +78,7 @@ async fn find_coordinator(
     let request = FindCoordinatorRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
     let result = if request.key_type == 0 {
-        ctx.groups.find_coordinator(request.key.as_str()).await
+        ctx.groups.find_coordinator(request.key.as_str(), Kafka).await
     } else {
         Err(GroupError::InvalidRequest)
     };

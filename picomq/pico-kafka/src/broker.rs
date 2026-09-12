@@ -48,7 +48,6 @@ impl BrokerContext {
             service.clone(),
             ownership.clone(),
             views.clone(),
-            crate::PROTOCOL_NAME,
         );
         Self {
             node_id,
