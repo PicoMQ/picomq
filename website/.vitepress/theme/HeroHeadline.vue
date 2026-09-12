@@ -95,8 +95,4 @@ onBeforeUnmount(() => {
     PicoMQ is durable, real-time streams over HTTP and Kafka,<br />
     built on S3-compatible object storage.
   </p>
-  <p class="pico-hero-tags">
-    <span>Open source</span>
-    <span>Built with Rust</span>
-  </p>
 </template>
