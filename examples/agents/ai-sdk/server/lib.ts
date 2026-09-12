@@ -3,6 +3,7 @@ import type { PicoClient } from '@picomq/client'
 
 export const PORT = Number(process.env.PORT ?? 3456)
 export const ENDPOINT = process.env.PICO_ENDPOINT ?? 'http://127.0.0.1:4437'
+export const TOKEN = process.env.PICO_TOKEN || undefined
 export const CT = 'application/json'
 export const MAX_CONTEXT = Number(process.env.AI_SDK_MAX_CONTEXT_MESSAGES ?? 40)
 

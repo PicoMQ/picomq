@@ -3,10 +3,14 @@ locals {
 
   create_s3_endpoint = local.create_network || var.create_s3_endpoint
 
+  kafka_host = "kafka.${var.domain}"
+
   nodes = {
     for i in range(1, var.node_count + 1) : tostring(i) => {
-      id   = i
-      host = var.node_count == 1 ? var.domain : "pico-${i}.${var.domain}"
+      id              = i
+      host            = var.node_count == 1 ? var.domain : "pico-${i}.${var.domain}"
+      kafka_port      = 9092 + i - 1
+      kafka_advertise = "kafka.${var.domain}:${9092 + i - 1}"
     }
   }
 

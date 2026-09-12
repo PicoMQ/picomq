@@ -60,6 +60,14 @@ resource "aws_security_group" "task" {
     cidr_blocks = [data.aws_vpc.selected.cidr_block]
   }
 
+  ingress {
+    description = "Kafka from VPC"
+    from_port   = 9092
+    to_port     = 9092
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.selected.cidr_block]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

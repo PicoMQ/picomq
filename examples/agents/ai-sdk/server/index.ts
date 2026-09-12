@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { dirname, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { connect } from '@picomq/client'
-import { ENDPOINT, PORT, asRequest } from './lib'
+import { ENDPOINT, PORT, TOKEN, asRequest } from './lib'
 import {
   CHAT_PREFIX,
   activeChatStream,
@@ -127,7 +127,7 @@ async function route(req: IncomingMessage, url: URL): Promise<Response> {
   return serveStatic(url.pathname)
 }
 
-const pico = connect('pico', ENDPOINT)
+const pico = connect('pico', ENDPOINT, { token: TOKEN })
 await initChat(pico)
 initAgent(pico)
 await initMulti(pico)

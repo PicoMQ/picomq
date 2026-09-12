@@ -16,6 +16,20 @@ output "alb_dns_name" {
   value = aws_lb.this.dns_name
 }
 
+output "kafka_bootstrap" {
+  value = "${local.kafka_host}:9092"
+}
+
+output "kafka_brokers" {
+  value = {
+    for key, node in local.nodes : key => node.kafka_advertise
+  }
+}
+
+output "kafka_nlb_dns_name" {
+  value = aws_lb.kafka.dns_name
+}
+
 output "vpc_id" {
   value = local.vpc_id
 }
