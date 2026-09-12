@@ -1,0 +1,5 @@
+bucket       = "picomq-terraform-state"
+key          = "harness/aws/terraform.tfstate"
+region       = "us-east-1"
+encrypt      = true
+use_lockfile = true
