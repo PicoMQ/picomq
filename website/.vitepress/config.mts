@@ -118,6 +118,7 @@ const docsSidebar = [
           { text: 'Postgres CDC to ClickHouse', link: '/docs/examples/connectors/postgres-cdc-clickhouse' },
           { text: 'Fleet telematics to Iceberg', link: '/docs/examples/connectors/fleet-telematics-iceberg' },
           { text: 'Flink Dynamic Kafka', link: '/docs/examples/connectors/flink-dynamic-kafka' },
+          { text: 'Flink agents to S3 Tables', link: '/docs/examples/connectors/flink-agents-s3-tables' },
         ],
       },
       {
@@ -205,6 +206,7 @@ export default defineConfig({
     nav: [
       { text: 'Docs', link: '/docs' },
       { text: 'Contribute', link: '/docs/contribute' },
+      { text: 'Nestor', link: 'https://nestor.picomq.com/' },
       { text: 'Discord', link: 'https://discord.gg/qsMy5sSpYX' },
       { text: 'GitHub', link: 'https://github.com/picomq/picomq' },
     ],
