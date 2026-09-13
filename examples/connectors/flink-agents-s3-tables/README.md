@@ -9,7 +9,7 @@ The [`agents/ai-sdk`](../../agents/ai-sdk) app writes chat and agent runs to Pic
 | `…/chat/{id}` | `agents.conversations` | `stream, seq, role, content, ts` |
 | `…/agent/run-{id}` | `agents.agent_events` | `stream, seq, type, step_index, finish_reason, total_tokens, tools, ts` |
 
-PicoMQ ships a native Iceberg sink ([`fleet-telematics-iceberg`](../fleet-telematics-iceberg)). This example uses the Kafka protocol into a third-party engine instead.
+PicoMQ ships an Iceberg sink connector ([`fleet-telematics-iceberg`](../fleet-telematics-iceberg)). This example uses the Kafka protocol into a third-party engine instead.
 
 ## Prerequisites
 
