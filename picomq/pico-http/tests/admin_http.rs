@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use picomq_http::{HttpProtocol, ServeOptions, serve};
+use picomq_server::GroupCoordinator;
 
 #[tokio::test]
 async fn health_and_ready() {
@@ -41,6 +42,12 @@ async fn health_and_ready() {
 async fn ready_fails_while_draining() {
     let node = common::start_node().await;
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
+    let groups = GroupCoordinator::new(
+        node.config().node_id,
+        node.service(),
+        node.ownership(),
+        node.views(),
+    );
     let server = serve(
         node,
         ServeOptions {
@@ -50,6 +57,7 @@ async fn ready_fails_while_draining() {
             shutdown_drain: Duration::from_secs(2),
             ..Default::default()
         },
+        groups,
     )
     .await
     .unwrap();
@@ -294,6 +302,12 @@ async fn dashboard_is_served_at_root() {
 #[tokio::test]
 async fn admin_listener_can_be_disabled() {
     let node = common::start_node().await;
+    let groups = GroupCoordinator::new(
+        node.config().node_id,
+        node.service(),
+        node.ownership(),
+        node.views(),
+    );
     let server = serve(
         node,
         ServeOptions {
@@ -301,6 +315,7 @@ async fn admin_listener_can_be_disabled() {
             admin_addr: None,
             ..Default::default()
         },
+        groups,
     )
     .await
     .unwrap();

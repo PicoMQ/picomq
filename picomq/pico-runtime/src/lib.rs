@@ -8,7 +8,7 @@ use std::time::Duration;
 use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore, Verifier};
 use picomq_http::{RunningServer, ServeOptions};
 use picomq_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
-use picomq_server::{KvTokenStore, NodeConfig, PicoNode};
+use picomq_server::{GroupCoordinator, KvTokenStore, NodeConfig, PicoNode};
 use picomq_sql::{
     LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig, SqliteStore,
 };
@@ -178,8 +178,19 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         .spawn_ttl_sweep(lease.leadership(), LIFECYCLE_TICK);
     let compaction_check = node.service().spawn_compaction_check(LIFECYCLE_TICK);
 
-    let kafka = kafka_listener
-        .map(|(listener, bound)| (bound, spawn_kafka(&config, &node, listener, bound)));
+    let groups = GroupCoordinator::new(
+        config.node_id,
+        node.service(),
+        node.ownership(),
+        node.views(),
+    );
+
+    let kafka = kafka_listener.map(|(listener, bound)| {
+        (
+            bound,
+            spawn_kafka(&config, &node, listener, bound, groups.clone()),
+        )
+    });
 
     let addr = config.addr;
     let authorizer = match config.auth_mode {
@@ -202,6 +213,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             leadership: Some(lease.leadership()),
             authorizer,
         },
+        groups,
     )
     .await
     .map_err(|source| RuntimeError::Bind { addr, source })?;
@@ -236,6 +248,7 @@ fn spawn_kafka(
     node: &Arc<PicoNode>,
     listener: tokio::net::TcpListener,
     bound: std::net::SocketAddr,
+    groups: Arc<GroupCoordinator>,
 ) -> tokio::task::JoinHandle<()> {
     let broker = Arc::new(picomq_kafka::BrokerContext::new(
         config.node_id,
@@ -244,6 +257,7 @@ fn spawn_kafka(
         node.ownership(),
         node.views(),
         node.metadata().clone(),
+        groups,
     ));
     let listener_config = picomq_kafka::ListenerConfig {
         addr: bound,

@@ -15,7 +15,7 @@ use kafka_protocol::records::{
 };
 use picomq_kafka::{BrokerContext, HandlerOutcome, KafkaListener, ListenerConfig, dispatch};
 use picomq_metadata::{CommandSink, LocalSink};
-use picomq_server::{NodeConfig, PicoNode};
+use picomq_server::{GroupCoordinator, NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 use tokio::net::TcpListener;
 
@@ -47,6 +47,12 @@ async fn test_broker() -> BrokerContext {
     )
     .await
     .unwrap();
+    let groups = GroupCoordinator::new(
+        node.config().node_id,
+        node.service(),
+        node.ownership(),
+        node.views(),
+    );
     BrokerContext::new(
         node.config().node_id,
         node.config().cluster_id.clone(),
@@ -54,6 +60,7 @@ async fn test_broker() -> BrokerContext {
         node.ownership(),
         node.views(),
         node.metadata().clone(),
+        groups,
     )
 }
 
@@ -837,6 +844,12 @@ async fn classic_group_lifecycle_and_offset_replay() {
     let committed = OffsetCommitResponse::decode(&mut buf, 7).unwrap();
     assert_eq!(committed.topics[0].partitions[0].error_code, 0);
 
+    let restarted_groups = GroupCoordinator::new(
+        broker.node_id,
+        broker.service.clone(),
+        broker.ownership.clone(),
+        broker.views.clone(),
+    );
     let restarted = BrokerContext::new(
         broker.node_id,
         broker.cluster_id.clone(),
@@ -844,6 +857,7 @@ async fn classic_group_lifecycle_and_offset_replay() {
         broker.ownership.clone(),
         broker.views.clone(),
         broker.metadata.clone(),
+        restarted_groups,
     );
     let fetch = encode_request(
         ApiKey::OffsetFetch,
@@ -933,6 +947,12 @@ async fn create_topics_binds_picomq_schema_and_validates_produce() {
     )
     .await
     .unwrap();
+    let groups = GroupCoordinator::new(
+        node.config().node_id,
+        node.service(),
+        node.ownership(),
+        node.views(),
+    );
     let broker = BrokerContext::new(
         node.config().node_id,
         node.config().cluster_id.clone(),
@@ -940,6 +960,7 @@ async fn create_topics_binds_picomq_schema_and_validates_produce() {
         node.ownership(),
         node.views(),
         node.metadata().clone(),
+        groups,
     );
 
     let create_req = encode_request(

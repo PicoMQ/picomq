@@ -45,6 +45,7 @@ pub enum GroupError {
 pub use offsets::{CommittedOffset, OffsetCommit};
 
 use offsets::{OffsetTable, decode_into, empty_offset_fetch, encode_commits, encode_snapshot};
+use picomq_metadata::Protocol;
 use state::{
     Group, GroupPhase, MAX_GROUPS, MAX_MEMBERS_PER_GROUP, Rebalance, complete_rebalance,
     group_stream_name, member_from_input, new_member_id, prune_empty_groups, remove_member,
@@ -167,7 +168,6 @@ pub struct ListedGroup {
 
 pub struct GroupCoordinator {
     node_id: i32,
-    protocol_name: &'static str,
     service: Arc<S3StreamService>,
     ownership: Arc<MetadataOwnershipService>,
     views: Arc<picomq_metadata::ViewPublisher>,
@@ -180,11 +180,9 @@ impl GroupCoordinator {
         service: Arc<S3StreamService>,
         ownership: Arc<MetadataOwnershipService>,
         views: Arc<picomq_metadata::ViewPublisher>,
-        protocol_name: &'static str,
     ) -> Arc<Self> {
         Arc::new(Self {
             node_id,
-            protocol_name,
             service,
             ownership,
             views,
@@ -195,6 +193,7 @@ impl GroupCoordinator {
     pub async fn find_coordinator(
         &self,
         group_id: &str,
+        protocol: Protocol,
     ) -> Result<CoordinatorEndpoint, GroupError> {
         validate_group_id(group_id)?;
         let stream = group_stream_name(group_id);
@@ -211,12 +210,25 @@ impl GroupCoordinator {
                 .ok_or(GroupError::CoordinatorNotAvailable)?
         };
         let view = self.views.load();
-        let address = view
-            .state
-            .get_node_protocol_address(node_id, self.protocol_name)
-            .filter(|address| !address.is_empty())
-            .ok_or(GroupError::CoordinatorNotAvailable)?
-            .to_owned();
+
+        let address = match protocol {
+            Protocol::Kafka => view
+                .state
+                .get_node_protocol_address(node_id, protocol)
+                .filter(|address| !address.is_empty())
+                .ok_or(GroupError::CoordinatorNotAvailable)?
+                .to_owned(),
+            Protocol::Pico | Protocol::Ds => {
+                // this code is kinda similar to picomq/pico-http/src/admin.rs:301 we may want to unify
+                if owner.local {
+                    self.ownership.local_node().advertised_address
+                } else {
+                    owner
+                        .owner_advertised_address
+                        .ok_or(GroupError::CoordinatorNotAvailable)?
+                }
+            }
+        };
         Ok(CoordinatorEndpoint { node_id, address })
     }
 
@@ -865,5 +877,142 @@ impl GroupCoordinator {
             cursor = read.next_offset.record_offset();
         }
         Ok((offsets, replayed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{NodeConfig, PicoNode};
+    use picomq_metadata::{LocalSink, MetadataCommand, MetadataView, apply};
+    use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
+
+    async fn start_node(node_id: i32, http_address: &str) -> Arc<PicoNode> {
+        let (sink, views) = LocalSink::new();
+        let object_storage: Arc<dyn ObjectStorageTrait> =
+            Arc::new(MemoryObjectStorage::new(node_id as i16));
+        let wal_storage: Arc<dyn ObjectStorageTrait> =
+            Arc::new(MemoryObjectStorage::new(node_id as i16 + 100));
+        let engine = s3stream::Config {
+            wal_upload_interval_ms: 200,
+            wal_config: "3@mem://wal?batchInterval=5".into(),
+            ..Default::default()
+        };
+        Arc::new(
+            PicoNode::start(
+                NodeConfig {
+                    node_id,
+                    node_epoch: 1,
+                    http_address: http_address.to_owned(),
+                    engine,
+                    ..Default::default()
+                },
+                Arc::new(sink),
+                views,
+                object_storage,
+                wal_storage,
+                None,
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    // Regression test for a bug where `find_coordinator` returned this
+    // node's own advertised address for the Pico/Ds protocols even when a
+    // *different* node owned the group's stream. Callers would then be
+    // pointed at the wrong coordinator instead of the remote owner.
+    #[tokio::test]
+    async fn find_coordinator_pico_protocol_uses_remote_owner_address() {
+        let node = start_node(1, "http://local:4437").await;
+        let groups = GroupCoordinator::new(
+            node.config().node_id,
+            node.service(),
+            node.ownership(),
+            node.views(),
+        );
+
+        let group_id = "test-group";
+        let stream = group_stream_name(group_id);
+        groups.ensure_stream(&stream).await.unwrap();
+
+        // Simulate the stream being owned by a remote node: register node 2,
+        // close the stream on node 1, then re-open it on node 2 -- the same
+        // command sequence a real ownership transfer would replicate.
+        let stream_id = node
+            .service()
+            .lookup_stream_id(&stream)
+            .await
+            .unwrap()
+            .unwrap();
+        let view = node.views().load();
+        let mut state = view.state.clone();
+        let current = state.streams.get(&stream_id).copied().unwrap();
+
+        apply(
+            &mut state,
+            &MetadataCommand::RegisterNode {
+                node_id: 2,
+                node_epoch: 1,
+                http_address: "http://remote:9999".to_owned(),
+                slots: 1,
+                protocol_addresses: Default::default(),
+            },
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &MetadataCommand::CloseStream {
+                node_id: current.node_id,
+                node_epoch: node.config().node_epoch,
+                stream_id,
+                epoch: current.epoch,
+            },
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &MetadataCommand::OpenStream {
+                node_id: 2,
+                node_epoch: 1,
+                stream_id,
+                epoch: current.epoch + 1,
+            },
+        )
+        .unwrap();
+
+        node.views().publish(MetadataView {
+            applied_index: view.applied_index + 1,
+            state,
+        });
+
+        let endpoint = groups
+            .find_coordinator(group_id, Protocol::Pico)
+            .await
+            .unwrap();
+        assert_eq!(endpoint.node_id, 2);
+        assert_eq!(endpoint.address, "http://remote:9999");
+    }
+
+    #[tokio::test]
+    async fn find_coordinator_pico_protocol_uses_local_address_when_local() {
+        let node = start_node(1, "http://local:4437").await;
+        let groups = GroupCoordinator::new(
+            node.config().node_id,
+            node.service(),
+            node.ownership(),
+            node.views(),
+        );
+
+        let group_id = "test-group";
+        let stream = group_stream_name(group_id);
+        groups.ensure_stream(&stream).await.unwrap();
+
+        let endpoint = groups
+            .find_coordinator(group_id, Protocol::Pico)
+            .await
+            .unwrap();
+        assert_eq!(endpoint.node_id, 1);
+        assert_eq!(endpoint.address, "http://local:4437");
     }
 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore};
 use picomq_http::{HttpProtocol, RoutingMode, RunningServer, ServeOptions, serve};
-use picomq_server::PicoNode;
+use picomq_server::{GroupCoordinator, PicoNode};
 use serde_json::{Value, json};
 
 async fn admin_server() -> (RunningServer, String, Arc<PicoNode>) {
@@ -26,6 +26,12 @@ async fn admin_server() -> (RunningServer, String, Arc<PicoNode>) {
         .await
         .unwrap();
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
+    let groups = GroupCoordinator::new(
+        node.config().node_id,
+        node.service(),
+        node.ownership(),
+        node.views(),
+    );
     let server = serve(
         node.clone(),
         ServeOptions {
@@ -36,6 +42,7 @@ async fn admin_server() -> (RunningServer, String, Arc<PicoNode>) {
             authorizer: Some(node.authorizer()),
             ..Default::default()
         },
+        groups,
     )
     .await
     .unwrap();
