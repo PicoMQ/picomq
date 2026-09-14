@@ -10,7 +10,7 @@ use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
 use picomq_http::{HttpProtocol, RoutingMode, ServeOptions, serve};
-use picomq_server::PicoNode;
+use picomq_server::{GroupCoordinator, PicoNode};
 
 fn full_stream_scope(prefix: &str, auto_prefix: bool) -> Scope {
     Scope {
@@ -44,6 +44,12 @@ async fn gated_server(
         .await
         .unwrap();
 
+    let groups = GroupCoordinator::new(
+        node.config().node_id,
+        node.service(),
+        node.ownership(),
+        node.views(),
+    );
     let server = serve(
         node.clone(),
         ServeOptions {
@@ -54,6 +60,7 @@ async fn gated_server(
             authorizer: Some(node.authorizer()),
             ..Default::default()
         },
+        groups,
     )
     .await
     .unwrap();

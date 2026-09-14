@@ -42,13 +42,8 @@ impl BrokerContext {
         ownership: Arc<MetadataOwnershipService>,
         views: Arc<ViewPublisher>,
         metadata: MetadataNodeHandle,
+        groups: Arc<GroupCoordinator>,
     ) -> Self {
-        let groups = GroupCoordinator::new(
-            node_id,
-            service.clone(),
-            ownership.clone(),
-            views.clone(),
-        );
         Self {
             node_id,
             cluster_id,

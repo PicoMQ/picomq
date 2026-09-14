@@ -10,7 +10,7 @@ use std::time::Duration;
 use picomq_http::{HttpProtocol, RoutingMode, RunningServer, ServeOptions, serve};
 use picomq_metadata::LocalSink;
 use picomq_schema::{Registry, SchemaStore};
-use picomq_server::{NodeConfig, PicoNode};
+use picomq_server::{GroupCoordinator, NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
 pub struct TestServer {
@@ -66,6 +66,12 @@ async fn start(protocol: HttpProtocol) -> TestServer {
 
 async fn start_with_node(protocol: HttpProtocol, node: Arc<PicoNode>) -> TestServer {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
+    let groups = GroupCoordinator::new(
+        node.config().node_id,
+        node.service(),
+        node.ownership(),
+        node.views(),
+    );
     let server = serve(
         node.clone(),
         ServeOptions {
@@ -79,6 +85,7 @@ async fn start_with_node(protocol: HttpProtocol, node: Arc<PicoNode>) -> TestSer
             max_request_size: 32 * 1024 * 1024,
             ..Default::default()
         },
+        groups,
     )
     .await
     .unwrap();

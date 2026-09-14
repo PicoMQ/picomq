@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use axum::Router;
 use picomq_auth::Authorizer;
-use picomq_server::PicoNode;
+use picomq_server::{GroupCoordinator, PicoNode};
 use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -89,6 +89,7 @@ pub struct RunningServer {
     stop: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
     shutdown_drain: Duration,
+    groups: Arc<GroupCoordinator>,
 }
 
 /// Bind `options.protocol` on `options.addr` and, when configured, the admin
@@ -97,7 +98,11 @@ pub struct RunningServer {
 /// The node is constructed by the caller, which lets one node be served by
 /// different sockets in tests and keeps this crate free of metadata-backend
 /// choices.
-pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Result<RunningServer> {
+pub async fn serve(
+    node: Arc<PicoNode>,
+    options: ServeOptions,
+    groups: Arc<GroupCoordinator>,
+) -> std::io::Result<RunningServer> {
     let common_router = common::router(
         node.service(),
         node.ownership(),
@@ -172,6 +177,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
         stop,
         tasks,
         shutdown_drain: options.shutdown_drain,
+        groups,
     })
 }
 
@@ -234,6 +240,11 @@ impl RunningServer {
 
     pub fn node(&self) -> Arc<PicoNode> {
         self.node.clone()
+    }
+
+    /// The consumer-group coordinator shared with the Kafka listener.
+    pub fn groups(&self) -> Arc<GroupCoordinator> {
+        self.groups.clone()
     }
 
     /// (fail readiness, wait out the drain window), stop accepting and let
