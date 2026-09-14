@@ -16,6 +16,7 @@ use s3stream::{
 
 use crate::auth::TokenService;
 use crate::error::ServiceError;
+use crate::group::GroupCoordinator;
 use crate::ownership::MetadataOwnershipService;
 use crate::service::S3StreamService;
 use crate::transfer::TransferWatcher;
@@ -58,6 +59,7 @@ pub struct PicoNode {
     engine: S3StreamEngine,
     service: Arc<S3StreamService>,
     ownership: Arc<MetadataOwnershipService>,
+    groups: Arc<GroupCoordinator>,
     tokens: Arc<TokenService>,
     transfer_watcher: tokio::task::JoinHandle<()>,
 }
@@ -117,6 +119,12 @@ impl PicoNode {
             config.http_address.clone(),
             service.clone(),
         ));
+        let groups = GroupCoordinator::new(
+            config.node_id,
+            service.clone(),
+            ownership.clone(),
+            views.clone(),
+        );
         let tokens = Arc::new(TokenService::new(kv_client));
         let transfer_watcher =
             TransferWatcher::spawn(service.clone(), views.clone(), config.node_id);
@@ -128,6 +136,7 @@ impl PicoNode {
             engine,
             service,
             ownership,
+            groups,
             tokens,
             transfer_watcher,
         })
@@ -143,6 +152,10 @@ impl PicoNode {
 
     pub fn ownership(&self) -> Arc<MetadataOwnershipService> {
         self.ownership.clone()
+    }
+
+    pub fn groups(&self) -> Arc<GroupCoordinator> {
+        self.groups.clone()
     }
 
     pub fn tokens(&self) -> Arc<TokenService> {

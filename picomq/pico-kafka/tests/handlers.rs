@@ -47,14 +47,7 @@ async fn test_broker() -> BrokerContext {
     )
     .await
     .unwrap();
-    BrokerContext::new(
-        node.config().node_id,
-        node.config().cluster_id.clone(),
-        node.service(),
-        node.ownership(),
-        node.views(),
-        node.metadata().clone(),
-    )
+    BrokerContext::new(&node)
 }
 
 fn encode_request<T: Encodable>(
@@ -837,14 +830,6 @@ async fn classic_group_lifecycle_and_offset_replay() {
     let committed = OffsetCommitResponse::decode(&mut buf, 7).unwrap();
     assert_eq!(committed.topics[0].partitions[0].error_code, 0);
 
-    let restarted = BrokerContext::new(
-        broker.node_id,
-        broker.cluster_id.clone(),
-        broker.service.clone(),
-        broker.ownership.clone(),
-        broker.views.clone(),
-        broker.metadata.clone(),
-    );
     let fetch = encode_request(
         ApiKey::OffsetFetch,
         7,
@@ -858,7 +843,7 @@ async fn classic_group_lifecycle_and_offset_replay() {
             ]))
             .with_require_stable(true),
     );
-    let mut buf = response_body(&restarted, &fetch).await;
+    let mut buf = response_body(&broker, &fetch).await;
     ResponseHeader::decode(&mut buf, OffsetFetchResponse::header_version(7)).unwrap();
     let fetched = OffsetFetchResponse::decode(&mut buf, 7).unwrap();
     assert_eq!(fetched.error_code, 0);
@@ -933,14 +918,7 @@ async fn create_topics_binds_picomq_schema_and_validates_produce() {
     )
     .await
     .unwrap();
-    let broker = BrokerContext::new(
-        node.config().node_id,
-        node.config().cluster_id.clone(),
-        node.service(),
-        node.ownership(),
-        node.views(),
-        node.metadata().clone(),
-    );
+    let broker = BrokerContext::new(&node);
 
     let create_req = encode_request(
         ApiKey::CreateTopics,

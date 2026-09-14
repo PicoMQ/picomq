@@ -55,12 +55,6 @@ const GROUP_CONTENT_TYPE: &str = "application/vnd.picomq.kafka-group-state";
 const OFFSET_SNAPSHOT_INTERVAL: u64 = 64;
 
 #[derive(Debug, Clone)]
-pub struct CoordinatorEndpoint {
-    pub node_id: i32,
-    pub address: String,
-}
-
-#[derive(Debug, Clone)]
 pub struct JoinProtocol {
     pub name: String,
     pub metadata: Bytes,
@@ -167,7 +161,6 @@ pub struct ListedGroup {
 
 pub struct GroupCoordinator {
     node_id: i32,
-    protocol_name: &'static str,
     service: Arc<S3StreamService>,
     ownership: Arc<MetadataOwnershipService>,
     views: Arc<picomq_metadata::ViewPublisher>,
@@ -180,11 +173,9 @@ impl GroupCoordinator {
         service: Arc<S3StreamService>,
         ownership: Arc<MetadataOwnershipService>,
         views: Arc<picomq_metadata::ViewPublisher>,
-        protocol_name: &'static str,
     ) -> Arc<Self> {
         Arc::new(Self {
             node_id,
-            protocol_name,
             service,
             ownership,
             views,
@@ -192,10 +183,10 @@ impl GroupCoordinator {
         })
     }
 
-    pub async fn find_coordinator(
-        &self,
-        group_id: &str,
-    ) -> Result<CoordinatorEndpoint, GroupError> {
+    /// The node that coordinates `group_id`: the owner of the group's
+    /// internal stream. Callers map the node to an address for their
+    /// protocol.
+    pub async fn find_coordinator(&self, group_id: &str) -> Result<i32, GroupError> {
         validate_group_id(group_id)?;
         let stream = group_stream_name(group_id);
         let owner = self
@@ -203,21 +194,12 @@ impl GroupCoordinator {
             .owner_of(&stream)
             .await
             .map_err(|_| GroupError::CoordinatorNotAvailable)?;
-        let node_id = if owner.local {
-            self.node_id
-        } else {
-            owner
-                .owner_node_id
-                .ok_or(GroupError::CoordinatorNotAvailable)?
-        };
-        let view = self.views.load();
-        let address = view
-            .state
-            .get_node_protocol_address(node_id, self.protocol_name)
-            .filter(|address| !address.is_empty())
-            .ok_or(GroupError::CoordinatorNotAvailable)?
-            .to_owned();
-        Ok(CoordinatorEndpoint { node_id, address })
+        if owner.local {
+            return Ok(self.node_id);
+        }
+        owner
+            .owner_node_id
+            .ok_or(GroupError::CoordinatorNotAvailable)
     }
 
     pub async fn join(self: &Arc<Self>, input: JoinInput) -> JoinOutcome {

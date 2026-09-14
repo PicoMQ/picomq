@@ -1,6 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::{BrokerId, ResponseHeader, TopicName};
 use kafka_protocol::protocol::{Encodable, HeaderVersion, StrBytes};
+use picomq_metadata::MetadataState;
 use picomq_server::{ErrorKind, ServiceError, alias};
 use uuid::Uuid;
 
@@ -95,6 +96,12 @@ pub async fn ensure_local_leader(ctx: &BrokerContext, stream_name: &str) -> Resu
     } else {
         Err(NOT_LEADER_OR_FOLLOWER)
     }
+}
+
+/// Advertised Kafka listener of `node_id`, `None` when the node is unknown
+/// or does not serve Kafka.
+pub fn broker_address(state: &MetadataState, node_id: i32) -> Option<&str> {
+    state.get_node_protocol_address(node_id, crate::PROTOCOL_NAME)
 }
 
 pub fn parse_host_port(address: &str) -> (String, i32) {

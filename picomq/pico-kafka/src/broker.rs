@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use picomq_metadata::{MetadataNodeHandle, ViewPublisher};
-use picomq_server::{GroupCoordinator, MetadataOwnershipService, S3StreamService};
+use picomq_server::{GroupCoordinator, MetadataOwnershipService, PicoNode, S3StreamService};
 use tokio::sync::Mutex;
 
 const PRODUCER_ID_BLOCK: u32 = 256;
@@ -35,29 +35,15 @@ pub struct BrokerContext {
 }
 
 impl BrokerContext {
-    pub fn new(
-        node_id: i32,
-        cluster_id: String,
-        service: Arc<S3StreamService>,
-        ownership: Arc<MetadataOwnershipService>,
-        views: Arc<ViewPublisher>,
-        metadata: MetadataNodeHandle,
-    ) -> Self {
-        let groups = GroupCoordinator::new(
-            node_id,
-            service.clone(),
-            ownership.clone(),
-            views.clone(),
-            crate::PROTOCOL_NAME,
-        );
+    pub fn new(node: &PicoNode) -> Self {
         Self {
-            node_id,
-            cluster_id,
-            service,
-            ownership,
-            views,
-            metadata,
-            groups,
+            node_id: node.config().node_id,
+            cluster_id: node.config().cluster_id.clone(),
+            service: node.service(),
+            ownership: node.ownership(),
+            views: node.views(),
+            metadata: node.metadata().clone(),
+            groups: node.groups(),
             producer_ids: Arc::new(Mutex::new(ProducerIdLease::new())),
         }
     }

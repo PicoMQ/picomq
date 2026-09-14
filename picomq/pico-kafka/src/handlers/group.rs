@@ -25,7 +25,8 @@ use crate::handlers::common::{
     COORDINATOR_NOT_AVAILABLE, FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND, GROUP_MAX_SIZE_REACHED,
     ILLEGAL_GENERATION, INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, KAFKA_STORAGE_ERROR,
     MEMBER_ID_REQUIRED, NO_ERROR, NOT_COORDINATOR, REBALANCE_IN_PROGRESS, UNKNOWN_MEMBER_ID,
-    UNKNOWN_TOPIC_OR_PARTITION, broker_id, encode_response, parse_host_port, topic_name,
+    UNKNOWN_TOPIC_OR_PARTITION, broker_address, broker_id, encode_response, parse_host_port,
+    topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 use picomq_server::alias::is_valid_topic as validate_topic_name;
@@ -83,13 +84,23 @@ async fn find_coordinator(
         Err(GroupError::InvalidRequest)
     };
     let response = match result {
-        Ok(endpoint) => {
-            let (host, port) = parse_host_port(&endpoint.address);
-            FindCoordinatorResponse::default()
-                .with_error_code(NO_ERROR)
-                .with_node_id(broker_id(endpoint.node_id))
-                .with_host(StrBytes::from(host))
-                .with_port(port)
+        Ok(node_id) => {
+            let view = ctx.views.load();
+            match broker_address(&view.state, node_id) {
+                Some(address) => {
+                    let (host, port) = parse_host_port(address);
+                    FindCoordinatorResponse::default()
+                        .with_error_code(NO_ERROR)
+                        .with_node_id(broker_id(node_id))
+                        .with_host(StrBytes::from(host))
+                        .with_port(port)
+                }
+                None => FindCoordinatorResponse::default()
+                    .with_error_code(COORDINATOR_NOT_AVAILABLE)
+                    .with_node_id(broker_id(-1))
+                    .with_host(StrBytes::from_static_str(""))
+                    .with_port(-1),
+            }
         }
         Err(error) => FindCoordinatorResponse::default()
             .with_error_code(error_code(error))
