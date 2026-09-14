@@ -223,9 +223,11 @@ impl GroupCoordinator {
                 if owner.local {
                     self.ownership.local_node().advertised_address
                 } else {
-                    owner.owner_advertised_address.ok_or(GroupError::CoordinatorNotAvailable)?
+                    owner
+                        .owner_advertised_address
+                        .ok_or(GroupError::CoordinatorNotAvailable)?
                 }
-            },
+            }
         };
         Ok(CoordinatorEndpoint { node_id, address })
     }
