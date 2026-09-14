@@ -147,7 +147,7 @@ thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "io-util"] }
 async-trait = "0.1.92"
 futures = "0.3.34"
-object_store = { version = "0.14.1", features = ["aws"] }
+object_store = { version = "0.14.1", features = ["aws", "gcp"] }
 fastrand = "2.5.0"
 md-5 = "0.11.0"
 hex = "0.4.3"

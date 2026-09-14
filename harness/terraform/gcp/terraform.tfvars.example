@@ -1,0 +1,23 @@
+region     = "us-central1"
+project    = "picomq"
+node_count = 2
+domain     = "picomq.internal"
+image      = "ghcr.io/picomq/picomq:latest"
+
+db_password = "change-me"
+
+# Existing VPC. Omit both values to create a network and two subnets instead.
+# vpc_id = "projects/my-project/global/networks/existing"
+# private_subnet_ids = [
+#   "projects/my-project/regions/us-central1/subnetworks/private-1",
+#   "projects/my-project/regions/us-central1/subnetworks/private-2",
+# ]
+
+# Optional. Omit to generate and store a bootstrap token in Secrets Manager.
+# bootstrap_token = "BASE64URL(id).BASE64URL(32bytes)"
+
+# force_destroy      = false
+# db_multi_az        = true
+# db_instance_class  = "db-custom-1-3840"
+# task_cpu           = 512
+# task_memory        = 1024

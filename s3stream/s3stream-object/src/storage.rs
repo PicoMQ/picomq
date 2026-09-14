@@ -254,12 +254,20 @@ impl ObjectStoreAdapter {
     /// Supported protocols:
     /// - `s3`: AWS S3 or compatible. Honors `region`, `endpoint`, `pathStyle`,
     ///   `s3Express` query builder chain).
+    /// - `gcs`: Google Cloud Storage using Application Default Credentials,
+    ///   including GKE Workload Identity.
     /// - `file`: local filesystem rooted at the path (dev/test).
     /// - `mem`: in-memory backend (tests).
     pub fn from_bucket_uri(uri: &str) -> Result<Self, ObjectError> {
         let uri = IdUri::parse(uri)?;
         let inner: std::sync::Arc<dyn object_store::ObjectStore> = match uri.protocol.as_str() {
             "s3" => std::sync::Arc::new(s3_builder(&uri).build().map_err(ObjectError::Backend)?),
+            "gcs" => std::sync::Arc::new(
+                object_store::gcp::GoogleCloudStorageBuilder::from_env()
+                    .with_bucket_name(&uri.path)
+                    .build()
+                    .map_err(ObjectError::Backend)?,
+            ),
             "file" => std::sync::Arc::new(
                 object_store::local::LocalFileSystem::new_with_prefix(&uri.path)
                     .map_err(ObjectError::Backend)?,
