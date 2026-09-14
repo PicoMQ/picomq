@@ -1,10 +1,10 @@
 //! Read-side queries, implemented directly on [`MetadataState`].
 //!
 
-use s3stream::{CompactOperations, S3ObjectMetadata, StreamMetadata};
 use crate::Protocol;
 use crate::Protocol::Kafka;
 use crate::state::MetadataState;
+use s3stream::{CompactOperations, S3ObjectMetadata, StreamMetadata};
 
 impl MetadataState {
     pub fn get_stream(&self, stream_id: u64) -> Option<StreamMetadata> {
@@ -218,9 +218,9 @@ mod tests {
         StreamState,
     };
 
+    use crate::Protocol::Kafka;
     use crate::apply::apply;
     use crate::command::{MetadataCommand, MetadataResult};
-    use crate::Protocol::Kafka;
     use crate::state::MetadataState;
 
     const NODE_1: i32 = 1;

@@ -31,7 +31,7 @@ pub use view::{MetadataView, ViewPublisher};
 pub enum Protocol {
     Kafka,
     Pico,
-    Ds
+    Ds,
 }
 
 impl Protocol {

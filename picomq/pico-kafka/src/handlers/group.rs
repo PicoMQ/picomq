@@ -1,3 +1,12 @@
+use crate::broker::BrokerContext;
+use crate::dispatch::RequestContext;
+use crate::handlers::common::{
+    COORDINATOR_NOT_AVAILABLE, FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND, GROUP_MAX_SIZE_REACHED,
+    ILLEGAL_GENERATION, INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, KAFKA_STORAGE_ERROR,
+    MEMBER_ID_REQUIRED, NO_ERROR, NOT_COORDINATOR, REBALANCE_IN_PROGRESS, UNKNOWN_MEMBER_ID,
+    UNKNOWN_TOPIC_OR_PARTITION, broker_id, encode_response, parse_host_port, topic_name,
+};
+use crate::handlers::{HandlerError, HandlerOutcome};
 use bytes::Bytes;
 use kafka_protocol::messages::describe_groups_response::{DescribedGroup, DescribedGroupMember};
 use kafka_protocol::messages::find_coordinator_response::FindCoordinatorResponse;
@@ -19,15 +28,6 @@ use kafka_protocol::messages::{
 };
 use kafka_protocol::protocol::{Decodable, StrBytes};
 use picomq_metadata::Protocol::Kafka;
-use crate::broker::BrokerContext;
-use crate::dispatch::RequestContext;
-use crate::handlers::common::{
-    COORDINATOR_NOT_AVAILABLE, FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND, GROUP_MAX_SIZE_REACHED,
-    ILLEGAL_GENERATION, INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, KAFKA_STORAGE_ERROR,
-    MEMBER_ID_REQUIRED, NO_ERROR, NOT_COORDINATOR, REBALANCE_IN_PROGRESS, UNKNOWN_MEMBER_ID,
-    UNKNOWN_TOPIC_OR_PARTITION, broker_id, encode_response, parse_host_port, topic_name,
-};
-use crate::handlers::{HandlerError, HandlerOutcome};
 use picomq_server::alias::is_valid_topic as validate_topic_name;
 use picomq_server::{
     CommittedOffset, GroupError, JoinInput, JoinProtocol, OffsetCommit, SyncInput, SyncOutcome,
@@ -78,7 +78,9 @@ async fn find_coordinator(
     let request = FindCoordinatorRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
     let result = if request.key_type == 0 {
-        ctx.groups.find_coordinator(request.key.as_str(), Kafka).await
+        ctx.groups
+            .find_coordinator(request.key.as_str(), Kafka)
+            .await
     } else {
         Err(GroupError::InvalidRequest)
     };
