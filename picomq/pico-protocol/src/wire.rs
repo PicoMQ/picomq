@@ -65,19 +65,19 @@ pub(crate) fn stream_path(name: &str) -> String {
     }
 }
 
+/// RFC 3986 percent-encoding: unreserved bytes pass through, everything
+/// else is escaped, so the result is safe as a path segment or query value.
 pub(crate) fn urlencode(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| match c {
-            '&' => "%26".to_owned(),
-            '=' => "%3D".to_owned(),
-            '?' => "%3F".to_owned(),
-            '#' => "%23".to_owned(),
-            ' ' => "%20".to_owned(),
-            '+' => "%2B".to_owned(),
-            other => other.to_string(),
-        })
-        .collect()
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 pub(crate) fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

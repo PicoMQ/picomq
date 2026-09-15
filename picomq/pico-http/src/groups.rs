@@ -7,6 +7,10 @@ use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::routing::{get, post, put};
 use picomq_auth::{Audience, Authorizer, Operation};
+use picomq_protocol::groups::{
+    self as wire, AssignmentResponse, CommitRequest, GroupListing, GroupSummary, HeartbeatRequest,
+    JoinRequest, JoinResponse, OffsetsResponse, Q_GENERATION, Q_INSTANCE_ID, Q_STREAM,
+};
 use picomq_protocol::pico::{
     CT_JSON, E_BAD_REQUEST, E_CAPACITY_EXCEEDED, E_COORDINATOR_UNAVAILABLE, E_DURABILITY, E_FENCED,
     E_ILLEGAL_GENERATION, E_INCONSISTENT_PROTOCOL, E_NOT_FOUND, E_REBALANCE_IN_PROGRESS,
@@ -17,7 +21,6 @@ use picomq_server::{
     CommittedOffset, GroupCoordinator, GroupDescription, GroupError, JoinInput, Joined,
     MemberFence, MemberRole, Membership, OffsetCommit,
 };
-use serde_json::{Map, Value, json};
 
 use crate::auth::{Caller, authenticate};
 use crate::http::{base_response, query_param, query_params, set_header};
@@ -145,14 +148,17 @@ async fn list(State(state): State<GroupState>, headers: HeaderMap) -> Response {
     if let Err(response) = state.allow(&caller, Operation::StreamInspect, &[]) {
         return *response;
     }
-    let groups: Vec<Value> = state
+    let groups = state
         .groups
         .list()
         .await
         .into_iter()
-        .map(|group| json!({ "group": group.group_id, "state": group.state.as_str() }))
+        .map(|group| GroupSummary {
+            group: group.group_id,
+            state: group.state.as_str().to_owned(),
+        })
         .collect();
-    ok(json!({ "groups": groups }))
+    ok(GroupListing { groups }.encode())
 }
 
 async fn describe(
@@ -172,7 +178,7 @@ async fn describe(
         return response;
     }
     match state.groups.describe(&group).await {
-        Ok(described) => ok(description_json(&state, &caller, described)),
+        Ok(described) => ok(description(&state, &caller, described).encode()),
         Err(error) => group_error(error),
     }
 }
@@ -188,59 +194,46 @@ async fn join(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    let body = match object(&body) {
-        Ok(body) => body,
-        Err(response) => return *response,
+    let request = match JoinRequest::decode(group, &body) {
+        Ok(request) => request,
+        Err(error) => return bad_request(&error.message),
     };
-    let subscription = match strings(&body, "subscription") {
-        Ok(Some(subscription)) => subscription,
-        Ok(None) => return bad_request("subscription is required"),
-        Err(response) => return *response,
-    };
-    let subscription = match state.resolve(&caller, &subscription) {
+    let subscription = match state.resolve(&caller, &request.subscription) {
         Ok(subscription) => subscription,
         Err(response) => return *response,
     };
     if let Err(response) = state.allow(&caller, Operation::Read, &subscription) {
         return *response;
     }
-    if let Some(response) = state.redirect(&uri, &group).await {
+    if let Some(response) = state.redirect(&uri, &request.group).await {
         return response;
     }
-    let input = match (
-        string(&body, "memberId"),
-        string(&body, "instanceId"),
-        string(&body, "clientId"),
-        integer(&body, "sessionTimeoutMs"),
-        integer(&body, "rebalanceTimeoutMs"),
-    ) {
-        (Ok(member_id), Ok(instance_id), Ok(client_id), Ok(session), Ok(rebalance)) => JoinInput {
-            group_id: group.clone(),
-            member_id: member_id.unwrap_or_default(),
-            instance_id,
-            client_id: client_id.unwrap_or_else(|| "pico".to_owned()),
+    let outcome = state
+        .groups
+        .join(JoinInput {
+            group_id: request.group,
+            member_id: request.member_id.unwrap_or_default(),
+            instance_id: request.instance_id,
+            client_id: request.client_id.unwrap_or_else(|| "pico".to_owned()),
             membership: Membership::Subscribed(subscription),
-            session_timeout_ms: session.unwrap_or(30_000),
-            rebalance_timeout_ms: rebalance.unwrap_or(0),
+            session_timeout_ms: request
+                .session_timeout_ms
+                .map_or(wire::DEFAULT_SESSION_TIMEOUT_MS as i32, saturating_i32),
+            rebalance_timeout_ms: request.rebalance_timeout_ms.map_or(0, saturating_i32),
             require_known_member_id: false,
-        },
-        (Err(response), ..)
-        | (_, Err(response), ..)
-        | (_, _, Err(response), ..)
-        | (_, _, _, Err(response), _)
-        | (_, _, _, _, Err(response)) => return *response,
-    };
-    let outcome = state.groups.join(input).await;
+        })
+        .await;
     match outcome.result {
         Ok(Joined::Subscribed {
             assignment,
             members,
-        }) => ok(json!({
-            "memberId": outcome.member_id,
-            "generation": outcome.generation,
-            "assignment": stripped(&state, &caller, &assignment),
-            "members": members,
-        })),
+        }) => ok(JoinResponse {
+            member_id: outcome.member_id,
+            generation: outcome.generation,
+            assignment: stripped(&state, &caller, &assignment),
+            members,
+        }
+        .encode()),
         Ok(Joined::Client { .. }) => group_error(GroupError::InconsistentProtocol),
         Err(error) => group_error(error),
     }
@@ -256,11 +249,11 @@ async fn assignment(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    let Some(generation) = query_param(&uri, "generation").and_then(|g| g.parse::<i32>().ok())
+    let Some(generation) = query_param(&uri, Q_GENERATION).and_then(|g| g.parse::<i32>().ok())
     else {
         return bad_request("generation query parameter is required");
     };
-    let instance_id = query_param(&uri, "instanceId");
+    let instance_id = query_param(&uri, Q_INSTANCE_ID);
     if let Some(response) = state.redirect(&uri, &group).await {
         return response;
     }
@@ -273,10 +266,11 @@ async fn assignment(
         instance_id: instance_id.as_deref(),
     };
     match state.groups.assignment(&group, fence).await {
-        Ok(assignment) => ok(json!({
-            "generation": generation,
-            "assignment": stripped(&state, &caller, &assignment),
-        })),
+        Ok(assignment) => ok(AssignmentResponse {
+            generation,
+            assignment: stripped(&state, &caller, &assignment),
+        }
+        .encode()),
         Err(error) => group_error(error),
     }
 }
@@ -292,28 +286,26 @@ async fn heartbeat(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    let body = match object(&body) {
-        Ok(body) => body,
-        Err(response) => return *response,
+    let request = match HeartbeatRequest::decode(group, member, &body) {
+        Ok(request) => request,
+        Err(error) => return bad_request(&error.message),
     };
-    let (generation, instance_id) =
-        match (integer(&body, "generation"), string(&body, "instanceId")) {
-            (Ok(Some(generation)), Ok(instance_id)) => (generation, instance_id),
-            (Ok(None), _) => return bad_request("generation is required"),
-            (Err(response), _) | (_, Err(response)) => return *response,
-        };
-    if let Some(response) = state.redirect(&uri, &group).await {
+    let group = &request.group;
+    if let Some(response) = state.redirect(&uri, group).await {
         return response;
     }
-    if let Err(response) = state.member_streams(&caller, &group, &member).await {
+    if let Err(response) = state
+        .member_streams(&caller, group, &request.fence.member_id)
+        .await
+    {
         return *response;
     }
     let fence = MemberFence {
-        generation,
-        member_id: &member,
-        instance_id: instance_id.as_deref(),
+        generation: request.fence.generation,
+        member_id: &request.fence.member_id,
+        instance_id: request.fence.instance_id.as_deref(),
     };
-    match state.groups.heartbeat(&group, fence).await {
+    match state.groups.heartbeat(group, fence).await {
         Ok(()) => no_content(),
         Err(error) => group_error(error),
     }
@@ -335,7 +327,7 @@ async fn leave(
     if let Err(response) = state.member_streams(&caller, &group, &member).await {
         return *response;
     }
-    let instance_id = query_param(&uri, "instanceId");
+    let instance_id = query_param(&uri, Q_INSTANCE_ID);
     match state
         .groups
         .leave(&group, &[(member, instance_id)])
@@ -359,32 +351,11 @@ async fn commit(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    let body = match object(&body) {
-        Ok(body) => body,
-        Err(response) => return *response,
+    let request = match CommitRequest::decode(group, &body) {
+        Ok(request) => request,
+        Err(error) => return bad_request(&error.message),
     };
-    let Some(Value::Object(offsets)) = body.get("offsets") else {
-        return bad_request("offsets must be an object keyed by stream");
-    };
-    let mut commits = Vec::with_capacity(offsets.len());
-    for (stream, value) in offsets {
-        let Some(entry) = value.as_object() else {
-            return bad_request("each offset must be an object");
-        };
-        let (position, metadata) = match (entry.get("position"), string(entry, "metadata")) {
-            (Some(Value::Number(position)), Ok(metadata)) => match position.as_u64() {
-                Some(position) => (position, metadata),
-                None => return bad_request("position must be a non-negative integer"),
-            },
-            (_, Err(response)) => return *response,
-            _ => return bad_request("position must be a non-negative integer"),
-        };
-        commits.push(OffsetCommit {
-            stream: stream.clone(),
-            value: CommittedOffset { position, metadata },
-        });
-    }
-    let streams: Vec<String> = commits.iter().map(|c| c.stream.clone()).collect();
+    let streams: Vec<String> = request.offsets.keys().cloned().collect();
     let streams = match state.resolve(&caller, &streams) {
         Ok(streams) => streams,
         Err(response) => return *response,
@@ -392,30 +363,31 @@ async fn commit(
     if let Err(response) = state.allow(&caller, Operation::Read, &streams) {
         return *response;
     }
-    for (commit, stream) in commits.iter_mut().zip(streams) {
-        commit.stream = stream;
-    }
-    let (member_id, generation, instance_id) = match (
-        string(&body, "memberId"),
-        integer(&body, "generation"),
-        string(&body, "instanceId"),
-    ) {
-        (Ok(member_id), Ok(generation), Ok(instance_id)) => (member_id, generation, instance_id),
-        (Err(response), ..) | (_, Err(response), _) | (_, _, Err(response)) => return *response,
-    };
-    let fence = match (&member_id, generation) {
-        (Some(member_id), Some(generation)) => Some(MemberFence {
-            generation,
-            member_id,
-            instance_id: instance_id.as_deref(),
-        }),
-        (None, None) => None,
-        _ => return bad_request("memberId and generation go together"),
-    };
-    if let Some(response) = state.redirect(&uri, &group).await {
+    let commits: Vec<OffsetCommit> = request
+        .offsets
+        .into_values()
+        .zip(streams)
+        .map(|(offset, stream)| OffsetCommit {
+            stream,
+            value: CommittedOffset {
+                position: offset.position,
+                metadata: offset.metadata,
+            },
+        })
+        .collect();
+    let fence = request.fence.as_ref().map(|fence| MemberFence {
+        generation: fence.generation,
+        member_id: &fence.member_id,
+        instance_id: fence.instance_id.as_deref(),
+    });
+    if let Some(response) = state.redirect(&uri, &request.group).await {
         return response;
     }
-    match state.groups.commit_offsets(&group, fence, &commits).await {
+    match state
+        .groups
+        .commit_offsets(&request.group, fence, &commits)
+        .await
+    {
         Ok(()) => no_content(),
         Err(error) => group_error(error),
     }
@@ -431,7 +403,7 @@ async fn fetch(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    let requested = query_params(&uri, "stream");
+    let requested = query_params(&uri, Q_STREAM);
     let requested = match state.resolve(&caller, &requested) {
         Ok(requested) => requested,
         Err(response) => return *response,
@@ -455,54 +427,57 @@ async fn fetch(
         Ok(offsets) => offsets,
         Err(error) => return group_error(error),
     };
-    let offsets: Map<String, Value> = offsets
+    let offsets = offsets
         .into_iter()
         .filter(|(stream, _)| state.allowed(&caller, stream))
         .map(|(stream, value)| {
             (
                 state.strip(&caller, &stream).to_owned(),
-                json!({ "position": value.position, "metadata": value.metadata }),
+                wire::CommittedOffset {
+                    position: value.position,
+                    metadata: value.metadata,
+                },
             )
         })
         .collect();
-    ok(json!({ "offsets": offsets }))
+    ok(OffsetsResponse { offsets }.encode())
 }
 
-fn description_json(
+fn description(
     state: &GroupState,
     caller: &Option<Caller>,
     described: GroupDescription,
-) -> Value {
-    let members: Vec<Value> = described
+) -> wire::GroupDescription {
+    let members = described
         .members
         .into_iter()
         .map(|member| {
-            let mut json = json!({
-                "memberId": member.member_id,
-                "instanceId": member.instance_id,
-                "clientId": member.client_id,
-            });
-            if let MemberRole::Subscribed {
+            let (subscription, assignment) = match member.role {
+                MemberRole::Subscribed {
+                    subscription,
+                    assignment,
+                } => (
+                    Some(stripped(state, caller, &subscription)),
+                    Some(stripped(state, caller, &assignment)),
+                ),
+                MemberRole::Client { .. } => (None, None),
+            };
+            wire::MemberDescription {
+                member_id: member.member_id,
+                instance_id: member.instance_id,
+                client_id: member.client_id,
                 subscription,
                 assignment,
-            } = member.role
-            {
-                json["subscription"] = stripped(state, caller, &subscription).into();
-                json["assignment"] = stripped(state, caller, &assignment).into();
             }
-            json
         })
         .collect();
-    let mut json = json!({
-        "group": described.group_id,
-        "state": described.state.as_str(),
-        "generation": described.generation,
-        "members": members,
-    });
-    if !described.protocol_type.is_empty() {
-        json["protocolType"] = described.protocol_type.into();
+    wire::GroupDescription {
+        group: described.group_id,
+        state: described.state.as_str().to_owned(),
+        generation: described.generation,
+        protocol_type: (!described.protocol_type.is_empty()).then_some(described.protocol_type),
+        members,
     }
-    json
 }
 
 fn stripped(state: &GroupState, caller: &Option<Caller>, streams: &[String]) -> Vec<String> {
@@ -512,55 +487,15 @@ fn stripped(state: &GroupState, caller: &Option<Caller>, streams: &[String]) -> 
         .collect()
 }
 
-fn object(body: &Bytes) -> Result<Map<String, Value>, Box<Response>> {
-    match serde_json::from_slice::<Value>(body) {
-        Ok(Value::Object(object)) => Ok(object),
-        _ => Err(rejected("expected a JSON object")),
-    }
+fn saturating_i32(value: u32) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
-fn string(body: &Map<String, Value>, key: &str) -> Result<Option<String>, Box<Response>> {
-    match body.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.clone())),
-        Some(_) => Err(rejected(&format!("{key} must be a string"))),
-    }
-}
-
-fn integer(body: &Map<String, Value>, key: &str) -> Result<Option<i32>, Box<Response>> {
-    match body.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(value)) => value
-            .as_i64()
-            .and_then(|value| i32::try_from(value).ok())
-            .map(Some)
-            .ok_or_else(|| rejected(&format!("{key} must be a 32-bit integer"))),
-        Some(_) => Err(rejected(&format!("{key} must be an integer"))),
-    }
-}
-
-fn strings(body: &Map<String, Value>, key: &str) -> Result<Option<Vec<String>>, Box<Response>> {
-    match body.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Array(values)) => values
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| rejected(&format!("{key} must be an array of strings")))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some),
-        Some(_) => Err(rejected(&format!("{key} must be an array of strings"))),
-    }
-}
-
-fn ok(body: Value) -> Response {
+fn ok(body: Bytes) -> Response {
     let mut response = base_response(200);
     set_header(&mut response, header::CONTENT_TYPE.as_str(), CT_JSON);
     set_header(&mut response, header::CACHE_CONTROL.as_str(), "no-store");
-    *response.body_mut() = axum::body::Body::from(serde_json::to_vec(&body).expect("json"));
+    *response.body_mut() = axum::body::Body::from(body);
     response
 }
 
@@ -572,10 +507,6 @@ fn no_content() -> Response {
 
 fn bad_request(message: &str) -> Response {
     error(400, E_BAD_REQUEST, message, None)
-}
-
-fn rejected(message: &str) -> Box<Response> {
-    Box::new(bad_request(message))
 }
 
 fn group_error(err: GroupError) -> Response {
