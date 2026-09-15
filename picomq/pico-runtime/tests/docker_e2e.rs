@@ -242,6 +242,131 @@ async fn pico_writes_kafka_reads() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
+async fn consumer_group_is_shared_by_kafka_and_pico_members() {
+    let h = Harness::new();
+    let topic = unique("e2e-group");
+    let group = unique("e2e-shared");
+    h.create_topic(&topic).await;
+    let producer = h.producer();
+    for n in 0..5 {
+        produce(&producer, &topic, None, &format!("job-{n}")).await;
+    }
+
+    let subscriber: StreamConsumer = ClientConfig::new()
+        .set("bootstrap.servers", &h.bootstrap)
+        .set("group.id", &group)
+        .set("enable.auto.commit", "false")
+        .set("auto.offset.reset", "earliest")
+        .set("partition.assignment.strategy", "cooperative-sticky")
+        .create()
+        .unwrap();
+    subscriber.subscribe(&[topic.as_str()]).unwrap();
+    assert_eq!(consume_n(&subscriber, 5).await.last().unwrap().offset, 4);
+    subscriber
+        .commit_consumer_state(rdkafka::consumer::CommitMode::Sync)
+        .unwrap();
+
+    let described: Value = h
+        .http
+        .get(h.url(&format!("/_groups/{group}")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(described["state"], "Stable");
+    assert_eq!(described["protocolType"], "consumer");
+
+    let offsets: Value = h
+        .http
+        .get(h.url(&format!("/_groups/{group}/offsets")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(offsets["offsets"][format!("/{topic}")]["position"], 5);
+
+    let rewind = h
+        .http
+        .put(h.url(&format!("/_groups/{group}/offsets")))
+        .json(&serde_json::json!({ "offsets": { format!("/{topic}"): { "position": 2 } } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rewind.status(), 204);
+    let mut partitions = rdkafka::TopicPartitionList::new();
+    partitions.add_partition(&topic, 0);
+    let committed = subscriber
+        .committed_offsets(partitions, Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(committed.elements()[0].offset(), rdkafka::Offset::Offset(2));
+    drop(subscriber);
+
+    let pico_group = unique("e2e-pico");
+    let joined: Value = h
+        .http
+        .post(h.url(&format!("/_groups/{pico_group}/members")))
+        .json(&serde_json::json!({ "subscription": [format!("/{topic}")] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(joined["generation"], 1);
+    assert_eq!(
+        joined["assignment"],
+        serde_json::json!([format!("/{topic}")])
+    );
+    let member = joined["memberId"].as_str().unwrap();
+    let heartbeat = h
+        .http
+        .post(h.url(&format!("/_groups/{pico_group}/members/{member}/heartbeat")))
+        .json(&serde_json::json!({ "generation": 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(heartbeat.status(), 204);
+    let commit = h
+        .http
+        .put(h.url(&format!("/_groups/{pico_group}/offsets")))
+        .json(&serde_json::json!({
+            "memberId": member,
+            "generation": 1,
+            "offsets": { format!("/{topic}"): { "position": 3, "metadata": "checkpoint" } },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(commit.status(), 204);
+    let left = h
+        .http
+        .delete(h.url(&format!("/_groups/{pico_group}/members/{member}")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(left.status(), 204);
+    let offsets: Value = h
+        .http
+        .get(h.url(&format!("/_groups/{pico_group}/offsets")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(offsets["offsets"][format!("/{topic}")]["position"], 3);
+    assert_eq!(
+        offsets["offsets"][format!("/{topic}")]["metadata"],
+        "checkpoint"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
 async fn kafka_writes_pico_reads() {
     let h = Harness::new();
     let topic = unique("e2e-kp");
