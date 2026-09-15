@@ -1,6 +1,3 @@
-//! Consumer groups over the Pico protocol: the raw operations and the
-//! member session that heartbeats, rebalances, and commits.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -215,8 +212,6 @@ async fn expired_member_rejoins_with_a_fresh_id() {
         .await
         .unwrap();
     let original = member.member_id();
-    // The coordinator forgets the member; the next heartbeat gets
-    // unknown_member and the session rejoins under a new id.
     client.leave_group("expiry", &original, None).await.unwrap();
     let mut assignments = member.assignments();
     let rejoined = next_generation(&mut assignments, 1).await;

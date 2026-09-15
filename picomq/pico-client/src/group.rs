@@ -15,7 +15,6 @@ use crate::retry::RetryPolicy;
 #[derive(Debug, Clone)]
 pub struct GroupConfig {
     pub session_timeout: Duration,
-    /// Defaults to a third of the session timeout.
     pub heartbeat_interval: Option<Duration>,
     pub rebalance_timeout: Option<Duration>,
     pub instance_id: Option<String>,
@@ -83,9 +82,6 @@ impl Session {
     }
 }
 
-/// One member of a server-assigned consumer group. Joins on construction,
-/// heartbeats in the background, rejoins when the coordinator rebalances,
-/// and publishes each new assignment through [`GroupMember::assignments`].
 pub struct GroupMember {
     client: Arc<PicoClient>,
     group: String,
@@ -139,7 +135,6 @@ impl GroupMember {
         self.assignments.borrow().clone()
     }
 
-    /// Closes when the member stops; [`GroupMember::error`] then says why.
     pub fn assignments(&self) -> watch::Receiver<Assignment> {
         self.assignments.clone()
     }

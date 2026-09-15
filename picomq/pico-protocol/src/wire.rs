@@ -65,8 +65,6 @@ pub(crate) fn stream_path(name: &str) -> String {
     }
 }
 
-/// RFC 3986 percent-encoding: unreserved bytes pass through, everything
-/// else is escaped, so the result is safe as a path segment or query value.
 pub(crate) fn urlencode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {

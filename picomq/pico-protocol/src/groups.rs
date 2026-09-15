@@ -287,8 +287,6 @@ pub struct MemberDescription {
     pub member_id: String,
     pub instance_id: Option<String>,
     pub client_id: String,
-    /// Absent for members that carry an opaque protocol payload (Kafka
-    /// clients doing their own assignment).
     pub subscription: Option<Vec<String>>,
     pub assignment: Option<Vec<String>>,
 }
