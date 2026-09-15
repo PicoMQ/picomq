@@ -65,6 +65,13 @@ pub const E_CLOSED: &str = "closed";
 pub const E_DURABILITY: &str = "durability";
 pub const E_UNAUTHENTICATED: &str = "unauthenticated";
 pub const E_PERMISSION_DENIED: &str = "permission_denied";
+pub const E_COORDINATOR_UNAVAILABLE: &str = "coordinator_unavailable";
+pub const E_ILLEGAL_GENERATION: &str = "illegal_generation";
+pub const E_INCONSISTENT_PROTOCOL: &str = "inconsistent_protocol";
+pub const E_UNKNOWN_MEMBER: &str = "unknown_member";
+pub const E_REBALANCE_IN_PROGRESS: &str = "rebalance_in_progress";
+pub const E_CAPACITY_EXCEEDED: &str = "capacity_exceeded";
+pub const GROUPS_PATH_PREFIX: &str = "/_groups";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErrorBody {

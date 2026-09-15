@@ -22,8 +22,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::admin::{self, AdminState};
-use crate::common;
 use crate::{DsFrontend, PicoFrontend, RoutingMode};
+use crate::{common, groups};
 
 /// Which HTTP stream protocol this process mounts on its data listener. The
 /// Kafka listener is separate and runs alongside either one.
@@ -106,21 +106,31 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
         options.max_request_size,
     );
     let protocol_router = match options.protocol {
-        HttpProtocol::Pico => common_router.fallback_service(
-            Arc::new(
-                PicoFrontend::with_tuning(
-                    node.service(),
-                    node.ownership(),
-                    options.routing_mode,
-                    options.long_poll_timeout,
-                    options.sse_max_duration,
-                    options.max_chunk_size,
-                    options.max_request_size,
+        HttpProtocol::Pico => common_router
+            .merge(groups::router(
+                groups::GroupState {
+                    groups: node.groups(),
+                    ownership: node.ownership(),
+                    mode: options.routing_mode,
+                    authorizer: options.authorizer.clone(),
+                },
+                options.max_request_size,
+            ))
+            .fallback_service(
+                Arc::new(
+                    PicoFrontend::with_tuning(
+                        node.service(),
+                        node.ownership(),
+                        options.routing_mode,
+                        options.long_poll_timeout,
+                        options.sse_max_duration,
+                        options.max_chunk_size,
+                        options.max_request_size,
+                    )
+                    .with_authorizer(options.authorizer.clone()),
                 )
-                .with_authorizer(options.authorizer.clone()),
-            )
-            .router(),
-        ),
+                .router(),
+            ),
         HttpProtocol::Ds => common_router.fallback_service(
             Arc::new(
                 DsFrontend::with_tuning(

@@ -133,6 +133,8 @@ pub fn is_reserved_name(name: &str) -> bool {
         || name.starts_with("/_schemas/")
         || name == "/_streams"
         || name.starts_with("/_streams/")
+        || name == "/_groups"
+        || name.starts_with("/_groups/")
 }
 
 impl S3StreamService {

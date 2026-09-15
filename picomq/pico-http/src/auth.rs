@@ -35,6 +35,62 @@ pub async fn gate(
     let Some(authorizer) = authorizer else {
         return Ok(None);
     };
+    let caller = authenticate(authorizer, audience, headers).await?;
+    let client_name = auth_resource(audience, uri);
+    let stored = caller.resolve(authorizer, &client_name)?;
+    for op in ops {
+        caller.authorize(authorizer, op, Some(&stored))?;
+    }
+    Ok(Some(Permit {
+        principal: caller.principal,
+        stream_name: stored,
+    }))
+}
+
+pub(crate) struct Caller {
+    pub(crate) principal: AuthPrincipal,
+    audience: Audience,
+    anonymous: bool,
+}
+
+impl Caller {
+    // Anonymous scope denials are 401, not 403: the remedy is a credential.
+    fn demote(&self, err: AuthError) -> Box<Response> {
+        let err = match err {
+            AuthError::Store(_) => err,
+            _ if self.anonymous => AuthError::Unauthenticated,
+            _ => err,
+        };
+        Box::new(reject(self.audience, err))
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        authorizer: &Authorizer,
+        client_name: &str,
+    ) -> Result<String, Box<Response>> {
+        authorizer
+            .resolve_stream_name(&self.principal, client_name)
+            .map_err(|err| self.demote(err))
+    }
+
+    pub(crate) fn authorize(
+        &self,
+        authorizer: &Authorizer,
+        op: Operation,
+        resource: Option<&str>,
+    ) -> Result<(), Box<Response>> {
+        authorizer
+            .authorize(&self.principal, op, resource)
+            .map_err(|err| self.demote(err))
+    }
+}
+
+pub(crate) async fn authenticate(
+    authorizer: &Authorizer,
+    audience: Audience,
+    headers: &HeaderMap,
+) -> Result<Caller, Box<Response>> {
     let now_ms = picomq_common::now_ms();
     let (principal, anonymous) = match header_str(headers, header::AUTHORIZATION.as_str()) {
         Some(credential) => (
@@ -52,25 +108,11 @@ pub async fn gate(
             true,
         ),
     };
-    // Anonymous scope denials are 401, not 403: the remedy is a credential.
-    let demote = |err: AuthError| match err {
-        AuthError::Store(_) => err,
-        _ if anonymous => AuthError::Unauthenticated,
-        _ => err,
-    };
-    let client_name = auth_resource(audience, uri);
-    let stored = authorizer
-        .resolve_stream_name(&principal, &client_name)
-        .map_err(|err| Box::new(reject(audience, demote(err))))?;
-    for op in ops {
-        authorizer
-            .authorize(&principal, op, Some(&stored))
-            .map_err(|err| Box::new(reject(audience, demote(err))))?;
-    }
-    Ok(Some(Permit {
+    Ok(Caller {
         principal,
-        stream_name: stored,
-    }))
+        audience,
+        anonymous,
+    })
 }
 
 fn classify(

@@ -393,6 +393,83 @@ async fn kafka_writes_pico_reads() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn one_group_serves_kafka_and_pico_consumers() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 1, true).await;
+    node.create_topic("jobs").await.unwrap();
+    let producer = node.producer();
+    for n in 0..3 {
+        produce(&producer, "jobs", None, &format!("job-{n}")).await;
+    }
+
+    let subscriber: StreamConsumer = ClientConfig::new()
+        .set("bootstrap.servers", node.bootstrap())
+        .set("group.id", "shared")
+        .set("enable.auto.commit", "false")
+        .set("auto.offset.reset", "earliest")
+        .create()
+        .unwrap();
+    subscriber.subscribe(&["jobs"]).unwrap();
+    let consumed = consume_n(&subscriber, 3).await;
+    assert_eq!(consumed.len(), 3);
+    subscriber
+        .commit_consumer_state(rdkafka::consumer::CommitMode::Sync)
+        .unwrap();
+
+    let described: Value = node
+        .http
+        .get(node.url("/_groups/shared"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(described["state"], "Stable");
+    assert_eq!(described["protocolType"], "consumer");
+    assert_eq!(described["members"].as_array().unwrap().len(), 1);
+    assert!(described["members"][0].get("assignment").is_none());
+
+    let clash = node
+        .http
+        .post(node.url("/_groups/shared/members"))
+        .json(&serde_json::json!({ "subscription": ["/jobs"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(clash.status(), 409);
+
+    let offsets: Value = node
+        .http
+        .get(node.url("/_groups/shared/offsets"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(offsets["offsets"]["/jobs"]["position"], 3);
+
+    let commit = node
+        .http
+        .put(node.url("/_groups/shared/offsets"))
+        .json(&serde_json::json!({ "offsets": { "/jobs": { "position": 1 } } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(commit.status(), 204);
+    let mut partitions = rdkafka::TopicPartitionList::new();
+    partitions.add_partition("jobs", 0);
+    let committed = subscriber
+        .committed_offsets(partitions, Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(committed.elements()[0].offset(), rdkafka::Offset::Offset(1));
+
+    drop(subscriber);
+    node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ds_and_kafka_share_a_json_stream() {
     let dir = tempfile::tempdir().unwrap();
     let node = Node::start(dir.path(), HttpProtocol::Ds, 1, true).await;

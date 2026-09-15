@@ -29,14 +29,21 @@ pub async fn route(
     uri: &Uri,
     name: &str,
 ) -> Option<Response> {
-    if mode == RoutingMode::LocalAlways
-        || stream_name(uri) == "/"
-        || *method == Method::PUT
-        || *method == Method::OPTIONS
-    {
+    if stream_name(uri) == "/" || *method == Method::PUT || *method == Method::OPTIONS {
         return None;
     }
+    owner_redirect(ownership, mode, uri, name).await
+}
 
+pub async fn owner_redirect(
+    ownership: &dyn OwnershipService,
+    mode: RoutingMode,
+    uri: &Uri,
+    name: &str,
+) -> Option<Response> {
+    if mode == RoutingMode::LocalAlways {
+        return None;
+    }
     let owner = match ownership.owner_of(name).await {
         Ok(owner) => owner,
         Err(e) => return Some(routing_error(&e.message)),

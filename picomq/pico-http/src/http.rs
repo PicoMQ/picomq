@@ -55,6 +55,17 @@ pub(crate) fn query_param(uri: &axum::http::Uri, name: &str) -> Option<String> {
     None
 }
 
+pub(crate) fn query_params(uri: &axum::http::Uri, name: &str) -> Vec<String> {
+    uri.query()
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (key == name).then(|| percent_decode(value))
+        })
+        .collect()
+}
+
 fn percent_decode(raw: &str) -> String {
     let mut out = Vec::with_capacity(raw.len());
     let bytes = raw.as_bytes();
