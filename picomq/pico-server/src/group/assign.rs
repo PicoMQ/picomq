@@ -12,7 +12,9 @@ pub(super) fn assign(members: &BTreeMap<String, Member>) -> BTreeMap<String, Vec
     }
     let mut assignments: BTreeMap<String, Vec<StreamName>> =
         members.keys().map(|id| (id.clone(), Vec::new())).collect();
-    for (stream, candidates) in subscribers {
+    let mut order: Vec<_> = subscribers.into_iter().collect();
+    order.sort_by_key(|(stream, candidates)| (candidates.len(), *stream));
+    for (stream, candidates) in order {
         let chosen = candidates
             .iter()
             .copied()
@@ -22,6 +24,9 @@ pub(super) fn assign(members: &BTreeMap<String, Member>) -> BTreeMap<String, Vec
             .get_mut(chosen)
             .expect("candidate is a member")
             .push(StreamName::clone(stream));
+    }
+    for streams in assignments.values_mut() {
+        streams.sort();
     }
     assignments
 }
@@ -68,13 +73,15 @@ mod tests {
 
     #[test]
     fn only_subscribers_receive_a_stream() {
-        let members = BTreeMap::from([
-            ("a".to_owned(), member(&["x"])),
-            ("b".to_owned(), member(&["x", "y", "z"])),
-        ]);
-        let assigned = assign(&members);
-        assert_eq!(names(&assigned["a"]), ["x"]);
-        assert_eq!(names(&assigned["b"]), ["y", "z"]);
+        for (narrow, wide) in [("a", "b"), ("b", "a")] {
+            let members = BTreeMap::from([
+                (narrow.to_owned(), member(&["x"])),
+                (wide.to_owned(), member(&["x", "y", "z"])),
+            ]);
+            let assigned = assign(&members);
+            assert_eq!(names(&assigned[narrow]), ["x"]);
+            assert_eq!(names(&assigned[wide]), ["y", "z"]);
+        }
     }
 
     #[test]
