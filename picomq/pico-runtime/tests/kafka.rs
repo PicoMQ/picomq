@@ -171,6 +171,61 @@ async fn subscribe_commit_resume_and_rebalance() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cooperative_sticky_members_split_topics_between_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let (server, bootstrap) = broker(dir.path(), 1).await;
+    create_topic(&bootstrap, "left").await;
+    create_topic(&bootstrap, "right").await;
+    let producer = producer(&bootstrap);
+    produce_n(&producer, "left", 0, 10).await;
+    produce_n(&producer, "right", 0, 10).await;
+
+    let sticky = |group: &str| -> StreamConsumer {
+        ClientConfig::new()
+            .set("bootstrap.servers", &bootstrap)
+            .set("group.id", group)
+            .set("auto.offset.reset", "earliest")
+            .set("enable.auto.commit", "false")
+            .set("session.timeout.ms", "6000")
+            .set("partition.assignment.strategy", "cooperative-sticky")
+            .create()
+            .unwrap()
+    };
+    let first = sticky("pair");
+    let second = sticky("pair");
+    first.subscribe(&["left", "right"]).unwrap();
+    second.subscribe(&["left", "right"]).unwrap();
+
+    let mut offsets = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while offsets.len() < 20 {
+        let message = tokio::select! {
+            m = first.recv() => m,
+            m = second.recv() => m,
+            _ = tokio::time::sleep_until(deadline) => panic!("consume timed out"),
+        };
+        offsets.push(message.unwrap().offset());
+    }
+    offsets.sort_unstable();
+    assert_eq!(offsets, (0..10).flat_map(|i| [i, i]).collect::<Vec<_>>());
+    let owned = |consumer: &StreamConsumer| -> Vec<String> {
+        consumer
+            .assignment()
+            .unwrap()
+            .elements()
+            .iter()
+            .map(|tp| tp.topic().to_owned())
+            .collect()
+    };
+    let mut all = owned(&first);
+    all.extend(owned(&second));
+    all.sort();
+    assert_eq!(all, ["left", "right"], "each topic is owned exactly once");
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn restart_recovers_data_and_offsets() {
     let dir = tempfile::tempdir().unwrap();
     let (server, bootstrap) = broker(dir.path(), 1).await;

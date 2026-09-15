@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use kafka_protocol::messages::describe_groups_response::{DescribedGroup, DescribedGroupMember};
 use kafka_protocol::messages::find_coordinator_response::FindCoordinatorResponse;
@@ -26,12 +28,12 @@ use crate::handlers::common::{
     ILLEGAL_GENERATION, INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, KAFKA_STORAGE_ERROR,
     MEMBER_ID_REQUIRED, NO_ERROR, NOT_COORDINATOR, REBALANCE_IN_PROGRESS, UNKNOWN_MEMBER_ID,
     UNKNOWN_TOPIC_OR_PARTITION, broker_address, broker_id, encode_response, parse_host_port,
-    topic_name,
+    resolve_topic, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
-use picomq_server::alias::is_valid_topic as validate_topic_name;
 use picomq_server::{
-    CommittedOffset, GroupError, JoinInput, JoinProtocol, OffsetCommit, SyncInput, SyncOutcome,
+    CommittedOffset, GroupError, JoinInput, JoinProtocol, Joined, MemberFence, MemberRole,
+    Membership, OffsetCommit, SyncInput,
 };
 
 fn error_code(error: GroupError) -> i16 {
@@ -128,45 +130,61 @@ async fn join_group(
         .join(JoinInput {
             group_id: request.group_id.to_string(),
             member_id: request.member_id.to_string(),
-            group_instance_id: request.group_instance_id.map(|id| id.to_string()),
-            protocol_type: request.protocol_type.to_string(),
-            protocols: request
-                .protocols
-                .into_iter()
-                .map(|protocol| JoinProtocol {
-                    name: protocol.name.to_string(),
-                    metadata: protocol.metadata,
-                })
-                .collect(),
+            instance_id: request.group_instance_id.map(|id| id.to_string()),
+            client_id: req.client_id.clone().unwrap_or_default(),
+            membership: Membership::Client {
+                protocol_type: request.protocol_type.to_string(),
+                protocols: request
+                    .protocols
+                    .into_iter()
+                    .map(|protocol| JoinProtocol {
+                        name: protocol.name.to_string(),
+                        metadata: protocol.metadata,
+                    })
+                    .collect(),
+            },
             session_timeout_ms: request.session_timeout_ms,
             rebalance_timeout_ms: request.rebalance_timeout_ms,
-            client_id: req.client_id.clone().unwrap_or_default(),
             require_known_member_id: req.api_version >= 4,
         })
         .await;
-    let members = outcome
-        .members
-        .into_iter()
-        .map(|member| {
-            let mut response = JoinGroupResponseMember::default()
-                .with_member_id(StrBytes::from(member.member_id))
-                .with_metadata(member.metadata);
-            if req.api_version >= 5 {
-                response =
-                    response.with_group_instance_id(member.group_instance_id.map(StrBytes::from));
-            }
-            response
-        })
-        .collect();
     let mut response = JoinGroupResponse::default()
-        .with_error_code(outcome.error.map_or(NO_ERROR, error_code))
-        .with_generation_id(outcome.generation_id)
-        .with_protocol_name(outcome.protocol_name.map(StrBytes::from))
-        .with_leader(StrBytes::from(outcome.leader))
-        .with_member_id(StrBytes::from(outcome.member_id))
-        .with_members(members);
-    if req.api_version >= 7 {
-        response = response.with_protocol_type(outcome.protocol_type.map(StrBytes::from));
+        .with_generation_id(outcome.generation)
+        .with_member_id(StrBytes::from(outcome.member_id));
+    match outcome.result {
+        Ok(Joined::Client {
+            protocol_type,
+            protocol_name,
+            leader,
+            members,
+        }) => {
+            let members = members
+                .into_iter()
+                .map(|member| {
+                    let mut wire = JoinGroupResponseMember::default()
+                        .with_member_id(StrBytes::from(member.member_id))
+                        .with_metadata(member.metadata);
+                    if req.api_version >= 5 {
+                        wire = wire.with_group_instance_id(member.instance_id.map(StrBytes::from));
+                    }
+                    wire
+                })
+                .collect();
+            response = response
+                .with_error_code(NO_ERROR)
+                .with_protocol_name(Some(StrBytes::from(protocol_name)))
+                .with_leader(StrBytes::from(leader))
+                .with_members(members);
+            if req.api_version >= 7 {
+                response = response.with_protocol_type(Some(StrBytes::from(protocol_type)));
+            }
+        }
+        Ok(Joined::Subscribed { .. }) => {
+            response = response.with_error_code(INCONSISTENT_GROUP_PROTOCOL);
+        }
+        Err(error) => {
+            response = response.with_error_code(error_code(error));
+        }
     }
     Ok(HandlerOutcome::Response(encode_response(
         req.correlation_id,
@@ -183,13 +201,13 @@ async fn sync_group(
     let mut body = Bytes::copy_from_slice(body);
     let request = SyncGroupRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
-    let outcome = ctx
+    let result = ctx
         .groups
         .sync(SyncInput {
             group_id: request.group_id.to_string(),
-            generation_id: request.generation_id,
+            generation: request.generation_id,
             member_id: request.member_id.to_string(),
-            group_instance_id: request.group_instance_id.map(|id| id.to_string()),
+            instance_id: request.group_instance_id.map(|id| id.to_string()),
             assignments: request
                 .assignments
                 .into_iter()
@@ -197,19 +215,26 @@ async fn sync_group(
                 .collect(),
         })
         .await;
-    Ok(HandlerOutcome::Response(sync_response(req, outcome)))
-}
-
-fn sync_response(req: &RequestContext, outcome: SyncOutcome) -> super::ResponseFrame {
-    let mut response = kafka_protocol::messages::SyncGroupResponse::default()
-        .with_error_code(outcome.error.map_or(NO_ERROR, error_code))
-        .with_assignment(outcome.assignment);
-    if req.api_version >= 5 {
-        response = response
-            .with_protocol_type(outcome.protocol_type.map(StrBytes::from))
-            .with_protocol_name(outcome.protocol_name.map(StrBytes::from));
-    }
-    encode_response(req.correlation_id, req.api_version, &response)
+    let response = match result {
+        Ok(outcome) => {
+            let mut response = kafka_protocol::messages::SyncGroupResponse::default()
+                .with_error_code(NO_ERROR)
+                .with_assignment(outcome.assignment);
+            if req.api_version >= 5 {
+                response = response
+                    .with_protocol_type(Some(StrBytes::from(outcome.protocol_type)))
+                    .with_protocol_name(Some(StrBytes::from(outcome.protocol_name)));
+            }
+            response
+        }
+        Err(error) => kafka_protocol::messages::SyncGroupResponse::default()
+            .with_error_code(error_code(error)),
+    };
+    Ok(HandlerOutcome::Response(encode_response(
+        req.correlation_id,
+        req.api_version,
+        &response,
+    )))
 }
 
 async fn heartbeat(
@@ -224,9 +249,11 @@ async fn heartbeat(
         .groups
         .heartbeat(
             request.group_id.as_str(),
-            request.generation_id,
-            request.member_id.as_str(),
-            request.group_instance_id.as_ref().map(StrBytes::as_str),
+            MemberFence {
+                generation: request.generation_id,
+                member_id: request.member_id.as_str(),
+                instance_id: request.group_instance_id.as_ref().map(StrBytes::as_str),
+            },
         )
         .await;
     let response =
@@ -307,33 +334,51 @@ async fn describe_groups(
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
     let mut groups = Vec::with_capacity(request.groups.len());
     for group_id in request.groups {
-        let described = ctx.groups.describe(group_id.as_str()).await;
-        let members = described
-            .members
-            .into_iter()
-            .map(|member| {
-                let mut wire = DescribedGroupMember::default()
-                    .with_member_id(StrBytes::from(member.member_id))
-                    .with_client_id(StrBytes::from(member.client_id))
-                    .with_client_host(StrBytes::from_static_str(""))
-                    .with_member_metadata(member.metadata)
-                    .with_member_assignment(member.assignment);
-                if req.api_version >= 4 {
-                    wire =
-                        wire.with_group_instance_id(member.group_instance_id.map(StrBytes::from));
-                }
-                wire
-            })
-            .collect();
-        groups.push(
-            DescribedGroup::default()
-                .with_error_code(described.error.map_or(NO_ERROR, error_code))
+        let wire = match ctx.groups.describe(group_id.as_str()).await {
+            Ok(described) => {
+                let members = described
+                    .members
+                    .into_iter()
+                    .map(|member| {
+                        let (metadata, assignment) = match member.role {
+                            MemberRole::Client {
+                                metadata,
+                                assignment,
+                            } => (metadata, assignment),
+                            MemberRole::Subscribed { .. } => (Bytes::new(), Bytes::new()),
+                        };
+                        let mut wire = DescribedGroupMember::default()
+                            .with_member_id(StrBytes::from(member.member_id))
+                            .with_client_id(StrBytes::from(member.client_id))
+                            .with_client_host(StrBytes::from_static_str(""))
+                            .with_member_metadata(metadata)
+                            .with_member_assignment(assignment);
+                        if req.api_version >= 4 {
+                            wire =
+                                wire.with_group_instance_id(member.instance_id.map(StrBytes::from));
+                        }
+                        wire
+                    })
+                    .collect();
+                DescribedGroup::default()
+                    .with_error_code(NO_ERROR)
+                    .with_group_id(group_id)
+                    .with_group_state(StrBytes::from_static_str(described.state.as_str()))
+                    .with_protocol_type(StrBytes::from(described.protocol_type))
+                    .with_protocol_data(StrBytes::from(described.protocol_name))
+                    .with_members(members)
+            }
+            Err(error) => DescribedGroup::default()
+                .with_error_code(match error {
+                    GroupError::GroupNotFound => NO_ERROR,
+                    other => error_code(other),
+                })
                 .with_group_id(group_id)
-                .with_group_state(StrBytes::from(described.state))
-                .with_protocol_type(StrBytes::from(described.protocol_type))
-                .with_protocol_data(StrBytes::from(described.protocol_name))
-                .with_members(members),
-        );
+                .with_group_state(StrBytes::from_static_str("Dead"))
+                .with_protocol_type(StrBytes::from_static_str(""))
+                .with_protocol_data(StrBytes::from_static_str("")),
+        };
+        groups.push(wire);
     }
     let response = kafka_protocol::messages::DescribeGroupsResponse::default().with_groups(groups);
     Ok(HandlerOutcome::Response(encode_response(
@@ -351,23 +396,15 @@ async fn list_groups(
     let mut body = Bytes::copy_from_slice(body);
     let request = ListGroupsRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
-    let states: Vec<String> = request
-        .states_filter
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-    let types: Vec<String> = request
-        .types_filter
-        .iter()
-        .map(ToString::to_string)
-        .collect();
+    let states: Vec<&str> = request.states_filter.iter().map(StrBytes::as_str).collect();
+    let types: Vec<&str> = request.types_filter.iter().map(StrBytes::as_str).collect();
     let groups = ctx
         .groups
         .list()
         .await
         .into_iter()
-        .filter(|group| states.is_empty() || states.contains(&group.state))
-        .filter(|_| types.is_empty() || types.iter().any(|kind| kind == "classic"))
+        .filter(|group| states.is_empty() || states.contains(&group.state.as_str()))
+        .filter(|_| types.is_empty() || types.contains(&"classic"))
         .map(|group| {
             let mut wire = WireListedGroup::default()
                 .with_group_id(kafka_protocol::messages::GroupId(StrBytes::from(
@@ -375,7 +412,7 @@ async fn list_groups(
                 )))
                 .with_protocol_type(StrBytes::from(group.protocol_type));
             if req.api_version >= 4 {
-                wire = wire.with_group_state(StrBytes::from(group.state));
+                wire = wire.with_group_state(StrBytes::from_static_str(group.state.as_str()));
             }
             if req.api_version >= 5 {
                 wire = wire.with_group_type(StrBytes::from_static_str("classic"));
@@ -402,60 +439,62 @@ async fn offset_commit(
     let request = OffsetCommitRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
     let mut commits = Vec::new();
+    let mut rejected: BTreeMap<(String, i32), i16> = BTreeMap::new();
     for topic in &request.topics {
-        let name = topic.name.to_string();
-        if !validate_topic_name(&name) {
-            continue;
-        }
+        let stream = resolve_topic(ctx, topic.name.as_str()).await;
         for partition in &topic.partitions {
-            if partition.partition_index == 0 {
-                commits.push(OffsetCommit {
-                    topic: name.clone(),
-                    partition: 0,
-                    value: CommittedOffset {
-                        offset: partition.committed_offset,
-                        leader_epoch: partition.committed_leader_epoch,
-                        metadata: partition
-                            .committed_metadata
-                            .as_ref()
-                            .map(ToString::to_string),
-                    },
-                });
+            let key = (topic.name.to_string(), partition.partition_index);
+            match (&stream, u64::try_from(partition.committed_offset)) {
+                (Ok(stream), Ok(position)) if partition.partition_index == 0 => {
+                    commits.push(OffsetCommit {
+                        stream: stream.clone(),
+                        value: CommittedOffset {
+                            position,
+                            metadata: partition
+                                .committed_metadata
+                                .as_ref()
+                                .map(ToString::to_string),
+                        },
+                    });
+                }
+                (Ok(_), Ok(_)) => {
+                    rejected.insert(key, UNKNOWN_TOPIC_OR_PARTITION);
+                }
+                (Ok(_), Err(_)) => {
+                    rejected.insert(key, INVALID_REQUEST);
+                }
+                (Err(code), _) => {
+                    rejected.insert(key, *code);
+                }
             }
         }
     }
+    let fence = (request.generation_id_or_member_epoch >= 0).then(|| MemberFence {
+        generation: request.generation_id_or_member_epoch,
+        member_id: request.member_id.as_str(),
+        instance_id: request.group_instance_id.as_ref().map(StrBytes::as_str),
+    });
     let result = ctx
         .groups
-        .commit_offsets(
-            request.group_id.as_str(),
-            request.generation_id_or_member_epoch,
-            request.member_id.as_str(),
-            request.group_instance_id.as_ref().map(StrBytes::as_str),
-            &commits,
-        )
+        .commit_offsets(request.group_id.as_str(), fence, &commits)
         .await;
     let code = result.err().map_or(NO_ERROR, error_code);
     let topics = request
         .topics
-        .into_iter()
+        .iter()
         .map(|topic| {
-            let valid_name = validate_topic_name(topic.name.as_str());
             let partitions = topic
                 .partitions
-                .into_iter()
+                .iter()
                 .map(|partition| {
-                    let error_code = if !valid_name || partition.partition_index != 0 {
-                        UNKNOWN_TOPIC_OR_PARTITION
-                    } else {
-                        code
-                    };
+                    let key = (topic.name.to_string(), partition.partition_index);
                     OffsetCommitResponsePartition::default()
                         .with_partition_index(partition.partition_index)
-                        .with_error_code(error_code)
+                        .with_error_code(rejected.get(&key).copied().unwrap_or(code))
                 })
                 .collect();
             OffsetCommitResponseTopic::default()
-                .with_name(topic.name)
+                .with_name(topic.name.clone())
                 .with_partitions(partitions)
         })
         .collect();
@@ -475,40 +514,64 @@ async fn offset_fetch(
     let mut body = Bytes::copy_from_slice(body);
     let request = OffsetFetchRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
-    let requested: Option<Vec<(String, Vec<i32>)>> = request.topics.as_ref().map(|topics| {
-        topics
-            .iter()
-            .map(|topic| (topic.name.to_string(), topic.partition_indexes.clone()))
-            .collect()
-    });
+    let mut requested: Vec<(String, Vec<i32>, Option<String>)> = Vec::new();
+    if let Some(topics) = &request.topics {
+        for topic in topics {
+            let stream = resolve_topic(ctx, topic.name.as_str()).await.ok();
+            requested.push((
+                topic.name.to_string(),
+                topic.partition_indexes.clone(),
+                stream,
+            ));
+        }
+    }
+    let streams: Vec<String> = requested
+        .iter()
+        .filter_map(|(_, _, stream)| stream.clone())
+        .collect();
     let result = ctx
         .groups
-        .fetch_offsets(request.group_id.as_str(), requested.as_deref())
+        .fetch_offsets(
+            request.group_id.as_str(),
+            request.topics.is_some().then_some(streams.as_slice()),
+        )
         .await;
-    let (error_code, values) = match result {
-        Ok(values) => (NO_ERROR, values),
-        Err(error) => (error_code(error), Default::default()),
+    let (error_code, offsets) = match result {
+        Ok(offsets) => (NO_ERROR, offsets),
+        Err(error) => (error_code(error), BTreeMap::new()),
     };
-    let topics = values
-        .into_iter()
-        .map(|(name, partitions)| {
-            OffsetFetchResponseTopic::default()
-                .with_name(topic_name(&name))
-                .with_partitions(
-                    partitions
-                        .into_iter()
-                        .map(|(partition, value)| {
-                            OffsetFetchResponsePartition::default()
-                                .with_partition_index(partition)
-                                .with_committed_offset(value.offset)
-                                .with_committed_leader_epoch(value.leader_epoch)
-                                .with_metadata(value.metadata.map(StrBytes::from))
-                                .with_error_code(NO_ERROR)
-                        })
-                        .collect(),
-                )
-        })
-        .collect();
+    let topics = if request.topics.is_some() {
+        requested
+            .into_iter()
+            .map(|(topic, partitions, stream)| {
+                let committed = stream.as_ref().and_then(|stream| offsets.get(stream));
+                OffsetFetchResponseTopic::default()
+                    .with_name(topic_name(&topic))
+                    .with_partitions(
+                        partitions
+                            .into_iter()
+                            .map(|partition| {
+                                fetched_partition(partition, committed.filter(|_| partition == 0))
+                            })
+                            .collect(),
+                    )
+            })
+            .collect()
+    } else {
+        let mut topics = Vec::with_capacity(offsets.len());
+        for (stream, committed) in &offsets {
+            if let Ok(Some(meta)) = ctx.service.describe(stream).await
+                && let Some(topic) = meta.kafka_topic
+            {
+                topics.push(
+                    OffsetFetchResponseTopic::default()
+                        .with_name(topic_name(&topic))
+                        .with_partitions(vec![fetched_partition(0, Some(committed))]),
+                );
+            }
+        }
+        topics
+    };
     let response = OffsetFetchResponse::default()
         .with_error_code(error_code)
         .with_topics(topics);
@@ -517,4 +580,20 @@ async fn offset_fetch(
         req.api_version,
         &response,
     )))
+}
+
+fn fetched_partition(
+    partition: i32,
+    committed: Option<&CommittedOffset>,
+) -> OffsetFetchResponsePartition {
+    let base = OffsetFetchResponsePartition::default()
+        .with_partition_index(partition)
+        .with_committed_leader_epoch(-1)
+        .with_error_code(NO_ERROR);
+    match committed {
+        Some(value) => base
+            .with_committed_offset(value.position as i64)
+            .with_metadata(value.metadata.clone().map(StrBytes::from)),
+        None => base.with_committed_offset(-1).with_metadata(None),
+    }
 }

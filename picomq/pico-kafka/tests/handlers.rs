@@ -700,6 +700,95 @@ async fn static_membership_rejoin_and_fencing() {
 }
 
 #[tokio::test]
+async fn connect_shaped_group_passes_foreign_protocols_through() {
+    use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
+    use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
+    use kafka_protocol::messages::{
+        DescribeGroupsRequest, DescribeGroupsResponse, GroupId, JoinGroupRequest,
+        JoinGroupResponse, SyncGroupRequest, SyncGroupResponse,
+    };
+    use kafka_protocol::protocol::HeaderVersion;
+
+    let broker = test_broker().await;
+    let group_id = GroupId(StrBytes::from_static_str("connect-cluster"));
+    let worker_state = Bytes::from_static(b"\x00\x02sessioned worker metadata");
+    let join = |member_id: StrBytes, correlation_id| {
+        encode_request(
+            ApiKey::JoinGroup,
+            7,
+            correlation_id,
+            &JoinGroupRequest::default()
+                .with_group_id(group_id.clone())
+                .with_session_timeout_ms(10_000)
+                .with_rebalance_timeout_ms(60_000)
+                .with_member_id(member_id)
+                .with_protocol_type(StrBytes::from_static_str("connect"))
+                .with_protocols(vec![
+                    JoinGroupRequestProtocol::default()
+                        .with_name(StrBytes::from_static_str("sessioned"))
+                        .with_metadata(worker_state.clone()),
+                    JoinGroupRequestProtocol::default()
+                        .with_name(StrBytes::from_static_str("compatible"))
+                        .with_metadata(Bytes::from_static(b"older")),
+                ]),
+        )
+    };
+    let mut buf = response_body(&broker, &join(StrBytes::default(), 60)).await;
+    ResponseHeader::decode(&mut buf, JoinGroupResponse::header_version(7)).unwrap();
+    let required = JoinGroupResponse::decode(&mut buf, 7).unwrap();
+    assert_eq!(required.error_code, 79);
+    let mut buf = response_body(&broker, &join(required.member_id.clone(), 61)).await;
+    ResponseHeader::decode(&mut buf, JoinGroupResponse::header_version(7)).unwrap();
+    let joined = JoinGroupResponse::decode(&mut buf, 7).unwrap();
+    assert_eq!(joined.error_code, 0);
+    assert_eq!(joined.protocol_type.as_ref().unwrap().as_str(), "connect");
+    assert_eq!(joined.protocol_name.as_ref().unwrap().as_str(), "sessioned");
+    assert_eq!(joined.leader, joined.member_id);
+    assert_eq!(joined.members[0].metadata, worker_state);
+
+    let task_assignment = Bytes::from_static(b"\x00\x02connector and task ids");
+    let sync = encode_request(
+        ApiKey::SyncGroup,
+        5,
+        62,
+        &SyncGroupRequest::default()
+            .with_group_id(group_id.clone())
+            .with_generation_id(joined.generation_id)
+            .with_member_id(joined.member_id.clone())
+            .with_protocol_type(Some(StrBytes::from_static_str("connect")))
+            .with_protocol_name(Some(StrBytes::from_static_str("sessioned")))
+            .with_assignments(vec![
+                SyncGroupRequestAssignment::default()
+                    .with_member_id(joined.member_id.clone())
+                    .with_assignment(task_assignment.clone()),
+            ]),
+    );
+    let mut buf = response_body(&broker, &sync).await;
+    ResponseHeader::decode(&mut buf, SyncGroupResponse::header_version(5)).unwrap();
+    let synced = SyncGroupResponse::decode(&mut buf, 5).unwrap();
+    assert_eq!(synced.error_code, 0);
+    assert_eq!(synced.protocol_type.as_ref().unwrap().as_str(), "connect");
+    assert_eq!(synced.assignment, task_assignment);
+
+    let describe = encode_request(
+        ApiKey::DescribeGroups,
+        5,
+        63,
+        &DescribeGroupsRequest::default().with_groups(vec![group_id]),
+    );
+    let mut buf = response_body(&broker, &describe).await;
+    ResponseHeader::decode(&mut buf, DescribeGroupsResponse::header_version(5)).unwrap();
+    let described = DescribeGroupsResponse::decode(&mut buf, 5).unwrap();
+    let group = &described.groups[0];
+    assert_eq!(group.error_code, 0);
+    assert_eq!(group.group_state.as_str(), "Stable");
+    assert_eq!(group.protocol_type.as_str(), "connect");
+    assert_eq!(group.protocol_data.as_str(), "sessioned");
+    assert_eq!(group.members[0].member_metadata, worker_state);
+    assert_eq!(group.members[0].member_assignment, task_assignment);
+}
+
+#[tokio::test]
 async fn classic_group_lifecycle_and_offset_replay() {
     use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
     use kafka_protocol::messages::offset_commit_request::{
@@ -716,6 +805,14 @@ async fn classic_group_lifecycle_and_offset_replay() {
     use kafka_protocol::protocol::HeaderVersion;
 
     let broker = test_broker().await;
+    broker
+        .service
+        .create(picomq_server::CreateCommand::new(
+            "/events",
+            "application/octet-stream",
+        ))
+        .await
+        .unwrap();
     let group_id = GroupId(StrBytes::from_static_str("workers"));
 
     let find = encode_request(
@@ -849,7 +946,7 @@ async fn classic_group_lifecycle_and_offset_replay() {
     assert_eq!(fetched.error_code, 0);
     let partition = &fetched.topics[0].partitions[0];
     assert_eq!(partition.committed_offset, 42);
-    assert_eq!(partition.committed_leader_epoch, 3);
+    assert_eq!(partition.committed_leader_epoch, -1);
     assert_eq!(partition.metadata.as_ref().unwrap().as_str(), "checkpoint");
 
     let leave = encode_request(
