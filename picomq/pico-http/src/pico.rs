@@ -715,7 +715,9 @@ fn service_error_response(e: ServiceError) -> Response {
             response
         }
         ErrorKind::MatchFailed => error(412, E_MATCH_FAILED, &e.message, e.next_offset.as_ref()),
-        ErrorKind::Conflict => error(409, E_CONFLICT, &e.message, e.next_offset.as_ref()),
+        ErrorKind::Conflict | ErrorKind::Transferring => {
+            error(409, E_CONFLICT, &e.message, e.next_offset.as_ref())
+        }
         ErrorKind::Closed => {
             let mut response = error(409, E_CLOSED, "stream is closed", e.next_offset.as_ref());
             set_header(&mut response, H_CLOSED, "true");

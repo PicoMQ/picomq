@@ -10,6 +10,9 @@ use crate::types::OffsetToken;
 pub enum ErrorKind {
     NotFound,
     Conflict,
+    /// The stream is moving to another node. HTTP: 409. Kafka:
+    /// `NOT_LEADER_OR_FOLLOWER`, so clients refresh metadata and retry.
+    Transferring,
     Closed,
     BadRequest,
     /// A record batch that does not parse as Kafka RecordBatch v2 (bad

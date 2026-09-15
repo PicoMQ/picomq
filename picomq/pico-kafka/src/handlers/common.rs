@@ -73,6 +73,7 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
     match error.kind {
         ErrorKind::NotFound => UNKNOWN_TOPIC_OR_PARTITION,
         ErrorKind::Conflict => TOPIC_ALREADY_EXISTS,
+        ErrorKind::Transferring => NOT_LEADER_OR_FOLLOWER,
         ErrorKind::BadRequest => INVALID_REQUEST,
         ErrorKind::CorruptBatch => CORRUPT_MESSAGE,
         ErrorKind::SchemaViolation => INVALID_RECORD,
@@ -145,4 +146,17 @@ pub fn concat_batches(batches: &[picomq_server::StreamBatch]) -> Bytes {
         out.extend_from_slice(&batch.payload);
     }
     out.freeze()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transferring_stream_tells_clients_to_refresh_metadata() {
+        let error = ServiceError::kind(ErrorKind::Transferring);
+        assert_eq!(service_error_code(&error), NOT_LEADER_OR_FOLLOWER);
+        let taken = ServiceError::kind(ErrorKind::Conflict);
+        assert_eq!(service_error_code(&taken), TOPIC_ALREADY_EXISTS);
+    }
 }
