@@ -60,6 +60,60 @@ type ProducerAck struct {
 	Ack       AppendAck
 }
 
+type MemberFence struct {
+	MemberID   string
+	Generation int32
+	InstanceID string
+}
+
+type CommittedOffset struct {
+	Position uint64 `json:"position"`
+	Metadata string `json:"metadata,omitempty"`
+}
+
+type Offsets map[string]CommittedOffset
+
+type JoinOptions struct {
+	MemberID         string
+	InstanceID       string
+	ClientID         string
+	SessionTimeout   time.Duration
+	RebalanceTimeout time.Duration
+}
+
+type GroupMembership struct {
+	MemberID   string
+	Generation int32
+	Assignment []string
+	Members    []string
+}
+
+type GroupAssignment struct {
+	Generation int32
+	Assignment []string
+}
+
+type MemberDescription struct {
+	MemberID     string
+	InstanceID   string
+	ClientID     string
+	Subscription []string
+	Assignment   []string
+}
+
+type GroupDescription struct {
+	Group        string
+	State        string
+	Generation   int32
+	ProtocolType string
+	Members      []MemberDescription
+}
+
+type GroupSummary struct {
+	Group string
+	State string
+}
+
 type ReadLimits struct {
 	Count uint64
 	Bytes uint64

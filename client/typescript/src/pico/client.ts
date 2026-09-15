@@ -3,11 +3,19 @@ import { base64Decode, parseOptionalUint, retryableError } from '../util'
 import { toEnvelopes, type RecordEnvelope } from '../record'
 import { RetryPolicy } from '../retry'
 import { PicoStream } from '../stream'
-import { header, Http, toArrayBuffer, truthy, urlencode } from '../transport/http'
+import {
+  header,
+  Http,
+  toArrayBuffer,
+  truthy,
+  urlencode,
+  type HttpRequest,
+} from '../transport/http'
 import { subscribeLoop } from '../transport/subscribe'
 import { CodecError, decodeBatchRead, encodeBatchAppend } from './codec'
 import {
   CT_BATCH_BINARY,
+  CT_JSON,
   H_CLOSED,
   H_EXPIRES_AT,
   H_NEXT_SEQ,
@@ -25,8 +33,16 @@ import type {
   AppendInput,
   AppendOptions,
   CallOptions,
+  GroupAssignment,
+  GroupDescription,
+  GroupMembership,
+  GroupSummary,
   HeaderValue,
+  JoinOptions,
   Live,
+  MemberDescription,
+  MemberFence,
+  Offsets,
   ProducerAck,
   ProducerRef,
   Protocol,
@@ -188,6 +204,157 @@ export class PicoClient implements StreamApi {
   async delete(name: string, options?: CallOptions): Promise<boolean> {
     return this.retry.run(
       () => this.deleteOnce(name, options?.signal),
+      retryableError,
+      options?.signal,
+    )
+  }
+
+  async joinGroup(
+    group: string,
+    subscription: string[],
+    options: JoinOptions = {},
+  ): Promise<GroupMembership> {
+    const body: {
+      subscription: string[]
+      memberId?: string
+      instanceId?: string
+      clientId?: string
+      sessionTimeoutMs?: number
+      rebalanceTimeoutMs?: number
+    } = { subscription }
+    if (options.memberId !== undefined) body.memberId = options.memberId
+    if (options.instanceId !== undefined) body.instanceId = options.instanceId
+    if (options.clientId !== undefined) body.clientId = options.clientId
+    if (options.sessionTimeoutMs !== undefined) body.sessionTimeoutMs = options.sessionTimeoutMs
+    if (options.rebalanceTimeoutMs !== undefined) {
+      body.rebalanceTimeoutMs = options.rebalanceTimeoutMs
+    }
+    const response = await this.call(
+      'POST',
+      `${groupPath(group)}/members`,
+      '',
+      body,
+      [200],
+      options.signal,
+    )
+    const joined = (await response.json()) as {
+      memberId?: string
+      generation?: number
+      assignment?: string[]
+      members?: string[]
+    }
+    if (typeof joined.memberId !== 'string' || typeof joined.generation !== 'number') {
+      throw new ClientError('other', 'join response lacks memberId or generation', {
+        code: 'invalid_response',
+      })
+    }
+    return {
+      memberId: joined.memberId,
+      generation: joined.generation,
+      assignment: joined.assignment ?? [],
+      members: joined.members ?? [],
+    }
+  }
+
+  async groupAssignment(
+    group: string,
+    fence: MemberFence,
+    options?: CallOptions,
+  ): Promise<GroupAssignment> {
+    let query = `?generation=${fence.generation}`
+    if (fence.instanceId !== undefined) {
+      query += `&instanceId=${urlencode(fence.instanceId)}`
+    }
+    const response = await this.call(
+      'GET',
+      memberPath(group, fence.memberId),
+      query,
+      undefined,
+      [200],
+      options?.signal,
+    )
+    const body = (await response.json()) as { generation?: number; assignment?: string[] }
+    if (typeof body.generation !== 'number') {
+      throw new ClientError('other', 'assignment response lacks generation', {
+        code: 'invalid_response',
+      })
+    }
+    return { generation: body.generation, assignment: body.assignment ?? [] }
+  }
+
+  async heartbeat(group: string, fence: MemberFence, options?: CallOptions): Promise<void> {
+    const body: { generation: number; instanceId?: string } = { generation: fence.generation }
+    if (fence.instanceId !== undefined) body.instanceId = fence.instanceId
+    await this.call(
+      'POST',
+      `${memberPath(group, fence.memberId)}/heartbeat`,
+      '',
+      body,
+      [204],
+      options?.signal,
+    )
+  }
+
+  async leaveGroup(
+    group: string,
+    memberId: string,
+    instanceId?: string,
+    options?: CallOptions,
+  ): Promise<void> {
+    const query = instanceId === undefined ? '' : `?instanceId=${urlencode(instanceId)}`
+    await this.call(
+      'DELETE',
+      memberPath(group, memberId),
+      query,
+      undefined,
+      [204],
+      options?.signal,
+    )
+  }
+
+  async commitOffsets(
+    group: string,
+    offsets: Offsets,
+    fence?: MemberFence,
+    options?: CallOptions,
+  ): Promise<void> {
+    const body: {
+      offsets: Offsets
+      memberId?: string
+      generation?: number
+      instanceId?: string
+    } = { offsets }
+    if (fence !== undefined) {
+      body.memberId = fence.memberId
+      body.generation = fence.generation
+      if (fence.instanceId !== undefined) body.instanceId = fence.instanceId
+    }
+    await this.call('PUT', `${groupPath(group)}/offsets`, '', body, [204], options?.signal)
+  }
+
+  async fetchOffsets(
+    group: string,
+    streams: string[] = [],
+    options?: CallOptions,
+  ): Promise<Offsets> {
+    return this.retry.run(
+      () => this.fetchOffsetsOnce(group, streams, options?.signal),
+      retryableError,
+      options?.signal,
+    )
+  }
+
+  async describeGroup(group: string, options?: CallOptions): Promise<GroupDescription> {
+    return this.retry.run(
+      () => this.describeGroupOnce(group, options?.signal),
+      retryableError,
+      options?.signal,
+    )
+  }
+
+  async listGroups(options?: CallOptions): Promise<GroupSummary[]> {
+    return this.retry.run(
+      () => this.listGroupsOnce(options?.signal),
       retryableError,
       options?.signal,
     )
@@ -385,10 +552,101 @@ export class PicoClient implements StreamApi {
     }
   }
 
+  private async fetchOffsetsOnce(
+    group: string,
+    streams: string[],
+    signal?: AbortSignal,
+  ): Promise<Offsets> {
+    const query = streams
+      .map((stream, i) => `${i === 0 ? '?' : '&'}stream=${urlencode(stream)}`)
+      .join('')
+    const response = await this.call(
+      'GET',
+      `${groupPath(group)}/offsets`,
+      query,
+      undefined,
+      [200],
+      signal,
+    )
+    const body = (await response.json()) as { offsets?: Offsets }
+    return body.offsets ?? {}
+  }
+
+  private async describeGroupOnce(group: string, signal?: AbortSignal): Promise<GroupDescription> {
+    const response = await this.call('GET', groupPath(group), '', undefined, [200], signal)
+    const body = (await response.json()) as {
+      group?: string
+      state?: string
+      generation?: number
+      protocolType?: string
+      members?: Array<{
+        memberId?: string
+        instanceId?: string | null
+        clientId?: string
+        subscription?: string[]
+        assignment?: string[]
+      }>
+    }
+    if (typeof body.group !== 'string' || typeof body.state !== 'string') {
+      throw new ClientError('other', 'describe response lacks group or state', {
+        code: 'invalid_response',
+      })
+    }
+    const described: GroupDescription = {
+      group: body.group,
+      state: body.state,
+      generation: body.generation ?? 0,
+      members: (body.members ?? []).map((node) => {
+        const member: MemberDescription = {
+          memberId: node.memberId ?? '',
+          clientId: node.clientId ?? '',
+        }
+        if (typeof node.instanceId === 'string') member.instanceId = node.instanceId
+        if (node.subscription !== undefined) member.subscription = node.subscription
+        if (node.assignment !== undefined) member.assignment = node.assignment
+        return member
+      }),
+    }
+    if (body.protocolType !== undefined) described.protocolType = body.protocolType
+    return described
+  }
+
+  private async listGroupsOnce(signal?: AbortSignal): Promise<GroupSummary[]> {
+    const response = await this.call('GET', GROUPS_PATH, '', undefined, [200], signal)
+    const body = (await response.json()) as { groups?: GroupSummary[] }
+    return body.groups ?? []
+  }
+
+  private async call(
+    method: string,
+    path: string,
+    query: string,
+    body: object | undefined,
+    expected: number[],
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const request: HttpRequest = { method, url: this.url(path, query), signal }
+    if (body !== undefined) {
+      request.headers = { 'Content-Type': CT_JSON }
+      request.body = JSON.stringify(body)
+    }
+    return expectPico(await this.http.send(request), expected)
+  }
+
   private url(name: string, query = ''): string {
     const path = name.startsWith('/') ? name : `/${name}`
     return `${this.baseUrl}${path}${query}`
   }
+}
+
+const GROUPS_PATH = '/_groups'
+
+function groupPath(group: string): string {
+  return `${GROUPS_PATH}/${urlencode(group)}`
+}
+
+function memberPath(group: string, memberId: string): string {
+  return `${groupPath(group)}/members/${urlencode(memberId)}`
 }
 
 function parseAck(response: Response): AppendAck {

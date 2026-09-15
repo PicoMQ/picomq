@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { connect, ClientError, RetryPolicy } from '../../src/index'
+import { connect, ClientError, GroupMember, RetryPolicy, type Assignment } from '../../src/index'
 import type { StreamRecord } from '../../src/types'
 
 const ENDPOINT = process.env.PICO_ENDPOINT ?? 'http://127.0.0.1:4437'
+const TOKEN =
+  process.env.PICO_TOKEN ?? 'ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY'
 
 async function serverUp(): Promise<boolean> {
   try {
     const response = await fetch(ENDPOINT, { signal: AbortSignal.timeout(1500) })
-    return response.ok
+    return response.status < 500
   } catch {
     return false
   }
@@ -16,8 +18,17 @@ async function serverUp(): Promise<boolean> {
 const up = await serverUp()
 const text = (record: StreamRecord) => new TextDecoder().decode(record.body)
 
+const groupConfig = { sessionTimeoutMs: 2000, heartbeatIntervalMs: 100 }
+
+async function nextGeneration(member: GroupMember, after: number): Promise<Assignment> {
+  for await (const assignment of member.assignments()) {
+    if (assignment.generation > after) return assignment
+  }
+  throw new Error(`no rebalance past generation ${after}; error=${member.error()?.code}`)
+}
+
 describe.runIf(up)('live pico server', () => {
-  const pico = connect('pico', ENDPOINT, { retry: RetryPolicy.attempts(3) })
+  const pico = connect('pico', ENDPOINT, { retry: RetryPolicy.attempts(3), token: TOKEN })
   const base = `/it-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
   const CT = 'application/octet-stream'
 
@@ -256,6 +267,85 @@ describe.runIf(up)('live pico server', () => {
       stream.read('0', 'long-poll', {}, { signal: controller.signal }),
     ).rejects.toMatchObject({ kind: 'aborted' })
     expect(Date.now() - started).toBeLessThan(5000)
+  })
+
+  it('joins, commits, fetches, describes, and leaves a group', { timeout: 20_000 }, async () => {
+    const streams = [`${base}/g/a`, `${base}/g/b`]
+    for (const name of streams) await pico.create(name, CT)
+    const group = `ops-${base.slice(4)}`
+
+    const joined = await pico.joinGroup(group, streams, { clientId: 'test', sessionTimeoutMs: 2000 })
+    expect(joined.generation).toBe(1)
+    expect(joined.assignment).toEqual(streams)
+    expect(joined.members).toEqual([joined.memberId])
+
+    const fence = { memberId: joined.memberId, generation: 1 }
+    await pico.heartbeat(group, fence)
+    expect((await pico.groupAssignment(group, fence)).assignment).toEqual(joined.assignment)
+
+    const offsets = { [streams[0]!]: { position: 3, metadata: 'ck' } }
+    await pico.commitOffsets(group, offsets, fence)
+    await expect(
+      pico.commitOffsets(group, offsets, { ...fence, generation: 0 }),
+    ).rejects.toMatchObject({ code: 'illegal_generation' })
+    expect(await pico.fetchOffsets(group)).toEqual(offsets)
+    expect(await pico.fetchOffsets(group, [streams[1]!])).toEqual({})
+
+    const described = await pico.describeGroup(group)
+    expect(described.state).toBe('Stable')
+    expect(described.members).toHaveLength(1)
+    expect(described.members[0]!.clientId).toBe('test')
+    expect(described.members[0]!.assignment).toEqual(joined.assignment)
+    expect((await pico.listGroups()).map((g) => g.group)).toContain(group)
+
+    await pico.leaveGroup(group, joined.memberId)
+    expect((await pico.describeGroup(group)).state).toBe('Empty')
+    await expect(pico.heartbeat(group, fence)).rejects.toMatchObject({ code: 'unknown_member' })
+  })
+
+  it('members share streams and follow rebalances', { timeout: 30_000 }, async () => {
+    const streams = ['a', 'b', 'c', 'd'].map((s) => `${base}/m/${s}`)
+    for (const name of streams) await pico.create(name, CT)
+    const group = `shared-${base.slice(4)}`
+
+    const first = await GroupMember.join(pico, group, streams, groupConfig)
+    expect(first.assignment()).toEqual({ generation: 1, streams })
+
+    const [second, onFirst] = await Promise.all([
+      GroupMember.join(pico, group, streams, groupConfig),
+      nextGeneration(first, 1),
+    ])
+    expect(onFirst.generation).toBe(2)
+    expect(second.assignment().generation).toBe(2)
+    expect([...onFirst.streams, ...second.assignment().streams].sort()).toEqual(streams)
+    expect(onFirst.streams).toHaveLength(2)
+
+    const mine = second.assignment().streams[0]!
+    await second.commit({ [mine]: { position: 9 } })
+    expect((await first.fetchOffsets([mine]))[mine]!.position).toBe(9)
+
+    await second.leave()
+    const afterLeave = await nextGeneration(first, 2)
+    expect(afterLeave.streams).toEqual(streams)
+    expect(first.error()).toBeUndefined()
+
+    await first.leave()
+    expect((await pico.describeGroup(group)).state).toBe('Empty')
+  })
+
+  it('expired member rejoins with a fresh id', { timeout: 20_000 }, async () => {
+    const stream = `${base}/x/a`
+    await pico.create(stream, CT)
+    const group = `expiry-${base.slice(4)}`
+
+    const member = await GroupMember.join(pico, group, [stream], groupConfig)
+    const original = member.memberId()
+    await pico.leaveGroup(group, original)
+    const rejoined = await nextGeneration(member, 1)
+    expect(rejoined.streams).toEqual([stream])
+    expect(member.memberId()).not.toBe(original)
+    expect(member.error()).toBeUndefined()
+    await member.leave()
   })
 
   it('cleans up its test streams', async () => {

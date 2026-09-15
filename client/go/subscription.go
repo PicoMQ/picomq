@@ -318,16 +318,7 @@ func (s *Subscription) recover(cause error) error {
 		}
 		delay *= 2
 	}
-	timer := time.NewTimer(delay)
-	select {
-	case <-s.ctx.Done():
-		if !timer.Stop() {
-			<-timer.C
-		}
-		return s.ctx.Err()
-	case <-timer.C:
-		return nil
-	}
+	return sleepCtx(s.ctx, delay)
 }
 
 func scannerLimit(maxEventBytes int) int {
