@@ -82,7 +82,7 @@ async fn operations_join_commit_fetch_describe_and_leave() {
         .unwrap();
     assert_eq!(joined.generation, 1);
     assert_eq!(joined.assignment, names(&["/g/a", "/g/b"]));
-    assert_eq!(joined.members, [joined.member_id.clone()]);
+    assert_eq!(joined.members, std::slice::from_ref(&joined.member_id));
 
     let fence = MemberFence {
         member_id: joined.member_id.clone(),
@@ -185,7 +185,11 @@ async fn members_share_streams_and_follow_rebalances() {
         .await
         .unwrap();
     assert_eq!(
-        first.fetch_offsets(&[mine.clone()]).await.unwrap()[mine].position,
+        first
+            .fetch_offsets(std::slice::from_ref(mine))
+            .await
+            .unwrap()[mine]
+            .position,
         9
     );
 
