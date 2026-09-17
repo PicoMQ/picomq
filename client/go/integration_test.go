@@ -414,8 +414,8 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("enforces bearer tokens on a running Pico server", func() {
-		if os.Getenv("PICOMQ_INTEGRATION") == "" {
-			ginkgo.Skip("set PICOMQ_INTEGRATION=1 to run live tests")
+		if os.Getenv("PICOMQ_INTEGRATION") == "" || os.Getenv("PICOMQ_AUTH_REQUIRED") == "" {
+			ginkgo.Skip("set PICOMQ_INTEGRATION=1 and PICOMQ_AUTH_REQUIRED=1 against a server started with --auth required")
 		}
 		ctx := context.Background()
 		endpoint := liveEndpoint("PICOMQ_ENDPOINT")

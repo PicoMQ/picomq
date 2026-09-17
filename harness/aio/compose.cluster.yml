@@ -7,6 +7,8 @@
 # HTTP protocol: set PICO_PROTOCOL=pico|ds in .env (see .env.example).
 
 x-pico: &pico
+  # Built from the repository root unless PICO_IMAGE names an image that already exists.
+  image: ${PICO_IMAGE:-picomq-aio:local}
   build:
     context: ../..
     dockerfile: Dockerfile
