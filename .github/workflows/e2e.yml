@@ -19,13 +19,12 @@ permissions:
 jobs:
   e2e:
     name: e2e / ${{ matrix.scenario }}
-    if: inputs.scenario == 'all' || inputs.scenario == matrix.scenario
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        scenario: [single, cluster, ds]
+        scenario: ${{ inputs.scenario == 'all' && fromJSON('["single", "cluster", "ds"]') || fromJSON(format('["{0}"]', inputs.scenario)) }}
     steps:
       - uses: actions/checkout@v7
 
