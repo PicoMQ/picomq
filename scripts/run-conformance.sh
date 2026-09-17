@@ -76,7 +76,7 @@ fi
 cd "${WORK}"
 npm init -y >/dev/null 2>&1
 npm pkg set type=module >/dev/null
-npm install --silent @durable-streams/server-conformance-tests@0.3.6 vitest@4
+npm install --no-audit --no-fund @durable-streams/server-conformance-tests@0.3.6 vitest@4.0
 cat > runner.test.js <<'EOF'
 import { runConformanceTests } from '@durable-streams/server-conformance-tests'
 const baseUrl = process.env.CONFORMANCE_TEST_URL
@@ -97,4 +97,4 @@ export default defineConfig({
 EOF
 
 echo "Running conformance against ${BASE_URL}"
-CONFORMANCE_TEST_URL="${BASE_URL}" npx vitest run --reporter=verbose
+CONFORMANCE_TEST_URL="${BASE_URL}" ./node_modules/.bin/vitest run --reporter=verbose
