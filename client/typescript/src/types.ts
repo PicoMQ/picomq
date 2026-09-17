@@ -100,6 +100,60 @@ export interface ProducerAck {
   ack: AppendAck
 }
 
+export interface MemberFence {
+  memberId: string
+  generation: number
+  instanceId?: string
+}
+
+export interface CommittedOffset {
+  position: number
+  metadata?: string
+}
+
+export type Offsets = { [stream: string]: CommittedOffset }
+
+export interface JoinOptions extends CallOptions {
+  memberId?: string
+  instanceId?: string
+  clientId?: string
+  sessionTimeoutMs?: number
+  rebalanceTimeoutMs?: number
+}
+
+export interface GroupMembership {
+  memberId: string
+  generation: number
+  assignment: string[]
+  members: string[]
+}
+
+export interface GroupAssignment {
+  generation: number
+  assignment: string[]
+}
+
+export interface MemberDescription {
+  memberId: string
+  instanceId?: string
+  clientId: string
+  subscription?: string[]
+  assignment?: string[]
+}
+
+export interface GroupDescription {
+  group: string
+  state: string
+  generation: number
+  protocolType?: string
+  members: MemberDescription[]
+}
+
+export interface GroupSummary {
+  group: string
+  state: string
+}
+
 export interface StreamApi {
   protocol(): Protocol
   beginning(): string

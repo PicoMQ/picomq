@@ -605,7 +605,7 @@ async fn transfer_moves_stream_to_target_node() {
                     Ok(_) => applied += 1,
                     Err(e) => {
                         assert!(
-                            matches!(e.kind, ErrorKind::Conflict | ErrorKind::BadRequest),
+                            matches!(e.kind, ErrorKind::Transferring | ErrorKind::BadRequest),
                             "unexpected failure {e:?}"
                         );
                         break;

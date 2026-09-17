@@ -2,6 +2,7 @@
 
 pub mod ds;
 pub mod error;
+pub mod groups;
 pub mod mime;
 pub mod pico;
 pub mod record;

@@ -133,6 +133,8 @@ pub fn is_reserved_name(name: &str) -> bool {
         || name.starts_with("/_schemas/")
         || name == "/_streams"
         || name.starts_with("/_streams/")
+        || name == "/_groups"
+        || name.starts_with("/_groups/")
 }
 
 impl S3StreamService {
@@ -1381,7 +1383,7 @@ impl S3StreamService {
             };
             if pending.to_node != self.node.node_id() {
                 return Err(ServiceError::with_message(
-                    ErrorKind::Conflict,
+                    ErrorKind::Transferring,
                     None,
                     false,
                     format!(
@@ -1392,7 +1394,7 @@ impl S3StreamService {
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(ServiceError::with_message(
-                    ErrorKind::Conflict,
+                    ErrorKind::Transferring,
                     None,
                     false,
                     format!("stream {stream_id} transfer did not settle in time"),

@@ -4,6 +4,7 @@ pub mod admin;
 mod auth;
 pub mod common;
 pub mod ds;
+pub mod groups;
 mod http;
 pub mod pico;
 pub mod route;

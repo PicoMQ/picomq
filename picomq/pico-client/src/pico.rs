@@ -1,6 +1,11 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use picomq_protocol::WireRequest;
+use picomq_protocol::groups::{
+    AssignmentRequest, AssignmentResponse, CommitRequest, DescribeRequest, FetchOffsetsRequest,
+    GroupDescription, GroupListing, GroupSummary, HeartbeatRequest, JoinRequest, JoinResponse,
+    LeaveRequest, ListGroupsRequest, MemberFence, Offsets, OffsetsResponse,
+};
 use picomq_protocol::pico::{
     AppendRequest, AppendResponse, CloseRequest, CloseResponse, CreateRequest, CreateResponse,
     DeleteRequest, DeleteResponse, HeadRequest, HeadResponse, LIVE_LONG_POLL, ListRequest, Listing,
@@ -82,6 +87,89 @@ impl PicoClient {
         Ok(seq_string(
             TrimResponse::decode(response.headers()).start_seq,
         ))
+    }
+
+    pub async fn join_group(&self, request: &JoinRequest) -> Result<JoinResponse> {
+        let response = self.call(request.encode()).await?;
+        JoinResponse::decode(&response.bytes().await?).map_err(invalid_response)
+    }
+
+    pub async fn group_assignment(
+        &self,
+        group: &str,
+        fence: &MemberFence,
+    ) -> Result<AssignmentResponse> {
+        let request = AssignmentRequest {
+            group: group.to_owned(),
+            fence: fence.clone(),
+        };
+        let response = self.call(request.encode()).await?;
+        AssignmentResponse::decode(&response.bytes().await?).map_err(invalid_response)
+    }
+
+    pub async fn heartbeat(&self, group: &str, fence: &MemberFence) -> Result<()> {
+        let request = HeartbeatRequest {
+            group: group.to_owned(),
+            fence: fence.clone(),
+        };
+        self.call(request.encode()).await.map(drop)
+    }
+
+    pub async fn leave_group(
+        &self,
+        group: &str,
+        member_id: &str,
+        instance_id: Option<&str>,
+    ) -> Result<()> {
+        let request = LeaveRequest {
+            group: group.to_owned(),
+            member_id: member_id.to_owned(),
+            instance_id: instance_id.map(str::to_owned),
+        };
+        self.call(request.encode()).await.map(drop)
+    }
+
+    pub async fn commit_offsets(
+        &self,
+        group: &str,
+        fence: Option<&MemberFence>,
+        offsets: &Offsets,
+    ) -> Result<()> {
+        let request = CommitRequest {
+            group: group.to_owned(),
+            fence: fence.cloned(),
+            offsets: offsets.clone(),
+        };
+        self.call(request.encode()).await.map(drop)
+    }
+
+    pub async fn fetch_offsets(&self, group: &str, streams: &[String]) -> Result<Offsets> {
+        let request = FetchOffsetsRequest {
+            group: group.to_owned(),
+            streams: streams.to_vec(),
+        };
+        let response = self.call(request.encode()).await?;
+        OffsetsResponse::decode(&response.bytes().await?)
+            .map(|decoded| decoded.offsets)
+            .map_err(invalid_response)
+    }
+
+    pub async fn describe_group(&self, group: &str) -> Result<GroupDescription> {
+        let request = DescribeRequest {
+            group: group.to_owned(),
+        };
+        let response = self.retry.run(|| self.call(request.encode())).await?;
+        GroupDescription::decode(&response.bytes().await?).map_err(invalid_response)
+    }
+
+    pub async fn list_groups(&self) -> Result<Vec<GroupSummary>> {
+        let response = self
+            .retry
+            .run(|| self.call(ListGroupsRequest.encode()))
+            .await?;
+        GroupListing::decode(&response.bytes().await?)
+            .map(|listing| listing.groups)
+            .map_err(invalid_response)
     }
 
     async fn call(&self, wire: WireRequest) -> Result<Response> {

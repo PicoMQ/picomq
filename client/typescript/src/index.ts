@@ -4,8 +4,17 @@ export type {
   AppendOptions,
   CallOptions,
   ClientConfig,
+  CommittedOffset,
+  GroupAssignment,
+  GroupDescription,
+  GroupMembership,
+  GroupSummary,
   HeaderValue,
+  JoinOptions,
   Live,
+  MemberDescription,
+  MemberFence,
+  Offsets,
   ProducerAck,
   ProducerRef,
   Protocol,
@@ -24,6 +33,7 @@ export type { RecordEnvelope } from './record'
 export { ClientError, isAbortError, type ErrorKind } from './error'
 export { DsClient } from './ds/client'
 export { PicoClient } from './pico/client'
+export { GroupMember, type Assignment, type GroupClient, type GroupConfig } from './group'
 export { Pending, Producer, type ProducerClient, type ProducerConfig } from './producer'
 export { PicoStream, Stream } from './stream'
 export { RetryPolicy } from './retry'

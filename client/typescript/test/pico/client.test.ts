@@ -81,3 +81,182 @@ describe('PicoClient.append', () => {
     expect(headers.get('Pico-Producer-Seq')).toBe('3')
   })
 })
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function request(fetch: ReturnType<typeof vi.fn>, index = 0) {
+  const [url, init] = fetch.mock.calls[index]! as [string, RequestInit]
+  const body = init.body === undefined || init.body === null ? undefined : JSON.parse(init.body as string)
+  return { url, method: init.method, headers: new Headers(init.headers), body }
+}
+
+describe('PicoClient groups', () => {
+  it('joins with the json body and decodes the membership', async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      json({ memberId: 'm-1', generation: 2, assignment: ['/a'], members: ['m-1', 'm-2'] }),
+    )
+    vi.stubGlobal('fetch', fetch)
+
+    const client = new PicoClient('http://example.test')
+    const joined = await client.joinGroup('orders/eu', ['/a', '/b'], {
+      memberId: 'm-1',
+      instanceId: 'i-1',
+      clientId: 'test',
+      sessionTimeoutMs: 6000,
+      rebalanceTimeoutMs: 9000,
+    })
+
+    expect(joined).toEqual({
+      memberId: 'm-1',
+      generation: 2,
+      assignment: ['/a'],
+      members: ['m-1', 'm-2'],
+    })
+
+    const sent = request(fetch)
+    expect(sent.method).toBe('POST')
+    expect(sent.url).toBe('http://example.test/_groups/orders%2Feu/members')
+    expect(sent.headers.get('Content-Type')).toBe('application/json')
+    expect(sent.body).toEqual({
+      subscription: ['/a', '/b'],
+      memberId: 'm-1',
+      instanceId: 'i-1',
+      clientId: 'test',
+      sessionTimeoutMs: 6000,
+      rebalanceTimeoutMs: 9000,
+    })
+  })
+
+  it('rejects a join response without a member id', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ generation: 1 })))
+    const client = new PicoClient('http://example.test')
+
+    await expect(client.joinGroup('g', ['/a'])).rejects.toMatchObject({ code: 'invalid_response' })
+  })
+
+  it('heartbeats, fetches the assignment, and leaves with the fence', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(json({ generation: 3, assignment: ['/a'] }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetch)
+
+    const client = new PicoClient('http://example.test')
+    const fence = { memberId: 'm/1', generation: 3, instanceId: 'i-1' }
+
+    await client.heartbeat('g', fence)
+    expect(await client.groupAssignment('g', fence)).toEqual({ generation: 3, assignment: ['/a'] })
+    await client.leaveGroup('g', 'm/1', 'i-1')
+
+    const heartbeat = request(fetch, 0)
+    expect(heartbeat.method).toBe('POST')
+    expect(heartbeat.url).toBe('http://example.test/_groups/g/members/m%2F1/heartbeat')
+    expect(heartbeat.body).toEqual({ generation: 3, instanceId: 'i-1' })
+
+    const assignment = request(fetch, 1)
+    expect(assignment.method).toBe('GET')
+    expect(assignment.url).toBe(
+      'http://example.test/_groups/g/members/m%2F1?generation=3&instanceId=i-1',
+    )
+
+    const leave = request(fetch, 2)
+    expect(leave.method).toBe('DELETE')
+    expect(leave.url).toBe('http://example.test/_groups/g/members/m%2F1?instanceId=i-1')
+  })
+
+  it('commits with an optional fence and fetches offsets per stream', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        json({ offsets: { '/a': { position: 7, metadata: 'ck' }, '/b c': { position: 1 } } }),
+      )
+    vi.stubGlobal('fetch', fetch)
+
+    const client = new PicoClient('http://example.test')
+    const offsets = { '/a': { position: 7, metadata: 'ck' } }
+
+    await client.commitOffsets('g', offsets, { memberId: 'm', generation: 3 })
+    await client.commitOffsets('g', offsets)
+    const fetched = await client.fetchOffsets('g', ['/a', '/b c'])
+
+    const fenced = request(fetch, 0)
+    expect(fenced.method).toBe('PUT')
+    expect(fenced.url).toBe('http://example.test/_groups/g/offsets')
+    expect(fenced.body).toEqual({ offsets, memberId: 'm', generation: 3 })
+    expect(request(fetch, 1).body).toEqual({ offsets })
+
+    const fetchRequest = request(fetch, 2)
+    expect(fetchRequest.method).toBe('GET')
+    expect(fetchRequest.url).toBe('http://example.test/_groups/g/offsets?stream=%2Fa&stream=%2Fb%20c')
+    expect(fetched).toEqual({ '/a': { position: 7, metadata: 'ck' }, '/b c': { position: 1 } })
+  })
+
+  it('maps group error codes onto client errors', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(json({ error: 'illegal_generation', message: 'stale' }, 409)),
+    )
+    const client = new PicoClient('http://example.test')
+
+    await expect(
+      client.commitOffsets('g', {}, { memberId: 'm', generation: 0 }),
+    ).rejects.toMatchObject({ kind: 'conflict', code: 'illegal_generation', status: 409 })
+  })
+
+  it('describes and lists groups with retries', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('boom', { status: 503 }))
+      .mockResolvedValueOnce(
+        json({
+          group: 'g',
+          state: 'Stable',
+          generation: 2,
+          protocolType: 'consumer',
+          members: [
+            { memberId: 'm', instanceId: null, clientId: 'c', subscription: ['/a'], assignment: ['/a'] },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(json({ groups: [{ group: 'g', state: 'Stable' }] }))
+    vi.stubGlobal('fetch', fetch)
+
+    const client = new PicoClient('http://example.test', undefined, false, new RetryPolicy(3, 0, 0, 1))
+
+    const described = await client.describeGroup('g')
+    expect(described).toEqual({
+      group: 'g',
+      state: 'Stable',
+      generation: 2,
+      protocolType: 'consumer',
+      members: [{ memberId: 'm', clientId: 'c', subscription: ['/a'], assignment: ['/a'] }],
+    })
+    expect(request(fetch, 1).url).toBe('http://example.test/_groups/g')
+
+    expect(await client.listGroups()).toEqual([{ group: 'g', state: 'Stable' }])
+    expect(request(fetch, 2).url).toBe('http://example.test/_groups')
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not retry joins, heartbeats, or commits', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response('boom', { status: 503 }))
+    vi.stubGlobal('fetch', fetch)
+
+    const client = new PicoClient('http://example.test', undefined, false, RetryPolicy.attempts(3))
+    const fence = { memberId: 'm', generation: 1 }
+
+    await expect(client.joinGroup('g', ['/a'])).rejects.toMatchObject({ status: 503 })
+    await expect(client.heartbeat('g', fence)).rejects.toMatchObject({ status: 503 })
+    await expect(client.commitOffsets('g', {}, fence)).rejects.toMatchObject({ status: 503 })
+
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+})

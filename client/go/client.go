@@ -224,15 +224,22 @@ func (c *coreClient) run(ctx context.Context, operation func() error) error {
 		if !again || !retryable(err) {
 			return err
 		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
-			return ctx.Err()
-		case <-timer.C:
+		if err := sleepCtx(ctx, delay); err != nil {
+			return err
 		}
+	}
+}
+
+func sleepCtx(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	select {
+	case <-ctx.Done():
+		if !timer.Stop() {
+			<-timer.C
+		}
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

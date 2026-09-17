@@ -237,14 +237,7 @@ fn spawn_kafka(
     listener: tokio::net::TcpListener,
     bound: std::net::SocketAddr,
 ) -> tokio::task::JoinHandle<()> {
-    let broker = Arc::new(picomq_kafka::BrokerContext::new(
-        config.node_id,
-        config.cluster_id.clone(),
-        node.service(),
-        node.ownership(),
-        node.views(),
-        node.metadata().clone(),
-    ));
+    let broker = Arc::new(picomq_kafka::BrokerContext::new(node));
     let listener_config = picomq_kafka::ListenerConfig {
         addr: bound,
         max_request_bytes: config.max_request_size,

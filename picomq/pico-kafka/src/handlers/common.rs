@@ -1,6 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::{BrokerId, ResponseHeader, TopicName};
 use kafka_protocol::protocol::{Encodable, HeaderVersion, StrBytes};
+use picomq_metadata::MetadataState;
 use picomq_server::{ErrorKind, ServiceError, alias};
 use uuid::Uuid;
 
@@ -72,6 +73,7 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
     match error.kind {
         ErrorKind::NotFound => UNKNOWN_TOPIC_OR_PARTITION,
         ErrorKind::Conflict => TOPIC_ALREADY_EXISTS,
+        ErrorKind::Transferring => NOT_LEADER_OR_FOLLOWER,
         ErrorKind::BadRequest => INVALID_REQUEST,
         ErrorKind::CorruptBatch => CORRUPT_MESSAGE,
         ErrorKind::SchemaViolation => INVALID_RECORD,
@@ -95,6 +97,12 @@ pub async fn ensure_local_leader(ctx: &BrokerContext, stream_name: &str) -> Resu
     } else {
         Err(NOT_LEADER_OR_FOLLOWER)
     }
+}
+
+/// Advertised Kafka listener of `node_id`, `None` when the node is unknown
+/// or does not serve Kafka.
+pub fn broker_address(state: &MetadataState, node_id: i32) -> Option<&str> {
+    state.get_node_protocol_address(node_id, crate::PROTOCOL_NAME)
 }
 
 pub fn parse_host_port(address: &str) -> (String, i32) {
@@ -138,4 +146,17 @@ pub fn concat_batches(batches: &[picomq_server::StreamBatch]) -> Bytes {
         out.extend_from_slice(&batch.payload);
     }
     out.freeze()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transferring_stream_tells_clients_to_refresh_metadata() {
+        let error = ServiceError::kind(ErrorKind::Transferring);
+        assert_eq!(service_error_code(&error), NOT_LEADER_OR_FOLLOWER);
+        let taken = ServiceError::kind(ErrorKind::Conflict);
+        assert_eq!(service_error_code(&taken), TOPIC_ALREADY_EXISTS);
+    }
 }

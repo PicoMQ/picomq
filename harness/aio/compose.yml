@@ -64,6 +64,7 @@ services:
     restart: "no"
 
   pico:
+    image: ${PICO_IMAGE:-picomq-aio:local}
     build:
       context: ../..
       dockerfile: Dockerfile

@@ -9,8 +9,8 @@ use uuid::Uuid;
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_id, encode_response, is_internal_topic,
-    new_topic_id, parse_host_port, service_error_code, topic_name, topic_uuid,
+    NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_address, broker_id, encode_response,
+    is_internal_topic, new_topic_id, parse_host_port, service_error_code, topic_name, topic_uuid,
 };
 use crate::handlers::topics::KAFKA_CREATED_CT;
 use crate::handlers::{HandlerError, HandlerOutcome};
@@ -26,13 +26,8 @@ pub async fn handle(
 
     let mut brokers = Vec::new();
     let view = ctx.views.load();
-    for (node_id, node) in view.state.nodes.iter() {
-        let Some(host) = node
-            .protocol_addresses
-            .get(crate::PROTOCOL_NAME)
-            .map(String::as_str)
-            .filter(|a| !a.is_empty())
-        else {
+    for node_id in view.state.nodes.keys() {
+        let Some(host) = broker_address(&view.state, *node_id) else {
             continue;
         };
         let (host, port) = parse_host_port(host);

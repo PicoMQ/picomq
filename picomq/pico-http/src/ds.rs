@@ -645,7 +645,9 @@ fn service_error_response(e: ServiceError) -> Response {
             }
             response
         }
-        ErrorKind::Conflict | ErrorKind::Closed => respond(409, e.next_offset.as_ref(), e.closed),
+        ErrorKind::Conflict | ErrorKind::Transferring | ErrorKind::Closed => {
+            respond(409, e.next_offset.as_ref(), e.closed)
+        }
         ErrorKind::Durability => fail(500, &e.message),
     }
 }
