@@ -224,14 +224,23 @@ func (c *PicoClient) JoinGroup(ctx context.Context, group string, subscription [
 		ClientID           string   `json:"clientId,omitempty"`
 		SessionTimeoutMs   int64    `json:"sessionTimeoutMs,omitempty"`
 		RebalanceTimeoutMs int64    `json:"rebalanceTimeoutMs,omitempty"`
-	}{Subscription: subscription, MemberID: options.MemberID, InstanceID: options.InstanceID, ClientID: options.ClientID, SessionTimeoutMs: options.SessionTimeout.Milliseconds(), RebalanceTimeoutMs: options.RebalanceTimeout.Milliseconds()}
+	}{
+		Subscription:       subscription,
+		MemberID:           options.MemberID,
+		InstanceID:         options.InstanceID,
+		ClientID:           options.ClientID,
+		SessionTimeoutMs:   options.SessionTimeout.Milliseconds(),
+		RebalanceTimeoutMs: options.RebalanceTimeout.Milliseconds(),
+	}
 	if request.Subscription == nil {
 		request.Subscription = []string{}
 	}
+
 	data, err := c.groupCall(ctx, http.MethodPost, c.core.groupURL(nil, group, "members"), request, http.StatusOK)
 	if err != nil {
 		return GroupMembership{}, err
 	}
+
 	var raw struct {
 		MemberID   *string  `json:"memberId"`
 		Generation *int32   `json:"generation"`
@@ -244,7 +253,13 @@ func (c *PicoClient) JoinGroup(ctx context.Context, group string, subscription [
 	if raw.MemberID == nil || raw.Generation == nil {
 		return GroupMembership{}, &ClientError{Kind: ErrorInvalidResponse, Code: "invalid_response", Message: "join response lacks memberId or generation"}
 	}
-	return GroupMembership{MemberID: *raw.MemberID, Generation: *raw.Generation, Assignment: nonNil(raw.Assignment), Members: nonNil(raw.Members)}, nil
+
+	return GroupMembership{
+		MemberID:   *raw.MemberID,
+		Generation: *raw.Generation,
+		Assignment: nonNil(raw.Assignment),
+		Members:    nonNil(raw.Members),
+	}, nil
 }
 
 func (c *PicoClient) GroupAssignment(ctx context.Context, group string, fence MemberFence) (GroupAssignment, error) {
@@ -252,10 +267,12 @@ func (c *PicoClient) GroupAssignment(ctx context.Context, group string, fence Me
 	if fence.InstanceID != "" {
 		query.Set("instanceId", fence.InstanceID)
 	}
+
 	data, err := c.groupCall(ctx, http.MethodGet, c.core.groupURL(query, group, "members", fence.MemberID), nil, http.StatusOK)
 	if err != nil {
 		return GroupAssignment{}, err
 	}
+
 	var raw struct {
 		Generation *int32   `json:"generation"`
 		Assignment []string `json:"assignment"`
@@ -266,6 +283,7 @@ func (c *PicoClient) GroupAssignment(ctx context.Context, group string, fence Me
 	if raw.Generation == nil {
 		return GroupAssignment{}, &ClientError{Kind: ErrorInvalidResponse, Code: "invalid_response", Message: "assignment response lacks generation"}
 	}
+
 	return GroupAssignment{Generation: *raw.Generation, Assignment: nonNil(raw.Assignment)}, nil
 }
 
@@ -274,6 +292,7 @@ func (c *PicoClient) Heartbeat(ctx context.Context, group string, fence MemberFe
 		Generation int32  `json:"generation"`
 		InstanceID string `json:"instanceId,omitempty"`
 	}{Generation: fence.Generation, InstanceID: fence.InstanceID}
+
 	_, err := c.groupCall(ctx, http.MethodPost, c.core.groupURL(nil, group, "members", fence.MemberID, "heartbeat"), request, http.StatusNoContent)
 	return err
 }
@@ -283,6 +302,7 @@ func (c *PicoClient) LeaveGroup(ctx context.Context, group, memberID, instanceID
 	if instanceID != "" {
 		query = url.Values{"instanceId": {instanceID}}
 	}
+
 	_, err := c.groupCall(ctx, http.MethodDelete, c.core.groupURL(query, group, "members", memberID), nil, http.StatusNoContent)
 	return err
 }
@@ -301,6 +321,7 @@ func (c *PicoClient) CommitOffsets(ctx context.Context, group string, offsets Of
 		generation := fence.Generation
 		request.MemberID, request.Generation, request.InstanceID = fence.MemberID, &generation, fence.InstanceID
 	}
+
 	_, err := c.groupCall(ctx, http.MethodPut, c.core.groupURL(nil, group, "offsets"), request, http.StatusNoContent)
 	return err
 }
@@ -311,16 +332,19 @@ func (c *PicoClient) FetchOffsets(ctx context.Context, group string, streams []s
 		if len(streams) > 0 {
 			query = url.Values{"stream": streams}
 		}
+
 		data, callErr := c.groupCall(ctx, http.MethodGet, c.core.groupURL(query, group, "offsets"), nil, http.StatusOK)
 		if callErr != nil {
 			return callErr
 		}
+
 		var raw struct {
 			Offsets Offsets `json:"offsets"`
 		}
 		if callErr = json.Unmarshal(data, &raw); callErr != nil {
 			return invalidResponse(callErr)
 		}
+
 		offsets = raw.Offsets
 		if offsets == nil {
 			offsets = Offsets{}
@@ -336,6 +360,7 @@ func (c *PicoClient) DescribeGroup(ctx context.Context, group string) (descripti
 		if callErr != nil {
 			return callErr
 		}
+
 		var raw struct {
 			Group        *string `json:"group"`
 			State        *string `json:"state"`
@@ -355,9 +380,22 @@ func (c *PicoClient) DescribeGroup(ctx context.Context, group string) (descripti
 		if raw.Group == nil || raw.State == nil {
 			return &ClientError{Kind: ErrorInvalidResponse, Code: "invalid_response", Message: "describe response lacks group or state"}
 		}
-		description = GroupDescription{Group: *raw.Group, State: *raw.State, Generation: raw.Generation, ProtocolType: raw.ProtocolType, Members: make([]MemberDescription, 0, len(raw.Members))}
+
+		description = GroupDescription{
+			Group:        *raw.Group,
+			State:        *raw.State,
+			Generation:   raw.Generation,
+			ProtocolType: raw.ProtocolType,
+			Members:      make([]MemberDescription, 0, len(raw.Members)),
+		}
 		for _, member := range raw.Members {
-			description.Members = append(description.Members, MemberDescription{MemberID: member.MemberID, InstanceID: member.InstanceID, ClientID: member.ClientID, Subscription: member.Subscription, Assignment: member.Assignment})
+			description.Members = append(description.Members, MemberDescription{
+				MemberID:     member.MemberID,
+				InstanceID:   member.InstanceID,
+				ClientID:     member.ClientID,
+				Subscription: member.Subscription,
+				Assignment:   member.Assignment,
+			})
 		}
 		return nil
 	})
@@ -370,6 +408,7 @@ func (c *PicoClient) ListGroups(ctx context.Context) (groups []GroupSummary, err
 		if callErr != nil {
 			return callErr
 		}
+
 		var raw struct {
 			Groups []struct {
 				Group string `json:"group"`
@@ -379,6 +418,7 @@ func (c *PicoClient) ListGroups(ctx context.Context) (groups []GroupSummary, err
 		if callErr = json.Unmarshal(data, &raw); callErr != nil {
 			return invalidResponse(callErr)
 		}
+
 		groups = make([]GroupSummary, 0, len(raw.Groups))
 		for _, group := range raw.Groups {
 			groups = append(groups, GroupSummary{Group: group.Group, State: group.State})
@@ -398,21 +438,25 @@ func (c *PicoClient) groupCall(ctx context.Context, method, target string, reque
 		wire.headers = http.Header{"Content-Type": {"application/json"}}
 		wire.body = payload
 	}
+
 	response, err := c.core.send(ctx, wire)
 	if err != nil {
 		return nil, err
 	}
+
 	return expectPico(response, expected...)
 }
 
 func (c *coreClient) groupURL(query url.Values, segments ...string) string {
 	u := *c.baseURL
+
 	path := strings.TrimRight(c.baseURL.Path, "/") + "/_groups"
 	raw := strings.TrimRight(c.baseURL.EscapedPath(), "/") + "/_groups"
 	for _, segment := range segments {
 		path += "/" + segment
 		raw += "/" + url.PathEscape(segment)
 	}
+
 	u.Path, u.RawPath = path, raw
 	u.RawQuery = query.Encode()
 	return u.String()

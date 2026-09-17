@@ -305,6 +305,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		ctx := context.Background()
 		client, err := NewPico(liveEndpoint("PICOMQ_ENDPOINT"), liveOptions()...)
 		Expect(err).NotTo(HaveOccurred())
+
 		run := fmt.Sprintf("%d", time.Now().UnixNano())
 		streams := make([]string, 0, 4)
 		for _, suffix := range []string{"a", "b", "c", "d"} {
@@ -325,32 +326,42 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		Expect(joined.Generation).To(Equal(int32(1)))
 		Expect(joined.Assignment).To(Equal(streams[:2]))
 		Expect(joined.Members).To(Equal([]string{joined.MemberID}))
+
 		fence := MemberFence{MemberID: joined.MemberID, Generation: 1}
 		Expect(client.Heartbeat(ctx, group, fence)).To(Succeed())
+
 		assignment, err := client.GroupAssignment(ctx, group, fence)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(assignment.Assignment).To(Equal(joined.Assignment))
+
 		offsets := Offsets{streams[0]: {Position: 3, Metadata: "ck"}}
 		Expect(client.CommitOffsets(ctx, group, offsets, &fence)).To(Succeed())
+
 		stale := fence
 		stale.Generation = 0
 		Expect(errorCode(client.CommitOffsets(ctx, group, offsets, &stale))).To(Equal("illegal_generation"))
+
 		fetched, err := client.FetchOffsets(ctx, group, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fetched).To(Equal(offsets))
+
 		fetched, err = client.FetchOffsets(ctx, group, streams[1:2])
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fetched).To(BeEmpty())
+
 		described, err := client.DescribeGroup(ctx, group)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(described.State).To(Equal("Stable"))
 		Expect(described.Members).To(HaveLen(1))
 		Expect(described.Members[0].ClientID).To(Equal("go-test"))
 		Expect(described.Members[0].Assignment).To(Equal(joined.Assignment))
+
 		groups, err := client.ListGroups(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(groups).To(ContainElement(GroupSummary{Group: group, State: "Stable"}))
+
 		Expect(client.LeaveGroup(ctx, group, joined.MemberID, "")).To(Succeed())
+
 		described, err = client.DescribeGroup(ctx, group)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(described.State).To(Equal("Empty"))
@@ -358,25 +369,33 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 
 		shared := "go-shared-" + run
 		config := GroupConfig{SessionTimeout: 2 * time.Second, HeartbeatInterval: 100 * time.Millisecond}
+
 		first, err := client.NewGroupMember(ctx, shared, streams, &config)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(first.Assignment()).To(Equal(Assignment{Generation: 1, Streams: streams}))
+
 		second, err := client.NewGroupMember(ctx, shared, streams, &config)
 		Expect(err).NotTo(HaveOccurred())
+
 		onFirst := awaitGeneration(first, 1)
 		Expect(onFirst.Generation).To(Equal(int32(2)))
 		Expect(second.Assignment().Generation).To(Equal(int32(2)))
 		Expect(onFirst.Streams).To(HaveLen(2))
 		Expect(append(append([]string{}, onFirst.Streams...), second.Assignment().Streams...)).To(ConsistOf(streams))
+
 		mine := second.Assignment().Streams[0]
 		Expect(second.Commit(ctx, Offsets{mine: {Position: 9}})).To(Succeed())
+
 		fetched, err = first.FetchOffsets(ctx, []string{mine})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fetched[mine].Position).To(Equal(uint64(9)))
+
 		Expect(second.Leave(ctx)).To(Succeed())
 		Expect(awaitGeneration(first, 2).Streams).To(Equal(streams))
 		Expect(first.Err()).NotTo(HaveOccurred())
+
 		Expect(first.Leave(ctx)).To(Succeed())
+
 		described, err = client.DescribeGroup(ctx, shared)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(described.State).To(Equal("Empty"))
@@ -385,7 +404,9 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		member, err := client.NewGroupMember(ctx, expiry, streams[:1], &config)
 		Expect(err).NotTo(HaveOccurred())
 		original := member.MemberID()
+
 		Expect(client.LeaveGroup(ctx, expiry, original, "")).To(Succeed())
+
 		Expect(awaitGeneration(member, 1).Streams).To(Equal(streams[:1]))
 		Expect(member.MemberID()).NotTo(Equal(original))
 		Expect(member.Err()).NotTo(HaveOccurred())
@@ -563,6 +584,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 			Expect(err).NotTo(HaveOccurred())
 			clients[i] = client
 		}
+
 		run := fmt.Sprintf("%d", time.Now().UnixNano())
 		streams := make([]string, 0, 4)
 		for _, suffix := range []string{"a", "b", "c", "d"} {
@@ -581,18 +603,24 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		joined, err := clients[0].JoinGroup(ctx, group, streams[:1], JoinOptions{ClientID: "go-cluster", SessionTimeout: 2 * time.Second})
 		Expect(err).NotTo(HaveOccurred())
 		fence := MemberFence{MemberID: joined.MemberID, Generation: joined.Generation}
+
 		waitForGroup(clients[1], group)
 		Expect(clients[1].Heartbeat(ctx, group, fence)).To(Succeed())
+
 		assignment, err := clients[1].GroupAssignment(ctx, group, fence)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(assignment.Assignment).To(Equal(streams[:1]))
+
 		Expect(clients[1].CommitOffsets(ctx, group, Offsets{streams[0]: {Position: 5}}, &fence)).To(Succeed())
+
 		fetched, err := clients[1].FetchOffsets(ctx, group, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fetched[streams[0]].Position).To(Equal(uint64(5)))
+
 		described, err := clients[1].DescribeGroup(ctx, group)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(described.State).To(Equal("Stable"))
+
 		var listed []GroupSummary
 		for _, client := range clients {
 			groups, err := client.ListGroups(ctx)
@@ -600,33 +628,43 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 			listed = append(listed, groups...)
 		}
 		Expect(listed).To(ContainElement(GroupSummary{Group: group, State: "Stable"}), "each node lists the groups it coordinates")
+
 		Expect(clients[1].LeaveGroup(ctx, group, joined.MemberID, "")).To(Succeed())
+
 		described, err = clients[0].DescribeGroup(ctx, group)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(described.State).To(Equal("Empty"))
 
 		shared := "go-cluster-shared-" + run
 		config := GroupConfig{SessionTimeout: 2 * time.Second, HeartbeatInterval: 100 * time.Millisecond}
+
 		first, err := clients[0].NewGroupMember(ctx, shared, streams, &config)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(first.Assignment()).To(Equal(Assignment{Generation: 1, Streams: streams}))
+
 		waitForGroup(clients[1], shared)
 		second, err := clients[1].NewGroupMember(ctx, shared, streams, &config)
 		Expect(err).NotTo(HaveOccurred())
+
 		onFirst := awaitGeneration(first, 1)
 		Expect(onFirst.Generation).To(Equal(int32(2)))
 		Expect(second.Assignment().Generation).To(Equal(int32(2)))
 		Expect(onFirst.Streams).To(HaveLen(2))
 		Expect(append(append([]string{}, onFirst.Streams...), second.Assignment().Streams...)).To(ConsistOf(streams))
+
 		mine := second.Assignment().Streams[0]
 		Expect(second.Commit(ctx, Offsets{mine: {Position: 9}})).To(Succeed())
+
 		fetched, err = first.FetchOffsets(ctx, []string{mine})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fetched[mine].Position).To(Equal(uint64(9)))
+
 		Expect(second.Leave(ctx)).To(Succeed())
 		Expect(awaitGeneration(first, 2).Streams).To(Equal(streams))
 		Expect(first.Err()).NotTo(HaveOccurred())
+
 		Expect(first.Leave(ctx)).To(Succeed())
+
 		described, err = clients[1].DescribeGroup(ctx, shared)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(described.State).To(Equal("Empty"))

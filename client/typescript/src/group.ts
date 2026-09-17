@@ -60,9 +60,11 @@ function resolveConfig(config: GroupConfig): ResolvedConfig {
     heartbeatIntervalMs: Math.max(1, config.heartbeatIntervalMs ?? sessionTimeoutMs / 3),
     retry: config.retry ?? new RetryPolicy(Number.MAX_SAFE_INTEGER, 100, 5_000, 2),
   }
+
   if (config.rebalanceTimeoutMs !== undefined) resolved.rebalanceTimeoutMs = config.rebalanceTimeoutMs
   if (config.instanceId !== undefined) resolved.instanceId = config.instanceId
   if (config.clientId !== undefined) resolved.clientId = config.clientId
+
   return resolved
 }
 
@@ -72,11 +74,13 @@ function joinOptions(
   signal: AbortSignal | undefined,
 ): JoinOptions {
   const options: JoinOptions = { sessionTimeoutMs: config.sessionTimeoutMs }
+
   if (signal !== undefined) options.signal = signal
   if (memberId !== undefined) options.memberId = memberId
   if (config.instanceId !== undefined) options.instanceId = config.instanceId
   if (config.clientId !== undefined) options.clientId = config.clientId
   if (config.rebalanceTimeoutMs !== undefined) options.rebalanceTimeoutMs = config.rebalanceTimeoutMs
+
   return options
 }
 
@@ -109,7 +113,9 @@ class Watch<T> {
         seen = this.version
         yield this.current
       }
+
       if (this.closed) return
+
       await new Promise<void>((resolve) => this.waiters.push(resolve))
     }
   }
@@ -140,9 +146,11 @@ export class GroupMember {
     this.currentMemberId = joined.memberId
     this.generation = joined.generation
     this.watch = new Watch({ generation: joined.generation, streams: joined.assignment })
+
     if (signal !== undefined) {
       signal.addEventListener('abort', () => this.controller.abort(signal.reason), { once: true })
     }
+
     this.heartbeats = this.run()
   }
 
@@ -154,11 +162,13 @@ export class GroupMember {
   ): Promise<GroupMember> {
     throwIfAborted(config.signal)
     const resolved = resolveConfig(config)
+
     const joined = await resolved.retry.run(
       () => client.joinGroup(group, subscription, joinOptions(resolved, undefined, config.signal)),
       retryableError,
       config.signal,
     )
+
     return new GroupMember(client, group, subscription, resolved, joined, config.signal)
   }
 
@@ -191,7 +201,9 @@ export class GroupMember {
     this.controller.abort()
     await this.heartbeats
     this.watch.close()
+
     if (this.failed !== undefined) return
+
     await this.client.leaveGroup(this.group, this.currentMemberId, this.config.instanceId, options)
   }
 
@@ -204,14 +216,17 @@ export class GroupMember {
   private async run(): Promise<void> {
     const signal = this.controller.signal
     let attempt = 0
+
     for (;;) {
       try {
         await sleep(this.config.heartbeatIntervalMs, signal)
       } catch {
         return
       }
+
       const fence = this.fence()
       let joined: GroupMembership
+
       try {
         await this.client.heartbeat(this.group, fence, { signal })
         attempt = 0
@@ -219,6 +234,7 @@ export class GroupMember {
       } catch (error) {
         const err = asClientError(error)
         if (err.kind === 'aborted') return
+
         try {
           if (err.code === 'rebalance_in_progress' || err.code === 'illegal_generation') {
             joined = await this.rejoin(fence.memberId, signal)
@@ -227,6 +243,7 @@ export class GroupMember {
           } else if (err.retryable()) {
             const delay = this.config.retry.delay(attempt)
             if (delay === null) throw err
+
             attempt += 1
             await sleep(delay, signal)
             continue
@@ -236,11 +253,13 @@ export class GroupMember {
         } catch (failure) {
           const fatal = asClientError(failure)
           if (fatal.kind === 'aborted') return
+
           this.failed = fatal
           this.watch.close()
           return
         }
       }
+
       attempt = 0
       this.currentMemberId = joined.memberId
       this.generation = joined.generation
@@ -253,6 +272,7 @@ export class GroupMember {
     signal: AbortSignal,
   ): Promise<GroupMembership> {
     let attempt = 0
+
     for (;;) {
       try {
         return await this.client.joinGroup(
@@ -262,17 +282,21 @@ export class GroupMember {
         )
       } catch (error) {
         const err = asClientError(error)
+
         if (err.code === 'unknown_member') {
           memberId = undefined
           continue
         }
+
         if (err.retryable()) {
           const delay = this.config.retry.delay(attempt)
           if (delay === null) throw err
+
           attempt += 1
           await sleep(delay, signal)
           continue
         }
+
         throw err
       }
     }

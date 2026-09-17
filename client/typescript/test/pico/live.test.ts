@@ -340,11 +340,14 @@ describe.runIf(up)('live pico server', () => {
 
     const member = await GroupMember.join(pico, group, [stream], groupConfig)
     const original = member.memberId()
+
     await pico.leaveGroup(group, original)
+
     const rejoined = await nextGeneration(member, 1)
     expect(rejoined.streams).toEqual([stream])
     expect(member.memberId()).not.toBe(original)
     expect(member.error()).toBeUndefined()
+
     await member.leave()
   })
 

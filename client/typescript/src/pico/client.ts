@@ -222,6 +222,7 @@ export class PicoClient implements StreamApi {
       sessionTimeoutMs?: number
       rebalanceTimeoutMs?: number
     } = { subscription }
+
     if (options.memberId !== undefined) body.memberId = options.memberId
     if (options.instanceId !== undefined) body.instanceId = options.instanceId
     if (options.clientId !== undefined) body.clientId = options.clientId
@@ -229,6 +230,7 @@ export class PicoClient implements StreamApi {
     if (options.rebalanceTimeoutMs !== undefined) {
       body.rebalanceTimeoutMs = options.rebalanceTimeoutMs
     }
+
     const response = await this.call(
       'POST',
       `${groupPath(group)}/members`,
@@ -237,6 +239,7 @@ export class PicoClient implements StreamApi {
       [200],
       options.signal,
     )
+
     const joined = (await response.json()) as {
       memberId?: string
       generation?: number
@@ -248,6 +251,7 @@ export class PicoClient implements StreamApi {
         code: 'invalid_response',
       })
     }
+
     return {
       memberId: joined.memberId,
       generation: joined.generation,
@@ -265,6 +269,7 @@ export class PicoClient implements StreamApi {
     if (fence.instanceId !== undefined) {
       query += `&instanceId=${urlencode(fence.instanceId)}`
     }
+
     const response = await this.call(
       'GET',
       memberPath(group, fence.memberId),
@@ -273,18 +278,21 @@ export class PicoClient implements StreamApi {
       [200],
       options?.signal,
     )
+
     const body = (await response.json()) as { generation?: number; assignment?: string[] }
     if (typeof body.generation !== 'number') {
       throw new ClientError('other', 'assignment response lacks generation', {
         code: 'invalid_response',
       })
     }
+
     return { generation: body.generation, assignment: body.assignment ?? [] }
   }
 
   async heartbeat(group: string, fence: MemberFence, options?: CallOptions): Promise<void> {
     const body: { generation: number; instanceId?: string } = { generation: fence.generation }
     if (fence.instanceId !== undefined) body.instanceId = fence.instanceId
+
     await this.call(
       'POST',
       `${memberPath(group, fence.memberId)}/heartbeat`,
@@ -302,6 +310,7 @@ export class PicoClient implements StreamApi {
     options?: CallOptions,
   ): Promise<void> {
     const query = instanceId === undefined ? '' : `?instanceId=${urlencode(instanceId)}`
+
     await this.call(
       'DELETE',
       memberPath(group, memberId),
@@ -324,11 +333,13 @@ export class PicoClient implements StreamApi {
       generation?: number
       instanceId?: string
     } = { offsets }
+
     if (fence !== undefined) {
       body.memberId = fence.memberId
       body.generation = fence.generation
       if (fence.instanceId !== undefined) body.instanceId = fence.instanceId
     }
+
     await this.call('PUT', `${groupPath(group)}/offsets`, '', body, [204], options?.signal)
   }
 
@@ -560,6 +571,7 @@ export class PicoClient implements StreamApi {
     const query = streams
       .map((stream, i) => `${i === 0 ? '?' : '&'}stream=${urlencode(stream)}`)
       .join('')
+
     const response = await this.call(
       'GET',
       `${groupPath(group)}/offsets`,
@@ -568,12 +580,14 @@ export class PicoClient implements StreamApi {
       [200],
       signal,
     )
+
     const body = (await response.json()) as { offsets?: Offsets }
     return body.offsets ?? {}
   }
 
   private async describeGroupOnce(group: string, signal?: AbortSignal): Promise<GroupDescription> {
     const response = await this.call('GET', groupPath(group), '', undefined, [200], signal)
+
     const body = (await response.json()) as {
       group?: string
       state?: string
@@ -592,6 +606,7 @@ export class PicoClient implements StreamApi {
         code: 'invalid_response',
       })
     }
+
     const described: GroupDescription = {
       group: body.group,
       state: body.state,
@@ -601,18 +616,22 @@ export class PicoClient implements StreamApi {
           memberId: node.memberId ?? '',
           clientId: node.clientId ?? '',
         }
+
         if (typeof node.instanceId === 'string') member.instanceId = node.instanceId
         if (node.subscription !== undefined) member.subscription = node.subscription
         if (node.assignment !== undefined) member.assignment = node.assignment
+
         return member
       }),
     }
     if (body.protocolType !== undefined) described.protocolType = body.protocolType
+
     return described
   }
 
   private async listGroupsOnce(signal?: AbortSignal): Promise<GroupSummary[]> {
     const response = await this.call('GET', GROUPS_PATH, '', undefined, [200], signal)
+
     const body = (await response.json()) as { groups?: GroupSummary[] }
     return body.groups ?? []
   }
@@ -630,6 +649,7 @@ export class PicoClient implements StreamApi {
       request.headers = { 'Content-Type': CT_JSON }
       request.body = JSON.stringify(body)
     }
+
     return expectPico(await this.http.send(request), expected)
   }
 

@@ -124,14 +124,18 @@ describe.runIf(up)('live pico cluster', () => {
       sessionTimeoutMs: 2000,
     })
     const fence = { memberId: joined.memberId, generation: joined.generation }
+
     await waitForGroup(other, group)
     await other.heartbeat(group, fence)
     expect((await other.groupAssignment(group, fence)).assignment).toEqual([stream])
+
     await other.commitOffsets(group, { [stream]: { position: 5 } }, fence)
     expect((await other.fetchOffsets(group))[stream]!.position).toBe(5)
     expect((await other.describeGroup(group)).state).toBe('Stable')
+
     const listed = [...(await owner.listGroups()), ...(await other.listGroups())]
     expect(listed.map((g) => g.group)).toContain(group)
+
     await other.leaveGroup(group, joined.memberId)
     expect((await owner.describeGroup(group)).state).toBe('Empty')
   })
@@ -144,6 +148,7 @@ describe.runIf(up)('live pico cluster', () => {
 
     const first = await GroupMember.join(owner, group, streams, config)
     expect(first.assignment()).toEqual({ generation: 1, streams })
+
     await waitForGroup(other, group)
     const [second, onFirst] = await Promise.all([
       GroupMember.join(other, group, streams, config),
@@ -154,6 +159,7 @@ describe.runIf(up)('live pico cluster', () => {
         throw new Error(`no rebalance; error=${first.error()?.code}`)
       })(),
     ])
+
     expect(onFirst.generation).toBe(2)
     expect(second.assignment().generation).toBe(2)
     expect(onFirst.streams).toHaveLength(2)
@@ -171,6 +177,7 @@ describe.runIf(up)('live pico cluster', () => {
       }
     }
     expect(first.error()).toBeUndefined()
+
     await first.leave()
     expect((await other.describeGroup(group)).state).toBe('Empty')
   })

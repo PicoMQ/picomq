@@ -18,11 +18,25 @@ type GroupConfig struct {
 }
 
 func DefaultGroupConfig() GroupConfig {
-	return GroupConfig{SessionTimeout: 30 * time.Second, Retry: RetryPolicy{MaxAttempts: math.MaxInt32, InitialBackoff: 100 * time.Millisecond, MaxBackoff: 5 * time.Second, Multiplier: 2}}
+	return GroupConfig{
+		SessionTimeout: 30 * time.Second,
+		Retry: RetryPolicy{
+			MaxAttempts:    math.MaxInt32,
+			InitialBackoff: 100 * time.Millisecond,
+			MaxBackoff:     5 * time.Second,
+			Multiplier:     2,
+		},
+	}
 }
 
 func (c GroupConfig) joinOptions(memberID string) JoinOptions {
-	return JoinOptions{MemberID: memberID, InstanceID: c.InstanceID, ClientID: c.ClientID, SessionTimeout: c.SessionTimeout, RebalanceTimeout: c.RebalanceTimeout}
+	return JoinOptions{
+		MemberID:         memberID,
+		InstanceID:       c.InstanceID,
+		ClientID:         c.ClientID,
+		SessionTimeout:   c.SessionTimeout,
+		RebalanceTimeout: c.RebalanceTimeout,
+	}
 }
 
 type Assignment struct {
@@ -62,15 +76,26 @@ func (c *PicoClient) NewGroupMember(ctx context.Context, group string, subscript
 	if cfg.HeartbeatInterval < time.Millisecond {
 		cfg.HeartbeatInterval = time.Millisecond
 	}
-	m := &GroupMember{client: c, group: group, subscription: append([]string(nil), subscription...), config: cfg, assignments: make(chan Assignment, 1), done: make(chan struct{})}
+
+	m := &GroupMember{
+		client:       c,
+		group:        group,
+		subscription: append([]string(nil), subscription...),
+		config:       cfg,
+		assignments:  make(chan Assignment, 1),
+		done:         make(chan struct{}),
+	}
+
 	joined, err := m.rejoin(ctx, "")
 	if err != nil {
 		return nil, err
 	}
 	m.apply(joined)
+
 	loopCtx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	go m.run(loopCtx)
+
 	return m, nil
 }
 
@@ -102,6 +127,7 @@ func (m *GroupMember) Commit(ctx context.Context, offsets Offsets) error {
 	}
 	fence := m.fence()
 	m.mu.Unlock()
+
 	return m.client.CommitOffsets(ctx, m.group, offsets, &fence)
 }
 
@@ -116,12 +142,14 @@ func (m *GroupMember) Leave(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+
 	m.mu.Lock()
 	failed, memberID := m.err, m.memberID
 	m.mu.Unlock()
 	if failed != nil {
 		return nil
 	}
+
 	return m.client.LeaveGroup(ctx, m.group, memberID, m.config.InstanceID)
 }
 
@@ -132,14 +160,17 @@ func (m *GroupMember) fence() MemberFence {
 func (m *GroupMember) run(ctx context.Context) {
 	defer close(m.done)
 	defer close(m.assignments)
+
 	attempt := 0
 	for {
 		if sleepCtx(ctx, m.config.HeartbeatInterval) != nil {
 			return
 		}
+
 		m.mu.Lock()
 		fence := m.fence()
 		m.mu.Unlock()
+
 		err := m.client.Heartbeat(ctx, m.group, fence)
 		if err == nil {
 			attempt = 0
@@ -148,6 +179,7 @@ func (m *GroupMember) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+
 		var joined GroupMembership
 		switch code := errorCode(err); {
 		case code == "rebalance_in_progress" || code == "illegal_generation":
@@ -164,6 +196,7 @@ func (m *GroupMember) run(ctx context.Context) {
 				continue
 			}
 		}
+
 		if ctx.Err() != nil {
 			return
 		}
@@ -173,6 +206,7 @@ func (m *GroupMember) run(ctx context.Context) {
 			m.mu.Unlock()
 			return
 		}
+
 		attempt = 0
 		m.apply(joined)
 	}
@@ -184,6 +218,7 @@ func (m *GroupMember) apply(joined GroupMembership) {
 	m.current = Assignment{Generation: joined.Generation, Streams: joined.Assignment}
 	current := m.current
 	m.mu.Unlock()
+
 	select {
 	case <-m.assignments:
 	default:
@@ -198,6 +233,7 @@ func (m *GroupMember) rejoin(ctx context.Context, memberID string) (GroupMembers
 		if err == nil {
 			return joined, nil
 		}
+
 		if errorCode(err) == "unknown_member" {
 			memberID = ""
 			continue
@@ -205,10 +241,12 @@ func (m *GroupMember) rejoin(ctx context.Context, memberID string) (GroupMembers
 		if !retryable(err) {
 			return GroupMembership{}, err
 		}
+
 		delay, again := m.config.Retry.delay(attempt)
 		if !again {
 			return GroupMembership{}, err
 		}
+
 		attempt++
 		if err := sleepCtx(ctx, delay); err != nil {
 			return GroupMembership{}, err

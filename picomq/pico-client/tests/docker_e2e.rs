@@ -390,6 +390,7 @@ async fn rust_client_groups_join_commit_describe_leave() {
         .commit_offsets(&group, Some(&fence), &offsets)
         .await
         .unwrap();
+
     let stale = MemberFence {
         generation: 0,
         ..fence.clone()
@@ -402,6 +403,7 @@ async fn rust_client_groups_join_commit_describe_leave() {
             .code,
         "illegal_generation"
     );
+
     assert_eq!(client.fetch_offsets(&group, &[]).await.unwrap(), offsets);
     assert!(
         client
@@ -414,6 +416,7 @@ async fn rust_client_groups_join_commit_describe_leave() {
     let described = client.describe_group(&group).await.unwrap();
     assert_eq!(described.state, "Stable");
     assert_eq!(described.members[0].client_id, "rust-e2e");
+
     assert!(
         client
             .list_groups()
@@ -427,6 +430,7 @@ async fn rust_client_groups_join_commit_describe_leave() {
         .leave_group(&group, &joined.member_id, None)
         .await
         .unwrap();
+
     assert_eq!(client.describe_group(&group).await.unwrap().state, "Empty");
     assert_eq!(
         client.heartbeat(&group, &fence).await.unwrap_err().code,
@@ -457,13 +461,14 @@ async fn rust_client_groups_rebalance_and_expiry() {
     let second = second.unwrap();
     assert_eq!(on_first.generation, 2);
     assert_eq!(second.assignment().generation, 2);
+    assert_eq!(on_first.streams.len(), 2);
+
     let mut all = on_first.streams.clone();
     all.extend(second.assignment().streams.clone());
     all.sort();
     let mut expected = streams.clone();
     expected.sort();
     assert_eq!(all, expected);
-    assert_eq!(on_first.streams.len(), 2);
 
     let mine = &second.assignment().streams[0];
     second
@@ -476,6 +481,7 @@ async fn rust_client_groups_rebalance_and_expiry() {
         )]))
         .await
         .unwrap();
+
     assert_eq!(
         first
             .fetch_offsets(std::slice::from_ref(mine))
@@ -490,12 +496,14 @@ async fn rust_client_groups_rebalance_and_expiry() {
         next_generation(&mut first_assignments, 2).await.streams,
         streams
     );
+
     first.leave().await.unwrap();
     assert_eq!(client.describe_group(&group).await.unwrap().state, "Empty");
 
     let expiry = unique("expiry").trim_start_matches('/').to_owned();
     let stream = unique("xa");
     client.create(&stream, "text/plain", None).await.unwrap();
+
     let member = GroupMember::join(
         Arc::clone(&client),
         &expiry,
@@ -506,12 +514,14 @@ async fn rust_client_groups_rebalance_and_expiry() {
     .unwrap();
     let original = member.member_id();
     client.leave_group(&expiry, &original, None).await.unwrap();
+
     let mut assignments = member.assignments();
     assert_eq!(
         next_generation(&mut assignments, 1).await.streams,
         names(&[&stream])
     );
     assert_ne!(member.member_id(), original);
+
     member.leave().await.unwrap();
 }
 
@@ -523,6 +533,7 @@ async fn rust_client_groups_follow_cluster_redirects() {
     };
     let owner = pico();
     let follower = pico_at(&other);
+
     let stream = unique("cluster-g");
     owner.create(&stream, "text/plain", None).await.unwrap();
     let group = unique("cluster-ops").trim_start_matches('/').to_owned();
@@ -544,6 +555,7 @@ async fn rust_client_groups_follow_cluster_redirects() {
         generation: joined.generation,
         instance_id: None,
     };
+
     wait_for_group(&follower, &group).await;
     follower.heartbeat(&group, &fence).await.unwrap();
     assert_eq!(
@@ -554,6 +566,7 @@ async fn rust_client_groups_follow_cluster_redirects() {
             .assignment,
         names(&[&stream])
     );
+
     let offsets = Offsets::from([(
         stream.clone(),
         CommittedOffset {
@@ -569,8 +582,10 @@ async fn rust_client_groups_follow_cluster_redirects() {
         follower.fetch_offsets(&group, &[]).await.unwrap()[&stream].position,
         5
     );
+
     let described = follower.describe_group(&group).await.unwrap();
     assert_eq!(described.state, "Stable");
+
     follower
         .leave_group(&group, &joined.member_id, None)
         .await
