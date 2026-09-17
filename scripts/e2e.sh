@@ -118,7 +118,6 @@ run() {
   local scenario="$1"
   local status=0
 
-  # Protocol and auth are read by compose from the environment, so set them before `up`.
   case "$scenario" in
     single) export PICO_PROTOCOL=pico PICO_AUTH=off ;;
     cluster) export PICO_PROTOCOL=pico PICO_AUTH=required ;;

@@ -1,7 +1,5 @@
 name: e2e
 
-# Manual only. Each scenario brings up Postgres + RustFS + pico in docker compose
-# and runs the live suites against it, see scripts/e2e.sh.
 on:
   workflow_dispatch:
     inputs:
