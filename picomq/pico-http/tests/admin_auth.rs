@@ -361,3 +361,311 @@ async fn issuance_rejects_widening_and_dead_scopes() {
 
     server.shutdown().await;
 }
+
+/// Lifecycle operations use the admin audience and the existing stream
+/// permissions together. General admin-write permission alone is insufficient.
+#[tokio::test]
+async fn stream_lifecycle_requires_admin_audience_operation_and_resource() {
+    let (server, root, node) = admin_server().await;
+    let admin = format!("http://{}", server.admin_addr().unwrap());
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+
+    let admin_only = issue_scoped_token(
+        &client,
+        &admin,
+        &root,
+        "lifecycle/admin",
+        json!({
+            "audiences": ["admin"],
+            "ops": ["create", "delete"],
+            "streams": [{ "prefix": "/managed/" }],
+        }),
+    )
+    .await;
+    let pico_only = issue_scoped_token(
+        &client,
+        &admin,
+        &root,
+        "lifecycle/pico",
+        json!({
+            "audiences": ["pico"],
+            "ops": ["create", "delete"],
+            "streams": [{ "prefix": "/managed/" }],
+        }),
+    )
+    .await;
+    let no_stream_write = issue_scoped_token(
+        &client,
+        &admin,
+        &root,
+        "lifecycle/general-admin",
+        json!({
+            "audiences": ["admin"],
+            "groups": { "admin": { "read": true, "write": true } },
+            "streams": [{ "prefix": "/managed/" }],
+        }),
+    )
+    .await;
+    let outside = issue_scoped_token(
+        &client,
+        &admin,
+        &root,
+        "lifecycle/other-streams",
+        json!({
+            "audiences": ["admin"],
+            "ops": ["create", "delete"],
+            "streams": [{ "prefix": "/other/" }],
+        }),
+    )
+    .await;
+    let create_only = issue_scoped_token(
+        &client,
+        &admin,
+        &root,
+        "lifecycle/create-only",
+        json!({
+            "audiences": ["admin"],
+            "ops": ["create"],
+            "streams": [{ "prefix": "/managed/" }],
+        }),
+    )
+    .await;
+    let delete_only = issue_scoped_token(
+        &client,
+        &admin,
+        &root,
+        "lifecycle/delete-only",
+        json!({
+            "audiences": ["admin"],
+            "ops": ["delete"],
+            "streams": [{ "prefix": "/managed/" }],
+        }),
+    )
+    .await;
+    let url = format!("{admin}/admin/streams/managed/orders");
+
+    for (token, status) in [
+        (None, 401),
+        (Some(&pico_only), 401),
+        (Some(&no_stream_write), 403),
+        (Some(&outside), 403),
+        (Some(&delete_only), 403),
+    ] {
+        let mut request = client.put(&url);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), status);
+        assert!(
+            node.service()
+                .head("/managed/orders")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    let created = client
+        .put(&url)
+        .bearer_auth(&admin_only)
+        .header("Content-Type", "text/plain")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201, "pico audience is not required");
+    assert!(
+        node.service()
+            .head("/managed/orders")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        client
+            .put(format!("{base}/managed/protocol"))
+            .bearer_auth(&admin_only)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401,
+        "admin token still cannot write through the protocol listener"
+    );
+
+    for (token, status) in [
+        (None, 401),
+        (Some(&pico_only), 401),
+        (Some(&no_stream_write), 403),
+        (Some(&outside), 403),
+        (Some(&create_only), 403),
+    ] {
+        let mut request = client.delete(&url);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        assert_eq!(request.send().await.unwrap().status(), status);
+        assert!(
+            node.service()
+                .head("/managed/orders")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert_eq!(
+        client
+            .delete(&url)
+            .bearer_auth(&admin_only)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    assert!(
+        node.service()
+            .head("/managed/orders")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn stream_lifecycle_uses_absolute_names_even_with_auto_prefix() {
+    let (server, root, node) = admin_server().await;
+    let admin = format!("http://{}", server.admin_addr().unwrap());
+    let client = reqwest::Client::new();
+    let prefixed = issue_scoped_token(
+        &client,
+        &admin,
+        &root,
+        "lifecycle/tenant",
+        json!({
+            "audiences": ["admin"],
+            "ops": ["create", "delete"],
+            "streams": [{ "prefix": "/tenant/" }],
+            "autoPrefixStreams": true,
+        }),
+    )
+    .await;
+
+    // Admin paths decode once, like the existing inspection endpoint. A
+    // native stream with a literal %2F in its name must escape that percent.
+    // Administrative paths are absolute, even for a token that rewrites
+    // protocol paths. A relative-looking path must not silently select a
+    // different stored stream than the existing admin inspection API.
+    let relative = format!("{admin}/admin/streams/orders%252Ftoday");
+    for method in [reqwest::Method::PUT, reqwest::Method::DELETE] {
+        assert_eq!(
+            client
+                .request(method, &relative)
+                .bearer_auth(&prefixed)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+    }
+    let url = format!("{admin}/admin/streams/tenant/orders%252Ftoday");
+    let created = client
+        .put(&url)
+        .bearer_auth(&prefixed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    assert_eq!(
+        created.headers()["Location"],
+        "/admin/streams/tenant/orders%252Ftoday"
+    );
+    assert!(
+        node.service()
+            .head("/tenant/orders%2Ftoday")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        node.service()
+            .head("/orders%2Ftoday")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        node.service()
+            .head("/tenant/orders/today")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let exact = issue_scoped_token(
+        &client,
+        &admin,
+        &root,
+        "lifecycle/exact-escaped",
+        json!({
+            "audiences": ["admin"],
+            "ops": ["create", "delete"],
+            "streams": [{ "exact": "/tenant/orders%2Ftoday" }],
+        }),
+    )
+    .await;
+    let other_name = format!("{admin}/admin/streams/tenant/orders%2Ftoday");
+    for method in [reqwest::Method::PUT, reqwest::Method::DELETE] {
+        assert_eq!(
+            client
+                .request(method, &other_name)
+                .bearer_auth(&exact)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403,
+            "authorization uses the same decoded name as the lifecycle service"
+        );
+    }
+    assert_eq!(
+        client
+            .delete(&url)
+            .bearer_auth(&prefixed)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    assert!(
+        node.service()
+            .head("/tenant/orders%2Ftoday")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.shutdown().await;
+}
+
+async fn issue_scoped_token(
+    client: &reqwest::Client,
+    admin: &str,
+    root: &str,
+    id: &str,
+    scope: Value,
+) -> String {
+    let response = client
+        .post(format!("{admin}/admin/tokens"))
+        .bearer_auth(root)
+        .json(&json!({ "id": id, "scope": scope }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let body: Value = response.json().await.unwrap();
+    body["token"].as_str().unwrap().to_owned()
+}

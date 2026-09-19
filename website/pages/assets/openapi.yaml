@@ -475,6 +475,102 @@ paths:
         "403":
           $ref: "#/components/responses/AdminForbidden"
   /admin/streams/{stream}:
+    put:
+      tags: [admin]
+      summary: Create a stream through the admin listener
+      operationId: adminCreateStream
+      servers: [{ url: "http://127.0.0.1:9090" }]
+      description: >
+        Uses the native stream lifecycle service with an empty request body.
+        Requires the admin audience, create permission and matching stream scope.
+        The path names the absolute stored stream; autoPrefixStreams is not
+        applied. Path components are decoded once, so a stored name /a%20b is
+        addressed as /admin/streams/a%2520b. Reserved namespaces and names that
+        cannot be represented as native URI paths are rejected. Existing streams
+        assigned to another node must be managed through that node's admin
+        listener, including closed streams. Pending transfers reject the write.
+        No owner redirect or automatic forwarding is performed.
+      parameters:
+        - $ref: "#/components/parameters/Stream"
+        - name: Content-Type
+          in: header
+          schema: { type: string, default: application/octet-stream }
+        - name: Pico-Kafka-Topic
+          in: header
+          description: Optional Kafka topic alias.
+          schema: { type: string }
+        - name: Pico-TTL
+          in: header
+          description: Retention in seconds; mutually exclusive with Pico-Expires-At.
+          schema: { type: integer, minimum: 0 }
+        - name: Pico-Expires-At
+          in: header
+          description: Absolute expiry time (RFC 3339 or Unix milliseconds).
+          schema: { type: string }
+        - name: Pico-Closed
+          in: header
+          schema: { type: boolean }
+        - name: Pico-Schema
+          in: header
+          schema: { type: string }
+        - name: Pico-Schema-Validate
+          in: header
+          schema: { type: boolean }
+      responses:
+        "201":
+          description: Created using the existing stream service.
+          headers:
+            Pico-Next-Seq: { $ref: "#/components/headers/NextSeq" }
+            Location:
+              description: The admin resource path used for creation.
+              schema: { type: string }
+        "200":
+          description: Already exists with compatible configuration.
+          headers:
+            Pico-Next-Seq: { $ref: "#/components/headers/NextSeq" }
+        "400":
+          description: Invalid name, configuration, or nonempty request body.
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "409":
+          description: >
+            Configuration or alias conflict; or code owner_required with
+            ownerNodeId; or code transfer_pending with fromNode and toNode.
+            Ownership refusals perform no write and include no Location header.
+        "503":
+          description: Registered stream has no available ownership row.
+    delete:
+      tags: [admin]
+      summary: Delete a stream through the admin listener
+      operationId: adminDeleteStream
+      servers: [{ url: "http://127.0.0.1:9090" }]
+      description: >
+        Requires the admin audience, delete permission and matching stream scope.
+        Uses the existing stream service. Takes no request body. Uses the same
+        absolute stored-name encoding and ownership guard as admin creation.
+        Connect explicitly to the assigned node's admin listener; credentials
+        are never redirected to a protocol address.
+      parameters:
+        - $ref: "#/components/parameters/Stream"
+      responses:
+        "204":
+          description: Deleted.
+        "400":
+          description: Invalid or reserved name, or nonempty request body.
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          description: No such stream.
+        "409":
+          description: >
+            code owner_required with ownerNodeId, or code transfer_pending with
+            fromNode and toNode. No write or redirect is performed.
+        "503":
+          description: Registered stream has no available ownership row.
     get:
       tags: [admin]
       summary: One stream's placement and state
