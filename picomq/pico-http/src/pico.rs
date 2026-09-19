@@ -183,91 +183,14 @@ impl PicoFrontend {
     ) -> Response {
         let result = match method {
             Method::OPTIONS => Ok(options()),
-            Method::PUT => self.put(&uri, &headers, &body, &name).await,
+            Method::PUT => create_stream(&self.service, &uri, &headers, &body, &name).await,
             Method::POST => self.post(&uri, &headers, &body, &name).await,
-            Method::DELETE => self.delete(&name).await,
+            Method::DELETE => delete_stream(&self.service, &name).await,
             Method::HEAD => self.head(&name).await,
             Method::GET => self.get(&uri, &headers, &name, permit.as_ref()).await,
             _ => Ok(error(405, "method_not_allowed", "method not allowed", None)),
         };
         result.unwrap_or_else(service_error_response)
-    }
-
-    async fn put(
-        &self,
-        uri: &Uri,
-        headers: &HeaderMap,
-        body: &Bytes,
-        name: &str,
-    ) -> Result<Response, ServiceError> {
-        if stream_name(uri) == "/" {
-            return Ok(error(
-                400,
-                E_BAD_REQUEST,
-                "cannot create the root stream",
-                None,
-            ));
-        }
-        if !body.is_empty() {
-            return Ok(error(
-                400,
-                E_BAD_REQUEST,
-                "create takes no body, append with POST",
-                None,
-            ));
-        }
-
-        let ttl_seconds = parse_strict_u64_header(headers, H_TTL, "invalid Pico-TTL")?;
-        let expires_at_ms = parse_instant_header(headers, H_EXPIRES_AT, "invalid Pico-Expires-At")?;
-        if ttl_seconds.is_some() && expires_at_ms.is_some() {
-            return Err(bad_request("Pico-TTL and Pico-Expires-At both set"));
-        }
-
-        let content_type = header_str(headers, header::CONTENT_TYPE.as_str())
-            .filter(|v| !v.is_empty())
-            .unwrap_or(DEFAULT_CT)
-            .to_owned();
-        let result = self
-            .service
-            .create(CreateCommand {
-                name: name.to_owned(),
-                content_type: content_type.clone(),
-                ttl_seconds,
-                expires_at_ms,
-                closed: truthy(headers, H_CLOSED),
-                initial_records: Vec::new(),
-                external_id: None,
-                internal: false,
-                schema_name: header_str(headers, H_SCHEMA)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned),
-                schema_validate: truthy(headers, H_SCHEMA_VALIDATE),
-                kafka_topic: header_str(headers, H_KAFKA_TOPIC)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned),
-            })
-            .await?;
-        let meta = result.meta;
-
-        if !result.created && !mime_equals(Some(&meta.content_type), Some(&content_type)) {
-            return Ok(error(
-                409,
-                E_CONFLICT,
-                &format!("stream exists with content type {}", meta.content_type),
-                Some(&meta.next_offset),
-            ));
-        }
-
-        let mut response = respond(
-            if result.created { 201 } else { 200 },
-            Some(&meta.next_offset),
-            meta.closed,
-        );
-        write_meta(&mut response, &meta);
-        if result.created {
-            set_header(&mut response, header::LOCATION.as_str(), uri.path());
-        }
-        Ok(response)
     }
 
     async fn head(&self, name: &str) -> Result<Response, ServiceError> {
@@ -349,11 +272,6 @@ impl PicoFrontend {
             set_header(&mut response, H_PRODUCER_SEQ, &seq.to_string());
         }
         Ok(response)
-    }
-
-    async fn delete(&self, name: &str) -> Result<Response, ServiceError> {
-        let deleted = self.service.delete(name).await?;
-        Ok(respond(if deleted { 204 } else { 404 }, None, false))
     }
 
     async fn get(
@@ -690,7 +608,93 @@ fn options() -> Response {
     response
 }
 
-fn service_error_response(e: ServiceError) -> Response {
+/// Shared HTTP lifecycle implementation. Callers authenticate, authorize and
+/// choose the serving node before entering the stream service.
+pub(crate) async fn create_stream(
+    service: &S3StreamService,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &Bytes,
+    name: &str,
+) -> Result<Response, ServiceError> {
+    if stream_name(uri) == "/" {
+        return Ok(error(
+            400,
+            E_BAD_REQUEST,
+            "cannot create the root stream",
+            None,
+        ));
+    }
+    if !body.is_empty() {
+        return Ok(error(
+            400,
+            E_BAD_REQUEST,
+            "create takes no body, append with POST",
+            None,
+        ));
+    }
+
+    let ttl_seconds = parse_strict_u64_header(headers, H_TTL, "invalid Pico-TTL")?;
+    let expires_at_ms = parse_instant_header(headers, H_EXPIRES_AT, "invalid Pico-Expires-At")?;
+    if ttl_seconds.is_some() && expires_at_ms.is_some() {
+        return Err(bad_request("Pico-TTL and Pico-Expires-At both set"));
+    }
+
+    let content_type = header_str(headers, header::CONTENT_TYPE.as_str())
+        .filter(|v| !v.is_empty())
+        .unwrap_or(DEFAULT_CT)
+        .to_owned();
+    let result = service
+        .create(CreateCommand {
+            name: name.to_owned(),
+            content_type: content_type.clone(),
+            ttl_seconds,
+            expires_at_ms,
+            closed: truthy(headers, H_CLOSED),
+            initial_records: Vec::new(),
+            external_id: None,
+            internal: false,
+            schema_name: header_str(headers, H_SCHEMA)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            schema_validate: truthy(headers, H_SCHEMA_VALIDATE),
+            kafka_topic: header_str(headers, H_KAFKA_TOPIC)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+        })
+        .await?;
+    let meta = result.meta;
+
+    if !result.created && !mime_equals(Some(&meta.content_type), Some(&content_type)) {
+        return Ok(error(
+            409,
+            E_CONFLICT,
+            &format!("stream exists with content type {}", meta.content_type),
+            Some(&meta.next_offset),
+        ));
+    }
+
+    let mut response = respond(
+        if result.created { 201 } else { 200 },
+        Some(&meta.next_offset),
+        meta.closed,
+    );
+    write_meta(&mut response, &meta);
+    if result.created {
+        set_header(&mut response, header::LOCATION.as_str(), uri.path());
+    }
+    Ok(response)
+}
+
+pub(crate) async fn delete_stream(
+    service: &S3StreamService,
+    name: &str,
+) -> Result<Response, ServiceError> {
+    let deleted = service.delete(name).await?;
+    Ok(respond(if deleted { 204 } else { 404 }, None, false))
+}
+
+pub(crate) fn service_error_response(e: ServiceError) -> Response {
     match e.kind {
         ErrorKind::NotFound => error(404, E_NOT_FOUND, "no such stream", None),
         ErrorKind::BadRequest | ErrorKind::CorruptBatch => {
