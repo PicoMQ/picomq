@@ -4,7 +4,7 @@ PicoMQ is durable, real-time streams over HTTP and Kafka, built on S3-compatible
 
 [Documentation](https://picomq.com/docs/) · [Discord](https://discord.gg/qsMy5sSpYX) · [Quick start](https://picomq.com/docs/quick-start)
 
-- **`s3stream/`** the stream engine (see [s3stream/README.md](s3stream/README.md))
+- [`s3stream`](https://github.com/PicoMQ/s3stream) the stream engine
 - **`picomq/`** the host: metadata plane, server, protocol frontends (HTTP with Pico protocol and Durable Streams, plus Kafka), client, and the `pico` CLI
 
 ## Install

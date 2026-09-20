@@ -1,5 +1,0 @@
-[
-  {"cluster_id": "cluster-a", "node_id": 0, "prefix": "CFCD208495D565EF66E7DFF9F98764DA/_kafka_cluster-a/0/", "path_v0": "CFCD208495D565EF66E7DFF9F98764DA/_kafka_cluster-a/0/3/wal/8192", "path_v1": "CFCD208495D565EF66E7DFF9F98764DA/_kafka_cluster-a/0/3/wal/8192-12288"},
-  {"cluster_id": "cluster-a", "node_id": 7, "prefix": "8F14E45FCEEA167A5A36DEDD4BEA2543/_kafka_cluster-a/7/", "path_v0": "8F14E45FCEEA167A5A36DEDD4BEA2543/_kafka_cluster-a/7/3/wal/8192", "path_v1": "8F14E45FCEEA167A5A36DEDD4BEA2543/_kafka_cluster-a/7/3/wal/8192-12288"},
-  {"cluster_id": "prod_x", "node_id": 12345, "prefix": "827CCB0EEA8A706C4C34A16891F84E7B/_kafka_prod_x/12345/", "path_v0": "827CCB0EEA8A706C4C34A16891F84E7B/_kafka_prod_x/12345/3/wal/8192", "path_v1": "827CCB0EEA8A706C4C34A16891F84E7B/_kafka_prod_x/12345/3/wal/8192-12288"}
-]

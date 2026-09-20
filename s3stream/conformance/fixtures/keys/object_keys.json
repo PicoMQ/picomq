@@ -1,7 +1,0 @@
-[
-  {"namespace": "DEFAULT", "object_id": 0, "key": "00000000/DEFAULT/0"},
-  {"namespace": "DEFAULT", "object_id": 1, "key": "10000000/DEFAULT/1"},
-  {"namespace": "DEFAULT", "object_id": 255, "key": "ff000000/DEFAULT/255"},
-  {"namespace": "DEFAULT", "object_id": 123456789, "key": "51dcb570/DEFAULT/123456789"},
-  {"namespace": "DEFAULT", "object_id": 9223372036854775807, "key": "fffffffffffffff7/DEFAULT/9223372036854775807"}
-]

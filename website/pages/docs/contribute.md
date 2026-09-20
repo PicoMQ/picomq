@@ -10,7 +10,7 @@ If you are new to the project, new to Rust, or just unsure whether a change belo
 
 The workspace is split into two areas with a hard boundary between them:
 
-- **`s3stream/`** is the stream engine: WAL, object layout, caching, compaction. It is a self-contained library (crates, wire specification, conformance fixtures).
+- [`s3stream`](https://github.com/PicoMQ/s3stream) is the stream engine: WAL, object layout, caching, compaction. It is a self-contained library (crates, wire specification, conformance fixtures).
 - **`picomq/`** is the host: metadata plane, server, HTTP frontends (Pico protocol and Durable Streams), client, and the `pico` CLI. Host crates depend only on the `s3stream` facade crate, never on engine internals. The wire vocabulary (header constants, Pico record codec) lives in `picomq-protocol`, a small crate shared by the frontends and `picomq-client`, which keeps the client publishable as a standalone SDK with no server dependencies.
 
 Keeping that boundary intact is a review criterion. If a change in `picomq/*` needs something from inside the engine, the right move is to widen the facade.
@@ -38,7 +38,7 @@ For an end-to-end environment, the compose stacks in `harness/aio` bring up a no
 A few things the toolchain enforces:
 
 - `unsafe_code` is denied workspace-wide.
-- Wire formats in `s3stream/specification/` are pinned by golden fixtures in `s3stream/conformance/`. A change to a format needs a spec update and new fixtures in the same PR. Never regenerate fixtures to make a failing test pass.
+- Wire formats in `s3stream`'s `specification/` are pinned by golden fixtures in its `conformance/`. A change to a format needs a spec update and new fixtures in the same PR. Never regenerate fixtures to make a failing test pass.
 - The Durable Streams frontend is additionally exercised through the official `durable-streams` client in e2e tests, as an independent conformance check.
 
 ## Docs
