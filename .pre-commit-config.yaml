@@ -1,0 +1,49 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy (core)
+        entry: cargo clippy --fix --allow-dirty --allow-staged --workspace --exclude picomq-connectors --exclude 'picomq-connector-*' --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy-connectors
+        name: cargo clippy (connectors)
+        entry: cargo clippy --fix --allow-dirty --allow-staged -p picomq-connectors -p 'picomq-connector-*' --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-test
+        name: cargo test (core)
+        entry: cargo test --workspace --exclude picomq-connectors --exclude 'picomq-connector-*'
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: cargo-test-connectors
+        name: cargo test (connectors)
+        entry: cargo test -p picomq-connectors -p 'picomq-connector-*'
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
