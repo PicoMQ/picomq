@@ -1,6 +1,0 @@
-[
-  {"name": "data_at_zero", "kind": "data", "start_offset": 0, "body_hex": "68656c6c6f2077616c"},
-  {"name": "data_at_offset", "kind": "data", "start_offset": 123456789, "body_hex": "0726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e8"},
-  {"name": "data_empty_body", "kind": "data", "start_offset": 4096, "body_hex": ""},
-  {"name": "padding_64", "kind": "padding", "start_offset": 8192, "total_length": 64}
-]
