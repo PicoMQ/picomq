@@ -103,6 +103,12 @@ async function request(connection: Connection, path: string, init: RequestInit =
   if (response.type === 'opaqueredirect' || response.status === 307 || response.status === 308) {
     throw new ApiError('This stream belongs to another node. Connect to its owner or use a proxy that handles ownership redirects.')
   }
+  if (response.status === 401 || response.status === 403) {
+    void response.body?.cancel().catch(() => {})
+    const message = response.status === 401 ? 'A valid stream API token is required.'
+      : 'The token does not allow this operation. Stream requests require the pico audience; schema/config requests require admin.'
+    throw new ApiError(`${response.status}: ${message}`, response.status)
+  }
   if (!response.ok) {
     let text = ''
     try { text = await readText(response, 4096, true) }
@@ -112,8 +118,6 @@ async function request(connection: Connection, path: string, init: RequestInit =
     }
     let message = text.slice(0, 500)
     try { const body = JSON.parse(text); message = body.message || body.error || message } catch { /* Plain-text error. */ }
-    if (response.status === 401) message = 'A valid stream API token is required.'
-    if (response.status === 403) message = 'The token does not allow this operation. Stream requests require the pico audience; schema/config requests require admin.'
     throw new ApiError(`${response.status}: ${message || response.statusText}`, response.status)
   }
   return response

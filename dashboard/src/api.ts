@@ -96,6 +96,28 @@ export interface StreamOwnership {
   state?: 'opened' | 'closed' | null
 }
 
+async function readOwnershipBody(response: Response): Promise<string> {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let bytes = 0
+  let text = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) return text + decoder.decode()
+      bytes += value.length
+      if (bytes > 1024 * 1024) {
+        void reader.cancel().catch(() => {})
+        throw new Error('The admin response exceeds the dashboard size limit.')
+      }
+      text += decoder.decode(value, { stream: true })
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 /** Read the explicitly paired admin listener, without reusing a stream token. */
 export async function fetchStreamOwnership(connection: Connection, name: string, signal?: AbortSignal): Promise<StreamOwnership> {
   // Admin uses an Axum Path extractor, which decodes the name once. Native
@@ -117,7 +139,7 @@ export async function fetchStreamOwnership(connection: Connection, name: string,
     if (!response.headers.get('Content-Type')?.includes('application/json')) {
       throw new Error('Expected the PicoMQ admin JSON API. Check the paired admin endpoint.')
     }
-    const body = await response.json() as StreamOwnership
+    const body = JSON.parse(await readOwnershipBody(response)) as StreamOwnership
     if (!body || body.name !== name || !Number.isSafeInteger(body.ownerNodeId)
       || typeof body.ownerAdvertisedAddress !== 'string'
       || (body.epoch !== null && (!Number.isSafeInteger(body.epoch) || body.epoch < -1))) {

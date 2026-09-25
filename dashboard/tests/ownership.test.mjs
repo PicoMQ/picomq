@@ -84,6 +84,45 @@ test('ownership rejects unsafe numeric identities and metadata for a different s
   }
 })
 
+test('ownership rejects an oversized chunked 2xx admin response', async () => {
+  const encoder = new TextEncoder()
+  const payload = encoder.encode(JSON.stringify(ownership()))
+  const padding = encoder.encode(' '.repeat(64 * 1024))
+  let chunks = 0
+  let cancelled = false
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    pull(controller) {
+      if (chunks === 0) controller.enqueue(payload)
+      else if (chunks <= 17) controller.enqueue(padding)
+      else controller.close()
+      chunks++
+    },
+    cancel() { cancelled = true },
+  }), { headers: { 'Content-Type': 'application/json' } })
+
+  await assert.rejects(api.fetchStreamOwnership(connection, '/demo/orders'), /admin response exceeds the dashboard size limit/i)
+  assert.equal(cancelled, true)
+})
+
+test('ownership reports its size limit when cancellation rejects or stalls', async () => {
+  for (const cancel of [
+    () => { throw new TypeError('cancel failed') },
+    () => new Promise(() => {}),
+  ]) {
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array(1024 * 1024 + 1)) },
+      cancel,
+    }), { headers: { 'Content-Type': 'application/json' } })
+    let timer
+    try {
+      await assert.rejects(Promise.race([
+        api.fetchStreamOwnership(connection, '/demo/orders'),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Cancellation stalled.')), 1000) }),
+      ]), /admin response exceeds the dashboard size limit/i)
+    } finally { clearTimeout(timer) }
+  }
+})
+
 test('ownership authentication failures retain the server status without retrying', async () => {
   for (const status of [401, 403]) {
     let calls = 0

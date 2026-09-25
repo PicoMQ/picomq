@@ -77,6 +77,7 @@ export function watchStreams(connection: Connection, run: WatchRun, handlers: Wa
       }
     } catch (error) {
       if (!active(subscription)) return
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) { fail(error); return }
       subscription.status = { name, position: subscription.cursor ?? '—', state: errorMessage(error) }
     }
     emitStatuses()

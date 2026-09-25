@@ -210,6 +210,48 @@ for (const status of [401, 403]) test(`discovery ${status} is fatal and aborts e
   await advance(30_000); assert.equal(lists, 2)
 })
 
+for (const mode of ['exact', 'regex']) for (const method of ['HEAD', 'GET']) for (const status of [401, 403]) {
+  test(`${mode} watch stops on ${method} ${status} without retrying`, async t => {
+    const pending = deferred()
+    const { output, advance } = harness(t, request => {
+      if (request.name === '/') return listing(['/fast', '/slow'])
+      if (request.name === '/slow') return pending.promise
+      if (request.method === method) return new Response('denied', { status })
+      return head()
+    }, { mode, names: ['/fast', '/slow'] })
+    await flush()
+    assert.equal(output.errors.length, 1)
+    assert.equal(output.errors[0].status, status)
+    assert.match(output.errors[0].message, status === 401 ? /valid stream API token is required/ : /token does not allow this operation/)
+    assert.ok(output.requests.every(request => request.signal.aborted))
+    const count = output.requests.length
+    await advance(30_000)
+    assert.equal(output.requests.length, count)
+    assert.equal(output.errors.length, 1)
+  })
+}
+
+for (const mode of ['exact', 'regex']) for (const status of [401, 403]) for (const body of ['unfinished', 'stalled cancellation']) {
+  test(`${mode} watch stops on ${status} with ${body} error body`, async t => {
+    const { output, advance } = harness(t, request => {
+      if (request.name === '/') return listing(['/fast'])
+      if (request.method === 'HEAD') return head()
+      const stream = new ReadableStream({
+        start(controller) { controller.enqueue(new Uint8Array(body === 'unfinished' ? 1 : 4097)) },
+        cancel() { return new Promise(() => {}) },
+      })
+      return new Response(stream, { status })
+    }, { mode })
+    await flush()
+    assert.equal(output.errors.length, 1)
+    assert.equal(output.errors[0].status, status)
+    assert.ok(output.requests.every(request => request.signal.aborted))
+    const count = output.requests.length
+    await advance(30_000)
+    assert.equal(output.requests.length, count)
+  })
+}
+
 test('an interrupted error body cannot erase a known authorization failure status', async t => {
   const { output, advance } = harness(t, () => {
     const body = new ReadableStream({ start(controller) { controller.error(new TypeError('Error response body interrupted')) } })
