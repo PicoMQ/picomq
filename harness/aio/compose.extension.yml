@@ -1,0 +1,130 @@
+# PicoMQ inside Postgres: the pico extension on a primary, a streaming standby, RustFS (S3).
+# From this directory: docker compose -f compose.extension.yml up --build
+#
+# Host client: http://localhost:4437
+# Kafka: localhost:9092
+# Standby (no pico while in recovery): http://localhost:4438
+
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0-rc.3
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: ${AWS_ACCESS_KEY_ID:-picomq}
+      RUSTFS_SECRET_KEY: ${AWS_SECRET_ACCESS_KEY:-picomqpicomq}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_OBS_LOGGER_LEVEL: error
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  createbucket:
+    image: amazon/aws-cli:2.36.28
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-picomq}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-picomqpicomq}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        aws --endpoint-url http://rustfs:9000 s3 mb s3://picomq 2>/dev/null || true
+        aws --endpoint-url http://rustfs:9000 s3 ls s3://picomq >/dev/null
+    restart: "no"
+
+  pico:
+    image: ${PICO_PG_IMAGE:-picomq-pg:local}
+    build:
+      context: ../..
+      dockerfile: picomq/pico-pg/Dockerfile
+    command:
+      - postgres
+      - -c
+      - hba_file=/etc/postgresql/hba.conf
+      - -c
+      - pico.storage=-2@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true
+      - -c
+      - pico.schema_registry=3@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true
+      - -c
+      - pico.wal_upload_interval_ms=200
+      - -c
+      - pico.listen=0.0.0.0:4437
+      - -c
+      - pico.admin_listen=0.0.0.0:9090
+      - -c
+      - pico.kafka_listen=0.0.0.0:9092
+      - -c
+      - pico.kafka_advertise=localhost:9092
+      - -c
+      - pico.advertised_url=http://localhost:4437
+      - -c
+      - pico.insecure_allow_remote=on
+    environment:
+      POSTGRES_PASSWORD: picomq
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-picomq}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-picomqpicomq}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./extension/hba.conf:/etc/postgresql/hba.conf:ro
+    ports:
+      - "4437:4437"
+      - "9090:9090"
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres && bash -c 'exec 3<>/dev/tcp/127.0.0.1/4437'"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+    depends_on:
+      createbucket:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  standby:
+    image: ${PICO_PG_IMAGE:-picomq-pg:local}
+    user: postgres
+    environment:
+      PGPASSWORD: picomq
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-picomq}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-picomqpicomq}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        chmod 700 "$$PGDATA";
+        [ -s "$$PGDATA/PG_VERSION" ] || pg_basebackup -h pico -U postgres -D "$$PGDATA" -R -X stream;
+        exec postgres
+        -c "pico.storage=-2@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true"
+        -c pico.listen=0.0.0.0:4437
+        -c pico.admin_listen=
+        -c pico.kafka_listen=
+        -c pico.insecure_allow_remote=on
+    volumes:
+      - standby-data:/var/lib/postgresql/data
+    ports:
+      - "4438:4437"
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U postgres -Atc 'select pg_is_in_recovery()' | grep -qx t"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+    depends_on:
+      pico:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pg-data:
+  rustfs-data:
+  standby-data:

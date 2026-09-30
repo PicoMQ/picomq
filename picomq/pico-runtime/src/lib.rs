@@ -12,7 +12,8 @@ use picomq_server::{KvTokenStore, NodeConfig, PicoNode};
 use picomq_sql::{
     LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig, SqliteStore,
 };
-use s3stream::{IdUri, ObjectStorageTrait, ObjectStoreAdapter};
+use picomq_wal_pg::PgWal;
+use s3stream::{IdUri, ObjectStorageTrait, ObjectStoreAdapter, WriteAheadLogTrait};
 
 pub use config::{AuthMode, KafkaConfig, MetaBackend, ServerConfig};
 
@@ -29,6 +30,8 @@ pub enum RuntimeError {
     MetadataLog(#[from] picomq_sql::SqlSinkError),
     #[error("object storage: {0}")]
     Storage(#[from] s3stream::ObjectError),
+    #[error("postgres wal: {0}")]
+    Wal(#[from] picomq_wal_pg::Error),
     #[error("node startup: {0}")]
     Node(#[from] picomq_server::ServiceError),
     #[error("bind {addr}: {source}")]
@@ -108,7 +111,6 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
 
     let storage_uri = config.storage_uri.clone();
     let object_storage = open_bucket(&storage_uri)?;
-    let wal_storage = open_bucket(&config.wal_uri())?;
 
     let engine = s3stream::Config {
         cluster_id: config.cluster_id.clone(),
@@ -131,25 +133,40 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         }
         _ => Default::default(),
     };
-    let node = Arc::new(
-        PicoNode::start(
-            NodeConfig {
-                node_id: config.node_id,
-                node_epoch: config.node_epoch,
-                http_address: config.advertised_url(),
-                slots: config.slots,
-                protocol_addresses,
-                cluster_id: config.cluster_id.clone(),
-                engine,
-            },
+    let mut node_config = NodeConfig {
+        node_id: config.node_id,
+        node_epoch: config.node_epoch,
+        http_address: config.advertised_url(),
+        slots: config.slots,
+        protocol_addresses,
+        cluster_id: config.cluster_id.clone(),
+        engine,
+    };
+    let wal_uri = config.wal_uri();
+    let node = if picomq_wal_pg::Config::accepts(&wal_uri) {
+        let wal = postgres_wal(&wal_uri, &node_config)?;
+        node_config.engine.wal_config = wal.uri().to_owned();
+        PicoNode::start_with_wal(
+            node_config,
             sink.clone() as Arc<dyn CommandSink>,
             views,
             object_storage.clone(),
-            wal_storage,
+            wal,
             schema_registry.clone(),
         )
-        .await?,
-    );
+        .await?
+    } else {
+        PicoNode::start(
+            node_config,
+            sink.clone() as Arc<dyn CommandSink>,
+            views,
+            object_storage.clone(),
+            open_bucket(&wal_uri)?,
+            schema_registry.clone(),
+        )
+        .await?
+    };
+    let node = Arc::new(node);
 
     if let Some(wire) = &config.bootstrap_token {
         bootstrap_token(node.tokens().store().as_ref(), wire).await?;
@@ -294,6 +311,15 @@ fn open_adapter(uri: &str) -> Result<ObjectStoreAdapter, RuntimeError> {
 
 fn open_bucket(uri: &str) -> Result<Arc<dyn ObjectStorageTrait>, RuntimeError> {
     Ok(Arc::new(open_adapter(uri)?))
+}
+
+fn postgres_wal(uri: &str, node: &NodeConfig) -> Result<Arc<dyn WriteAheadLogTrait>, RuntimeError> {
+    let config = picomq_wal_pg::Config::parse(uri)?.identity(
+        node.cluster_id.clone(),
+        u32::try_from(node.node_id).unwrap_or_default(),
+        u64::try_from(node.node_epoch).unwrap_or_default(),
+    );
+    Ok(Arc::new(PgWal::new(config)?))
 }
 
 async fn open_store(backend: &MetaBackend) -> Result<Arc<dyn MetaStore>, RuntimeError> {

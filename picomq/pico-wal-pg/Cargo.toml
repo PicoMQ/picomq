@@ -1,0 +1,28 @@
+[package]
+name = "picomq-wal-pg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "PicoMQ Postgres write-ahead log for the s3stream engine"
+repository.workspace = true
+
+[dependencies]
+s3stream-wal = { workspace = true }
+s3stream-codec = { workspace = true }
+
+async-trait = { workspace = true }
+bytes = { workspace = true }
+crc32fast = { workspace = true }
+futures = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

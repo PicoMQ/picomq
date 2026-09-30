@@ -11,7 +11,7 @@ use picomq_auth::Authorizer;
 use picomq_metadata::{CommandSink, MetadataNodeHandle, ViewPublisher};
 use s3stream::{
     Client as _, Config, KVClient, ObjectStorageTrait, ObjectWalConfig, ObjectWalService,
-    S3StreamBuilder, S3StreamEngine,
+    S3StreamBuilder, S3StreamEngine, WriteAheadLogTrait,
 };
 
 use crate::auth::TokenService;
@@ -21,7 +21,6 @@ use crate::ownership::MetadataOwnershipService;
 use crate::service::S3StreamService;
 use crate::transfer::TransferWatcher;
 use crate::waiter::StreamWaiterRegistry;
-
 /// Node identity and engine tuning the host passes in.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
@@ -73,6 +72,25 @@ impl PicoNode {
         wal_storage: Arc<dyn ObjectStorageTrait>,
         schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
     ) -> Result<Self, ServiceError> {
+        let mut wal_config = ObjectWalConfig::from_uri_or_defaults(&config.engine.wal_config)
+            .map_err(|e| {
+                ServiceError::with_message(crate::ErrorKind::BadRequest, None, false, e.to_string())
+            })?;
+        wal_config.cluster_id = config.cluster_id.clone();
+        wal_config.node_id = config.node_id as u32;
+        wal_config.epoch = config.node_epoch as u64;
+        let wal = Arc::new(ObjectWalService::new(wal_storage, wal_config));
+        Self::start_with_wal(config, sink, views, object_storage, wal, schema_registry).await
+    }
+
+    pub async fn start_with_wal(
+        config: NodeConfig,
+        sink: Arc<dyn CommandSink>,
+        views: Arc<ViewPublisher>,
+        object_storage: Arc<dyn ObjectStorageTrait>,
+        wal: Arc<dyn WriteAheadLogTrait>,
+        schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
+    ) -> Result<Self, ServiceError> {
         let handle =
             MetadataNodeHandle::new(config.node_id, config.node_epoch, sink, views.clone());
         handle
@@ -84,17 +102,9 @@ impl PicoNode {
             .await
             .map_err(|e| e.to_stream_error())?;
 
-        let mut wal_config = ObjectWalConfig::from_uri_or_defaults(&config.engine.wal_config)
-            .map_err(|e| {
-                ServiceError::with_message(crate::ErrorKind::BadRequest, None, false, e.to_string())
-            })?;
-        wal_config.cluster_id = config.cluster_id.clone();
-        wal_config.node_id = config.node_id as u32;
-        wal_config.epoch = config.node_epoch as u64;
-
         let engine = S3StreamBuilder::new(config.engine.clone())
             .object_storage(object_storage)
-            .write_ahead_log(Arc::new(ObjectWalService::new(wal_storage, wal_config)))
+            .write_ahead_log(wal)
             .stream_manager(Arc::new(handle.stream_manager()))
             .object_manager(Arc::new(handle.object_manager()))
             .kv_client(Arc::new(handle.kv_client()))

@@ -14,6 +14,7 @@ picomq-metadata = { workspace = true }
 picomq-common = { workspace = true }
 picomq-sql = { workspace = true }
 picomq-server = { workspace = true }
+picomq-wal-pg = { workspace = true }
 picomq-http = { workspace = true }
 picomq-kafka = { workspace = true }
 picomq-schema = { workspace = true }

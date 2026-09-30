@@ -1,0 +1,6 @@
+comment = 'PicoMQ: a durable streams node running inside PostgreSQL'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/pico'
+relocatable = false
+superuser = true
+trusted = false
