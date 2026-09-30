@@ -39,10 +39,18 @@ impl Reclaimer {
 }
 
 pub(crate) async fn truncate(pool: &PgPool, tables: &[String]) -> Result<(), Error> {
+    statement(pool, "TRUNCATE", tables).await
+}
+
+pub(crate) async fn drop(pool: &PgPool, tables: &[String]) -> Result<(), Error> {
+    statement(pool, "DROP TABLE IF EXISTS", tables).await
+}
+
+async fn statement(pool: &PgPool, verb: &str, tables: &[String]) -> Result<(), Error> {
     if tables.is_empty() {
         return Ok(());
     }
-    sqlx::query(AssertSqlSafe(format!("TRUNCATE {}", tables.join(", "))))
+    sqlx::query(AssertSqlSafe(format!("{verb} {}", tables.join(", "))))
         .execute(pool)
         .await?;
     Ok(())

@@ -5,6 +5,7 @@ use crate::error::Error;
 pub(crate) const NODE: &str = "pico_wal_node";
 
 const LOCK: i64 = 0x0070_6963_6f77_616c;
+const EXTERNAL: i8 = b'e' as i8;
 
 pub(crate) struct Schema {
     slots: Vec<String>,
@@ -36,6 +37,19 @@ impl Schema {
             .join(" UNION ALL ")
     }
 
+    pub(crate) fn floors(&self) -> String {
+        self.slots
+            .iter()
+            .map(|table| {
+                format!(
+                    "(SELECT start_offset FROM {table} WHERE start_offset <= $1 \
+                     ORDER BY start_offset DESC LIMIT 1)"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ")
+    }
+
     pub(crate) async fn migrate(&self, pool: &PgPool) -> Result<(), Error> {
         let mut tx = pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -60,11 +74,20 @@ impl Schema {
             )))
             .execute(&mut *tx)
             .await?;
-            sqlx::query(AssertSqlSafe(format!(
-                "ALTER TABLE {table} ALTER COLUMN body SET STORAGE EXTERNAL"
-            )))
-            .execute(&mut *tx)
+            let storage: i8 = sqlx::query_scalar(
+                "SELECT attstorage FROM pg_attribute \
+                 WHERE attrelid = $1::regclass AND attname = 'body'",
+            )
+            .bind(table)
+            .fetch_one(&mut *tx)
             .await?;
+            if storage != EXTERNAL {
+                sqlx::query(AssertSqlSafe(format!(
+                    "ALTER TABLE {table} ALTER COLUMN body SET STORAGE EXTERNAL"
+                )))
+                .execute(&mut *tx)
+                .await?;
+            }
         }
         tx.commit().await?;
         Ok(())

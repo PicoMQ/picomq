@@ -25,6 +25,7 @@ const docsSidebar = [
       { text: 'Metadata', link: '/docs/design/metadata' },
       { text: 'Streams', link: '/docs/design/streams' },
       { text: 'Writes', link: '/docs/design/writes' },
+      { text: 'Write-ahead log', link: '/docs/design/wal' },
       { text: 'Reads', link: '/docs/design/reads' },
       { text: 'Ownership & routing', link: '/docs/design/ownership' },
       { text: 'Transfers', link: '/docs/design/transfers' },
@@ -91,6 +92,7 @@ const docsSidebar = [
         collapsed: true,
         items: [
           { text: 'Docker', link: '/docs/operations/deployment/docker' },
+          { text: 'Postgres extension', link: '/docs/operations/deployment/postgres' },
           { text: 'Fly', link: '/docs/operations/deployment/fly' },
           { text: 'AWS', link: '/docs/operations/deployment/aws' },
         ],

@@ -13,7 +13,12 @@ The workspace is split into two areas with a hard boundary between them:
 - [`s3stream`](https://github.com/PicoMQ/s3stream) is the stream engine: WAL, object layout, caching, compaction. It is a self-contained library (crates, wire specification, conformance fixtures).
 - **`picomq/`** is the host: metadata plane, server, HTTP frontends (Pico protocol and Durable Streams), client, and the `pico` CLI. Host crates depend only on the `s3stream` facade crate, never on engine internals. The wire vocabulary (header constants, Pico record codec) lives in `picomq-protocol`, a small crate shared by the frontends and `picomq-client`, which keeps the client publishable as a standalone SDK with no server dependencies.
 
-Keeping that boundary intact is a review criterion. If a change in `picomq/*` needs something from inside the engine, the right move is to widen the facade.
+Two host crates are specific to Postgres:
+
+- `picomq/pico-wal-pg` implements the engine's WAL trait on Postgres tables. See [Write-ahead log](/docs/design/wal).
+- `picomq/pico-pg` is the [Postgres extension](/docs/operations/deployment/postgres), a pgrx background worker around `picomq-runtime`. It is its own workspace because pgrx pins build settings the main workspace does not.
+
+Keeping the engine boundary intact is a review criterion. If a change in `picomq/*` needs something from inside the engine, the right move is to widen the facade.
 
 The docs are at `website/` (`VitePress`). And the deployment harnesses live in `harness/` (`aio` for the all-in-one compose stacks, `byo` for an existing Postgres and object store, `terraform` and more).
 
@@ -26,12 +31,17 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-Postgres-backed tests are env-gated and skipped unless a URL is provided:
+Postgres-backed tests need a database URL and are skipped or ignored without one:
 
 ```bash
 PICOMQ_PG_URL=postgres://user:pass@localhost:5432/picomq \
     cargo test -p picomq-sql --test pg_contract --test pg_e2e
+
+PICO_TEST_PG_URL=postgres://user:pass@localhost:5432/picomq \
+    cargo test -p picomq-wal-pg -- --ignored
 ```
+
+The extension is built and tested through Docker. `scripts/e2e.sh extension` builds the image, starts `harness/aio/compose.extension.yml`, and runs the extension and protocol suites against it. Building it on a host needs `cargo-pgrx` and a Postgres server, see [Postgres extension](/docs/operations/deployment/postgres#build-from-source).
 
 For an end-to-end environment, the compose stacks in `harness/aio` bring up a node with Postgres and RustFS (or SQLite and local files with `compose.lite.yml`). See [Quick start](/docs/quick-start).
 

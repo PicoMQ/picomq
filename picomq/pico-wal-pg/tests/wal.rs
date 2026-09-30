@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use s3stream_wal::{WalError, WriteAheadLog};
 
-use common::{cluster, record, recovered, url, wal};
+use common::{cluster, record, recovered, slots, url, wal};
 
 #[tokio::test]
 #[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test wal -- --ignored"]
@@ -208,4 +208,17 @@ async fn ring_geometry_changes_only_once_drained() {
     assert!(recovered(&resized).await.is_empty());
     resized.append(record(5, 1, b"fresh")).await.unwrap();
     resized.shutdown_gracefully().await;
+    assert_eq!(slots(&url, &cluster).await, 6);
+
+    let drained = wal(&url, &cluster, 5, "segments=6");
+    drained.start().await.unwrap();
+    assert_eq!(recovered(&drained).await.len(), 1);
+    drained.reset().await.unwrap();
+    drained.shutdown_gracefully().await;
+
+    let shrunk = wal(&url, &cluster, 6, "segments=4");
+    shrunk.start().await.unwrap();
+    assert!(recovered(&shrunk).await.is_empty());
+    shrunk.shutdown_gracefully().await;
+    assert_eq!(slots(&url, &cluster).await, 4);
 }

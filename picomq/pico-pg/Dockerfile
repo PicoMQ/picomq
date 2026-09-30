@@ -38,6 +38,11 @@ RUN --mount=type=cache,id=picomq-pg-target-${PG_MAJOR},sharing=locked,target=/sr
         --pg-config /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config \
         --out-dir /package
 
+FROM scratch AS package
+ARG PG_MAJOR
+COPY --from=build /package/usr/lib/postgresql/${PG_MAJOR}/lib/ /lib/
+COPY --from=build /package/usr/share/postgresql/${PG_MAJOR}/extension/ /extension/
+
 FROM postgres:${PG_MAJOR}-bookworm
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \

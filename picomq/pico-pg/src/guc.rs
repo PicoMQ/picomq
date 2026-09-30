@@ -4,20 +4,28 @@ use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
 
 type Text = GucSetting<Option<CString>>;
 
+const DEFAULT_DATABASE: &CStr = c"postgres";
+const DEFAULT_LISTEN: &CStr = c"127.0.0.1:4437";
+const DEFAULT_ADMIN_LISTEN: &CStr = c"127.0.0.1:9090";
+const DEFAULT_KAFKA_LISTEN: &CStr = c"127.0.0.1:9092";
+const DEFAULT_CLUSTER_ID: &CStr = c"picomq";
+const DEFAULT_AUTH: &CStr = c"off";
+const DEFAULT_LOG: &CStr = c"warn";
+
 static STORAGE: Text = Text::new(None);
 static WAL: Text = Text::new(None);
-static DATABASE: Text = Text::new(Some(c"postgres"));
+static DATABASE: Text = Text::new(Some(DEFAULT_DATABASE));
 static ROLE: Text = Text::new(None);
 static DATABASE_URL: Text = Text::new(None);
-static LISTEN: Text = Text::new(Some(c"127.0.0.1:4437"));
-static ADMIN_LISTEN: Text = Text::new(Some(c"127.0.0.1:9090"));
-static KAFKA_LISTEN: Text = Text::new(Some(c"127.0.0.1:9092"));
+static LISTEN: Text = Text::new(Some(DEFAULT_LISTEN));
+static ADMIN_LISTEN: Text = Text::new(Some(DEFAULT_ADMIN_LISTEN));
+static KAFKA_LISTEN: Text = Text::new(Some(DEFAULT_KAFKA_LISTEN));
 static ADVERTISED_URL: Text = Text::new(None);
 static KAFKA_ADVERTISE: Text = Text::new(None);
-static CLUSTER_ID: Text = Text::new(Some(c"picomq"));
-static AUTH: Text = Text::new(Some(c"off"));
+static CLUSTER_ID: Text = Text::new(Some(DEFAULT_CLUSTER_ID));
+static AUTH: Text = Text::new(Some(DEFAULT_AUTH));
 static BOOTSTRAP_TOKEN: Text = Text::new(None);
-static LOG: Text = Text::new(Some(c"warn"));
+static LOG: Text = Text::new(Some(DEFAULT_LOG));
 static SCHEMA_REGISTRY: Text = Text::new(None);
 static NODE_ID: GucSetting<i32> = GucSetting::<i32>::new(1);
 static WAL_CACHE_MB: GucSetting<i32> = GucSetting::<i32>::new(64);
@@ -55,18 +63,18 @@ impl Settings {
         Self {
             storage: value(&STORAGE),
             wal: value(&WAL),
-            database: value(&DATABASE).unwrap_or_else(|| "postgres".to_owned()),
+            database: value(&DATABASE).unwrap_or_else(|| text_of(DEFAULT_DATABASE)),
             role: value(&ROLE),
             database_url: value(&DATABASE_URL),
-            listen: value(&LISTEN).unwrap_or_else(|| "127.0.0.1:4437".to_owned()),
+            listen: value(&LISTEN).unwrap_or_else(|| text_of(DEFAULT_LISTEN)),
             admin_listen: value(&ADMIN_LISTEN),
             kafka_listen: value(&KAFKA_LISTEN),
             advertised_url: value(&ADVERTISED_URL),
             kafka_advertise: value(&KAFKA_ADVERTISE),
-            cluster_id: value(&CLUSTER_ID).unwrap_or_else(|| "picomq".to_owned()),
-            auth: value(&AUTH).unwrap_or_else(|| "off".to_owned()),
+            cluster_id: value(&CLUSTER_ID).unwrap_or_else(|| text_of(DEFAULT_CLUSTER_ID)),
+            auth: value(&AUTH).unwrap_or_else(|| text_of(DEFAULT_AUTH)),
             bootstrap_token: value(&BOOTSTRAP_TOKEN),
-            log: value(&LOG).unwrap_or_else(|| "warn".to_owned()),
+            log: value(&LOG).unwrap_or_else(|| text_of(DEFAULT_LOG)),
             schema_registry: value(&SCHEMA_REGISTRY),
             node_id: NODE_ID.get(),
             wal_cache_mb: WAL_CACHE_MB.get() as u64,
@@ -226,6 +234,10 @@ fn number(
 fn value(setting: &Text) -> Option<String> {
     setting
         .get()
-        .map(|value| value.to_string_lossy().into_owned())
+        .map(|value| text_of(&value))
         .filter(|value| !value.is_empty())
+}
+
+fn text_of(value: &CStr) -> String {
+    value.to_string_lossy().into_owned()
 }

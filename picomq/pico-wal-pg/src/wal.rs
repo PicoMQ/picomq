@@ -104,8 +104,8 @@ impl PgWal {
             )
             .await?;
         self.watermark.store(state.trim, Ordering::SeqCst);
-        self.writer.start(frontier);
         self.reclaimer.run(state.trim, frontier).await?;
+        self.writer.start(frontier);
         Ok(())
     }
 
@@ -123,7 +123,10 @@ impl PgWal {
                 state.segments, state.segment_bytes, config.segments, config.segment_bytes
             )));
         }
-        reclaim::truncate(&self.pool, previous.slots()).await
+        let shared = previous.slots().len().min(self.schema.slots().len());
+        let (kept, extra) = previous.slots().split_at(shared);
+        reclaim::truncate(&self.pool, kept).await?;
+        reclaim::drop(&self.pool, extra).await
     }
 
     async fn advance(&self, watermark: u64) -> Result<(), Error> {

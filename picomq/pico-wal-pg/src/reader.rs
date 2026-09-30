@@ -58,20 +58,30 @@ impl Reader {
     }
 
     pub(crate) async fn get(&self, offset: RecordOffset) -> Result<StreamRecordBatch, Error> {
-        let position = signed(offset.offset)?;
-        let batches = self
-            .select("start_offset <= $1 AND end_offset > $1", position, position)
-            .await?;
-        for batch in batches {
-            let (_, framed) = batch.decode()?;
-            if let Some(found) = framed.into_iter().find(|f| f.offset == offset.offset) {
-                return Ok(found.record);
-            }
+        let missing = || Error::Corrupt(format!("no record at offset {}", offset.offset));
+        let floor = self
+            .floor(signed(offset.offset)?)
+            .await?
+            .ok_or_else(missing)?;
+        let batch = self
+            .select(floor, floor + 1)
+            .await?
+            .into_iter()
+            .next()
+            .filter(|batch| batch.end > offset.offset)
+            .ok_or_else(missing)?;
+        if batch.epoch != offset.epoch {
+            return Err(Error::Corrupt(format!(
+                "record at offset {} belongs to epoch {}, expected epoch {}",
+                offset.offset, batch.epoch, offset.epoch
+            )));
         }
-        Err(Error::Corrupt(format!(
-            "no record at offset {}",
-            offset.offset
-        )))
+        let (_, framed) = batch.decode()?;
+        framed
+            .into_iter()
+            .find(|f| f.offset == offset.offset)
+            .map(|f| f.record)
+            .ok_or_else(missing)
     }
 
     pub(crate) async fn range(
@@ -82,13 +92,9 @@ impl Reader {
         if start >= end {
             return Ok(Vec::new());
         }
-        let batches = self
-            .select(
-                "end_offset > $1 AND start_offset < $2",
-                signed(start)?,
-                signed(end)?,
-            )
-            .await?;
+        let low = signed(start)?;
+        let floor = self.floor(low).await?.unwrap_or(low);
+        let batches = self.select(floor, signed(end)?).await?;
         let mut records = Vec::new();
         for batch in batches {
             let (_, framed) = batch.decode()?;
@@ -102,10 +108,20 @@ impl Reader {
         Ok(records)
     }
 
-    async fn select(&self, filter: &str, low: i64, high: i64) -> Result<Vec<Batch>, Error> {
+    async fn floor(&self, position: i64) -> Result<Option<i64>, Error> {
+        Ok(sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT max(start_offset) FROM ({}) floors",
+            self.schema.floors()
+        )))
+        .bind(position)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    async fn select(&self, low: i64, high: i64) -> Result<Vec<Batch>, Error> {
         let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT start_offset, end_offset, epoch, body FROM ({}) wal \
-             WHERE {filter} ORDER BY start_offset",
+             WHERE start_offset >= $1 AND start_offset < $2 ORDER BY start_offset",
             self.schema.union()
         )))
         .bind(low)

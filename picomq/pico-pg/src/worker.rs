@@ -1,11 +1,13 @@
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
+use std::pin::pin;
 use std::time::Duration;
 
 use pgrx::bgworkers::{
     BackgroundWorker, BackgroundWorkerBuilder, BgWorkerStartTime, SignalWakeFlags,
 };
 use pgrx::prelude::*;
+use picomq_runtime::{PicoServer, RuntimeError, ServerConfig};
 use tokio::runtime::Runtime;
 use tracing_subscriber::EnvFilter;
 
@@ -48,8 +50,12 @@ pub extern "C-unwind" fn pico_worker_main(_argument: pg_sys::Datum) {
         Ok(runtime) => runtime,
         Err(e) => error!("pico: runtime: {e}"),
     };
-    let server = match runtime.block_on(picomq_runtime::start(config)) {
-        Ok(server) => server,
+    let server = match start(&runtime, config) {
+        Ok(Some(server)) => server,
+        Ok(None) => {
+            runtime.shutdown_background();
+            return;
+        }
         Err(e) => error!("pico: {e}"),
     };
     log!("pico: serving on {}", server.local_addr());
@@ -61,6 +67,22 @@ pub extern "C-unwind" fn pico_worker_main(_argument: pg_sys::Datum) {
         warning!("pico: shutdown did not finish within {SHUTDOWN:?}");
     }
     runtime.shutdown_background();
+}
+
+fn start(runtime: &Runtime, config: ServerConfig) -> Result<Option<PicoServer>, RuntimeError> {
+    runtime.block_on(async {
+        let mut start = pin!(picomq_runtime::start(config));
+        loop {
+            tokio::select! {
+                result = &mut start => return result.map(Some),
+                () = tokio::time::sleep(TICK) => {
+                    if BackgroundWorker::sigterm_received() {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    })
 }
 
 fn runtime(threads: usize) -> std::io::Result<Runtime> {
