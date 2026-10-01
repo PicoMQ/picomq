@@ -1,10 +1,16 @@
 # Overview
 
-A PicoMQ deployment has three components. Nodes serve clients and hold only caches. An object store holds every record. A SQL database holds the metadata log that coordinates the nodes.
+A PicoMQ deployment has three components. Nodes serve clients and hold only caches. An object store holds the data objects. A SQL database holds the metadata log that coordinates the nodes. The write-ahead log lives in either the object store or the SQL database.
+
+| Component | Holds | Options |
+| --- | --- | --- |
+| Node | Caches | `pico serve` process, or a background worker inside Postgres |
+| Object store | Data objects, WAL by default | S3 and compatible stores, local filesystem |
+| SQL database | Metadata log, optionally the WAL | Postgres, SQLite for a single node |
 
 ## Anatomy of a node
 
-Each node runs the same stack. An HTTP listener speaks the Pico protocol or Durable Streams, and a Kafka listener serves Kafka clients. An admin listener serves the admin API and the dashboard. Behind them, an ownership router decides whether this node serves a stream or redirects, the stream service manages the registry of names and per-stream state, and the `s3stream` engine moves records to and from object storage.
+Each node runs the same stack. An HTTP listener speaks the Pico protocol or Durable Streams, and a Kafka listener serves Kafka clients. An admin listener serves the admin API and the dashboard. Behind them, an ownership router decides whether this node serves a stream or redirects, the stream service manages the registry of names and per-stream state, and the `s3stream` engine moves records to and from storage. The same stack runs as a process or as the [Postgres extension](/docs/operations/deployment/postgres).
 
 <div class="pico-diagram">
 <svg viewBox="0 0 559 434" width="559" role="img" aria-label="A node runs listeners, routing, the stream service, and the engine. The engine writes to object storage. The service proposes commands to the SQL metadata log.">
@@ -33,10 +39,10 @@ Each node runs the same stack. An HTTP listener speaks the Pico protocol or Dura
 <text x="108" y="274" text-anchor="middle" class="sub">WAL, objects, caches</text>
     <rect x="276" y="352" width="216" height="56" class="box"/>
 <text x="383" y="376" text-anchor="middle" class="label">SQL database</text>
-<text x="383" y="394" text-anchor="middle" class="sub">command log, snapshot, lease</text>
+<text x="383" y="394" text-anchor="middle" class="sub">command log, lease, optional WAL</text>
     <rect x="0" y="352" width="216" height="56" class="box"/>
 <text x="108" y="376" text-anchor="middle" class="label">object storage</text>
-<text x="108" y="394" text-anchor="middle" class="sub">WAL objects, data objects</text>
+<text x="108" y="394" text-anchor="middle" class="sub">data objects, WAL by default</text>
     <path d="M108 96 L108 132" class="edge" marker-end="url(#arr2)"/>
     <path d="M216 164 L272 164" class="edge" marker-end="url(#arr2)"/>
     <path d="M306 192 L306 260 L220 260" class="edge" marker-end="url(#arr2)"/>
@@ -49,7 +55,7 @@ Each node runs the same stack. An HTTP listener speaks the Pico protocol or Dura
 </svg>
 </div>
 
-The engine is the only writer of record data. It appends to a write-ahead log on object storage for durability, batches records into larger data objects in the background, and serves reads from caches when it can.
+The engine is the only writer of record data. It appends to a [write-ahead log](/docs/design/wal) for durability, batches records into larger data objects in the background, and serves reads from caches when it can.
 
 ## The metadata log
 

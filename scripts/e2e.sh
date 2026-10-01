@@ -14,13 +14,15 @@
 #             ownership redirects, groups across nodes, Rust, TypeScript and Go cluster suites
 #   ds        two nodes, Durable Streams HTTP + Kafka, auth off
 #             Go Durable Streams live and cluster suites
+#   extension pico inside Postgres, Pico HTTP + Kafka, auth off
+#             crash, restart and standby tests, then the protocol cross tests
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCENARIOS=("$@")
 if [ ${#SCENARIOS[@]} -eq 0 ]; then
-  SCENARIOS=(single cluster ds)
+  SCENARIOS=(single cluster ds extension)
 fi
 
 NODE1="http://127.0.0.1:4437"
@@ -30,6 +32,7 @@ ADMIN2="http://127.0.0.1:9091"
 KAFKA="127.0.0.1:9092"
 
 export PICO_IMAGE="${PICO_IMAGE:-picomq-e2e:local}"
+export PICO_PG_IMAGE="${PICO_PG_IMAGE:-picomq-pg-e2e:local}"
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 
@@ -37,6 +40,7 @@ compose_file() {
   case "$1" in
     single) echo "$ROOT/harness/aio/compose.yml" ;;
     cluster | ds) echo "$ROOT/harness/aio/compose.cluster.yml" ;;
+    extension) echo "$ROOT/harness/aio/compose.extension.yml" ;;
     *) echo "unknown scenario: $1" >&2; exit 2 ;;
   esac
 }
@@ -60,6 +64,11 @@ wait_ready() {
 rust_protocol_suite() {
   log "$1: rust protocol e2e"
   (cd "$ROOT" && cargo test --locked -p picomq-runtime --test docker_e2e -- --ignored --test-threads=1 --nocapture)
+}
+
+rust_extension_suite() {
+  log "$1: rust extension e2e"
+  (cd "$ROOT" && cargo test --locked -p picomq-runtime --test extension -- --ignored --test-threads=1 --nocapture)
 }
 
 rust_client_suite() {
@@ -114,6 +123,20 @@ run_ds() {
   go_suite ds
 }
 
+run_extension() {
+  local file
+  file="$(compose_file extension)"
+  export PICO_ENDPOINT="$NODE1" PICO_STANDBY_ENDPOINT="$NODE2" PICO_KAFKA="$KAFKA"
+  export PICO_CRASH_CMD="docker compose -f $file kill -s KILL pico && docker compose -f $file up --detach --wait pico"
+  export PICO_RESTART_CMD="docker compose -f $file restart pico"
+  unset PICO_ENDPOINT_2 PICOMQ_INTEGRATION PICOMQ_AUTH_REQUIRED PICOMQ_ENDPOINT PICOMQ_ENDPOINT_2 PICOMQ_RESTART_CMD PICOMQ_DS_INTEGRATION
+
+  wait_ready "$ADMIN1"
+  docker compose -f "$file" up --detach --wait standby
+  rust_extension_suite extension
+  rust_protocol_suite extension
+}
+
 run() {
   local scenario="$1"
   local status=0
@@ -122,6 +145,7 @@ run() {
     single) export PICO_PROTOCOL=pico PICO_AUTH=off ;;
     cluster) export PICO_PROTOCOL=pico PICO_AUTH=required ;;
     ds) export PICO_PROTOCOL=ds PICO_AUTH=off ;;
+    extension) export PICO_PROTOCOL=pico PICO_AUTH=off ;;
   esac
 
   log "$scenario: starting stack"
@@ -146,6 +170,10 @@ run() {
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
   log "building $PICO_IMAGE"
   docker build -t "$PICO_IMAGE" "$ROOT"
+  if [[ " ${SCENARIOS[*]} " == *" extension "* ]]; then
+    log "building $PICO_PG_IMAGE"
+    docker build -t "$PICO_PG_IMAGE" -f "$ROOT/picomq/pico-extension/Dockerfile" "$ROOT"
+  fi
 fi
 
 log "building test binaries"

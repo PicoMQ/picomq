@@ -1,10 +1,6 @@
 # Writes
 
-An append is durable when the record is in object storage. There is no local disk in the write path, so a node that dies loses nothing that was acknowledged. The cost of that guarantee is object store latency, and the write path is shaped around paying it once for many records instead of once per record.
-
-::: info Note
-A local disk backend for the WAL may be considered in the future for low latency use cases. That would only change where the WAL is written, the rest of the write path stays the same.
-:::
+An append is durable when the record is in the write-ahead log, which lives in object storage or in Postgres. There is no node-local disk in the write path, so a node that dies loses nothing that was acknowledged. The cost of that guarantee is one round trip to the WAL, and the write path is shaped around paying it once for many records instead of once per record.
 
 ## The append path
 
@@ -13,7 +9,7 @@ An append arrives at the stream's owning node as a `POST`. The node checks the p
 Inside the engine the record goes to two places. It enters the log cache, which serves tail reads, and it enters the WAL, which makes it durable.
 
 <div class="pico-diagram">
-<svg viewBox="0 40 590 240" width="590" role="img" aria-label="An append is ordered under the stream gate, buffered into a WAL bulk with other records, uploaded as one object, and acknowledged when the upload completes.">
+<svg viewBox="0 40 590 240" width="590" role="img" aria-label="An append is ordered under the stream gate, buffered into a WAL bulk with other records, written as one WAL write, and acknowledged when the write completes.">
   <defs>
     <marker id="arrw" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0 0.5 L7.5 4 L0 7.5 Z" class="arrow"/>
@@ -29,8 +25,8 @@ Inside the engine the record goes to two places. It enters the log cache, which 
   <text x="480" y="84" text-anchor="middle" class="label">WAL bulk</text>
   <text x="480" y="102" text-anchor="middle" class="sub">records batched</text>
   <rect x="410" y="200" width="140" height="56" class="box-accent"/>
-  <text x="480" y="224" text-anchor="middle" class="label">object PUT</text>
-  <text x="480" y="242" text-anchor="middle" class="sub">one upload per bulk</text>
+  <text x="480" y="224" text-anchor="middle" class="label">WAL write</text>
+  <text x="480" y="242" text-anchor="middle" class="sub">one PUT or one commit</text>
   <rect x="210" y="200" width="140" height="56" class="box"/>
   <text x="280" y="224" text-anchor="middle" class="label">ack</text>
   <text x="280" y="242" text-anchor="middle" class="sub">durable, in order</text>
@@ -46,15 +42,15 @@ Inside the engine the record goes to two places. It enters the log cache, which 
 
 ## The WAL
 
-The WAL is a sequence of small objects in the object store, written by one node under its own key prefix. Incoming records accumulate into a bulk, and each bulk becomes one `PUT`. Uploads are pipelined, so several bulks can be in flight, but acknowledgements are delivered in submission order. A record is acknowledged only when its bulk and every bulk before it are stored.
+Incoming records accumulate into a bulk, and each bulk becomes one write to the WAL: a `PUT` on the object store, or a committed `INSERT` in Postgres. Writes are pipelined, so several bulks can be in flight, but acknowledgements are delivered in submission order. A record is acknowledged only when its bulk and every bulk before it are stored.
 
-Group commit is what makes this affordable. One upload of a few hundred kilobytes contains every record that arrived while the previous upload was in flight, so per-record cost drops as concurrency rises. A single append on an idle stream pays one object store round trip.
+Group commit is what makes this affordable. One write of a few hundred kilobytes contains every record that arrived while the previous write was in flight, so per-record cost drops as concurrency rises. A single append on an idle stream pays one round trip, tens of milliseconds on S3, a millisecond or two in Postgres.
 
-Records are framed with a checksum and the WAL objects include the node's epoch. A node that lost its registration cannot extend its WAL past a takeover, which is part of the fencing described in [Streams](/docs/design/streams).
+Records are framed with a checksum and every WAL write carries the node's epoch. A node that lost its registration cannot extend its WAL past a takeover, which is part of the fencing described in [Streams](/docs/design/streams). The layout of each backend, the Postgres ring of tables, and what each survives are on the [Write-ahead log](/docs/design/wal) page.
 
 ## From WAL to committed objects
 
-WAL objects are a staging area, not the long-term layout. A background upload task drains sealed log cache blocks into read-optimized objects and commits them through the metadata log.
+The WAL is a staging area, not the long-term layout. A background upload task drains sealed log cache blocks into read-optimized objects and commits them through the metadata log.
 
 <div class="pico-diagram">
 <svg viewBox="0 30 720 260" width="720" role="img" aria-label="Sealed cache blocks are written as stream-set or stream objects, committed through the metadata log, and the covered WAL objects are deleted.">

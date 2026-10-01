@@ -68,9 +68,36 @@ S3 credentials come from the standard `AWS_*` environment variables. Compatible 
 --storage=-2@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true
 ```
 
-`--wal` optionally puts the WAL in its own bucket. When absent the WAL shares the data bucket under the next bucket id, which is the right default unless WAL and data need different storage classes or lifecycle rules.
+`--wal` selects where the write-ahead log lives.
+
+| `--wal` | WAL location |
+| --- | --- |
+| absent | The data bucket, under the next bucket id |
+| `id@s3://...` | Its own bucket, for a different storage class or lifecycle rules |
+| `postgres://...` | Tables in a Postgres database |
 
 `--schema-registry` points at a store of named schemas that streams bind and optionally validate against. Unset by default, covered in [Schemas](/docs/schemas).
+
+### Postgres WAL
+
+```bash
+--wal=postgres://user:pass@pg:5432/picomq?sslmode=require&batchInterval=1
+```
+
+Query parameters below are consumed by pico. Any other parameter, such as `sslmode`, is passed to the connection. The [Write-ahead log](/docs/design/wal) page covers the layout and what each parameter does.
+
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `batchInterval` | `1` | Milliseconds records accumulate before a batch is inserted. |
+| `maxBytesInBatch` | `1048576` | Batch size that triggers an insert before the interval lapses. |
+| `maxInflight` | `4` | Concurrent batch inserts. |
+| `maxUnflushedBytes` | `134217728` | Acknowledged bytes not yet uploaded to data objects before appends wait. |
+| `segments` | `8` | Slot tables in the ring. At least 2. |
+| `segmentBytes` | `67108864` | Bytes per slot. `(segments - 1) * segmentBytes` must exceed `maxUnflushedBytes`. |
+| `synchronousCommit` | `on` | `on`, `remote_write`, `remote_apply`, or `local`. |
+| `allowUnsafe` | `false` | Start even when Postgres has `fsync = off`. |
+
+Startup checks: the database must be a primary, `fsync` must be on unless `allowUnsafe=true`, and a warning is logged when `synchronous_standby_names` is empty. The same database can hold both the metadata log and the WAL, which is the layout the [Postgres extension](/docs/operations/deployment/postgres) uses.
 
 ### S3 Express One Zone for the WAL
 

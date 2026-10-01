@@ -66,7 +66,8 @@ pub struct ServeArgs {
     )]
     storage: String,
 
-    /// WAL bucket URI. Defaults to the data bucket with its own bucket id
+    /// WAL location: a bucket URI, or a postgres:// URL to keep the WAL in
+    /// Postgres. Defaults to the data bucket with its own bucket id
     #[arg(long, env = "PICO_WAL", allow_hyphen_values = true)]
     wal: Option<String>,
 

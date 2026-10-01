@@ -1,16 +1,23 @@
 # Tuning
 
-The mental model for all tuning: append latency is bounded below by one object store `PUT`, and cost is roughly proportional to how many of those `PUT`s are made. Every knob in this page moves along that line, trading latency against request count, or memory against object store reads.
+The mental model for all tuning: append latency is bounded below by one WAL write, and object store cost is roughly proportional to how many `PUT`s are made. Every knob in this page moves along that line, trading latency against request count, or memory against object store reads.
 
 ## Append latency
 
-The WAL seals and uploads a batch when it reaches `8` MiB or when the batch interval lapses, `250` ms by default. A lone append on a quiet stream pays up to that interval on top of the upload itself, so the batch interval is the dominant latency knob for low-throughput streams. It is set as a parameter on the WAL URI.
+The WAL seals a batch when it reaches the size cap or when the batch interval lapses. A lone append on a quiet stream pays up to that interval on top of the write itself, so the batch interval is the dominant latency knob for low-throughput streams. It is set as a parameter on the WAL URI.
+
+| WAL | Batch interval | Size cap | Write cost |
+| --- | --- | --- | --- |
+| Object store | `250` ms | `8` MiB | One `PUT`, tens of ms on S3 |
+| Postgres | `1` ms | `1` MiB | One commit, low single-digit ms |
 
 ```bash
 --wal '0@s3://picomq?region=us-east-1&batchInterval=5'
 ```
 
-A `5` ms interval gives near-floor latency at the price of one `PUT` per flush. Busy streams are insensitive to this setting because size seals the batch first, and group commit keeps the per-record cost low either way. The other WAL URI parameters, `maxBytesInBatch`, `maxUnflushedBytes`, and `maxInflightUploadCount`, rarely need to move.
+A `5` ms interval on the object store gives near-floor latency at the price of one `PUT` per flush. Busy streams are insensitive to this setting because size seals the batch first, and group commit keeps the per-record cost low either way. The remaining URI parameters (`maxBytesInBatch`, `maxUnflushedBytes`, `maxInflightUploadCount` on the object store, `maxInflight` on Postgres) rarely need to move.
+
+On the Postgres WAL the floor is the commit itself. `synchronousCommit=remote_apply` adds the standby round trip to every acknowledgement in exchange for records surviving the loss of the primary. `remote_write` is the cheaper middle.
 
 ## Producer throughput
 
@@ -35,7 +42,7 @@ A larger upload threshold produces fewer, larger committed objects, which reads 
 
 ## Object store spend
 
-Request count, not bytes, dominates the bill on most object stores. The two levers that matter are the WAL batch interval, one `PUT` per flush, and the upload threshold, which sets how often WAL data is rewritten into committed objects. Relaxing latency on quiet streams and letting batches fill is the single most effective cost change. Compaction and garbage collection add a steady background of requests proportional to churn, not to traffic.
+Request count, not bytes, dominates the bill on most object stores. The two levers that matter are the WAL batch interval, one `PUT` per flush, and the upload threshold, which sets how often WAL data is rewritten into committed objects. With the WAL in Postgres the first lever disappears from the bill and only the upload threshold remains. Relaxing latency on quiet streams and letting batches fill is the single most effective cost change. Compaction and garbage collection add a steady background of requests proportional to churn, not to traffic.
 
 ## Read behavior
 
