@@ -23,7 +23,7 @@ use picomq_auth::{
 };
 use picomq_metadata::MetadataState;
 use picomq_server::registry::RegistryEntry;
-use picomq_server::{OwnershipService, PicoNode};
+use picomq_server::{OwnershipService, PicoNode, is_reserved_name};
 use s3stream::StreamState;
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -94,7 +94,10 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/cluster", get(cluster))
         .route("/admin/nodes", get(nodes))
         .route("/admin/nodes/{id}", post(update_node))
-        .route("/admin/streams/{*name}", get(stream))
+        .route(
+            "/admin/streams/{*name}",
+            get(stream).put(mutate_stream).delete(mutate_stream),
+        )
         .route("/admin/transfer", post(transfer))
         .route("/admin/tokens", get(list_tokens).post(issue_token))
         .route("/admin/tokens/{*id}", delete(revoke_token))
@@ -127,7 +130,15 @@ fn cors_headers(headers: &mut HeaderMap) {
     );
     headers.insert(
         "Access-Control-Allow-Headers",
-        HeaderValue::from_static("authorization, content-type"),
+        HeaderValue::from_static(
+            "authorization, content-type, pico-kafka-topic, pico-ttl, pico-expires-at, pico-closed, pico-schema, pico-schema-validate",
+        ),
+    );
+    headers.insert(
+        "Access-Control-Expose-Headers",
+        HeaderValue::from_static(
+            "location, pico-next-seq, pico-start-seq, pico-closed, pico-kafka-topic, pico-ttl, pico-expires-at",
+        ),
     );
 }
 
@@ -331,6 +342,111 @@ async fn stream(
         "pendingTransfer": pending,
     });
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Lifecycle operations on the admin listener use the native HTTP lifecycle
+/// implementation and service, with admin-audience authentication. Path names
+/// are decoded once, like the existing detail route: a literal `%` in a stored
+/// stream name must therefore be encoded as `%25` in the admin URL.
+async fn mutate_stream(
+    State(state): State<AdminState>,
+    Path(name): Path<String>,
+    request: Request,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let op = if parts.method == Method::PUT {
+        Operation::Create
+    } else {
+        Operation::Delete
+    };
+    // Admin paths identify absolute stored names, like GET /admin/streams.
+    // Protocol auto-prefixing must not silently change a reviewed target here.
+    let name = format!("/{name}");
+    if let Err(response) = gate(state.authorizer.as_deref(), &parts.headers, op, Some(&name)).await
+    {
+        return *response;
+    }
+    if name == "/" || is_reserved_name(&name) {
+        return error_response(StatusCode::BAD_REQUEST, "not a user stream name");
+    }
+    // Native stream names are raw URI paths. Inaccessible names such as a
+    // decoded space or query delimiter must not be introduced by the admin API.
+    if !name.is_ascii()
+        || name.contains(['#', '\\'])
+        || !name
+            .parse::<Uri>()
+            .is_ok_and(|uri| uri.path() == name && uri.query().is_none())
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "use the exact native stream path, encoding literal percent signs as %25 in the admin URL",
+        );
+    }
+    // Neither operation takes a body. Bound it before any lifecycle mutation.
+    if axum::body::to_bytes(body, 0).await.is_err() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "stream lifecycle requests take no body",
+        );
+    }
+    if let Some(response) = lifecycle_owner(&state, &name) {
+        return response;
+    }
+    let service = state.node.service();
+    let result = if parts.method == Method::PUT {
+        crate::pico::create_stream(
+            &service,
+            &parts.uri,
+            &parts.headers,
+            &bytes::Bytes::new(),
+            &name,
+        )
+        .await
+    } else {
+        crate::pico::delete_stream(&service, &name).await
+    };
+    result.unwrap_or_else(crate::pico::service_error_response)
+}
+
+/// Do not let a non-owner's cached service mutate a registered stream. Admin
+/// addresses are not advertised, so a protocol redirect cannot safely carry an
+/// admin-only credential. Refuse with the persisted owner ID instead of guessing
+/// a port or calling the service on a different node. This guard uses a published
+/// snapshot; lifecycle concurrency semantics remain those of the shared service.
+fn lifecycle_owner(state: &AdminState, name: &str) -> Option<Response> {
+    let view = state.node.views().load();
+    let value = view.state.get_kv(name)?;
+    let entry = match RegistryEntry::decode(&value) {
+        Ok(entry) => entry,
+        Err(_) => {
+            return Some(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "corrupt registry entry",
+            ));
+        }
+    };
+    if let Some(pending) = view.state.pending_transfers.get(&entry.stream_id) {
+        return Some((StatusCode::CONFLICT, Json(json!({
+            "error": "A stream transfer is pending. Wait for it to complete, then review the operation again.",
+            "code": "transfer_pending",
+            "fromNode": pending.from_node,
+            "toNode": pending.to_node,
+        }))).into_response());
+    }
+    let Some(row) = view.state.streams.get(&entry.stream_id) else {
+        return Some(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stream ownership is unavailable; refresh details before retrying",
+        ));
+    };
+    if row.node_id != -1 && row.node_id != state.node.config().node_id {
+        return Some((StatusCode::CONFLICT, Json(json!({
+            "error": format!("Connect to node {}'s admin listener and review the operation again. No write was performed.", row.node_id),
+            "code": "owner_required",
+            "ownerNodeId": row.node_id,
+        }))).into_response());
+    }
+    None
 }
 
 /// Requests a live ownership move. Returns 202: the move completes
