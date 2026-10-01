@@ -6,7 +6,7 @@ members = [
     "picomq/pico-auth",
     "picomq/pico-metadata",
     "picomq/pico-sql",
-    "picomq/pico-wal-pg",
+    "picomq/pico-pgwal",
     "picomq/pico-server",
     "picomq/pico-kafka",
     "picomq/pico-http",
@@ -36,14 +36,14 @@ members = [
     "connectors/sources/elasticsearch",
     "connectors/sources/influxdb",
 ]
-exclude = ["picomq/pico-pg"]
+exclude = ["picomq/pico-extension"]
 default-members = [
     "picomq/pico-common",
     "picomq/pico-protocol",
     "picomq/pico-auth",
     "picomq/pico-metadata",
     "picomq/pico-sql",
-    "picomq/pico-wal-pg",
+    "picomq/pico-pgwal",
     "picomq/pico-server",
     "picomq/pico-kafka",
     "picomq/pico-http",
@@ -87,7 +87,7 @@ picomq-protocol = { path = "picomq/pico-protocol", version = "0.1.1" }
 picomq-auth = { path = "picomq/pico-auth" }
 picomq-metadata = { path = "picomq/pico-metadata" }
 picomq-sql = { path = "picomq/pico-sql" }
-picomq-wal-pg = { path = "picomq/pico-wal-pg" }
+picomq-pgwal = { path = "picomq/pico-pgwal" }
 picomq-server = { path = "picomq/pico-server" }
 picomq-kafka = { path = "picomq/pico-kafka" }
 picomq-http = { path = "picomq/pico-http" }

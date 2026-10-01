@@ -1,5 +1,5 @@
 [package]
-name = "picomq-wal-pg"
+name = "picomq-pgwal"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -7,7 +7,7 @@ use s3stream_wal::{WalError, WriteAheadLog};
 use common::{cluster, record, recovered, slots, url, wal};
 
 #[tokio::test]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test wal -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test wal -- --ignored"]
 async fn append_recover_reset_cycle() {
     let url = url();
     let cluster = cluster();
@@ -45,7 +45,7 @@ async fn append_recover_reset_cycle() {
 }
 
 #[tokio::test]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test wal -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test wal -- --ignored"]
 async fn get_and_get_range() {
     let url = url();
     let wal = wal(&url, &cluster(), 1, "");
@@ -77,7 +77,7 @@ async fn get_and_get_range() {
 }
 
 #[tokio::test]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test wal -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test wal -- --ignored"]
 async fn trim_inside_a_batch_recovers_only_the_suffix() {
     let url = url();
     let cluster = cluster();
@@ -111,7 +111,7 @@ async fn trim_inside_a_batch_recovers_only_the_suffix() {
 }
 
 #[tokio::test]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test wal -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test wal -- --ignored"]
 async fn recovers_without_a_clean_shutdown() {
     let url = url();
     let cluster = cluster();
@@ -129,7 +129,7 @@ async fn recovers_without_a_clean_shutdown() {
 }
 
 #[tokio::test]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test wal -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test wal -- --ignored"]
 async fn listener_runs_in_offset_order_before_acks() {
     let url = url();
     let wal = wal(&url, &cluster(), 1, "maxBytesInBatch=64&batchInterval=0");
@@ -156,7 +156,7 @@ async fn listener_runs_in_offset_order_before_acks() {
 }
 
 #[tokio::test]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test wal -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test wal -- --ignored"]
 async fn full_ring_backpressures_until_trimmed() {
     let url = url();
     let params =
@@ -183,7 +183,7 @@ async fn full_ring_backpressures_until_trimmed() {
 }
 
 #[tokio::test]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test wal -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test wal -- --ignored"]
 async fn ring_geometry_changes_only_once_drained() {
     let url = url();
     let cluster = cluster();

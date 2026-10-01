@@ -8,11 +8,11 @@ use std::time::Duration;
 use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore, Verifier};
 use picomq_http::{RunningServer, ServeOptions};
 use picomq_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
+use picomq_pgwal::PgWal;
 use picomq_server::{KvTokenStore, NodeConfig, PicoNode};
 use picomq_sql::{
     LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig, SqliteStore,
 };
-use picomq_wal_pg::PgWal;
 use s3stream::{IdUri, ObjectStorageTrait, ObjectStoreAdapter, WriteAheadLogTrait};
 
 pub use config::{AuthMode, KafkaConfig, MetaBackend, ServerConfig};
@@ -31,7 +31,7 @@ pub enum RuntimeError {
     #[error("object storage: {0}")]
     Storage(#[from] s3stream::ObjectError),
     #[error("postgres wal: {0}")]
-    Wal(#[from] picomq_wal_pg::Error),
+    Wal(#[from] picomq_pgwal::Error),
     #[error("node startup: {0}")]
     Node(#[from] picomq_server::ServiceError),
     #[error("bind {addr}: {source}")]
@@ -143,7 +143,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         engine,
     };
     let wal_uri = config.wal_uri();
-    let node = if picomq_wal_pg::Config::accepts(&wal_uri) {
+    let node = if picomq_pgwal::Config::accepts(&wal_uri) {
         let wal = postgres_wal(&wal_uri, &node_config)?;
         node_config.engine.wal_config = wal.uri().to_owned();
         PicoNode::start_with_wal(
@@ -314,7 +314,7 @@ fn open_bucket(uri: &str) -> Result<Arc<dyn ObjectStorageTrait>, RuntimeError> {
 }
 
 fn postgres_wal(uri: &str, node: &NodeConfig) -> Result<Arc<dyn WriteAheadLogTrait>, RuntimeError> {
-    let config = picomq_wal_pg::Config::parse(uri)?.identity(
+    let config = picomq_pgwal::Config::parse(uri)?.identity(
         node.cluster_id.clone(),
         u32::try_from(node.node_id).unwrap_or_default(),
         u64::try_from(node.node_epoch).unwrap_or_default(),

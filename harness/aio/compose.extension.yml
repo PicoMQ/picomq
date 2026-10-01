@@ -44,7 +44,7 @@ services:
     image: ${PICO_PG_IMAGE:-picomq-pg:local}
     build:
       context: ../..
-      dockerfile: picomq/pico-pg/Dockerfile
+      dockerfile: picomq/pico-extension/Dockerfile
     command:
       - postgres
       - -c

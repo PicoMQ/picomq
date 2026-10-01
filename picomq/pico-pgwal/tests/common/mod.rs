@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::Bytes;
 use futures::StreamExt;
-use picomq_wal_pg::{Config, PgWal};
+use picomq_pgwal::{Config, PgWal};
 use s3stream_codec::StreamRecordBatch;
 use s3stream_wal::WriteAheadLog;
 

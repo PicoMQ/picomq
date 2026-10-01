@@ -1,7 +1,7 @@
 [workspace]
 
 [package]
-name = "picomq-pg"
+name = "picomq-extension"
 version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"

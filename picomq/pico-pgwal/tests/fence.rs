@@ -5,7 +5,7 @@ use s3stream_wal::{WalError, WriteAheadLog};
 use common::{cluster, record, recovered, url, wal};
 
 #[tokio::test]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test fence -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test fence -- --ignored"]
 async fn a_newer_epoch_fences_the_running_writer() {
     let url = url();
     let cluster = cluster();
@@ -34,7 +34,7 @@ async fn a_newer_epoch_fences_the_running_writer() {
 }
 
 #[tokio::test]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test fence -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test fence -- --ignored"]
 async fn an_older_epoch_cannot_start() {
     let url = url();
     let cluster = cluster();
@@ -49,7 +49,7 @@ async fn an_older_epoch_cannot_start() {
 }
 
 #[tokio::test]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test fence -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test fence -- --ignored"]
 async fn concurrent_commits_never_land_after_the_fence() {
     let url = url();
     let cluster = cluster();

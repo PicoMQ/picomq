@@ -15,8 +15,8 @@ The workspace is split into two areas with a hard boundary between them:
 
 Two host crates are specific to Postgres:
 
-- `picomq/pico-wal-pg` implements the engine's WAL trait on Postgres tables. See [Write-ahead log](/docs/design/wal).
-- `picomq/pico-pg` is the [Postgres extension](/docs/operations/deployment/postgres), a pgrx background worker around `picomq-runtime`. It is its own workspace because pgrx pins build settings the main workspace does not.
+- `picomq/pico-pgwal` implements the engine's WAL trait on Postgres tables. See [Write-ahead log](/docs/design/wal).
+- `picomq/pico-extension` is the [Postgres extension](/docs/operations/deployment/postgres), a pgrx background worker around `picomq-runtime`. It is its own workspace because pgrx pins build settings the main workspace does not.
 
 Keeping the engine boundary intact is a review criterion. If a change in `picomq/*` needs something from inside the engine, the right move is to widen the facade.
 
@@ -38,7 +38,7 @@ PICOMQ_PG_URL=postgres://user:pass@localhost:5432/picomq \
     cargo test -p picomq-sql --test pg_contract --test pg_e2e
 
 PICO_TEST_PG_URL=postgres://user:pass@localhost:5432/picomq \
-    cargo test -p picomq-wal-pg -- --ignored
+    cargo test -p picomq-pgwal -- --ignored
 ```
 
 The extension is built and tested through Docker. `scripts/e2e.sh extension` builds the image, starts `harness/aio/compose.extension.yml`, and runs the extension and protocol suites against it. Building it on a host needs `cargo-pgrx` and a Postgres server, see [Postgres extension](/docs/operations/deployment/postgres#build-from-source).

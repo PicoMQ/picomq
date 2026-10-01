@@ -9,7 +9,7 @@ use s3stream_wal::WriteAheadLog;
 use common::{cluster, record, url, wal};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test retry -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test retry -- --ignored"]
 async fn acks_survive_killed_connections_exactly_once() {
     let url = url();
     let cluster = cluster();

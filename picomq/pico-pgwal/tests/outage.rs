@@ -63,7 +63,7 @@ impl Proxy {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-wal-pg --test outage -- --ignored"]
+#[ignore = "run explicitly: PICO_TEST_PG_URL=postgres://... cargo test -p picomq-pgwal --test outage -- --ignored"]
 async fn waits_out_a_postgres_outage() {
     let proxy = Proxy::start(&url()).await;
     let wal = wal(&proxy.url, &cluster(), 1, "batchInterval=0");

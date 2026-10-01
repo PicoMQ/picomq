@@ -72,7 +72,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: picomq/pico-pg/Dockerfile
+          file: picomq/pico-extension/Dockerfile
           load: true
           tags: picomq-pg-e2e:local
           cache-from: type=gha,scope=extension

@@ -172,7 +172,7 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
   docker build -t "$PICO_IMAGE" "$ROOT"
   if [[ " ${SCENARIOS[*]} " == *" extension "* ]]; then
     log "building $PICO_PG_IMAGE"
-    docker build -t "$PICO_PG_IMAGE" -f "$ROOT/picomq/pico-pg/Dockerfile" "$ROOT"
+    docker build -t "$PICO_PG_IMAGE" -f "$ROOT/picomq/pico-extension/Dockerfile" "$ROOT"
   fi
 fi
 

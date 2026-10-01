@@ -6422,6 +6422,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "picomq-pgwal"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "crc32fast",
+ "futures",
+ "s3stream-codec",
+ "s3stream-wal",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "picomq-protocol"
 version = "0.1.1"
 dependencies = [
@@ -6443,11 +6460,11 @@ dependencies = [
  "picomq-http",
  "picomq-kafka",
  "picomq-metadata",
+ "picomq-pgwal",
  "picomq-protocol",
  "picomq-schema",
  "picomq-server",
  "picomq-sql",
- "picomq-wal-pg",
  "rdkafka",
  "reqwest 0.13.4",
  "s3stream",
@@ -6520,23 +6537,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "picomq-wal-pg"
-version = "0.1.1"
-dependencies = [
- "async-trait",
- "bytes",
- "crc32fast",
- "futures",
- "s3stream-codec",
- "s3stream-wal",
- "sqlx",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "url",
 ]
 
 [[package]]

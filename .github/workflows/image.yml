@@ -147,7 +147,7 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
-          file: picomq/pico-pg/Dockerfile
+          file: picomq/pico-extension/Dockerfile
           build-args: PG_MAJOR=${{ matrix.pg }}
           target: package
           platforms: linux/amd64
@@ -181,7 +181,7 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
-          file: picomq/pico-pg/Dockerfile
+          file: picomq/pico-extension/Dockerfile
           build-args: PG_MAJOR=${{ matrix.pg }}
           push: true
           platforms: linux/amd64

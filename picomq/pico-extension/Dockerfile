@@ -30,8 +30,8 @@ RUN --mount=type=cache,id=picomq-cargo-registry,sharing=locked,target=/usr/local
  && cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
 COPY . .
 COPY --from=dashboard /src/picomq/pico-http/_dashboard /src/picomq/pico-http/_dashboard
-WORKDIR /src/picomq/pico-pg
-RUN --mount=type=cache,id=picomq-pg-target-${PG_MAJOR},sharing=locked,target=/src/picomq/pico-pg/target \
+WORKDIR /src/picomq/pico-extension
+RUN --mount=type=cache,id=picomq-extension-target-${PG_MAJOR},sharing=locked,target=/src/picomq/pico-extension/target \
     --mount=type=cache,id=picomq-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=picomq-cargo-git,sharing=locked,target=/usr/local/cargo/git \
     cargo pgrx package --no-default-features --features pg${PG_MAJOR} \
@@ -48,6 +48,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /package/ /
-COPY picomq/pico-pg/init.sql /docker-entrypoint-initdb.d/pico.sql
+COPY picomq/pico-extension/init.sql /docker-entrypoint-initdb.d/pico.sql
 RUN echo "shared_preload_libraries = 'pico'" >> /usr/share/postgresql/postgresql.conf.sample
 EXPOSE 4437 9090 9092

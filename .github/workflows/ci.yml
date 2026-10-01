@@ -103,7 +103,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: picomq/pico-pg
+        working-directory: picomq/pico-extension
     env:
       PGRX_PG_CONFIG_PATH: /usr/lib/postgresql/16/bin/pg_config
     steps:
@@ -125,7 +125,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: extension
-          workspaces: picomq/pico-pg -> target
+          workspaces: picomq/pico-extension -> target
 
       - name: cargo fmt
         run: cargo fmt -- --check

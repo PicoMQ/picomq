@@ -193,12 +193,12 @@ docker compose -f compose.extension.yml up --build
 
 ## Build from source
 
-The extension is the `picomq-pg` crate at `picomq/pico-pg`, built with [pgrx](https://github.com/pgcentralfoundation/pgrx). It is outside the main workspace because pgrx pins its own build settings.
+The extension is the `picomq-extension` crate at `picomq/pico-extension`, built with [pgrx](https://github.com/pgcentralfoundation/pgrx). It is outside the main workspace because pgrx pins its own build settings.
 
 ```bash
 cargo install --locked cargo-pgrx --version 0.16.1
 cargo pgrx init --pg17 "$(which pg_config)"
-cd picomq/pico-pg
+cd picomq/pico-extension
 cargo pgrx install --release --no-default-features --features pg17
 ```
 
@@ -209,6 +209,6 @@ cargo pgrx install --release --no-default-features --features pg17
 | `docker buildx build --target package` | `lib/` and `extension/` only, see below |
 
 ```bash
-docker buildx build -f picomq/pico-pg/Dockerfile --build-arg PG_MAJOR=17 \
+docker buildx build -f picomq/pico-extension/Dockerfile --build-arg PG_MAJOR=17 \
     --target package --output type=local,dest=out .
 ```
