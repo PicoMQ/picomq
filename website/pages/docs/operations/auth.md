@@ -23,7 +23,18 @@ pico serve --auth required --auth-bootstrap-token "$TOKEN" ...
 
 ## Issuing tokens
 
-Three endpoints on the admin listener:
+`pico admin tokens` covers the token lifecycle from the command line, using the caller's token for the admin listener (`--token`, `PICO_ADMIN_TOKEN`, `PICO_TOKEN`, or the stored credential):
+
+```bash
+pico admin tokens issue svc/ingest \
+    --stream-prefix /logs/ --grant stream:write --audience pico --expires-in 30d
+pico admin tokens list
+pico admin tokens revoke svc/ingest
+```
+
+`issue` prints only the secret on stdout, so `TOKEN=$(pico admin tokens issue ...)` captures it, and describes the issued scope on stderr. `--stream`/`--stream-prefix` and `--token-id`/`--token-prefix` add matchers, `--grant GROUP:ACCESS` sets a group (`stream`, `tokens`, or `admin` with `read`, `write`, or `rw`), `--op` adds a fine operation, `--audience` is required at least once, and `--auto-prefix` turns on tenant prefixing. `--scope` takes the full scope JSON below instead of the flags. With `--json` (`pico admin --json tokens ...`) every command prints the raw response.
+
+The commands are a thin client over three endpoints on the admin listener:
 
 | Method and path | What it does |
 | --- | --- |

@@ -8,6 +8,7 @@ use picomq_protocol::{check_path, stream_path};
 use serde_json::Value;
 
 use crate::io::note;
+use crate::tokens::TokenCommand;
 
 const TRANSFER_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSFER_WAIT_POLL: Duration = Duration::from_millis(250);
@@ -66,6 +67,9 @@ pub enum AdminCommand {
         #[arg(long)]
         slots: u32,
     },
+    /// List, issue, and revoke access tokens.
+    #[command(subcommand)]
+    Tokens(TokenCommand),
 }
 
 pub async fn run(args: AdminArgs) -> Result<i32, String> {
@@ -199,11 +203,12 @@ pub async fn run(args: AdminArgs) -> Result<i32, String> {
                 return print_json(&body);
             }
         }
+        AdminCommand::Tokens(command) => return crate::tokens::run(&api, args.json, command).await,
     }
     Ok(0)
 }
 
-struct Api {
+pub(crate) struct Api {
     base: String,
     http: reqwest::Client,
     token: Option<String>,
@@ -222,7 +227,7 @@ impl Api {
         Ok(format!("{}{path}", self.base))
     }
 
-    async fn get(&self, path: &str) -> Result<Value, String> {
+    pub(crate) async fn get(&self, path: &str) -> Result<Value, String> {
         let response = self
             .credentialed(self.http.get(self.url(path)?))
             .send()
@@ -231,10 +236,19 @@ impl Api {
         decode(response).await
     }
 
-    async fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
+    pub(crate) async fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
         let response = self
             .credentialed(self.http.post(self.url(path)?))
             .json(body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        decode(response).await
+    }
+
+    pub(crate) async fn delete(&self, path: &str) -> Result<Value, String> {
+        let response = self
+            .credentialed(self.http.delete(self.url(path)?))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -246,6 +260,10 @@ impl Api {
 /// not just the status code.
 async fn decode(response: reqwest::Response) -> Result<Value, String> {
     let status = response.status();
+    // A revoke answers 204 with no body.
+    if status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(Value::Null);
+    }
     let body: Value = response
         .json()
         .await
@@ -288,7 +306,7 @@ async fn await_transfer(
     }
 }
 
-fn print_json(body: &Value) -> Result<i32, String> {
+pub(crate) fn print_json(body: &Value) -> Result<i32, String> {
     println!(
         "{}",
         serde_json::to_string_pretty(body).map_err(|e| e.to_string())?
