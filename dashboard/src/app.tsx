@@ -1,4 +1,8 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
+import { ConnectionSettings, Discovery, Publish, Watch } from './stream-tabs'
+import { loadConnection, saveConnection, type Connection } from './streams'
+import { NodeSlots } from './admin-tools'
+import { TokenTools } from './token-tools'
 import {
   AuthRequired,
   fetchCluster,
@@ -54,6 +58,7 @@ function TokenGate({ message, onSubmit }: { message: string; onSubmit: (token: s
         }}
       >
         <input
+          aria-label="Admin access token"
           type="password"
           class="mono"
           placeholder="Bearer token"
@@ -67,6 +72,33 @@ function TokenGate({ message, onSubmit }: { message: string; onSubmit: (token: s
 }
 
 export function App() {
+  const [tab, setTab] = useState('Overview')
+  const [connection, setConnection] = useState(loadConnection)
+  const appliedConnection = useRef(connection)
+  const isConnectionCurrent = useCallback((value: Connection) => appliedConnection.current === value, [])
+  const [publishing, setPublishing] = useState(false)
+  const publishPending = useRef(false)
+  const [streamWriting, setStreamWriting] = useState(false)
+  const streamWritePending = useRef(false)
+  const onStreamPending = useCallback((pending: boolean) => {
+    streamWritePending.current = pending
+    setStreamWriting(pending)
+  }, [])
+  const onPublishPending = useCallback((pending: boolean) => {
+    publishPending.current = pending
+    setPublishing(pending)
+  }, [])
+  function applyConnection(value: Connection) {
+    if (publishPending.current || streamWritePending.current) throw new Error('Wait for the pending write to finish before applying a connection.')
+    saveConnection(value)
+    const current = appliedConnection.current
+    if (current.endpoint !== value.endpoint || current.token !== value.token) {
+      appliedConnection.current = value
+      setConnection(value)
+    }
+  }
+  const [watchSelection, setWatchSelection] = useState({ name: '', revision: 0 })
+  const [publishSelection, setPublishSelection] = useState({ name: '', revision: 0 })
   const [cluster, setCluster] = useState<ClusterInfo | null>(null)
   const [nodes, setNodes] = useState<NodeInfo[]>([])
   const [ready, setReady] = useState<Readiness | null>(null)
@@ -115,27 +147,6 @@ export function App() {
     }
   }, [attempt])
 
-  if (authNeeded) {
-    return (
-      <div class="ss-app">
-        <header class="ss-topbar">
-          <span class="name">PicoMQ</span>
-          <span class="tag">admin</span>
-          <span class="spacer" />
-          <Pill state="warn" label="locked" />
-        </header>
-        <TokenGate
-          message={authNeeded}
-          onSubmit={(token) => {
-            setToken(token)
-            setAuthNeeded(null)
-            setAttempt((n) => n + 1)
-          }}
-        />
-      </div>
-    )
-  }
-
   const readyState = ready?.ready ? 'ok' : ready ? 'warn' : 'err'
   const readyLabel = ready?.ready ? 'ready' : ready ? 'not ready' : 'unknown'
   const transfers = cluster?.pendingTransfers ?? []
@@ -146,9 +157,23 @@ export function App() {
         <span class="name">PicoMQ</span>
         <span class="tag">admin</span>
         <span class="spacer" />
-        {error ? <Pill state="err" label="unreachable" /> : <Pill state={readyState} label={readyLabel} />}
+        {authNeeded ? <Pill state="warn" label="admin locked" /> : error ? <Pill state="err" label="unreachable" /> : <Pill state={readyState} label={readyLabel} />}
       </header>
 
+      <nav class="ss-tabs" aria-label="Dashboard sections">
+        {['Overview', 'Discovery', 'Watch', 'Publish', 'Tokens'].map((name) => <button
+          key={name} class={tab === name ? 'active' : ''}
+          aria-current={tab === name ? 'page' : undefined}
+          onClick={() => setTab(name)}
+        >{name}</button>)}
+      </nav>
+      {['Discovery', 'Watch', 'Publish'].includes(tab) && <ConnectionSettings connection={connection} onChange={applyConnection} publishing={publishing || streamWriting} />}
+      <div hidden={tab !== 'Overview'}>
+      {authNeeded && <TokenGate message={authNeeded} onSubmit={(token) => {
+        setToken(token)
+        setAttempt((n) => n + 1)
+      }} />}
+      <div hidden={!!authNeeded}>
       <div class="ss-grid">
         <Stat label="Cluster" value={cluster?.clusterId} small />
         <Stat label="Node" value={cluster?.nodeId} />
@@ -160,6 +185,7 @@ export function App() {
 
       <section class="ss-section">
         <h2>This node</h2>
+        <div class="ss-table-scroll">
         <table>
           <tbody>
             <tr>
@@ -180,6 +206,7 @@ export function App() {
             </tr>
           </tbody>
         </table>
+        </div>
       </section>
 
       <section class="ss-section">
@@ -187,6 +214,7 @@ export function App() {
         {nodes.length === 0 ? (
           <div class="ss-empty">No registered nodes</div>
         ) : (
+          <div class="ss-table-scroll">
           <table>
             <thead>
               <tr>
@@ -197,6 +225,7 @@ export function App() {
                 <th>Opening</th>
                 <th>Placed</th>
                 <th></th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -209,10 +238,12 @@ export function App() {
                   <td class="mono">{n.openingCount}</td>
                   <td class="mono">{n.placedCount}</td>
                   <td>{n.local ? <Pill state="ok" label="this node" /> : null}</td>
+                  <td><NodeSlots node={n} adminRevision={attempt} onChanged={() => setAttempt((n) => n + 1)} /></td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </section>
 
@@ -221,6 +252,7 @@ export function App() {
         {transfers.length === 0 ? (
           <div class="ss-empty">No transfers in flight</div>
         ) : (
+          <div class="ss-table-scroll">
           <table>
             <thead>
               <tr>
@@ -239,11 +271,26 @@ export function App() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </section>
 
+      </div>
+      </div>
+      <div hidden={tab !== 'Discovery'}>
+        <Discovery connection={connection} isConnectionCurrent={isConnectionCurrent} active={tab === 'Discovery'} adminRevision={attempt}
+          onPending={onStreamPending} writing={publishing || streamWriting}
+          onWatch={(name) => { setWatchSelection((old) => ({ name, revision: old.revision + 1 })); setTab('Watch') }}
+          onPublish={(name) => { setPublishSelection((old) => ({ name, revision: old.revision + 1 })); setTab('Publish') }}
+        />
+      </div>
+      <div hidden={tab !== 'Watch'}><Watch connection={connection} selection={watchSelection} /></div>
+      <div hidden={tab !== 'Publish'}><Publish connection={connection} selection={publishSelection} onPendingChange={onPublishPending} /></div>
+      <div hidden={tab !== 'Tokens'}><TokenTools adminRevision={attempt} /></div>
       <footer class="ss-footer">
-        {error
+        {authNeeded
+          ? 'Overview requires admin access. Stream tabs use their own connection.'
+          : error
           ? `Last error: ${error}`
           : updatedAt
             ? `Updated ${updatedAt.toLocaleTimeString()} · polling every ${POLL_INTERVAL_MS / 1000}s`
