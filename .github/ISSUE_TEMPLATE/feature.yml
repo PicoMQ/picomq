@@ -22,7 +22,6 @@ body:
         - Pico protocol (HTTP)
         - Kafka protocol
         - Storage (WAL, S3)
-        - Connectors
         - CLI
         - Dashboard
         - Docs
