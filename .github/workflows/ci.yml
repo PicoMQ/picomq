@@ -15,7 +15,6 @@ jobs:
     name: path filter
     runs-on: ubuntu-latest
     outputs:
-      connectors: ${{ steps.filter.outputs.connectors }}
       extension: ${{ steps.filter.outputs.extension }}
     steps:
       - uses: actions/checkout@v7
@@ -23,11 +22,6 @@ jobs:
         id: filter
         with:
           filters: |
-            connectors:
-              - 'connectors/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'rust-toolchain.toml'
             extension:
               - 'picomq/**'
               - 'Cargo.lock'
@@ -60,41 +54,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --exclude picomq-connectors --exclude 'picomq-connector-*' --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace --exclude picomq-connectors --exclude 'picomq-connector-*'
-
-  connectors:
-    name: connectors / clippy / test
-    needs: changes
-    if: needs.changes.outputs.connectors == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsqlite3-dev pkg-config cmake libcurl4-openssl-dev
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
-          components: clippy
-
-      - uses: rui314/setup-mold@v1
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: connectors
-
-      - name: cargo clippy
-        run: cargo clippy -p picomq-connectors -p 'picomq-connector-*' --all-targets -- -D warnings
-
-      - name: cargo test
-        run: cargo test -p picomq-connectors -p 'picomq-connector-*'
+        run: cargo test --workspace
 
   extension:
     name: extension / fmt / clippy
