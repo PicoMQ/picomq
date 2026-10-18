@@ -429,6 +429,12 @@ impl Topics {
         if let Some(decision) = decision
             && !matches!(decision, ProducerDecision::Accepted { .. })
         {
+            let topic = match decision {
+                ProducerDecision::Duplicate { .. } if command.close_after && !topic.closed => {
+                    self.seal(&topic, closed_by(&command)).await?
+                }
+                _ => topic,
+            };
             return producer_reject(&topic, next, decision, &command);
         }
         if topic.closed {
@@ -472,6 +478,7 @@ impl Topics {
             self.touch(&topic).await?;
         }
 
+        let closer = closed_by(&command);
         let committed = append
             .commit(
                 command.records,
@@ -482,12 +489,7 @@ impl Topics {
             .await?;
 
         if command.close_after {
-            let closed_by = command.producer.as_ref().map(|p| ClosedBy {
-                producer_id: p.producer_id.clone(),
-                epoch: p.epoch,
-                seq: p.seq,
-            });
-            self.seal(&topic, closed_by).await?;
+            self.seal(&topic, closer).await?;
         }
 
         Ok(AppendResult {
@@ -1038,6 +1040,14 @@ fn append_to_closed(
     }
 
     Err(ServiceError::at(ErrorKind::Closed, next, true))
+}
+
+fn closed_by(command: &AppendCommand) -> Option<ClosedBy> {
+    command.producer.as_ref().map(|producer| ClosedBy {
+        producer_id: producer.producer_id.clone(),
+        epoch: producer.epoch,
+        seq: producer.seq,
+    })
 }
 
 fn matches_closed_by(topic: &Topic, command: &AppendCommand) -> bool {

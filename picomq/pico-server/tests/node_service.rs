@@ -1798,3 +1798,33 @@ async fn delete_records_times_out_before_the_upload() {
 
     node.close().await;
 }
+
+#[tokio::test]
+async fn a_retried_close_seals_after_an_interrupted_one() {
+    use picomq_server::types::Producer;
+
+    let node = local_node().await;
+    let topics = node.topics();
+    topics
+        .create(create("/interrupted", "text/plain"))
+        .await
+        .unwrap();
+
+    let last = |close_after| AppendCommand {
+        producer: Some(Producer::new("p1", 1, 0).unwrap()),
+        close_after,
+        ..append(&[b"last"], "text/plain")
+    };
+    topics.append("/interrupted", 0, last(false)).await.unwrap();
+
+    let retried = topics.append("/interrupted", 0, last(true)).await.unwrap();
+    assert!(!retried.applied);
+    assert!(retried.closed);
+    assert!(topics.get("/interrupted").await.unwrap().unwrap().closed);
+
+    let again = topics.append("/interrupted", 0, last(true)).await.unwrap();
+    assert!(again.closed);
+    assert_eq!(again.next_offset.record_offset(), 1);
+
+    node.close().await;
+}
