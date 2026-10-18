@@ -610,6 +610,8 @@ async fn transfer_moves_partition_to_target_node() {
         .await
         .unwrap();
     let log = log_of(&node1.topics(), "/xfer/a").await;
+    let topic = node1.topics().get("/xfer/a").await.unwrap().unwrap();
+    let before = node1.topics().watermarks(&topic, 0).await.unwrap().epoch;
 
     let racer = {
         let topics = node1.topics();
@@ -669,6 +671,13 @@ async fn transfer_moves_partition_to_target_node() {
     assert_eq!(all.records.len() as u64, 2 + raced);
     assert_eq!(&all.records[0].record.value[..], b"before");
     assert_eq!(&all.records.last().unwrap().record.value[..], b"after");
+
+    let after = node2.topics().watermarks(&topic, 0).await.unwrap().epoch;
+    assert!(after > before, "epoch {before} -> {after}");
+    assert_eq!(
+        node2.topics().epochs(&topic, 0).unwrap(),
+        [(before, 0), (after, 1 + raced)]
+    );
 
     node1.close().await;
     node2.close().await;
@@ -794,7 +803,7 @@ fn kafka_batch(producer: Option<(i64, i16, i32)>, values: &[&[u8]]) -> Bytes {
         .iter()
         .map(|v| LogRecord::value(Bytes::copy_from_slice(v)))
         .collect();
-    let mut batch = encode_batch(0, 1, &records).to_vec();
+    let mut batch = encode_batch(0, -1, 1, &records).to_vec();
     if let Some((id, epoch, base_seq)) = producer {
         batch[43..51].copy_from_slice(&id.to_be_bytes());
         batch[51..53].copy_from_slice(&epoch.to_be_bytes());
@@ -844,7 +853,12 @@ async fn kafka_batch_append_read_and_idempotency() {
     assert_eq!(from_start.batches[0].last_offset, 3);
     assert_eq!(from_start.batches[0].count, 3);
     assert_eq!(&from_start.batches[0].payload[..8], &0i64.to_be_bytes());
-    assert_eq!(&from_start.batches[0].payload[8..], &sent[8..]);
+    assert_eq!(&from_start.batches[0].payload[8..12], &sent[8..12]);
+    assert_eq!(
+        &from_start.batches[0].payload[12..16],
+        &(watermarks.epoch as i32).to_be_bytes()
+    );
+    assert_eq!(&from_start.batches[0].payload[16..], &sent[16..]);
     assert_eq!(from_start.next_offset, 3);
 
     let mid = service.read_batches(&log, 1, usize::MAX).await.unwrap();

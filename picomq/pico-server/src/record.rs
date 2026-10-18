@@ -14,7 +14,6 @@ const ATTR_CONTROL: i16 = 1 << 5;
 const NO_PRODUCER_ID: i64 = -1;
 const NO_PRODUCER_EPOCH: i16 = -1;
 const NO_SEQUENCE: i32 = -1;
-const NO_PARTITION_LEADER_EPOCH: i32 = -1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LogRecord {
@@ -62,6 +61,7 @@ pub struct StreamRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchHeader {
     pub base_offset: u64,
+    pub leader_epoch: i32,
     pub record_count: u32,
     pub max_timestamp_ms: i64,
     pub log_append_time: bool,
@@ -84,14 +84,23 @@ pub enum RecordError {
     Decode(String),
 }
 
-pub fn encode_batch(base_offset: u64, timestamp_ms: i64, records: &[LogRecord]) -> Bytes {
+pub fn leader_epoch(stream_epoch: u64) -> i32 {
+    i32::try_from(stream_epoch).unwrap_or(i32::MAX)
+}
+
+pub fn encode_batch(
+    base_offset: u64,
+    leader_epoch: i32,
+    timestamp_ms: i64,
+    records: &[LogRecord],
+) -> Bytes {
     assert!(!records.is_empty(), "a batch needs at least one record");
     let mut buf = BytesMut::with_capacity(
         BATCH_HEADER_LEN + records.iter().map(|r| r.size_hint() + 16).sum::<usize>(),
     );
     buf.put_i64(base_offset as i64);
     buf.put_i32(0); // batchLength, patched below
-    buf.put_i32(NO_PARTITION_LEADER_EPOCH);
+    buf.put_i32(leader_epoch);
     buf.put_i8(MAGIC_V2);
     buf.put_u32(0); // crc, patched below
     buf.put_i16(ATTR_LOG_APPEND_TIME);
@@ -164,6 +173,7 @@ pub fn batch_header(payload: &[u8]) -> Result<BatchHeader, RecordError> {
     }
     let base_offset = i64::from_be_bytes(payload[0..8].try_into().expect("8 bytes"));
     let batch_length = i32::from_be_bytes(payload[8..12].try_into().expect("4 bytes"));
+    let leader_epoch = i32::from_be_bytes(payload[12..16].try_into().expect("4 bytes"));
     if batch_length < 0 {
         return Err(RecordError::Truncated);
     }
@@ -187,6 +197,7 @@ pub fn batch_header(payload: &[u8]) -> Result<BatchHeader, RecordError> {
     });
     Ok(BatchHeader {
         base_offset: base_offset.max(0) as u64,
+        leader_epoch,
         record_count: record_count as u32,
         max_timestamp_ms,
         log_append_time: attributes & ATTR_LOG_APPEND_TIME != 0,
@@ -209,8 +220,9 @@ pub fn verify_crc(batch: &[u8]) -> Result<(), RecordError> {
     Ok(())
 }
 
-pub fn patch_base_offset(payload: &mut [u8], at: usize, base_offset: u64) {
+pub fn stamp(payload: &mut [u8], at: usize, base_offset: u64, leader_epoch: i32) {
     payload[at..at + 8].copy_from_slice(&(base_offset as i64).to_be_bytes());
+    payload[at + 12..at + 16].copy_from_slice(&leader_epoch.to_be_bytes());
 }
 
 pub fn batch_headers(payload: &[u8]) -> Result<Vec<BatchHeader>, RecordError> {
@@ -275,9 +287,10 @@ mod tests {
 
     #[test]
     fn round_trips_through_the_kafka_decoder() {
-        let encoded = encode_batch(40, 1_700_000_000_000, &records());
+        let encoded = encode_batch(40, 5, 1_700_000_000_000, &records());
         let header = batch_header(&encoded).unwrap();
         assert_eq!(header.base_offset, 40);
+        assert_eq!(header.leader_epoch, 5);
         assert_eq!(header.record_count, 3);
         assert_eq!(header.max_timestamp_ms, 1_700_000_000_000);
         assert!(header.log_append_time);
@@ -300,8 +313,8 @@ mod tests {
 
     #[test]
     fn concatenated_batches_decode_in_order() {
-        let mut payload = encode_batch(0, 1, &records()[..1]).to_vec();
-        payload.extend_from_slice(&encode_batch(1, 2, &records()[1..]));
+        let mut payload = encode_batch(0, 1, 1, &records()[..1]).to_vec();
+        payload.extend_from_slice(&encode_batch(1, 1, 2, &records()[1..]));
         let payload = Bytes::from(payload);
         let headers = batch_headers(&payload).unwrap();
         assert_eq!(headers.len(), 2);
@@ -314,7 +327,7 @@ mod tests {
 
     #[test]
     fn crc_is_verified_on_decode() {
-        let mut corrupted = encode_batch(0, 1, &records()).to_vec();
+        let mut corrupted = encode_batch(0, 1, 1, &records()).to_vec();
         let last = corrupted.len() - 1;
         corrupted[last] ^= 0x01;
         assert!(matches!(
@@ -325,11 +338,11 @@ mod tests {
 
     #[test]
     fn verify_crc_accepts_valid_and_rejects_flipped_batches() {
-        let encoded = encode_batch(0, 1, &records()).to_vec();
+        let encoded = encode_batch(0, 1, 1, &records()).to_vec();
         assert!(verify_crc(&encoded).is_ok());
 
         let mut patched = encoded.clone();
-        patch_base_offset(&mut patched, 0, 99);
+        stamp(&mut patched, 0, 99, 4);
         assert!(verify_crc(&patched).is_ok());
 
         let mut corrupted = encoded;
@@ -344,13 +357,13 @@ mod tests {
             batch_header(b"short"),
             Err(RecordError::Truncated)
         ));
-        let mut bad_magic = encode_batch(0, 1, &records()).to_vec();
+        let mut bad_magic = encode_batch(0, 1, 1, &records()).to_vec();
         bad_magic[16] = 1;
         assert!(matches!(
             batch_header(&bad_magic),
             Err(RecordError::Magic(1))
         ));
-        let encoded = encode_batch(0, 1, &records());
+        let encoded = encode_batch(0, 1, 1, &records());
         assert!(matches!(
             batch_header(&encoded[..encoded.len() - 1]),
             Err(RecordError::Truncated)
@@ -358,8 +371,8 @@ mod tests {
     }
 
     #[test]
-    fn producer_identity_and_base_offset_patch() {
-        let mut encoded = encode_batch(0, 1, &records()).to_vec();
+    fn producer_identity_and_stamp() {
+        let mut encoded = encode_batch(0, 1, 1, &records()).to_vec();
         assert_eq!(batch_header(&encoded).unwrap().producer, None);
 
         encoded[43..51].copy_from_slice(&7i64.to_be_bytes());
@@ -367,10 +380,11 @@ mod tests {
         encoded[53..57].copy_from_slice(&40i32.to_be_bytes());
         let crc = crc32c::crc32c(&encoded[21..]);
         encoded[17..21].copy_from_slice(&crc.to_be_bytes());
-        patch_base_offset(&mut encoded, 0, 1234);
+        stamp(&mut encoded, 0, 1234, 6);
 
         let header = batch_header(&encoded).unwrap();
         assert_eq!(header.base_offset, 1234);
+        assert_eq!(header.leader_epoch, 6);
         assert_eq!(
             header.producer,
             Some(NumericProducer {
@@ -382,7 +396,7 @@ mod tests {
         let decoded = decode_batches(&Bytes::from(encoded)).unwrap();
         assert_eq!(decoded[0].offset.record_offset(), 1234);
 
-        let mut empty = encode_batch(0, 1, &records()).to_vec();
+        let mut empty = encode_batch(0, 1, 1, &records()).to_vec();
         empty[57..61].copy_from_slice(&0i32.to_be_bytes());
         assert!(matches!(batch_header(&empty), Err(RecordError::Empty)));
     }

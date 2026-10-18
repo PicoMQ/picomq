@@ -1141,7 +1141,7 @@ async fn classic_group_lifecycle_and_offset_replay() {
     assert_eq!(fetched.error_code, 0);
     let partition = &fetched.topics[0].partitions[0];
     assert_eq!(partition.committed_offset, 42);
-    assert_eq!(partition.committed_leader_epoch, -1);
+    assert_eq!(partition.committed_leader_epoch, 3);
     assert_eq!(partition.metadata.as_ref().unwrap().as_str(), "checkpoint");
 
     let leave = encode_request(
@@ -1990,6 +1990,7 @@ async fn offset_delete_and_delete_groups_respect_members() {
             partition: Partition::new(topic.id, 0),
             value: CommittedOffset {
                 position: 3,
+                leader_epoch: None,
                 metadata: None,
             },
         });
@@ -2113,4 +2114,150 @@ async fn describe_cluster_lists_this_node() {
     assert_eq!(node.host.as_str(), "127.0.0.1");
     assert_eq!(node.port, 19092);
     assert!(!node.is_fenced);
+}
+
+#[tokio::test]
+async fn leader_epochs_are_reported_and_fence_stale_requests() {
+    use kafka_protocol::messages::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
+    use kafka_protocol::messages::offset_for_leader_epoch_request::{
+        OffsetForLeaderPartition, OffsetForLeaderTopic,
+    };
+    use kafka_protocol::messages::{
+        FetchResponse, ListOffsetsRequest, ListOffsetsResponse, MetadataResponse,
+        OffsetForLeaderEpochRequest, OffsetForLeaderEpochResponse, ProduceResponse,
+    };
+
+    let broker = test_broker().await;
+    broker
+        .topics
+        .create(picomq_server::CreateCommand::new(
+            "/events",
+            "application/octet-stream",
+        ))
+        .await
+        .unwrap();
+    let produce = ProduceRequest::default().with_acks(1).with_topic_data(vec![
+        TopicProduceData::default()
+            .with_name(tn("events"))
+            .with_partition_data(vec![
+                PartitionProduceData::default()
+                    .with_index(0)
+                    .with_records(Some(kafka_batch(b"one"))),
+            ]),
+    ]);
+    let produced: ProduceResponse = call(&broker, ApiKey::Produce, 10, &produce).await;
+    assert_eq!(produced.responses[0].partition_responses[0].error_code, 0);
+
+    let topic = broker.topics.get("/events").await.unwrap().unwrap();
+    let epoch = broker.topics.watermarks(&topic, 0).await.unwrap().epoch as i32;
+
+    let metadata: MetadataResponse = call(
+        &broker,
+        ApiKey::Metadata,
+        12,
+        &MetadataRequest::default().with_topics(Some(vec![
+            MetadataRequestTopic::default().with_name(Some(tn("events"))),
+        ])),
+    )
+    .await;
+    assert_eq!(metadata.topics[0].partitions[0].leader_epoch, epoch);
+
+    let fetch = |current: i32| {
+        FetchRequest::default()
+            .with_max_wait_ms(0)
+            .with_max_bytes(1 << 20)
+            .with_topics(vec![
+                FetchTopic::default()
+                    .with_topic(tn("events"))
+                    .with_partitions(vec![
+                        FetchPartition::default()
+                            .with_partition(0)
+                            .with_current_leader_epoch(current)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1 << 20),
+                    ]),
+            ])
+    };
+    for (current, code) in [(epoch - 1, 74), (epoch + 1, 75), (-1, 0)] {
+        let fetched: FetchResponse = call(&broker, ApiKey::Fetch, 12, &fetch(current)).await;
+        assert_eq!(
+            fetched.responses[0].partitions[0].error_code, code,
+            "{current}"
+        );
+    }
+    let fetched: FetchResponse = call(&broker, ApiKey::Fetch, 12, &fetch(epoch)).await;
+    let records = fetched.responses[0].partitions[0].records.clone().unwrap();
+    assert_eq!(&records[12..16], &epoch.to_be_bytes());
+
+    let list = |timestamp: i64, current: i32| {
+        ListOffsetsRequest::default()
+            .with_replica_id(BrokerId(-1))
+            .with_topics(vec![
+                ListOffsetsTopic::default()
+                    .with_name(tn("events"))
+                    .with_partitions(vec![
+                        ListOffsetsPartition::default()
+                            .with_partition_index(0)
+                            .with_current_leader_epoch(current)
+                            .with_timestamp(timestamp),
+                    ]),
+            ])
+    };
+    for (timestamp, current, expected) in [
+        (-2, -1, (0, 0, epoch)),
+        (-1, epoch, (0, 1, epoch)),
+        (0, -1, (0, 0, epoch)),
+        (-1, epoch - 1, (74, -1, -1)),
+    ] {
+        let listed: ListOffsetsResponse =
+            call(&broker, ApiKey::ListOffsets, 7, &list(timestamp, current)).await;
+        let partition = &listed.topics[0].partitions[0];
+        assert_eq!(
+            (
+                partition.error_code,
+                partition.offset,
+                partition.leader_epoch
+            ),
+            expected,
+            "{timestamp} at {current}"
+        );
+    }
+
+    let end = |current: i32, wanted: i32| {
+        OffsetForLeaderEpochRequest::default()
+            .with_replica_id(BrokerId(-1))
+            .with_topics(vec![
+                OffsetForLeaderTopic::default()
+                    .with_topic(tn("events"))
+                    .with_partitions(vec![
+                        OffsetForLeaderPartition::default()
+                            .with_partition(0)
+                            .with_current_leader_epoch(current)
+                            .with_leader_epoch(wanted),
+                    ]),
+            ])
+    };
+    for (current, wanted, expected) in [
+        (epoch, epoch, (0, epoch, 1)),
+        (-1, -1, (0, -1, -1)),
+        (epoch + 1, epoch, (75, -1, -1)),
+    ] {
+        let ended: OffsetForLeaderEpochResponse = call(
+            &broker,
+            ApiKey::OffsetForLeaderEpoch,
+            4,
+            &end(current, wanted),
+        )
+        .await;
+        let partition = &ended.topics[0].partitions[0];
+        assert_eq!(
+            (
+                partition.error_code,
+                partition.leader_epoch,
+                partition.end_offset
+            ),
+            expected,
+            "{wanted} at {current}"
+        );
+    }
 }

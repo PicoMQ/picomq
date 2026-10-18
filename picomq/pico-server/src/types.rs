@@ -136,6 +136,7 @@ pub struct BatchReadResult {
 pub struct StreamWatermarks {
     pub log_start_offset: u64,
     pub high_watermark: u64,
+    pub epoch: u64,
 }
 
 #[derive(Debug, Clone)]

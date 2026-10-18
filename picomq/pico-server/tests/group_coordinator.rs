@@ -45,6 +45,7 @@ fn commit(partition: Partition, position: u64) -> OffsetCommit {
         partition,
         value: CommittedOffset {
             position,
+            leader_epoch: None,
             metadata: Some("checkpoint".to_owned()),
         },
     }

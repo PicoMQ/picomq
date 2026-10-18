@@ -438,6 +438,7 @@ fn open_stream(
     state.streams.insert(stream_id, opened);
     state.placed_by_node.remove(&(stream.node_id, stream_id));
     state.opening_by_node.insert((node_id, stream_id), ());
+    state.epochs.insert((stream_id, epoch), stream.end_offset);
     Ok(MetadataResult::Stream(opened.to_stream_metadata()))
 }
 
@@ -498,6 +499,18 @@ fn trim_stream(
             ..stream
         },
     );
+
+    let covered: Vec<i64> = state
+        .stream_epochs(stream_id)
+        .into_iter()
+        .take_while(|(_, start)| *start <= new_start_offset)
+        .map(|(epoch, _)| epoch)
+        .collect();
+    if let Some((_, older)) = covered.split_last() {
+        for epoch in older {
+            state.epochs.remove(&(stream_id, *epoch));
+        }
+    }
     Ok(MetadataResult::Unit)
 }
 
@@ -671,6 +684,9 @@ fn delete_stream(
     state.streams.remove(&stream_id);
     state.placed_by_node.remove(&(stream.node_id, stream_id));
     state.pending_transfers.remove(&stream_id);
+    for (epoch, _) in state.stream_epochs(stream_id) {
+        state.epochs.remove(&(stream_id, epoch));
+    }
 
     let keys: Vec<_> = state
         .stream_objects
@@ -1611,6 +1627,78 @@ mod tests {
         assert!(state.stream_object_ids.is_empty());
     }
 
+    fn commit(state: &mut MetadataState, stream_id: u64, epoch: u64, start: u64, end: u64) {
+        let object_id = prepare(state, 1, 60_000, 0);
+        apply(
+            state,
+            &MetadataCommand::CommitStreamSetObject {
+                node_id: NODE_1,
+                node_epoch: EPOCH_1,
+                request: CommitStreamSetObjectRequest {
+                    object_id,
+                    object_size: 64,
+                    attributes: 0,
+                    stream_ranges: vec![ObjectStreamRange {
+                        stream_id,
+                        epoch,
+                        start_offset: start,
+                        end_offset: end,
+                        size: 64,
+                    }],
+                    stream_objects: vec![],
+                    compacted_object_ids: vec![],
+                },
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn epochs_record_where_each_open_starts() {
+        let mut state = setup();
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
+        commit(&mut state, stream_id, 1, 0, 8);
+        close(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 3).unwrap();
+        commit(&mut state, stream_id, 3, 8, 12);
+        assert_eq!(state.stream_epochs(stream_id), [(1, 0), (3, 8)]);
+
+        let trim = |state: &mut MetadataState, offset| {
+            apply(
+                state,
+                &MetadataCommand::TrimStream {
+                    node_id: NODE_1,
+                    node_epoch: EPOCH_1,
+                    stream_id,
+                    epoch: 3,
+                    new_start_offset: offset,
+                },
+            )
+            .unwrap();
+        };
+        trim(&mut state, 7);
+        assert_eq!(state.stream_epochs(stream_id), [(1, 0), (3, 8)]);
+        trim(&mut state, 8);
+        assert_eq!(state.stream_epochs(stream_id), [(3, 8)]);
+
+        close(&mut state, NODE_1, EPOCH_1, stream_id, 3).unwrap();
+        apply(
+            &mut state,
+            &MetadataCommand::DeleteStream {
+                node_id: NODE_1,
+                node_epoch: EPOCH_1,
+                stream_id,
+                epoch: 3,
+            },
+        )
+        .unwrap();
+        assert!(state.stream_epochs(stream_id).is_empty());
+    }
+
     #[test]
     fn opening_by_node_index_filters_by_node() {
         let mut state = setup();
@@ -2035,6 +2123,13 @@ mod tests {
         let mut derived_placed = derived_placed;
         derived_placed.sort_unstable();
         assert_eq!(indexed_placed, derived_placed, "placed_by_node");
+
+        for (stream_id, _) in state.epochs.keys() {
+            assert!(
+                state.streams.contains_key(stream_id),
+                "epochs of {stream_id}"
+            );
+        }
 
         assert_eq!(
             state.prepared.len(),

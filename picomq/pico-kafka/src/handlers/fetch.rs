@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures::future::select_all;
-use kafka_protocol::messages::FetchRequest;
 use kafka_protocol::messages::fetch_response::{FetchableTopicResponse, PartitionData};
+use kafka_protocol::messages::{FetchRequest, fetch_request};
 use kafka_protocol::protocol::Decodable;
 use picomq_server::{OffsetToken, StreamWatermarks, Topic, TopicId};
 use uuid::Uuid;
@@ -14,7 +14,7 @@ use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
     NO_ERROR, OFFSET_OUT_OF_RANGE, UNKNOWN_TOPIC_ID, concat_batches, encode_response,
-    leader_partition, resolve_topic, service_error_code, topic_name,
+    leader_partition, leader_watermarks, resolve_topic, service_error_code, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -29,6 +29,7 @@ struct ResolvedTopic {
 struct FetchPartition {
     index: i32,
     fetch_offset: i64,
+    current_leader_epoch: i32,
     target: Result<(Topic, u32), i16>,
 }
 
@@ -57,18 +58,13 @@ pub async fn handle(
 
     let mut topics = Vec::with_capacity(request.topics.len());
     for topic in &request.topics {
-        let partitions: Vec<(i32, i64)> = topic
-            .partitions
-            .iter()
-            .map(|p| (p.partition, p.fetch_offset))
-            .collect();
         topics.push(
             resolve_fetch_topic(
                 ctx,
                 req.api_version,
                 &topic.topic,
                 topic.topic_id,
-                partitions,
+                &topic.partitions,
             )
             .await,
         );
@@ -147,7 +143,7 @@ async fn resolve_fetch_topic(
     api_version: i16,
     requested_name: &kafka_protocol::messages::TopicName,
     requested_id: Uuid,
-    requested: Vec<(i32, i64)>,
+    requested: &[fetch_request::FetchPartition],
 ) -> ResolvedTopic {
     let (name, topic) = if api_version >= FETCH_TOPIC_ID_VERSION {
         let topic = match ctx.topics.by_id(&TopicId(*requested_id.as_bytes())).await {
@@ -169,7 +165,8 @@ async fn resolve_fetch_topic(
     };
 
     let mut partitions = Vec::with_capacity(requested.len());
-    for (index, fetch_offset) in requested {
+    for partition in requested {
+        let index = partition.partition;
         let target = match &topic {
             Ok(topic) => leader_partition(ctx, topic, index)
                 .await
@@ -178,7 +175,8 @@ async fn resolve_fetch_topic(
         };
         partitions.push(FetchPartition {
             index,
-            fetch_offset,
+            fetch_offset: partition.fetch_offset,
+            current_leader_epoch: partition.current_leader_epoch,
             target,
         });
     }
@@ -203,10 +201,11 @@ async fn read_partition(
     }
 
     let from = requested.fetch_offset as u64;
-    let watermarks = match ctx.topics.watermarks(topic, partition).await {
-        Ok(watermarks) => watermarks,
-        Err(error) => return error_partition(index, service_error_code(&error)),
-    };
+    let watermarks =
+        match leader_watermarks(ctx, topic, partition, requested.current_leader_epoch).await {
+            Ok(watermarks) => watermarks,
+            Err(code) => return error_partition(index, code),
+        };
     if from < watermarks.log_start_offset || from > watermarks.high_watermark {
         return PartitionRead {
             data: partition_data(index, OFFSET_OUT_OF_RANGE, &watermarks, None),
@@ -233,6 +232,7 @@ async fn read_partition(
             let watermarks = StreamWatermarks {
                 log_start_offset: read.log_start_offset,
                 high_watermark: read.high_watermark,
+                ..watermarks
             };
 
             PartitionRead {

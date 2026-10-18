@@ -1,6 +1,6 @@
 //! Record layout, big endian:
-//! "PGS2" u8 kind (0 delta, 1 snapshot) u32 count { [16] topic id, u32 partition, u64 position, u8 has_metadata, [string metadata] }
-//! "PGS2" u8 kind (2 delete) u32 count { [16] topic id, u32 partition }
+//! "PGS3" u8 kind (0 delta, 1 snapshot) u32 count { [16] topic id, u32 partition, u64 position, i32 leader epoch (-1 none), u8 has_metadata, [string metadata] }
+//! "PGS3" u8 kind (2 delete) u32 count { [16] topic id, u32 partition }
 //! string: u32 length, bytes
 
 use std::collections::BTreeMap;
@@ -10,7 +10,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::partition::Partition;
 use crate::topic::TopicId;
 
-const MAGIC: &[u8; 4] = b"PGS2";
+const MAGIC: &[u8; 4] = b"PGS3";
 const KIND_DELTA: u8 = 0;
 const KIND_SNAPSHOT: u8 = 1;
 const KIND_DELETE: u8 = 2;
@@ -20,6 +20,7 @@ const MAX_STRING_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedOffset {
     pub position: u64,
+    pub leader_epoch: Option<i32>,
     pub metadata: Option<String>,
 }
 
@@ -96,6 +97,7 @@ pub(super) fn decode_into(payload: &[u8], offsets: &mut OffsetTable) -> Result<(
         let topic = TopicId(take_id(&mut buf)?);
         let index = take_u32(&mut buf)?;
         let position = take_u64(&mut buf)?;
+        let leader_epoch = Some(take_i32(&mut buf)?).filter(|epoch| *epoch >= 0);
         let metadata = match take_u8(&mut buf)? {
             0 => None,
             1 => Some(take_string(&mut buf)?),
@@ -103,7 +105,11 @@ pub(super) fn decode_into(payload: &[u8], offsets: &mut OffsetTable) -> Result<(
         };
         offsets.insert(
             Partition::new(topic, index),
-            CommittedOffset { position, metadata },
+            CommittedOffset {
+                position,
+                leader_epoch,
+                metadata,
+            },
         );
     }
 
@@ -117,6 +123,7 @@ fn put_entry(buf: &mut BytesMut, partition: &Partition, value: &CommittedOffset)
     buf.put_slice(&partition.topic.0);
     buf.put_u32(partition.index);
     buf.put_u64(value.position);
+    buf.put_i32(value.leader_epoch.unwrap_or(-1));
     match &value.metadata {
         Some(metadata) => {
             buf.put_u8(1);
@@ -159,6 +166,10 @@ fn take_u32(buf: &mut &[u8]) -> Result<u32, ()> {
     (buf.remaining() >= 4).then(|| buf.get_u32()).ok_or(())
 }
 
+fn take_i32(buf: &mut &[u8]) -> Result<i32, ()> {
+    (buf.remaining() >= 4).then(|| buf.get_i32()).ok_or(())
+}
+
 fn take_u64(buf: &mut &[u8]) -> Result<u64, ()> {
     (buf.remaining() >= 8).then(|| buf.get_u64()).ok_or(())
 }
@@ -174,6 +185,7 @@ mod tests {
     fn committed(position: u64, metadata: Option<&str>) -> CommittedOffset {
         CommittedOffset {
             position,
+            leader_epoch: None,
             metadata: metadata.map(str::to_owned),
         }
     }
@@ -219,6 +231,24 @@ mod tests {
     }
 
     #[test]
+    fn leader_epochs_round_trip() {
+        let offsets = OffsetTable::from([
+            (
+                partition(1, 0),
+                CommittedOffset {
+                    leader_epoch: Some(4),
+                    ..committed(12, None)
+                },
+            ),
+            (partition(1, 1), committed(3, Some("m"))),
+        ]);
+
+        let mut decoded = OffsetTable::new();
+        decode_into(&encode_snapshot(&offsets), &mut decoded).unwrap();
+        assert_eq!(decoded, offsets);
+    }
+
+    #[test]
     fn deletes_remove_entries() {
         let mut table = OffsetTable::from([
             (partition(1, 0), committed(1, None)),
@@ -240,9 +270,9 @@ mod tests {
     fn rejects_garbage_and_the_previous_format() {
         let mut table = OffsetTable::new();
         assert!(decode_into(b"nope", &mut table).is_err());
-        assert!(decode_into(b"PGS1\x00\x00\x00\x00\x00", &mut table).is_err());
-        assert!(decode_into(b"PGS2\x00\xff\xff\xff\xff", &mut table).is_err());
-        assert!(decode_into(b"PGS2\x07\x00\x00\x00\x00", &mut table).is_err());
+        assert!(decode_into(b"PGS2\x00\x00\x00\x00\x00", &mut table).is_err());
+        assert!(decode_into(b"PGS3\x00\xff\xff\xff\xff", &mut table).is_err());
+        assert!(decode_into(b"PGS3\x07\x00\x00\x00\x00", &mut table).is_err());
 
         let mut trailing = encode_commits(&[]).to_vec();
         trailing.push(0);

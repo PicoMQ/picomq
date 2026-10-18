@@ -465,6 +465,8 @@ async fn offset_commit(
                     partition: target,
                     value: CommittedOffset {
                         position,
+                        leader_epoch: Some(partition.committed_leader_epoch)
+                            .filter(|epoch| *epoch >= 0),
                         metadata: partition
                             .committed_metadata
                             .as_ref()
@@ -625,7 +627,7 @@ fn fetched_partition(
 ) -> OffsetFetchResponsePartition {
     let base = OffsetFetchResponsePartition::default()
         .with_partition_index(partition)
-        .with_committed_leader_epoch(-1)
+        .with_committed_leader_epoch(committed.and_then(|value| value.leader_epoch).unwrap_or(-1))
         .with_error_code(NO_ERROR);
     match committed {
         Some(value) => base

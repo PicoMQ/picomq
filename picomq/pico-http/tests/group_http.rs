@@ -520,6 +520,7 @@ async fn groups_over_http_refuse_multi_partition_topics() {
                 partition: Partition::new(spread.id, index),
                 value: CommittedOffset {
                     position: 9,
+                    leader_epoch: None,
                     metadata: None,
                 },
             }),

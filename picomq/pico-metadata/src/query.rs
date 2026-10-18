@@ -19,6 +19,14 @@ impl MetadataState {
             .collect()
     }
 
+    /// `(epoch, first offset)` per recorded epoch of the stream, oldest first.
+    pub fn stream_epochs(&self, stream_id: u64) -> Vec<(i64, u64)> {
+        self.epochs
+            .range((stream_id, i64::MIN)..=(stream_id, i64::MAX))
+            .map(|((_, epoch), start_offset)| (*epoch, *start_offset))
+            .collect()
+    }
+
     pub fn get_opening_streams(&self, node_id: i32) -> Vec<StreamMetadata> {
         self.opening_by_node
             .range((node_id, 0)..=(node_id, u64::MAX))

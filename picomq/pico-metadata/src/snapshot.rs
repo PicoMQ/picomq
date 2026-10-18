@@ -96,6 +96,13 @@ pub fn encode(state: &MetadataState) -> Bytes {
         buf.put_i32_le(pending.to_node);
     }
 
+    buf.put_u64_le(state.epochs.len() as u64);
+    for ((stream_id, epoch), start_offset) in state.epochs.iter() {
+        buf.put_u64_le(*stream_id);
+        buf.put_i64_le(*epoch);
+        buf.put_u64_le(*start_offset);
+    }
+
     buf.freeze()
 }
 
@@ -233,6 +240,13 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
         state
             .pending_transfers
             .insert(stream_id, PendingTransfer { from_node, to_node });
+    }
+
+    for _ in 0..get_u64(&mut buf)? {
+        let stream_id = get_u64(&mut buf)?;
+        let epoch = get_i64(&mut buf)?;
+        let start_offset = get_u64(&mut buf)?;
+        state.epochs.insert((stream_id, epoch), start_offset);
     }
 
     if buf.has_remaining() {

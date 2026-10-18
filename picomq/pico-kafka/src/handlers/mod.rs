@@ -1,5 +1,6 @@
 pub(crate) mod common;
 mod configs;
+mod epochs;
 mod fetch;
 mod group;
 mod metadata;
@@ -76,6 +77,7 @@ pub async fn dispatch(
             configs::alter(ctx, req, body).await
         }
         key if key == ApiKey::DeleteRecords as i16 => records::delete(ctx, req, body).await,
+        key if key == ApiKey::OffsetForLeaderEpoch as i16 => epochs::handle(ctx, req, body).await,
         key if key == ApiKey::DescribeCluster as i16 => {
             metadata::describe_cluster(ctx, req, body).await
         }

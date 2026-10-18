@@ -328,7 +328,8 @@ impl S3StreamService {
         };
 
         let base_offset = stream.next_offset();
-        let (payload, batches) = patch_base_offsets(&payload, &headers, base_offset);
+        let leader_epoch = record::leader_epoch(stream.stream_epoch());
+        let (payload, batches) = stamp_batches(&payload, &headers, base_offset, leader_epoch);
         let timestamp_ms = headers
             .iter()
             .map(|h| h.max_timestamp_ms)
@@ -482,7 +483,20 @@ impl S3StreamService {
         Ok(StreamWatermarks {
             log_start_offset: live_start_offset(stream.as_ref()),
             high_watermark: stream.confirm_offset(),
+            epoch: stream.stream_epoch(),
         })
+    }
+
+    pub fn epochs(&self, log: &Log) -> Result<Vec<(u64, u64)>, ServiceError> {
+        let entry = self.require_entry(&log.key())?;
+        Ok(self
+            .views
+            .load()
+            .state
+            .stream_epochs(entry.stream_id)
+            .into_iter()
+            .map(|(epoch, start_offset)| (epoch.max(0) as u64, start_offset))
+            .collect())
     }
 
     pub async fn live_offsets(&self, log: &Log) -> Result<LogOffsets, ServiceError> {
@@ -800,7 +814,8 @@ impl Append<'_> {
             let timestamp_ms = service.next_timestamp(&gate, stream.as_ref()).await?;
             stamped = Some(timestamp_ms);
 
-            let payload = record::encode_batch(base_offset, timestamp_ms, &records);
+            let leader_epoch = record::leader_epoch(stream.stream_epoch());
+            let payload = record::encode_batch(base_offset, leader_epoch, timestamp_ms, &records);
             let count = records.len() as u32;
             match Arc::clone(&stream).submit_append(
                 AppendContext::default(),
@@ -908,35 +923,36 @@ fn parse_batches(payload: &Bytes) -> Result<Vec<BatchHeader>, ServiceError> {
     Ok(headers)
 }
 
-fn patch_base_offsets(
+fn stamp_batches(
     payload: &Bytes,
     headers: &[BatchHeader],
     base_offset: u64,
+    leader_epoch: i32,
 ) -> (Bytes, Vec<StreamBatch>) {
-    let mut patched = payload.to_vec();
+    let mut stamped = payload.to_vec();
     let mut assigned = base_offset;
     let mut pos = 0usize;
     let mut spans = Vec::with_capacity(headers.len());
 
     for header in headers {
-        record::patch_base_offset(&mut patched, pos, assigned);
+        record::stamp(&mut stamped, pos, assigned, leader_epoch);
         spans.push((pos, pos + header.len, assigned, header.record_count));
         pos += header.len;
         assigned += header.record_count as u64;
     }
 
-    let patched = Bytes::from(patched);
+    let stamped = Bytes::from(stamped);
     let batches = spans
         .into_iter()
         .map(|(from, to, base, count)| StreamBatch {
             base_offset: base,
             last_offset: base + count as u64,
             count,
-            payload: patched.slice(from..to),
+            payload: stamped.slice(from..to),
         })
         .collect();
 
-    (patched, batches)
+    (stamped, batches)
 }
 
 fn collect_records(
@@ -1044,7 +1060,7 @@ mod tests {
             base_offset,
             last_offset: base_offset + values.len() as u64,
             count: values.len() as u32,
-            payload: record::encode_batch(base_offset, 1, &records),
+            payload: record::encode_batch(base_offset, -1, 1, &records),
         }
     }
 
@@ -1099,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn produce_payloads_are_patched_per_batch() {
+    fn produce_payloads_are_stamped_per_batch() {
         let one = batch(0, &["a", "b"]).payload;
         let two = batch(0, &["c"]).payload;
         let payload = Bytes::from([&one[..], &two[..]].concat());
@@ -1107,17 +1123,24 @@ mod tests {
         let headers = parse_batches(&payload).unwrap();
         assert_eq!(headers.len(), 2);
 
-        let (stored, patched) = patch_base_offsets(&payload, &headers, 100);
+        let (stored, stamped) = stamp_batches(&payload, &headers, 100, 7);
         assert_eq!(stored.len(), payload.len());
         assert_eq!(
-            patched
+            stamped
                 .iter()
                 .map(|b| (b.base_offset, b.last_offset))
                 .collect::<Vec<_>>(),
             [(100, 102), (102, 103)]
         );
 
-        let decoded = record::decode_batches(&patched[1].payload).unwrap();
+        assert!(
+            record::batch_headers(&stored)
+                .unwrap()
+                .iter()
+                .all(|header| header.leader_epoch == 7)
+        );
+
+        let decoded = record::decode_batches(&stamped[1].payload).unwrap();
         assert_eq!(decoded[0].offset.record_offset(), 102);
         assert_eq!(&decoded[0].record.value[..], b"c");
 

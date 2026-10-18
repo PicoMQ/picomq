@@ -202,6 +202,11 @@ impl Topics {
         self.service.watermarks(&log).await
     }
 
+    pub fn epochs(&self, topic: &Topic, partition: u32) -> Result<Vec<(u64, u64)>, ServiceError> {
+        let log = partition_log(topic, partition)?;
+        self.service.epochs(&log)
+    }
+
     pub async fn record_at_or_after(
         &self,
         topic: &Topic,

@@ -438,6 +438,7 @@ async fn commit(
             partition,
             value: CommittedOffset {
                 position: offset.position,
+                leader_epoch: None,
                 metadata: offset.metadata,
             },
         })

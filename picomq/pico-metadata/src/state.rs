@@ -98,6 +98,9 @@ pub struct MetadataState {
     pub placed_by_node: OrdMap<(i32, u64), ()>,
     /// In-flight ownership transfers keyed by stream id.
     pub pending_transfers: OrdMap<u64, PendingTransfer>,
+    /// `(stream_id, epoch) → first offset written at that epoch`, recorded on
+    /// open and pruned by trim.
+    pub epochs: OrdMap<(u64, i64), u64>,
 
     /// Next numeric producer identity. Blocks are leased by
     /// `AllocateProducerIds` and never reclaimed, so an id is unique for the

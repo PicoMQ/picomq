@@ -33,6 +33,7 @@ const APIS: &[SupportedApi] = &[
     SupportedApi::new(ApiKey::DeleteTopics, 1, 6),
     SupportedApi::new(ApiKey::CreatePartitions, 0, 3),
     SupportedApi::new(ApiKey::DeleteRecords, 0, 2),
+    SupportedApi::new(ApiKey::OffsetForLeaderEpoch, 2, 4),
     SupportedApi::new(ApiKey::DescribeConfigs, 1, 4),
     SupportedApi::new(ApiKey::IncrementalAlterConfigs, 0, 1),
     SupportedApi::new(ApiKey::DescribeCluster, 0, 2),

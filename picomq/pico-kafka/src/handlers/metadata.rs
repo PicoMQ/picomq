@@ -6,6 +6,7 @@ use kafka_protocol::messages::metadata_response::{
 };
 use kafka_protocol::messages::{DescribeClusterRequest, MetadataRequest};
 use kafka_protocol::protocol::{Decodable, StrBytes};
+use picomq_server::record::leader_epoch;
 use picomq_server::topic::is_kafka_name;
 use picomq_server::{CreateCommand, OwnershipService, Topic, partition_log};
 use uuid::Uuid;
@@ -135,7 +136,8 @@ async fn build_topic(
             .with_offline_replicas(Vec::new())
             .with_error_code(NO_ERROR);
         if api_version >= 7 {
-            partition = partition.with_leader_epoch(-1);
+            partition =
+                partition.with_leader_epoch(u64::try_from(owner.epoch).map_or(-1, leader_epoch));
         }
         partitions.push(partition);
     }

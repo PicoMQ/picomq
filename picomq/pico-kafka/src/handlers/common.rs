@@ -2,7 +2,10 @@ use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::{BrokerId, ResponseHeader, TopicName};
 use kafka_protocol::protocol::{Encodable, HeaderVersion, StrBytes};
 use picomq_metadata::MetadataState;
-use picomq_server::{ErrorKind, Log, OwnershipService, Partition, ServiceError, Topic};
+use picomq_server::record::leader_epoch;
+use picomq_server::{
+    ErrorKind, Log, OwnershipService, Partition, ServiceError, StreamWatermarks, Topic,
+};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
@@ -39,6 +42,8 @@ pub const NON_EMPTY_GROUP: i16 = 68;
 pub const GROUP_ID_NOT_FOUND: i16 = 69;
 pub const MEMBER_ID_REQUIRED: i16 = 79;
 pub const GROUP_MAX_SIZE_REACHED: i16 = 81;
+pub const FENCED_LEADER_EPOCH: i16 = 74;
+pub const UNKNOWN_LEADER_EPOCH: i16 = 75;
 pub const FENCED_INSTANCE_ID: i16 = 82;
 pub const GROUP_SUBSCRIBED_TO_TOPIC: i16 = 86;
 pub const UNKNOWN_TOPIC_ID: i16 = 100;
@@ -194,6 +199,42 @@ pub async fn leader_partition(ctx: &BrokerContext, topic: &Topic, index: i32) ->
     }
 
     Ok(partition.index)
+}
+
+pub async fn leader_watermarks(
+    ctx: &BrokerContext,
+    topic: &Topic,
+    partition: u32,
+    current_leader_epoch: i32,
+) -> Result<StreamWatermarks, i16> {
+    let watermarks = ctx
+        .topics
+        .watermarks(topic, partition)
+        .await
+        .map_err(|error| service_error_code(&error))?;
+
+    let epoch = leader_epoch(watermarks.epoch);
+    match current_leader_epoch {
+        current if current < 0 || current == epoch => Ok(watermarks),
+        current if current < epoch => Err(FENCED_LEADER_EPOCH),
+        _ => Err(UNKNOWN_LEADER_EPOCH),
+    }
+}
+
+pub fn leader_epochs(
+    ctx: &BrokerContext,
+    topic: &Topic,
+    partition: u32,
+) -> Result<Vec<(i32, u64)>, i16> {
+    let epochs = ctx
+        .topics
+        .epochs(topic, partition)
+        .map_err(|error| service_error_code(&error))?;
+
+    Ok(epochs
+        .into_iter()
+        .map(|(epoch, start_offset)| (leader_epoch(epoch), start_offset))
+        .collect())
 }
 
 pub fn is_internal_topic(topic: &str) -> bool {
