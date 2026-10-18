@@ -22,8 +22,7 @@ use picomq_auth::{
     check_issue, scope_from_json, scope_to_json,
 };
 use picomq_metadata::MetadataState;
-use picomq_server::registry::RegistryEntry;
-use picomq_server::{OwnershipService, PicoNode};
+use picomq_server::{OwnershipService, PicoNode, partition_log};
 use s3stream::StreamState;
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -282,15 +281,23 @@ async fn stream(
         return *response;
     }
     let name = format!("/{name}");
+    let topic = match state.node.topics().get(&name).await {
+        Ok(Some(topic)) => topic,
+        Ok(None) => return not_found(&name),
+        Err(e) => return service_error(e),
+    };
+    let log = match partition_log(&topic, 0) {
+        Ok(log) => log,
+        Err(e) => return service_error(e),
+    };
+    let stream_id = match state.node.service().stream_id(&log) {
+        Ok(Some(stream_id)) => stream_id,
+        Ok(None) => return not_found(&name),
+        Err(e) => return service_error(e),
+    };
     let view = state.node.views().load();
-    let Some(value) = view.state.get_kv(&name) else {
-        return not_found(&name);
-    };
-    let Ok(entry) = RegistryEntry::decode(&value) else {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "corrupt registry entry");
-    };
-    let row = view.state.streams.get(&entry.stream_id).copied();
-    let owner = match state.node.ownership().owner_of(&name).await {
+    let row = view.state.streams.get(&stream_id).copied();
+    let owner = match state.node.ownership().owner_of(&log).await {
         Ok(owner) => owner,
         Err(e) => return service_error(e),
     };
@@ -306,20 +313,22 @@ async fn stream(
     let pending = view
         .state
         .pending_transfers
-        .get(&entry.stream_id)
+        .get(&stream_id)
         .map(|p| json!({ "fromNode": p.from_node, "toNode": p.to_node }));
 
     let body = json!({
-        "name": name,
-        "streamId": entry.stream_id,
+        "name": topic.name.spelling(),
+        "topicId": topic.id.hex(),
+        "partitions": topic.partitions,
+        "streamId": stream_id,
         "ownerNodeId": owner_node_id,
         "ownerAdvertisedAddress": owner_address,
         "ownerLocal": owner.local,
-        "contentType": entry.content_type,
-        "kafkaTopic": entry.kafka_topic,
-        "ttlSeconds": entry.ttl_seconds,
-        "expiresAtMs": entry.expires_at_ms,
-        "closed": entry.closed,
+        "contentType": topic.content_type,
+        "kafkaTopic": topic.name.kafka(),
+        "ttlSeconds": topic.ttl_seconds,
+        "expiresAtMs": topic.expires_at_ms,
+        "closed": topic.closed,
         "state": row.map(|r| match r.state {
             StreamState::Opened => "opened",
             StreamState::Closed => "closed",
@@ -356,7 +365,16 @@ async fn transfer(
     let Some(to_node) = body.get("toNode").and_then(Value::as_i64) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"toNode\"");
     };
-    match state.node.transfer_stream(name, to_node as i32).await {
+    let topic = match state.node.topics().get(name).await {
+        Ok(Some(topic)) => topic,
+        Ok(None) => return not_found(name),
+        Err(e) => return service_error(e),
+    };
+    let log = match partition_log(&topic, 0) {
+        Ok(log) => log,
+        Err(e) => return service_error(e),
+    };
+    match state.node.transfer(&log, to_node as i32).await {
         Ok(stream_id) => (
             StatusCode::ACCEPTED,
             Json(json!({

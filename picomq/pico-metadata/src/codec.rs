@@ -274,6 +274,17 @@ fn put_command_body(buf: &mut BytesMut, command: &MetadataCommand) {
             buf.put_u32_le(expected.len() as u32);
             buf.put_slice(expected);
         }
+        MetadataCommand::PutKvIfMatches {
+            key,
+            expected,
+            value,
+        } => {
+            put_str(buf, key);
+            buf.put_u32_le(expected.len() as u32);
+            buf.put_slice(expected);
+            buf.put_u32_le(value.len() as u32);
+            buf.put_slice(value);
+        }
         MetadataCommand::TransferStream {
             stream_id,
             from_node,
@@ -429,6 +440,11 @@ fn get_command_body(buf: &mut &[u8]) -> Result<MetadataCommand, CodecError> {
             node_id: get_i32(buf)?,
             node_epoch: get_i64(buf)?,
             count: get_u32(buf)?,
+        },
+        21 => MetadataCommand::PutKvIfMatches {
+            key: get_str(buf)?,
+            expected: get_blob(buf)?,
+            value: get_blob(buf)?,
         },
         other => return Err(CodecError::UnknownCommand(other)),
     })
@@ -790,6 +806,11 @@ mod tests {
                 key: "path/d".into(),
                 expected: Bytes::from_static(&[6, 7, 8]),
             },
+            MetadataCommand::PutKvIfMatches {
+                key: "path/e".into(),
+                expected: Bytes::from_static(&[9]),
+                value: Bytes::from_static(&[10, 11]),
+            },
         ]
     }
 
@@ -851,7 +872,7 @@ mod tests {
         ));
 
         // Unknown codes must be rejected, never misparsed.
-        for type_code in [0u8, 21, 200] {
+        for type_code in [0u8, 22, 200] {
             let bytes = [CODEC_VERSION, type_code];
             assert!(matches!(
                 decode_command(&bytes),
@@ -987,6 +1008,16 @@ mod tests {
                 .prop_map(|(key, expected)| MetadataCommand::DeleteKvIfMatches {
                     key,
                     expected: Bytes::from(expected)
+                }),
+            (
+                "[a-z/]{0,32}",
+                proptest::collection::vec(any::<u8>(), 0..64),
+                proptest::collection::vec(any::<u8>(), 0..64)
+            )
+                .prop_map(|(key, expected, value)| MetadataCommand::PutKvIfMatches {
+                    key,
+                    expected: Bytes::from(expected),
+                    value: Bytes::from(value)
                 }),
         ]
     }

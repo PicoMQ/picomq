@@ -1,5 +1,5 @@
 //! Ownership routing shared by both protocols: serve locally or 307 to the
-//! stream's owner.
+//! owner of the topic's log.
 //!
 //! One copy for both protocols: PUT and OPTIONS are
 //! always local (create places the stream, redirects start once an owner is
@@ -11,6 +11,7 @@ use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
 
 use picomq_server::ownership::OwnershipService;
+use picomq_server::{Log, Topics, partition_log};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RoutingMode {
@@ -21,9 +22,10 @@ pub enum RoutingMode {
 
 /// Decide whether this request is served here. `Some(response)` short-circuits
 /// (redirect or routing error).`None` means handle locally. Ownership is by
-/// the stored `name`. The redirect location is from the original URI.
+/// the topic's partition log. The redirect location is from the original URI.
 pub async fn route(
     ownership: &dyn OwnershipService,
+    topics: &Topics,
     mode: RoutingMode,
     method: &Method,
     uri: &Uri,
@@ -32,19 +34,32 @@ pub async fn route(
     if stream_name(uri) == "/" || *method == Method::PUT || *method == Method::OPTIONS {
         return None;
     }
-    owner_redirect(ownership, mode, uri, name).await
+    if mode == RoutingMode::LocalAlways {
+        return None;
+    }
+
+    let topic = match topics.get(name).await {
+        Ok(Some(topic)) => topic,
+        Ok(None) | Err(_) => return None,
+    };
+    let log = match partition_log(&topic, 0) {
+        Ok(log) => log,
+        Err(e) => return Some(routing_error(&e.message)),
+    };
+
+    owner_redirect(ownership, mode, uri, &log).await
 }
 
 pub async fn owner_redirect(
     ownership: &dyn OwnershipService,
     mode: RoutingMode,
     uri: &Uri,
-    name: &str,
+    log: &Log,
 ) -> Option<Response> {
     if mode == RoutingMode::LocalAlways {
         return None;
     }
-    let owner = match ownership.owner_of(name).await {
+    let owner = match ownership.owner_of(log).await {
         Ok(owner) => owner,
         Err(e) => return Some(routing_error(&e.message)),
     };

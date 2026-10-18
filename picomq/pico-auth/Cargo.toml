@@ -8,6 +8,7 @@ description = "PicoMQ access tokens: scoped opaque credentials, verification, an
 repository.workspace = true
 
 [dependencies]
+picomq-common = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }

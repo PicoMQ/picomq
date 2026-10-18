@@ -585,81 +585,63 @@ async fn mixed_writers_share_one_offset_space() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn explicit_alias_lifecycle() {
+async fn slashes_and_dots_name_one_topic() {
     let dir = tempfile::tempdir().unwrap();
     let node = Node::start(dir.path(), HttpProtocol::Pico, 1, true).await;
 
     let created = node
+        .http
+        .put(node.url("/orders/eu"))
+        .header("Content-Type", "text/plain")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    assert_eq!(created.headers()["Pico-Kafka-Topic"], "orders.eu");
+    assert!(node.topics().await.contains(&"orders.eu".to_owned()));
+
+    let same = node
+        .http
+        .put(node.url("/orders.eu"))
+        .header("Content-Type", "text/plain")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(same.status(), 200);
+    assert_eq!(
+        node.create_topic("orders.eu").await,
+        Err(RDKafkaErrorCode::TopicAlreadyExists)
+    );
+
+    produce(&node.producer(), "orders.eu", None, "hello").await;
+    assert_eq!(
+        pico_read_json(&node, "/orders/eu").await[0]["body"],
+        "hello"
+    );
+    assert_eq!(
+        pico_read_json(&node, "/orders.eu").await[0]["body"],
+        "hello"
+    );
+
+    let unsettable = node
+        .http
+        .patch(node.url("/_streams/orders/eu"))
+        .json(&serde_json::json!({"kafkaTopic": "renamed"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsettable.status(), 400);
+
+    let invisible = node
         .http
         .put(node.url("/tenant:1/orders"))
         .header("Content-Type", "text/plain")
         .send()
         .await
         .unwrap();
-    assert_eq!(created.status(), 201);
-    assert!(created.headers().get("Pico-Kafka-Topic").is_none());
+    assert_eq!(invisible.status(), 201);
+    assert!(invisible.headers().get("Pico-Kafka-Topic").is_none());
     assert!(!node.topics().await.iter().any(|t| t.contains("tenant")));
-
-    let config: Value = node
-        .http
-        .patch(node.url("/_streams/tenant:1/orders"))
-        .json(&serde_json::json!({"kafkaTopic": "tenant1.orders"}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(config["kafkaTopic"], "tenant1.orders");
-
-    produce(&node.producer(), "tenant1.orders", None, "hello").await;
-    let records = pico_read_json(&node, "/tenant:1/orders").await;
-    assert_eq!(records[0]["body"], "hello");
-
-    let clash = node
-        .http
-        .put(node.url("/other"))
-        .header("Content-Type", "text/plain")
-        .header("Pico-Kafka-Topic", "tenant1.orders")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(clash.status(), 409);
-    assert!(
-        node.http
-            .head(node.url("/other"))
-            .send()
-            .await
-            .unwrap()
-            .status()
-            == 404
-    );
-
-    node.http
-        .put(node.url("/orders/eu"))
-        .header("Content-Type", "text/plain")
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-    assert_eq!(
-        node.create_topic("orders.eu").await,
-        Err(RDKafkaErrorCode::TopicAlreadyExists)
-    );
-
-    let cleared: Value = node
-        .http
-        .patch(node.url("/_streams/tenant:1/orders"))
-        .json(&serde_json::json!({"kafkaTopic": null}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(cleared["kafkaTopic"], Value::Null);
-    assert!(!node.topics().await.contains(&"tenant1.orders".to_owned()));
 
     node.shutdown().await;
 }

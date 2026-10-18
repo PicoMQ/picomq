@@ -33,7 +33,7 @@ use crate::handlers::common::{
 use crate::handlers::{HandlerError, HandlerOutcome};
 use picomq_server::{
     CommittedOffset, GroupError, JoinInput, JoinProtocol, Joined, MemberFence, MemberRole,
-    Membership, OffsetCommit, SyncInput,
+    Membership, OffsetCommit, Partition, SyncInput, Topic, TopicId,
 };
 
 fn error_code(error: GroupError) -> i16 {
@@ -441,30 +441,30 @@ async fn offset_commit(
     let mut commits = Vec::new();
     let mut rejected: BTreeMap<(String, i32), i16> = BTreeMap::new();
     for topic in &request.topics {
-        let stream = resolve_topic(ctx, topic.name.as_str()).await;
+        let resolved = resolve_topic(ctx, topic.name.as_str()).await;
         for partition in &topic.partitions {
             let key = (topic.name.to_string(), partition.partition_index);
-            match (&stream, u64::try_from(partition.committed_offset)) {
-                (Ok(stream), Ok(position)) if partition.partition_index == 0 => {
-                    commits.push(OffsetCommit {
-                        stream: stream.clone(),
-                        value: CommittedOffset {
-                            position,
-                            metadata: partition
-                                .committed_metadata
-                                .as_ref()
-                                .map(ToString::to_string),
-                        },
-                    });
-                }
-                (Ok(_), Ok(_)) => {
-                    rejected.insert(key, UNKNOWN_TOPIC_OR_PARTITION);
-                }
+            let target = match &resolved {
+                Ok(resolved) => partition_of(resolved, partition.partition_index),
+                Err(code) => Err(*code),
+            };
+
+            match (target, u64::try_from(partition.committed_offset)) {
+                (Ok(target), Ok(position)) => commits.push(OffsetCommit {
+                    partition: target,
+                    value: CommittedOffset {
+                        position,
+                        metadata: partition
+                            .committed_metadata
+                            .as_ref()
+                            .map(ToString::to_string),
+                    },
+                }),
                 (Ok(_), Err(_)) => {
                     rejected.insert(key, INVALID_REQUEST);
                 }
                 (Err(code), _) => {
-                    rejected.insert(key, *code);
+                    rejected.insert(key, code);
                 }
             }
         }
@@ -514,64 +514,90 @@ async fn offset_fetch(
     let mut body = Bytes::copy_from_slice(body);
     let request = OffsetFetchRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
-    let mut requested: Vec<(String, Vec<i32>, Option<String>)> = Vec::new();
+    let mut requested: Vec<(String, Vec<i32>, Option<Topic>)> = Vec::new();
     if let Some(topics) = &request.topics {
         for topic in topics {
-            let stream = resolve_topic(ctx, topic.name.as_str()).await.ok();
+            let resolved = resolve_topic(ctx, topic.name.as_str()).await.ok();
             requested.push((
                 topic.name.to_string(),
                 topic.partition_indexes.clone(),
-                stream,
+                resolved,
             ));
         }
     }
-    let streams: Vec<String> = requested
+
+    let partitions: Vec<Partition> = requested
         .iter()
-        .filter_map(|(_, _, stream)| stream.clone())
+        .filter_map(|(_, indexes, topic)| topic.as_ref().map(|topic| (indexes, topic)))
+        .flat_map(|(indexes, topic)| {
+            indexes
+                .iter()
+                .filter_map(|index| partition_of(topic, *index).ok())
+        })
         .collect();
     let result = ctx
         .groups
         .fetch_offsets(
             request.group_id.as_str(),
-            request.topics.is_some().then_some(streams.as_slice()),
+            request.topics.is_some().then_some(partitions.as_slice()),
         )
         .await;
     let (error_code, offsets) = match result {
         Ok(offsets) => (NO_ERROR, offsets),
         Err(error) => (error_code(error), BTreeMap::new()),
     };
+
     let topics = if request.topics.is_some() {
         requested
             .into_iter()
-            .map(|(topic, partitions, stream)| {
-                let committed = stream.as_ref().and_then(|stream| offsets.get(stream));
+            .map(|(name, indexes, topic)| {
+                let partitions = indexes
+                    .into_iter()
+                    .map(|index| {
+                        let committed = topic
+                            .as_ref()
+                            .and_then(|topic| partition_of(topic, index).ok())
+                            .and_then(|partition| offsets.get(&partition));
+                        fetched_partition(index, committed)
+                    })
+                    .collect();
+
                 OffsetFetchResponseTopic::default()
-                    .with_name(topic_name(&topic))
-                    .with_partitions(
-                        partitions
-                            .into_iter()
-                            .map(|partition| {
-                                fetched_partition(partition, committed.filter(|_| partition == 0))
-                            })
-                            .collect(),
-                    )
+                    .with_name(topic_name(&name))
+                    .with_partitions(partitions)
             })
             .collect()
     } else {
-        let mut topics = Vec::with_capacity(offsets.len());
-        for (stream, committed) in &offsets {
-            if let Ok(Some(meta)) = ctx.service.describe(stream).await
-                && let Some(topic) = meta.kafka_topic
-            {
-                topics.push(
-                    OffsetFetchResponseTopic::default()
-                        .with_name(topic_name(&topic))
-                        .with_partitions(vec![fetched_partition(0, Some(committed))]),
-                );
-            }
+        let mut by_topic: BTreeMap<TopicId, Vec<(u32, &CommittedOffset)>> = BTreeMap::new();
+        for (partition, committed) in &offsets {
+            by_topic
+                .entry(partition.topic)
+                .or_default()
+                .push((partition.index, committed));
+        }
+
+        let mut topics = Vec::with_capacity(by_topic.len());
+        for (id, committed) in by_topic {
+            let Ok(Some(topic)) = ctx.topics.by_id(&id).await else {
+                continue;
+            };
+            let Some(name) = topic.name.kafka() else {
+                continue;
+            };
+
+            let partitions = committed
+                .into_iter()
+                .map(|(index, value)| fetched_partition(index as i32, Some(value)))
+                .collect();
+            topics.push(
+                OffsetFetchResponseTopic::default()
+                    .with_name(topic_name(name))
+                    .with_partitions(partitions),
+            );
         }
         topics
     };
+
     let response = OffsetFetchResponse::default()
         .with_error_code(error_code)
         .with_topics(topics);
@@ -580,6 +606,13 @@ async fn offset_fetch(
         req.api_version,
         &response,
     )))
+}
+
+fn partition_of(topic: &Topic, index: i32) -> Result<Partition, i16> {
+    match u32::try_from(index) {
+        Ok(index) if index < topic.partitions => Ok(Partition::new(topic.id, index)),
+        _ => Err(UNKNOWN_TOPIC_OR_PARTITION),
+    }
 }
 
 fn fetched_partition(

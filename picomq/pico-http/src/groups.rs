@@ -19,7 +19,7 @@ use picomq_protocol::pico::{
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{
     CommittedOffset, GroupCoordinator, GroupDescription, GroupError, JoinInput, Joined,
-    MemberFence, MemberRole, Membership, OffsetCommit,
+    MemberFence, MemberRole, Membership, OffsetCommit, Partition, Topics,
 };
 
 use crate::auth::{Caller, authenticate};
@@ -30,6 +30,7 @@ use crate::route::{RoutingMode, owner_redirect};
 #[derive(Clone)]
 pub struct GroupState {
     pub groups: Arc<GroupCoordinator>,
+    pub topics: Arc<Topics>,
     pub ownership: Arc<dyn OwnershipService>,
     pub mode: RoutingMode,
     pub authorizer: Option<Arc<Authorizer>>,
@@ -68,7 +69,7 @@ impl GroupState {
             self.ownership.as_ref(),
             self.mode,
             uri,
-            &GroupCoordinator::stream_name(group),
+            &GroupCoordinator::log(group),
         )
         .await
     }
@@ -120,6 +121,25 @@ impl GroupState {
                 .is_ok(),
             _ => true,
         }
+    }
+
+    async fn partitions(&self, names: &[String]) -> Result<Vec<Partition>, Box<Response>> {
+        let mut partitions = Vec::with_capacity(names.len());
+        for name in names {
+            match self.topics.get(name).await {
+                Ok(Some(topic)) => partitions.push(Partition::new(topic.id, 0)),
+                Ok(None) => {
+                    return Err(Box::new(error(
+                        404,
+                        E_NOT_FOUND,
+                        &format!("no such stream {name}"),
+                        None,
+                    )));
+                }
+                Err(e) => return Err(Box::new(error(400, E_BAD_REQUEST, &e.message, None))),
+            }
+        }
+        Ok(partitions)
     }
 
     async fn member_streams(
@@ -363,12 +383,16 @@ async fn commit(
     if let Err(response) = state.allow(&caller, Operation::Read, &streams) {
         return *response;
     }
+    let partitions = match state.partitions(&streams).await {
+        Ok(partitions) => partitions,
+        Err(response) => return *response,
+    };
     let commits: Vec<OffsetCommit> = request
         .offsets
         .into_values()
-        .zip(streams)
-        .map(|(offset, stream)| OffsetCommit {
-            stream,
+        .zip(partitions)
+        .map(|(offset, partition)| OffsetCommit {
+            partition,
             value: CommittedOffset {
                 position: offset.position,
                 metadata: offset.metadata,
@@ -416,31 +440,43 @@ async fn fetch(
     if let Some(response) = state.redirect(&uri, &group).await {
         return response;
     }
+
+    let mut partitions = Vec::with_capacity(requested.len());
+    for name in &requested {
+        if let Ok(Some(topic)) = state.topics.get(name).await {
+            partitions.push(Partition::new(topic.id, 0));
+        }
+    }
     let offsets = match state
         .groups
         .fetch_offsets(
             &group,
-            (!requested.is_empty()).then_some(requested.as_slice()),
+            (!requested.is_empty()).then_some(partitions.as_slice()),
         )
         .await
     {
         Ok(offsets) => offsets,
         Err(error) => return group_error(error),
     };
-    let offsets = offsets
-        .into_iter()
-        .filter(|(stream, _)| state.allowed(&caller, stream))
-        .map(|(stream, value)| {
-            (
-                state.strip(&caller, &stream).to_owned(),
-                wire::CommittedOffset {
-                    position: value.position,
-                    metadata: value.metadata,
-                },
-            )
-        })
-        .collect();
-    ok(OffsetsResponse { offsets }.encode())
+
+    let mut named = std::collections::BTreeMap::new();
+    for (partition, value) in offsets {
+        let Ok(Some(topic)) = state.topics.by_id(&partition.topic).await else {
+            continue;
+        };
+        let stream = topic.name.spelling();
+        if !state.allowed(&caller, stream) {
+            continue;
+        }
+        named.insert(
+            state.strip(&caller, stream).to_owned(),
+            wire::CommittedOffset {
+                position: value.position,
+                metadata: value.metadata,
+            },
+        );
+    }
+    ok(OffsetsResponse { offsets: named }.encode())
 }
 
 fn description(

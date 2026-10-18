@@ -191,9 +191,12 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         .tokens()
         .spawn_expiry_loop(lease.leadership(), LIFECYCLE_TICK);
     let ttl_sweep = node
-        .service()
+        .topics()
         .spawn_ttl_sweep(lease.leadership(), LIFECYCLE_TICK);
-    let compaction_check = node.service().spawn_compaction_check(LIFECYCLE_TICK);
+    let compaction_check = node
+        .service()
+        .streams()
+        .spawn_compaction_check(LIFECYCLE_TICK);
 
     let kafka = kafka_listener
         .map(|(listener, bound)| (bound, spawn_kafka(&config, &node, listener, bound)));

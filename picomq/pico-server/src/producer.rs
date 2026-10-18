@@ -2,8 +2,8 @@
 //! and defaults match Kafka's broker so its clients dedup exactly.
 
 use crate::error::ServiceError;
+use crate::log::LogEntry;
 use crate::record;
-use crate::registry::RegistryEntry;
 use crate::types::NumericProducer;
 
 /// One accepted batch: its sequence range and where it landed.
@@ -21,7 +21,7 @@ pub const PRODUCER_SPAN_WINDOW: usize = 5;
 pub const PRODUCER_EXPIRY_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Hard cap per producer map. Every tracked producer rides along in the
-/// registry entry on each rewrite, so an unbounded map lets one stream's
+/// log entry on each rewrite, so an unbounded map lets one stream's
 /// producer churn inflate every future KV write.
 pub const MAX_TRACKED_PRODUCERS: usize = 1024;
 
@@ -49,7 +49,7 @@ impl NumericProducerEntry {
 /// Drop producers idle past [`PRODUCER_EXPIRY_MS`], then enforce
 /// [`MAX_TRACKED_PRODUCERS`] by evicting the stalest. Applies uniformly to
 /// both producer maps.
-pub fn expire_producers(entry: &mut RegistryEntry, now_ms: i64) {
+pub fn expire_producers(entry: &mut LogEntry, now_ms: i64) {
     entry
         .numeric_producers
         .retain(|_, state| now_ms - state.last_touched_ms <= PRODUCER_EXPIRY_MS);
@@ -87,7 +87,7 @@ pub(crate) enum Admission {
 }
 
 pub(crate) fn admit(
-    entry: &mut RegistryEntry,
+    entry: &mut LogEntry,
     producer: Option<NumericProducer>,
     record_count: u32,
     now_ms: i64,
@@ -118,7 +118,7 @@ pub(crate) fn admit(
 }
 
 pub(crate) fn record(
-    entry: &mut RegistryEntry,
+    entry: &mut LogEntry,
     accepted: Option<(NumericProducer, i32)>,
     base_offset: u64,
     now_ms: i64,
@@ -142,7 +142,7 @@ pub(crate) fn record(
 }
 
 /// Replay the producer spans of every batch in a stored payload.
-pub(crate) fn fold_stored_payload(entry: &mut RegistryEntry, payload: &[u8], now_ms: i64) {
+pub(crate) fn fold_stored_payload(entry: &mut LogEntry, payload: &[u8], now_ms: i64) {
     let Ok(headers) = record::batch_headers(payload) else {
         return;
     };
@@ -172,7 +172,7 @@ enum Decision {
 
 /// Decision table per Kafka's ProducerStateManager.
 fn validate(
-    entry: &RegistryEntry,
+    entry: &LogEntry,
     producer_id: i64,
     epoch: i16,
     first_seq: i32,
@@ -227,26 +227,9 @@ fn validate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
-    fn entry() -> RegistryEntry {
-        RegistryEntry {
-            stream_id: 7,
-            content_type: "application/octet-stream".into(),
-            ttl_seconds: None,
-            expires_at_ms: None,
-            closed: false,
-            deadline_ms: 0,
-            last_seq: None,
-            producers: BTreeMap::new(),
-            closed_by: None,
-            external_id: [0; 16],
-            numeric_producers: BTreeMap::new(),
-            producer_state_offset: 0,
-            schema_name: None,
-            schema_validate: false,
-            kafka_topic: None,
-        }
+    fn entry() -> LogEntry {
+        LogEntry::new(7)
     }
 
     #[test]
@@ -389,7 +372,7 @@ mod tests {
         let mut e = entry();
         e.producers.insert(
             "fresh".into(),
-            crate::registry::ProducerState {
+            crate::log::ProducerState {
                 epoch: 1,
                 last_seq: 1,
                 last_touched_ms: 1_000,
@@ -397,7 +380,7 @@ mod tests {
         );
         e.producers.insert(
             "stale".into(),
-            crate::registry::ProducerState {
+            crate::log::ProducerState {
                 epoch: 1,
                 last_seq: 1,
                 last_touched_ms: 0,
@@ -416,7 +399,7 @@ mod tests {
         for i in 0..over {
             e.producers.insert(
                 format!("p{i:05}"),
-                crate::registry::ProducerState {
+                crate::log::ProducerState {
                     epoch: 0,
                     last_seq: 0,
                     last_touched_ms: i as i64,

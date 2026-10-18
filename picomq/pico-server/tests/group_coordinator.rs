@@ -5,8 +5,8 @@ use bytes::Bytes;
 use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
 use picomq_server::{
     CommittedOffset, GroupCoordinator, GroupError, GroupState, JoinInput, JoinOutcome,
-    JoinProtocol, Joined, MemberFence, MemberRole, Membership, NodeConfig, OffsetCommit, PicoNode,
-    SyncInput,
+    JoinProtocol, Joined, MemberFence, MemberRole, Membership, NodeConfig, OffsetCommit, Partition,
+    PicoNode, SyncInput, TopicId,
 };
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
@@ -36,9 +36,13 @@ async fn start_node(
     .unwrap()
 }
 
-fn commit(stream: &str, position: u64) -> OffsetCommit {
+fn partition(byte: u8) -> Partition {
+    Partition::new(TopicId([byte; 16]), 0)
+}
+
+fn commit(partition: Partition, position: u64) -> OffsetCommit {
     OffsetCommit {
-        stream: stream.to_owned(),
+        partition,
         value: CommittedOffset {
             position,
             metadata: Some("checkpoint".to_owned()),
@@ -111,7 +115,7 @@ async fn find_coordinator_is_the_owner_of_the_group_stream() {
 
     node1
         .groups()
-        .commit_offsets("orders", None, &[commit("/events", 7)])
+        .commit_offsets("orders", None, &[commit(partition(1), 7)])
         .await
         .unwrap();
 
@@ -132,23 +136,27 @@ async fn offsets_replay_into_a_fresh_coordinator() {
     let node = start_node(1, Arc::new(sink), views).await;
 
     node.groups()
-        .commit_offsets("orders", None, &[commit("/events", 42)])
+        .commit_offsets("orders", None, &[commit(partition(1), 42)])
         .await
         .unwrap();
 
     let restarted = GroupCoordinator::new(
         node.config().node_id,
         node.service(),
+        node.topics(),
         node.ownership(),
         node.views(),
     );
     let fetched = restarted
-        .fetch_offsets("orders", Some(&["/events".to_owned(), "/other".to_owned()]))
+        .fetch_offsets("orders", Some(&[partition(1), partition(2)]))
         .await
         .unwrap();
     assert_eq!(fetched.len(), 1);
-    assert_eq!(fetched["/events"].position, 42);
-    assert_eq!(fetched["/events"].metadata.as_deref(), Some("checkpoint"));
+    assert_eq!(fetched[&partition(1)].position, 42);
+    assert_eq!(
+        fetched[&partition(1)].metadata.as_deref(),
+        Some("checkpoint")
+    );
     assert!(
         restarted
             .fetch_offsets("unknown", None)
@@ -223,16 +231,24 @@ async fn subscribed_members_receive_a_server_side_assignment() {
         MemberRole::Subscribed { subscription, .. } if subscription == &all
     )));
 
-    let stream = &assignment_of(&second)[0];
+    assert!(!assignment_of(&second).is_empty());
     assert_eq!(
         groups
-            .commit_offsets("g", Some(fence(2, &second.member_id)), &[commit(stream, 5)])
+            .commit_offsets(
+                "g",
+                Some(fence(2, &second.member_id)),
+                &[commit(partition(3), 5)]
+            )
             .await,
         Ok(())
     );
     assert_eq!(
         groups
-            .commit_offsets("g", Some(fence(1, &second.member_id)), &[commit(stream, 6)])
+            .commit_offsets(
+                "g",
+                Some(fence(1, &second.member_id)),
+                &[commit(partition(3), 6)]
+            )
             .await,
         Err(GroupError::IllegalGeneration)
     );

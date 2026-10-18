@@ -8,7 +8,7 @@ use picomq_auth::Operation;
 use picomq_server::SchemaFormat;
 use serde_json::json;
 
-use super::{CommonState, gate, service_error};
+use super::{CommonState, gate};
 
 pub const SCHEMA_PATH_PREFIX: &str = "/_schemas";
 
@@ -35,16 +35,16 @@ async fn put_schema(
     {
         return *response;
     }
-    if state.service.schema_registry().is_none() {
+    let Some(registry) = state.topics.schema_registry() else {
         return schema_registry_disabled();
-    }
+    };
     let format = match schema_format_from_headers(&headers, &name) {
         Ok(format) => format,
         Err(response) => return *response,
     };
-    match state.service.put_schema(&name, format, body).await {
+    match registry.put(&name, format, body).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => service_error(error),
+        Err(error) => schema_failure(error),
     }
 }
 
@@ -63,10 +63,10 @@ async fn get_schema(
     {
         return *response;
     }
-    if state.service.schema_registry().is_none() {
+    let Some(registry) = state.topics.schema_registry() else {
         return schema_registry_disabled();
-    }
-    match state.service.get_schema(&name).await {
+    };
+    match registry.get(&name).await {
         Ok(Some((format, bytes))) => {
             let mut response = bytes.into_response();
             response.headers_mut().insert(
@@ -76,7 +76,7 @@ async fn get_schema(
             response
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(error) => service_error(error),
+        Err(error) => schema_failure(error),
     }
 }
 
@@ -95,14 +95,22 @@ async fn delete_schema(
     {
         return *response;
     }
-    if state.service.schema_registry().is_none() {
+    let Some(registry) = state.topics.schema_registry() else {
         return schema_registry_disabled();
-    }
-    match state.service.delete_schema(&name).await {
+    };
+    match registry.delete(&name).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => StatusCode::NOT_FOUND.into_response(),
-        Err(error) => service_error(error),
+        Err(error) => schema_failure(error),
     }
+}
+
+fn schema_failure(error: impl std::fmt::Display) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": error.to_string()})),
+    )
+        .into_response()
 }
 
 fn schema_registry_disabled() -> Response {

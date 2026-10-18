@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
 use picomq_server::ownership::OwnershipService;
-use picomq_server::{ErrorKind, S3StreamService, ServiceError};
+use picomq_server::{ErrorKind, ServiceError, Topics};
 use serde_json::json;
 
 use crate::RoutingMode;
@@ -18,21 +18,21 @@ pub use streams::STREAM_CONFIG_PATH_PREFIX;
 
 #[derive(Clone)]
 pub struct CommonState {
-    pub service: Arc<S3StreamService>,
+    pub topics: Arc<Topics>,
     pub ownership: Arc<dyn OwnershipService>,
     pub mode: RoutingMode,
     pub authorizer: Option<Arc<Authorizer>>,
 }
 
 pub fn router(
-    service: Arc<S3StreamService>,
+    topics: Arc<Topics>,
     ownership: Arc<dyn OwnershipService>,
     mode: RoutingMode,
     authorizer: Option<Arc<Authorizer>>,
     max_request_size: usize,
 ) -> Router {
     let state = CommonState {
-        service,
+        topics,
         ownership,
         mode,
         authorizer,

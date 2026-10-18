@@ -510,7 +510,7 @@ pub(super) fn validate_group_id(group_id: &str) -> Result<(), GroupError> {
     }
 }
 
-pub(super) fn validate_stream_name(name: &str) -> Result<(), GroupError> {
+fn validate_stream_name(name: &str) -> Result<(), GroupError> {
     if name.is_empty() || name.len() > MAX_STREAM_NAME_BYTES {
         Err(GroupError::InvalidRequest)
     } else {
@@ -556,24 +556,9 @@ pub(super) fn new_member_id(client_id: &str) -> String {
     format!("{client_id}-{}", uuid::Uuid::new_v4())
 }
 
-pub(super) fn group_stream_name(group_id: &str) -> String {
-    let mut encoded = String::with_capacity(group_id.len() * 2);
-    for byte in group_id.as_bytes() {
-        use std::fmt::Write;
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    format!("/_sys/groups/{encoded}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stream_name_is_collision_free() {
-        assert_ne!(group_stream_name("a/b"), group_stream_name("a%2fb"));
-        assert!(group_stream_name("g").starts_with("/_sys/groups/"));
-    }
 
     #[test]
     fn names_are_shared_and_swept() {

@@ -1,4 +1,5 @@
 use crate::error::ServiceError;
+use crate::log::Log;
 use crate::record::{self, StreamRecord};
 use crate::service::S3StreamService;
 use crate::types::StreamBatch;
@@ -8,14 +9,14 @@ const READ_BYTES: usize = 4 * 1024 * 1024;
 impl S3StreamService {
     pub async fn record_at_or_after(
         &self,
-        name: &str,
+        log: &Log,
         timestamp_ms: i64,
     ) -> Result<Option<StreamRecord>, ServiceError> {
-        let watermarks = self.watermarks(name).await?;
+        let watermarks = self.watermarks(log).await?;
         let mut cursor = watermarks.log_start_offset;
 
         while cursor < watermarks.high_watermark {
-            let read = self.read_batches(name, cursor, READ_BYTES).await?;
+            let read = self.read_batches(log, cursor, READ_BYTES).await?;
             if read.batches.is_empty() {
                 break;
             }
@@ -34,14 +35,14 @@ impl S3StreamService {
 
     pub async fn record_with_max_timestamp(
         &self,
-        name: &str,
+        log: &Log,
     ) -> Result<Option<StreamRecord>, ServiceError> {
-        let watermarks = self.watermarks(name).await?;
+        let watermarks = self.watermarks(log).await?;
         let mut cursor = watermarks.log_start_offset;
         let mut newest: Option<(i64, StreamBatch)> = None;
 
         while cursor < watermarks.high_watermark {
-            let read = self.read_batches(name, cursor, READ_BYTES).await?;
+            let read = self.read_batches(log, cursor, READ_BYTES).await?;
             if read.batches.is_empty() {
                 break;
             }

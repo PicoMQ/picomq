@@ -622,16 +622,8 @@ async fn find_coordinator_probe_creates_nothing() {
     assert_eq!(found.error_code, 0);
     assert_eq!(found.node_id.0, 1);
 
-    // hex("probe") under the reserved namespace: no stream may exist.
-    let stream = "/_sys/groups/70726f6265";
-    assert!(
-        broker
-            .service
-            .lookup_stream_id(stream)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    let group_log = picomq_server::GroupCoordinator::log("probe");
+    assert!(broker.service.stream_id(&group_log).unwrap().is_none());
 
     let fetch = encode_request(
         ApiKey::OffsetFetch,
@@ -650,14 +642,7 @@ async fn find_coordinator_probe_creates_nothing() {
     let fetched = OffsetFetchResponse::decode(&mut buf, 7).unwrap();
     assert_eq!(fetched.error_code, 0);
     assert_eq!(fetched.topics[0].partitions[0].committed_offset, -1);
-    assert!(
-        broker
-            .service
-            .lookup_stream_id(stream)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(broker.service.stream_id(&group_log).unwrap().is_none());
 }
 
 /// Join, rebalance, fencing, and expiry across two members.
@@ -999,7 +984,7 @@ async fn classic_group_lifecycle_and_offset_replay() {
 
     let broker = test_broker().await;
     broker
-        .service
+        .topics
         .create(picomq_server::CreateCommand::new(
             "/events",
             "application/octet-stream",
@@ -1237,8 +1222,8 @@ async fn create_topics_binds_picomq_schema_and_validates_produce() {
     assert_eq!(created.topics[0].error_code, 0);
     assert_eq!(
         broker
-            .service
-            .head("/orders")
+            .topics
+            .get("/orders")
             .await
             .unwrap()
             .unwrap()

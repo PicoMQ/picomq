@@ -229,7 +229,6 @@ pub struct CreateRequest<'a> {
     pub closed: bool,
     pub schema: Option<&'a str>,
     pub schema_validate: bool,
-    pub kafka_topic: Option<&'a str>,
 }
 
 impl<'a> CreateRequest<'a> {
@@ -242,7 +241,6 @@ impl<'a> CreateRequest<'a> {
             closed: false,
             schema: None,
             schema_validate: false,
-            kafka_topic: None,
         }
     }
 
@@ -254,7 +252,6 @@ impl<'a> CreateRequest<'a> {
             .flag(H_CLOSED, self.closed)
             .header_opt(H_SCHEMA, self.schema)
             .flag(H_SCHEMA_VALIDATE, self.schema_validate)
-            .header_opt(H_KAFKA_TOPIC, self.kafka_topic)
     }
 }
 

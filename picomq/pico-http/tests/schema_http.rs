@@ -222,15 +222,20 @@ async fn stream_config_patch_updates_schema_bind() {
 #[tokio::test]
 async fn stream_config_redirects_to_remote_owner() {
     use picomq_server::ownership::OwnershipService;
-    use picomq_server::{NodeMeta, Owner, ServiceError};
+    use picomq_server::{Log, NodeMeta, Owner, ServiceError};
     use std::sync::Arc;
 
     struct RemoteOwnership;
 
     #[async_trait::async_trait]
     impl OwnershipService for RemoteOwnership {
-        async fn owner_of(&self, _name: &str) -> Result<Owner, ServiceError> {
-            Ok(Owner::remote(7, 2, "http://owner.example:4437/".to_owned()))
+        async fn owner_of(&self, _log: &Log) -> Result<Owner, ServiceError> {
+            Ok(Owner::remote(
+                7,
+                1,
+                2,
+                "http://owner.example:4437/".to_owned(),
+            ))
         }
 
         fn local_node(&self) -> NodeMeta {
@@ -242,8 +247,15 @@ async fn stream_config_redirects_to_remote_owner() {
     }
 
     let node = common::start_node().await;
+    node.topics()
+        .create(picomq_server::CreateCommand::new(
+            "/orders",
+            "application/json",
+        ))
+        .await
+        .unwrap();
     let router = picomq_http::common::router(
-        node.service(),
+        node.topics(),
         Arc::new(RemoteOwnership),
         picomq_http::RoutingMode::Redirect,
         None,

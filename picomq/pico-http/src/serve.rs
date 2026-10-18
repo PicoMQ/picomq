@@ -99,7 +99,7 @@ pub struct RunningServer {
 /// choices.
 pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Result<RunningServer> {
     let common_router = common::router(
-        node.service(),
+        node.topics(),
         node.ownership(),
         options.routing_mode,
         options.authorizer.clone(),
@@ -110,6 +110,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
             .merge(groups::router(
                 groups::GroupState {
                     groups: node.groups(),
+                    topics: node.topics(),
                     ownership: node.ownership(),
                     mode: options.routing_mode,
                     authorizer: options.authorizer.clone(),
@@ -119,7 +120,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
             .fallback_service(
                 Arc::new(
                     PicoFrontend::with_tuning(
-                        node.service(),
+                        node.topics(),
                         node.ownership(),
                         options.routing_mode,
                         options.long_poll_timeout,
@@ -134,7 +135,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
         HttpProtocol::Ds => common_router.fallback_service(
             Arc::new(
                 DsFrontend::with_tuning(
-                    node.service(),
+                    node.topics(),
                     node.ownership(),
                     options.routing_mode,
                     options.long_poll_timeout,

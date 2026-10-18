@@ -1,4 +1,4 @@
-//! Node assembly: metadata plane + s3stream engine + named-stream service.
+//! Node assembly: metadata plane + s3stream engine + topics over logs.
 //!
 //! Intentionally not here: the metadata layer is a
 //! [`picomq_metadata::CommandSink`] the host constructs (`LocalSink` or
@@ -10,17 +10,21 @@ use std::sync::Arc;
 use picomq_auth::Authorizer;
 use picomq_metadata::{CommandSink, MetadataNodeHandle, ViewPublisher};
 use s3stream::{
-    Client as _, Config, KVClient, ObjectStorageTrait, ObjectWalConfig, ObjectWalService,
-    S3StreamBuilder, S3StreamEngine, WriteAheadLogTrait,
+    Config, ObjectStorageTrait, ObjectWalConfig, ObjectWalService, S3StreamBuilder, S3StreamEngine,
+    WriteAheadLogTrait,
 };
 
 use crate::auth::TokenService;
 use crate::error::ServiceError;
 use crate::group::GroupCoordinator;
+use crate::log::Log;
 use crate::ownership::MetadataOwnershipService;
 use crate::service::S3StreamService;
+use crate::streams::Streams;
+use crate::topics::Topics;
 use crate::transfer::TransferWatcher;
 use crate::waiter::StreamWaiterRegistry;
+
 /// Node identity and engine tuning the host passes in.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
@@ -57,6 +61,7 @@ pub struct PicoNode {
     views: Arc<ViewPublisher>,
     engine: S3StreamEngine,
     service: Arc<S3StreamService>,
+    topics: Arc<Topics>,
     ownership: Arc<MetadataOwnershipService>,
     groups: Arc<GroupCoordinator>,
     tokens: Arc<TokenService>,
@@ -107,22 +112,28 @@ impl PicoNode {
             .write_ahead_log(wal)
             .stream_manager(Arc::new(handle.stream_manager()))
             .object_manager(Arc::new(handle.object_manager()))
-            .kv_client(Arc::new(handle.kv_client()))
             .build()
             .await?;
 
-        let kv_client: Arc<dyn KVClient> = engine.kv_client();
-        let mut service = S3StreamService::new(
+        let kv_client = handle.kv_client();
+        let streams = Arc::new(Streams::new(
             engine.stream_client(),
-            kv_client.clone(),
             views.clone(),
             handle.clone(),
+        ));
+        let service = Arc::new(S3StreamService::new(
+            streams,
+            kv_client.clone(),
+            views.clone(),
             Arc::new(StreamWaiterRegistry::new()),
-        );
+        ));
+
+        let mut topics = Topics::new(service.clone(), kv_client.clone(), views.clone());
         if let Some(registry) = schema_registry {
-            service = service.with_schema_registry(registry);
+            topics = topics.with_schema_registry(registry);
         }
-        let service = Arc::new(service);
+        let topics = Arc::new(topics);
+
         let ownership = Arc::new(MetadataOwnershipService::new(
             views.clone(),
             config.node_id,
@@ -132,6 +143,7 @@ impl PicoNode {
         let groups = GroupCoordinator::new(
             config.node_id,
             service.clone(),
+            topics.clone(),
             ownership.clone(),
             views.clone(),
         );
@@ -145,6 +157,7 @@ impl PicoNode {
             views,
             engine,
             service,
+            topics,
             ownership,
             groups,
             tokens,
@@ -156,8 +169,8 @@ impl PicoNode {
         self.service.clone()
     }
 
-    pub fn stream_service(&self) -> Arc<S3StreamService> {
-        self.service.clone()
+    pub fn topics(&self) -> Arc<Topics> {
+        self.topics.clone()
     }
 
     pub fn ownership(&self) -> Arc<MetadataOwnershipService> {
@@ -188,9 +201,9 @@ impl PicoNode {
         &self.handle
     }
 
-    /// Request a live ownership move of a named stream to another node.
-    pub async fn transfer_stream(&self, name: &str, to_node: i32) -> Result<u64, ServiceError> {
-        let Some(stream_id) = self.service.lookup_stream_id(name).await? else {
+    /// Request a live ownership move of a log to another node.
+    pub async fn transfer(&self, log: &Log, to_node: i32) -> Result<u64, ServiceError> {
+        let Some(stream_id) = self.service.stream_id(log)? else {
             return Err(ServiceError::kind(crate::ErrorKind::NotFound));
         };
         let view = self.views.load();

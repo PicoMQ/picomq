@@ -1,6 +1,6 @@
 //! The replicated command set: the *only* way metadata changes.
 //!
-//! Twenty variants with stable type codes (see the codec).
+//! Twenty-one variants with stable type codes (see the codec).
 //!
 //! Why a closed command enum (and not methods mutating state): every mutation is
 //! a value that goes through the consensus log, so the state machine is
@@ -143,6 +143,12 @@ pub enum MetadataCommand {
         expected: bytes::Bytes,
     },
 
+    PutKvIfMatches {
+        key: String,
+        expected: bytes::Bytes,
+        value: bytes::Bytes,
+    },
+
     /// Requests a live ownership move. The stream must be OPENED on
     /// `from_node`. Records a pending transfer that the owning node observes
     /// and completes after draining and closing.
@@ -201,6 +207,7 @@ impl MetadataCommand {
             MetadataCommand::PlaceStream { .. } => 18,
             MetadataCommand::DeleteKvIfMatches { .. } => 19,
             MetadataCommand::AllocateProducerIds { .. } => 20,
+            MetadataCommand::PutKvIfMatches { .. } => 21,
         }
     }
 }

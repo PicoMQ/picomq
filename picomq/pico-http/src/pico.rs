@@ -36,8 +36,8 @@ use picomq_protocol::record::{
 };
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{
-    AppendCommand, CreateCommand, ErrorKind, LogRecord, OffsetToken, ReadResult, S3StreamService,
-    ServiceError, StreamMeta, StreamRecord,
+    AppendCommand, CreateCommand, ErrorKind, LogRecord, OffsetToken, ReadResult, ServiceError,
+    StreamRecord, TopicMeta, Topics,
 };
 
 use crate::auth::Permit;
@@ -54,11 +54,11 @@ const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_MAX_CHUNK_SIZE: usize = 64 * 1024;
 const DEFAULT_MAX_REQUEST_SIZE: usize = 32 * 1024 * 1024;
 
-/// The Pico frontend over one node's service + ownership pair.
+/// The Pico frontend over one node's topics + ownership pair.
 ///
 /// Defaults: 25s long poll, 55s SSE cap, 64 KiB chunks, 32 MiB request bodies.
 pub struct PicoFrontend {
-    service: Arc<S3StreamService>,
+    topics: Arc<Topics>,
     ownership: Arc<dyn OwnershipService>,
     authorizer: Option<Arc<Authorizer>>,
     mode: RoutingMode,
@@ -70,12 +70,12 @@ pub struct PicoFrontend {
 
 impl PicoFrontend {
     pub fn new(
-        service: Arc<S3StreamService>,
+        topics: Arc<Topics>,
         ownership: Arc<dyn OwnershipService>,
         mode: RoutingMode,
     ) -> Self {
         Self::with_tuning(
-            service,
+            topics,
             ownership,
             mode,
             Duration::from_secs(25),
@@ -86,7 +86,7 @@ impl PicoFrontend {
     }
 
     pub fn with_tuning(
-        service: Arc<S3StreamService>,
+        topics: Arc<Topics>,
         ownership: Arc<dyn OwnershipService>,
         mode: RoutingMode,
         long_poll_timeout: Duration,
@@ -95,7 +95,7 @@ impl PicoFrontend {
         max_request_size: usize,
     ) -> Self {
         Self {
-            service,
+            topics,
             ownership,
             authorizer: None,
             mode,
@@ -153,6 +153,7 @@ async fn dispatch(
     };
     if let Some(response) = route(
         frontend.ownership.as_ref(),
+        &frontend.topics,
         frontend.mode,
         &parts.method,
         &parts.uri,
@@ -228,40 +229,36 @@ impl PicoFrontend {
             .unwrap_or(DEFAULT_CT)
             .to_owned();
         let result = self
-            .service
+            .topics
             .create(CreateCommand {
-                name: name.to_owned(),
-                content_type: content_type.clone(),
                 ttl_seconds,
                 expires_at_ms,
                 closed: truthy(headers, H_CLOSED),
-                initial_records: Vec::new(),
-                external_id: None,
-                internal: false,
                 schema_name: header_str(headers, H_SCHEMA)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned),
                 schema_validate: truthy(headers, H_SCHEMA_VALIDATE),
-                kafka_topic: header_str(headers, H_KAFKA_TOPIC)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned),
+                ..CreateCommand::new(name, content_type.clone())
             })
             .await?;
         let meta = result.meta;
 
-        if !result.created && !mime_equals(Some(&meta.content_type), Some(&content_type)) {
+        if !result.created && !mime_equals(Some(&meta.topic.content_type), Some(&content_type)) {
             return Ok(error(
                 409,
                 E_CONFLICT,
-                &format!("stream exists with content type {}", meta.content_type),
-                Some(&meta.next_offset),
+                &format!(
+                    "stream exists with content type {}",
+                    meta.topic.content_type
+                ),
+                Some(next_of(&meta)),
             ));
         }
 
         let mut response = respond(
             if result.created { 201 } else { 200 },
-            Some(&meta.next_offset),
-            meta.closed,
+            Some(next_of(&meta)),
+            meta.topic.closed,
         );
         write_meta(&mut response, &meta);
         if result.created {
@@ -271,10 +268,10 @@ impl PicoFrontend {
     }
 
     async fn head(&self, name: &str) -> Result<Response, ServiceError> {
-        let Some(meta) = self.service.head(name).await? else {
+        let Some(meta) = self.topics.head(name).await? else {
             return Ok(respond(404, None, false));
         };
-        let mut response = respond(200, Some(&meta.next_offset), meta.closed);
+        let mut response = respond(200, Some(next_of(&meta)), meta.topic.closed);
         write_meta(&mut response, &meta);
         Ok(response)
     }
@@ -295,7 +292,7 @@ impl PicoFrontend {
             if !body.is_empty() {
                 return Err(bad_request("trim takes no body"));
             }
-            let start = self.service.trim(name, trim_seq).await?;
+            let start = self.topics.trim(name, 0, trim_seq).await?;
             let mut response = respond(200, None, false);
             set_header(&mut response, H_START_SEQ, &start.to_string());
             return Ok(response);
@@ -324,16 +321,19 @@ impl PicoFrontend {
         let count = records.len() as u64;
 
         let result = self
-            .service
-            .append(AppendCommand {
-                name: name.to_owned(),
-                records,
-                content_type: None,
-                stream_seq: None,
-                match_seq,
-                producer,
-                close_after: close,
-            })
+            .topics
+            .append(
+                name,
+                0,
+                AppendCommand {
+                    records,
+                    content_type: None,
+                    stream_seq: None,
+                    match_seq,
+                    producer,
+                    close_after: close,
+                },
+            )
             .await?;
 
         let mut response = respond(200, Some(&result.next_offset), result.closed);
@@ -352,7 +352,7 @@ impl PicoFrontend {
     }
 
     async fn delete(&self, name: &str) -> Result<Response, ServiceError> {
-        let deleted = self.service.delete(name).await?;
+        let deleted = self.topics.delete(name).await?;
         Ok(respond(if deleted { 204 } else { 404 }, None, false))
     }
 
@@ -396,28 +396,28 @@ impl PicoFrontend {
             (_, after) => after,
         };
         let limit = parse_strict_u64(query_param(uri, Q_LIMIT).as_deref(), "invalid limit")?;
-        let result = self
-            .service
-            .list(&prefix, start_after.as_deref(), limit.unwrap_or(0) as usize)
-            .await?;
+        let result =
+            self.topics
+                .list(&prefix, start_after.as_deref(), limit.unwrap_or(0) as usize)?;
 
         let listing = Listing {
             streams: result
-                .streams
+                .topics
                 .iter()
                 .map(|meta| {
+                    let spelling = meta.topic.name.spelling();
                     let name = match permit {
-                        Some(permit) => permit.principal.scope.strip_stream_name(&meta.name),
-                        None => &meta.name,
+                        Some(permit) => permit.principal.scope.strip_stream_name(spelling),
+                        None => spelling,
                     };
                     StreamEntry {
                         name: name.to_owned(),
-                        content_type: Some(meta.content_type.clone()),
-                        start_seq: meta.start_offset.record_offset(),
-                        next_seq: meta.next_offset.record_offset(),
-                        closed: meta.closed,
-                        ttl_seconds: meta.ttl_seconds,
-                        expires_at: meta.expires_at_ms.map(format_instant),
+                        content_type: Some(meta.topic.content_type.clone()),
+                        start_seq: meta.partitions[0].start_offset.record_offset(),
+                        next_seq: next_of(meta).record_offset(),
+                        closed: meta.topic.closed,
+                        ttl_seconds: meta.topic.ttl_seconds,
+                        expires_at: meta.topic.expires_at_ms.map(format_instant),
                     }
                 })
                 .collect(),
@@ -444,8 +444,8 @@ impl PicoFrontend {
             None => self.max_chunk_size,
             Some(bytes) => (bytes as usize).min(cap),
         };
-        self.service
-            .read(name, seq, max_bytes, count.unwrap_or(0) as usize)
+        self.topics
+            .read(name, 0, seq, max_bytes, count.unwrap_or(0) as usize)
             .await
     }
 
@@ -465,8 +465,8 @@ impl PicoFrontend {
         }
 
         if self
-            .service
-            .wait_appended(name, seq, self.long_poll_timeout)
+            .topics
+            .wait_appended(name, 0, seq, self.long_poll_timeout)
             .await?
         {
             let out = self.read(name, seq, uri).await?;
@@ -475,22 +475,22 @@ impl PicoFrontend {
             return Ok(response);
         }
 
-        let Some(meta) = self.service.head(name).await? else {
+        let Some(meta) = self.topics.head(name).await? else {
             return Ok(respond(404, None, false));
         };
-        let mut response = respond(204, Some(&meta.next_offset), meta.closed);
+        let mut response = respond(204, Some(next_of(&meta)), meta.topic.closed);
         set_header(&mut response, H_CURSOR, &cursor.to_string());
         set_header(&mut response, H_UP_TO_DATE, "true");
         Ok(response)
     }
 
     async fn sse(&self, name: &str, start: OffsetToken) -> Result<Response, ServiceError> {
-        if self.service.head(name).await?.is_none() {
+        if self.topics.head(name).await?.is_none() {
             return Ok(respond(404, None, false));
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(8);
-        let service = self.service.clone();
+        let topics = self.topics.clone();
         let name = name.to_owned();
         let max_chunk_size = self.max_chunk_size;
         let deadline = tokio::time::Instant::now() + self.sse_max_duration;
@@ -498,7 +498,7 @@ impl PicoFrontend {
             let mut seq = start;
             let mut announced_caught_up = false;
             while tokio::time::Instant::now() < deadline {
-                let Ok(read) = service.read(&name, seq, max_chunk_size, 0).await else {
+                let Ok(read) = topics.read(&name, 0, seq, max_chunk_size, 0).await else {
                     return;
                 };
 
@@ -541,8 +541,8 @@ impl PicoFrontend {
                     announced_caught_up = true;
                 }
 
-                if service
-                    .wait_appended(&name, seq, Duration::from_secs(1))
+                if topics
+                    .wait_appended(&name, 0, seq, Duration::from_secs(1))
                     .await
                     .is_err()
                 {
@@ -656,10 +656,10 @@ impl PicoFrontend {
         };
         if raw.eq_ignore_ascii_case(SEQ_NOW) {
             return self
-                .service
+                .topics
                 .head(name)
                 .await?
-                .map(|meta| meta.next_offset)
+                .map(|meta| *next_of(&meta))
                 .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound));
         }
         OffsetToken::parse(Some(&raw))
@@ -776,25 +776,30 @@ fn producer_of(
     Ok(Some(picomq_server::types::Producer::new(id, epoch, seq)?))
 }
 
-fn write_meta(response: &mut Response, meta: &StreamMeta) {
-    set_header(response, header::CONTENT_TYPE.as_str(), &meta.content_type);
+fn write_meta(response: &mut Response, meta: &TopicMeta) {
+    let topic = &meta.topic;
+    set_header(response, header::CONTENT_TYPE.as_str(), &topic.content_type);
     set_header(
         response,
         H_START_SEQ,
-        &meta.start_offset.record_offset().to_string(),
+        &meta.partitions[0].start_offset.record_offset().to_string(),
     );
-    if let Some(ttl) = meta.ttl_seconds {
+    if let Some(ttl) = topic.ttl_seconds {
         set_header(response, H_TTL, &ttl.to_string());
     }
-    if let Some(expires_at_ms) = meta.expires_at_ms {
+    if let Some(expires_at_ms) = topic.expires_at_ms {
         set_header(response, H_EXPIRES_AT, &format_instant(expires_at_ms));
     }
-    if let Some(schema_name) = &meta.schema_name {
+    if let Some(schema_name) = &topic.schema_name {
         set_header(response, H_SCHEMA, schema_name);
     }
-    if let Some(topic) = &meta.kafka_topic {
-        set_header(response, H_KAFKA_TOPIC, topic);
+    if let Some(kafka) = topic.name.kafka() {
+        set_header(response, H_KAFKA_TOPIC, kafka);
     }
+}
+
+fn next_of(meta: &TopicMeta) -> &OffsetToken {
+    &meta.partitions[0].next_offset
 }
 
 fn to_sequenced(records: &[StreamRecord]) -> Vec<SequencedRecord> {

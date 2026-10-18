@@ -67,7 +67,7 @@ async fn process(
             .streams
             .get(&stream_id)
             .is_some_and(|row| row.node_id == node_id && row.state == StreamState::Closed);
-        if owned && let Err(error) = service.ensure_open(stream_id).await {
+        if owned && let Err(error) = service.streams().ensure_open(stream_id).await {
             tracing::debug!(%error, stream_id, "transfer pre-warm open failed");
         }
     }
@@ -79,7 +79,7 @@ async fn release_and_complete(service: &S3StreamService, view: &MetadataView, st
     let Some(row) = view.state.streams.get(&stream_id).copied() else {
         return;
     };
-    let node = service.node();
+    let node = service.streams().node();
     let epoch = match row.state {
         StreamState::Closed => row.epoch,
         StreamState::Opened if row.node_id == node.node_id() => {

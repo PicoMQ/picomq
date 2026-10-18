@@ -1,8 +1,7 @@
-//! Scale gates for the data plane: many named streams on one node, each
-//! taking appends through the service. Complements the metadata-plane gates
-//! (`picomq-metadata`/`picomq-sql` scale tests) by exercising the per-stream
-//! state this layer holds: registry entries, entry cache, gates, and open
-//! engine streams.
+//! Scale gates for the data plane: many topics on one node, each taking
+//! appends. Complements the metadata-plane gates (`picomq-metadata`/
+//! `picomq-sql` scale tests) by exercising the per-topic state this layer
+//! holds: topic records, log entries, gates, and open engine streams.
 //!
 //! The default gate runs 50k streams. The 1M gate is `#[ignore]`d; run it
 //! explicitly with
@@ -69,7 +68,7 @@ async fn run_gate(total: u64) {
     )
     .await
     .unwrap();
-    let service = node.service();
+    let service = node.topics();
     let base_rss = rss_mib();
 
     // Phase 1: create `total` streams.
@@ -96,11 +95,9 @@ async fn run_gate(total: u64) {
         (create_rss - base_rss) * 1024.0 / total as f64
     );
 
-    // One registry entry, one `idx/sid/` and one `idx/topic/` record per
-    // stream.
     {
         let view = node.views().load();
-        assert_eq!(view.state.kv.len() as u64, 3 * total);
+        assert_eq!(view.state.kv.len() as u64, 4 * total);
         assert!(view.state.kv_bytes > 0);
         println!(
             "kv entries: {}, kv bytes: {} ({:.0} B/stream)",
@@ -117,12 +114,15 @@ async fn run_gate(total: u64) {
         let service = append_service.clone();
         async move {
             let appended = service
-                .append(AppendCommand {
-                    name: format!("/scale/{i}"),
-                    records: vec![LogRecord::value(Bytes::from_static(&[7u8; 128]))],
-                    content_type: Some("application/octet-stream".into()),
-                    ..Default::default()
-                })
+                .append(
+                    &format!("/scale/{i}"),
+                    0,
+                    AppendCommand {
+                        records: vec![LogRecord::value(Bytes::from_static(&[7u8; 128]))],
+                        content_type: Some("application/octet-stream".into()),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
             assert_eq!(appended.next_offset.record_offset(), 1);
@@ -142,7 +142,7 @@ async fn run_gate(total: u64) {
     let step = (total / 1_000).max(1);
     for i in (0..total).step_by(step as usize) {
         let read = service
-            .read(&format!("/scale/{i}"), OffsetToken::beginning(), 0, 0)
+            .read(&format!("/scale/{i}"), 0, OffsetToken::beginning(), 0, 0)
             .await
             .unwrap();
         assert_eq!(read.records.len(), 1);
@@ -161,12 +161,15 @@ async fn run_gate(total: u64) {
         let name = format!("/scale/{}", i * (total / warm.max(1)).max(1) % total);
         async move {
             service
-                .append(AppendCommand {
-                    name,
-                    records: vec![LogRecord::value(Bytes::from_static(&[8u8; 128]))],
-                    content_type: Some("application/octet-stream".into()),
-                    ..Default::default()
-                })
+                .append(
+                    &name,
+                    0,
+                    AppendCommand {
+                        records: vec![LogRecord::value(Bytes::from_static(&[8u8; 128]))],
+                        content_type: Some("application/octet-stream".into()),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
         }

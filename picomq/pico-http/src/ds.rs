@@ -32,8 +32,8 @@ use picomq_protocol::mime::{is_json, mime_of};
 use picomq_server::ownership::OwnershipService;
 use picomq_server::types::Producer;
 use picomq_server::{
-    AppendCommand, CreateCommand, ErrorKind, LogRecord, OffsetToken, ReadResult, S3StreamService,
-    ServiceError,
+    AppendCommand, CreateCommand, ErrorKind, LogRecord, OffsetToken, ReadResult, ServiceError,
+    TopicMeta, Topics,
 };
 
 use crate::http::{
@@ -49,11 +49,11 @@ const CACHE_CATCH_UP: &str = "public, max-age=60, stale-while-revalidate=300";
 const DEFAULT_MAX_CHUNK_SIZE: usize = 64 * 1024;
 const DEFAULT_MAX_REQUEST_SIZE: usize = 32 * 1024 * 1024;
 
-/// The Durable Streams frontend over one node's service + ownership pair.
+/// The Durable Streams frontend over one node's topics + ownership pair.
 ///
 /// Defaults: 25s long poll, 55s SSE cap, 64 KiB chunks, 32 MiB request bodies.
 pub struct DsFrontend {
-    service: Arc<S3StreamService>,
+    topics: Arc<Topics>,
     ownership: Arc<dyn OwnershipService>,
     authorizer: Option<Arc<Authorizer>>,
     mode: RoutingMode,
@@ -65,12 +65,12 @@ pub struct DsFrontend {
 
 impl DsFrontend {
     pub fn new(
-        service: Arc<S3StreamService>,
+        topics: Arc<Topics>,
         ownership: Arc<dyn OwnershipService>,
         mode: RoutingMode,
     ) -> Self {
         Self::with_tuning(
-            service,
+            topics,
             ownership,
             mode,
             Duration::from_secs(25),
@@ -81,7 +81,7 @@ impl DsFrontend {
     }
 
     pub fn with_tuning(
-        service: Arc<S3StreamService>,
+        topics: Arc<Topics>,
         ownership: Arc<dyn OwnershipService>,
         mode: RoutingMode,
         long_poll_timeout: Duration,
@@ -90,7 +90,7 @@ impl DsFrontend {
         max_request_size: usize,
     ) -> Self {
         Self {
-            service,
+            topics,
             ownership,
             authorizer: None,
             mode,
@@ -147,6 +147,7 @@ async fn dispatch(
     };
     if let Some(response) = route(
         frontend.ownership.as_ref(),
+        &frontend.topics,
         frontend.mode,
         &parts.method,
         &parts.uri,
@@ -178,7 +179,7 @@ impl DsFrontend {
             Method::OPTIONS => Ok(options()),
             Method::PUT => self.put(&uri, &headers, body, name).await,
             Method::POST => self.post(&uri, &headers, body, name).await,
-            Method::DELETE => match self.service.delete(&name).await {
+            Method::DELETE => match self.topics.delete(&name).await {
                 Ok(deleted) => Ok(respond(if deleted { 204 } else { 404 }, None, false)),
                 Err(e) => Err(e),
             },
@@ -213,34 +214,30 @@ impl DsFrontend {
             records_of(&content_type, &body, true)?
         };
         let result = self
-            .service
+            .topics
             .create(CreateCommand {
-                name,
-                content_type,
                 ttl_seconds,
                 expires_at_ms,
                 closed: truthy(headers, H_STREAM_CLOSED),
                 initial_records,
-                external_id: None,
-                internal: false,
                 schema_name: header_str(headers, H_STREAM_SCHEMA)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned),
                 schema_validate: truthy(headers, H_STREAM_SCHEMA_VALIDATE),
-                kafka_topic: None,
+                ..CreateCommand::new(name, content_type)
             })
             .await?;
         let meta = result.meta;
 
         let mut response = respond(
             if result.created { 201 } else { 200 },
-            Some(&meta.next_offset),
-            meta.closed,
+            Some(next_of(&meta)),
+            meta.topic.closed,
         );
         set_header(
             &mut response,
             header::CONTENT_TYPE.as_str(),
-            &meta.content_type,
+            &meta.topic.content_type,
         );
         if result.created {
             let mut location = self
@@ -277,10 +274,11 @@ impl DsFrontend {
         };
 
         let result = self
-            .service
+            .topics
             .append(
+                &name,
+                0,
                 AppendCommand {
-                    name,
                     records,
                     content_type: content_type.clone(),
                     stream_seq: header_str(headers, H_STREAM_SEQ).map(str::to_owned),
@@ -311,26 +309,27 @@ impl DsFrontend {
     }
 
     async fn head(&self, name: &str) -> Result<Response, ServiceError> {
-        let Some(meta) = self.service.head(name).await? else {
+        let Some(meta) = self.topics.head(name).await? else {
             return Ok(respond(404, None, false));
         };
-        let mut response = respond(200, Some(&meta.next_offset), meta.closed);
+        let topic = &meta.topic;
+        let mut response = respond(200, Some(next_of(&meta)), topic.closed);
         set_header(
             &mut response,
             header::CONTENT_TYPE.as_str(),
-            &meta.content_type,
+            &topic.content_type,
         );
-        if let Some(ttl) = meta.ttl_seconds {
+        if let Some(ttl) = topic.ttl_seconds {
             set_header(&mut response, H_STREAM_TTL, &ttl.to_string());
         }
-        if let Some(expires_at_ms) = meta.expires_at_ms {
+        if let Some(expires_at_ms) = topic.expires_at_ms {
             set_header(
                 &mut response,
                 H_STREAM_EXPIRES_AT,
                 &format_instant(expires_at_ms),
             );
         }
-        if let Some(schema_name) = &meta.schema_name {
+        if let Some(schema_name) = &topic.schema_name {
             set_header(&mut response, H_STREAM_SCHEMA, schema_name);
         }
         Ok(response)
@@ -355,8 +354,8 @@ impl DsFrontend {
         match live.as_deref() {
             None => {
                 let out = self
-                    .service
-                    .read(name, offset, self.max_chunk_size, 0)
+                    .topics
+                    .read(name, 0, offset, self.max_chunk_size, 0)
                     .await?;
                 self.write_read(headers, name, offset, out, false, offset_now)
             }
@@ -378,8 +377,8 @@ impl DsFrontend {
     ) -> Result<Response, ServiceError> {
         let cursor = cursor(cursor_raw);
         let out = self
-            .service
-            .read(name, offset, self.max_chunk_size, 0)
+            .topics
+            .read(name, 0, offset, self.max_chunk_size, 0)
             .await?;
         if !(out.records.is_empty() && out.up_to_date) || out.closed {
             let mut response = self.write_read(headers, name, offset, out, true, false)?;
@@ -388,23 +387,23 @@ impl DsFrontend {
         }
 
         if self
-            .service
-            .wait_appended(name, offset, self.long_poll_timeout)
+            .topics
+            .wait_appended(name, 0, offset, self.long_poll_timeout)
             .await?
         {
             let out = self
-                .service
-                .read(name, offset, self.max_chunk_size, 0)
+                .topics
+                .read(name, 0, offset, self.max_chunk_size, 0)
                 .await?;
             let mut response = self.write_read(headers, name, offset, out, true, false)?;
             set_header(&mut response, H_STREAM_CURSOR, &cursor.to_string());
             return Ok(response);
         }
 
-        let Some(meta) = self.service.head(name).await? else {
+        let Some(meta) = self.topics.head(name).await? else {
             return Ok(respond(404, None, false));
         };
-        let mut response = respond(204, Some(&meta.next_offset), meta.closed);
+        let mut response = respond(204, Some(next_of(&meta)), meta.topic.closed);
         set_header(&mut response, H_STREAM_CURSOR, &cursor.to_string());
         set_header(&mut response, H_STREAM_UP_TO_DATE, "true");
         Ok(response)
@@ -419,10 +418,10 @@ impl DsFrontend {
         start: OffsetToken,
         cursor_raw: Option<&str>,
     ) -> Result<Response, ServiceError> {
-        let Some(meta) = self.service.head(name).await? else {
+        let Some(meta) = self.topics.head(name).await? else {
             return Ok(respond(404, None, false));
         };
-        let encoder = SseEncoder::new(&meta.content_type);
+        let encoder = SseEncoder::new(&meta.topic.content_type);
         let cursor = cursor(cursor_raw);
 
         let mut response = base_response(200);
@@ -437,7 +436,7 @@ impl DsFrontend {
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(8);
-        let service = self.service.clone();
+        let topics = self.topics.clone();
         let name = name.to_owned();
         let max_chunk_size = self.max_chunk_size;
         let deadline = tokio::time::Instant::now() + self.sse_max_duration;
@@ -445,7 +444,7 @@ impl DsFrontend {
             let mut offset = start;
             let mut announced_caught_up = false;
             while tokio::time::Instant::now() < deadline {
-                let Ok(read) = service.read(&name, offset, max_chunk_size, 0).await else {
+                let Ok(read) = topics.read(&name, 0, offset, max_chunk_size, 0).await else {
                     return;
                 };
 
@@ -489,8 +488,8 @@ impl DsFrontend {
                     announced_caught_up = true;
                 }
 
-                if service
-                    .wait_appended(&name, offset, Duration::from_secs(1))
+                if topics
+                    .wait_appended(&name, 0, offset, Duration::from_secs(1))
                     .await
                     .is_err()
                 {
@@ -580,14 +579,18 @@ impl DsFrontend {
         };
         if raw.eq_ignore_ascii_case(OFFSET_NOW) {
             return self
-                .service
+                .topics
                 .head(name)
                 .await?
-                .map(|meta| meta.next_offset)
+                .map(|meta| *next_of(&meta))
                 .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound));
         }
         OffsetToken::parse(Some(raw))
     }
+}
+
+fn next_of(meta: &TopicMeta) -> &OffsetToken {
+    &meta.partitions[0].next_offset
 }
 
 fn options() -> Response {

@@ -308,7 +308,7 @@ async fn gated(scope: Scope) -> (picomq_http::RunningServer, String) {
         })
         .await
         .unwrap();
-    node.service()
+    node.topics()
         .create(picomq_server::CreateCommand::new(
             "/acct/orders",
             "text/plain",
@@ -441,14 +441,21 @@ async fn auto_prefix_scopes_see_relative_names() {
         fetched["offsets"],
         json!({ "orders": { "position": 11, "metadata": null } })
     );
+    let topic = server
+        .node()
+        .topics()
+        .get("/acct/orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let stored = server
+        .node()
+        .groups()
+        .fetch_offsets("g", None)
+        .await
+        .unwrap();
     assert_eq!(
-        server
-            .node()
-            .groups()
-            .fetch_offsets("g", None)
-            .await
-            .unwrap()["/acct/orders"]
-            .position,
+        stored[&picomq_server::Partition::new(topic.id, 0)].position,
         11
     );
 }

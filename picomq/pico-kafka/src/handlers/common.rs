@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::{BrokerId, ResponseHeader, TopicName};
 use kafka_protocol::protocol::{Encodable, HeaderVersion, StrBytes};
 use picomq_metadata::MetadataState;
-use picomq_server::{ErrorKind, ServiceError, alias};
+use picomq_server::{ErrorKind, Log, ServiceError, Topic, partition_log};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
@@ -66,10 +66,6 @@ pub fn topic_uuid(bytes: [u8; 16]) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-pub fn new_topic_id() -> [u8; 16] {
-    *Uuid::new_v4().as_bytes()
-}
-
 pub fn service_error_code(error: &ServiceError) -> i16 {
     match error.kind {
         ErrorKind::NotFound => UNKNOWN_TOPIC_OR_PARTITION,
@@ -86,11 +82,11 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
     }
 }
 
-pub async fn ensure_local_leader(ctx: &BrokerContext, stream_name: &str) -> Result<(), i16> {
+pub async fn ensure_local_leader(ctx: &BrokerContext, log: &Log) -> Result<(), i16> {
     use picomq_server::OwnershipService;
     let owner = ctx
         .ownership
-        .owner_of(stream_name)
+        .owner_of(log)
         .await
         .map_err(|_| NOT_LEADER_OR_FOLLOWER)?;
     if owner.local {
@@ -122,15 +118,19 @@ pub fn parse_host_port(address: &str) -> (String, i32) {
     }
 }
 
-pub async fn resolve_topic(ctx: &BrokerContext, topic: &str) -> Result<String, i16> {
-    if !alias::is_valid_topic(topic) {
-        return Err(UNKNOWN_TOPIC_OR_PARTITION);
-    }
-    ctx.service
-        .lookup_by_topic(topic)
+pub async fn resolve_topic(ctx: &BrokerContext, topic: &str) -> Result<Topic, i16> {
+    ctx.topics
+        .get_kafka(topic)
         .await
         .map_err(|error| service_error_code(&error))?
         .ok_or(UNKNOWN_TOPIC_OR_PARTITION)
+}
+
+pub async fn leader_log(ctx: &BrokerContext, topic: &Topic, index: i32) -> Result<Log, i16> {
+    let index = u32::try_from(index).map_err(|_| UNKNOWN_TOPIC_OR_PARTITION)?;
+    let log = partition_log(topic, index).map_err(|_| UNKNOWN_TOPIC_OR_PARTITION)?;
+    ensure_local_leader(ctx, &log).await?;
+    Ok(log)
 }
 
 pub fn is_internal_topic(topic: &str) -> bool {

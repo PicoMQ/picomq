@@ -145,8 +145,8 @@ async fn auto_prefix_resolves_stores_and_strips() {
             .unwrap(),
         "/orders"
     );
-    assert!(node.service().head("/acct/orders").await.unwrap().is_some());
-    assert!(node.service().head("/orders").await.unwrap().is_none());
+    assert!(node.topics().head("/acct/orders").await.unwrap().is_some());
+    assert!(node.topics().head("/orders").await.unwrap().is_none());
 
     let response = client
         .get(format!("{base}/orders"))
@@ -258,7 +258,7 @@ async fn auto_prefix_isolates_tenants() {
             .status(),
         201
     );
-    assert!(node.service().head("/a/orders").await.unwrap().is_some());
+    assert!(node.topics().head("/a/orders").await.unwrap().is_some());
 
     // The same client name is a different stream for the other tenant.
     assert_eq!(

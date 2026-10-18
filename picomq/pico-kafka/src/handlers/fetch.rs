@@ -7,14 +7,14 @@ use futures::future::select_all;
 use kafka_protocol::messages::FetchRequest;
 use kafka_protocol::messages::fetch_response::{FetchableTopicResponse, PartitionData};
 use kafka_protocol::protocol::Decodable;
-use picomq_server::OffsetToken;
+use picomq_server::{Log, OffsetToken, Topic, TopicId};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    NO_ERROR, OFFSET_OUT_OF_RANGE, UNKNOWN_TOPIC_ID, UNKNOWN_TOPIC_OR_PARTITION, concat_batches,
-    encode_response, ensure_local_leader, resolve_topic, service_error_code, topic_name,
+    NO_ERROR, OFFSET_OUT_OF_RANGE, UNKNOWN_TOPIC_ID, concat_batches, encode_response, leader_log,
+    resolve_topic, service_error_code, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -23,14 +23,14 @@ const FETCH_TOPIC_ID_VERSION: i16 = 13;
 struct ResolvedTopic {
     name: String,
     topic_id: Uuid,
-    stream: Result<String, i16>,
+    topic: Result<Topic, i16>,
     partitions: Vec<(i32, i64)>,
 }
 
 struct PartitionRead {
     data: PartitionData,
     bytes: usize,
-    wait: Option<(String, u64)>,
+    wait: Option<(Log, u64)>,
 }
 
 pub async fn handle(
@@ -73,20 +73,20 @@ pub async fn handle(
         let mut responses = Vec::with_capacity(topics.len());
         let mut total_bytes = 0usize;
         let mut any_error = false;
-        let mut waits: Vec<(String, u64)> = Vec::new();
+        let mut waits: Vec<(Log, u64)> = Vec::new();
 
         for topic in &topics {
             let mut partitions = Vec::with_capacity(topic.partitions.len());
             for &(partition_index, fetch_offset) in &topic.partitions {
-                let read = match &topic.stream {
+                let read = match &topic.topic {
                     Err(code) => error_partition(partition_index, *code),
-                    Ok(_) if partition_index != 0 => {
-                        error_partition(partition_index, UNKNOWN_TOPIC_OR_PARTITION)
-                    }
-                    Ok(stream) => {
-                        let budget = max_bytes.saturating_sub(total_bytes).max(1);
-                        read_partition(ctx, stream, fetch_offset, budget).await
-                    }
+                    Ok(resolved) => match leader_log(ctx, resolved, partition_index).await {
+                        Err(code) => error_partition(partition_index, code),
+                        Ok(log) => {
+                            let budget = max_bytes.saturating_sub(total_bytes).max(1);
+                            read_partition(ctx, log, partition_index, fetch_offset, budget).await
+                        }
+                    },
                 };
                 total_bytes += read.bytes;
                 if read.data.error_code != NO_ERROR {
@@ -122,11 +122,11 @@ pub async fn handle(
             )));
         }
 
-        let waiters = waits.iter().map(|(stream, high_watermark)| {
+        let waiters = waits.iter().map(|(log, high_watermark)| {
             let service = ctx.service.clone();
-            let stream = stream.clone();
+            let log = log.clone();
             let from = OffsetToken::of_record_offset(*high_watermark);
-            Box::pin(async move { service.wait_appended(&stream, from, remaining).await })
+            Box::pin(async move { service.wait_appended(&log, from, remaining).await })
         });
         let _ = select_all(waiters).await;
     }
@@ -140,105 +140,94 @@ async fn resolve_fetch_topic(
     partitions: Vec<(i32, i64)>,
 ) -> ResolvedTopic {
     if api_version >= FETCH_TOPIC_ID_VERSION {
-        let stream = match ctx
-            .service
-            .lookup_by_external_id(*requested_id.as_bytes())
-            .await
-        {
-            Ok(Some(stream)) => match ctx.service.describe(&stream).await {
-                Ok(Some(meta)) if meta.kafka_topic.is_some() => Ok((meta.kafka_topic, stream)),
-                Ok(_) => Err(UNKNOWN_TOPIC_ID),
-                Err(error) => Err(service_error_code(&error)),
-            },
-            Ok(None) => Err(UNKNOWN_TOPIC_ID),
+        let topic = match ctx.topics.by_id(&TopicId(*requested_id.as_bytes())).await {
+            Ok(Some(topic)) if topic.name.kafka().is_some() => Ok(topic),
+            Ok(_) => Err(UNKNOWN_TOPIC_ID),
             Err(error) => Err(service_error_code(&error)),
         };
-        let (name, stream) = match stream {
-            Ok((topic, stream)) => (topic.unwrap_or_default(), ensure_leader(ctx, stream).await),
-            Err(code) => (String::new(), Err(code)),
-        };
+        let name = topic
+            .as_ref()
+            .ok()
+            .and_then(|topic| topic.name.kafka())
+            .unwrap_or_default()
+            .to_owned();
+
         return ResolvedTopic {
             name,
             topic_id: requested_id,
-            stream,
+            topic,
             partitions,
         };
     }
 
     let name = requested_name.to_string();
-    let stream = match resolve_topic(ctx, &name).await {
-        Ok(stream) => ensure_leader(ctx, stream).await,
-        Err(code) => Err(code),
-    };
+    let topic = resolve_topic(ctx, &name).await;
     ResolvedTopic {
         name,
         topic_id: requested_id,
-        stream,
+        topic,
         partitions,
     }
 }
 
-async fn ensure_leader(ctx: &BrokerContext, stream: String) -> Result<String, i16> {
-    ensure_local_leader(ctx, &stream).await?;
-    Ok(stream)
-}
-
 async fn read_partition(
     ctx: &BrokerContext,
-    stream: &str,
+    log: Log,
+    index: i32,
     fetch_offset: i64,
     max_bytes: usize,
 ) -> PartitionRead {
     if fetch_offset < 0 {
-        return error_partition(0, OFFSET_OUT_OF_RANGE);
+        return error_partition(index, OFFSET_OUT_OF_RANGE);
     }
+
     let from = fetch_offset as u64;
-    let watermarks = match ctx.service.watermarks(stream).await {
+    let watermarks = match ctx.service.watermarks(&log).await {
         Ok(watermarks) => watermarks,
-        Err(error) => return error_partition(0, service_error_code(&error)),
+        Err(error) => return error_partition(index, service_error_code(&error)),
     };
     if from < watermarks.log_start_offset || from > watermarks.high_watermark {
         return PartitionRead {
-            data: partition_data(OFFSET_OUT_OF_RANGE, &watermarks, None),
+            data: partition_data(index, OFFSET_OUT_OF_RANGE, &watermarks, None),
             bytes: 0,
             wait: None,
         };
     }
     if from == watermarks.high_watermark {
         return PartitionRead {
-            data: partition_data(NO_ERROR, &watermarks, None),
+            data: partition_data(index, NO_ERROR, &watermarks, None),
             bytes: 0,
-            wait: Some((stream.to_owned(), watermarks.high_watermark)),
+            wait: Some((log, watermarks.high_watermark)),
         };
     }
-    match ctx.service.read_batches(stream, from, max_bytes).await {
+
+    match ctx.service.read_batches(&log, from, max_bytes).await {
         Ok(read) => {
             let payload = concat_batches(&read.batches);
             let bytes = payload.len();
+            let watermarks = picomq_server::StreamWatermarks {
+                log_start_offset: read.log_start_offset,
+                high_watermark: read.high_watermark,
+            };
+
             PartitionRead {
-                data: partition_data(
-                    NO_ERROR,
-                    &picomq_server::StreamWatermarks {
-                        log_start_offset: read.log_start_offset,
-                        high_watermark: read.high_watermark,
-                    },
-                    Some(payload),
-                ),
+                data: partition_data(index, NO_ERROR, &watermarks, Some(payload)),
                 bytes,
-                wait: Some((stream.to_owned(), read.high_watermark)),
+                wait: Some((log, read.high_watermark)),
             }
         }
-        Err(error) => error_partition(0, service_error_code(&error)),
+        Err(error) => error_partition(index, service_error_code(&error)),
     }
 }
 
 fn partition_data(
+    index: i32,
     error_code: i16,
     watermarks: &picomq_server::StreamWatermarks,
     records: Option<Bytes>,
 ) -> PartitionData {
     PartitionData::default()
-        .with_partition_index(0)
+        .with_partition_index(index)
         .with_error_code(error_code)
         .with_high_watermark(watermarks.high_watermark as i64)
         .with_last_stable_offset(watermarks.high_watermark as i64)

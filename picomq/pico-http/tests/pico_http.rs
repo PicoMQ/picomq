@@ -469,14 +469,19 @@ async fn live_reads() {
 #[tokio::test]
 async fn remote_owner_redirects() {
     use picomq_server::ownership::OwnershipService;
-    use picomq_server::{NodeMeta, Owner, ServiceError};
+    use picomq_server::{Log, NodeMeta, Owner, ServiceError};
 
     struct RemoteOwnership;
 
     #[async_trait::async_trait]
     impl OwnershipService for RemoteOwnership {
-        async fn owner_of(&self, _name: &str) -> Result<Owner, ServiceError> {
-            Ok(Owner::remote(7, 2, "http://owner.example:4437/".to_owned()))
+        async fn owner_of(&self, _log: &Log) -> Result<Owner, ServiceError> {
+            Ok(Owner::remote(
+                7,
+                1,
+                2,
+                "http://owner.example:4437/".to_owned(),
+            ))
         }
 
         fn local_node(&self) -> NodeMeta {
@@ -488,8 +493,15 @@ async fn remote_owner_redirects() {
     }
 
     let node = common::start_node().await;
+    node.topics()
+        .create(picomq_server::CreateCommand::new(
+            "/streams/demo",
+            "text/plain",
+        ))
+        .await
+        .unwrap();
     let frontend = std::sync::Arc::new(picomq_http::PicoFrontend::new(
-        node.service(),
+        node.topics(),
         std::sync::Arc::new(RemoteOwnership),
         picomq_http::RoutingMode::Redirect,
     ));
@@ -511,16 +523,14 @@ async fn remote_owner_redirects() {
         "http://owner.example:4437/streams/demo?seq=0&format=raw"
     );
 
-    // PUT is always local: create places the stream here.
     let put = http
-        .put(format!("{base_url}/streams/demo"))
+        .put(format!("{base_url}/streams/fresh"))
         .header("Content-Type", "text/plain")
         .send()
         .await
         .unwrap();
     assert_eq!(put.status(), 201);
 
-    // The list root is always local too.
     let list = http.get(format!("{base_url}/")).send().await.unwrap();
     assert_eq!(list.status(), 200);
 }

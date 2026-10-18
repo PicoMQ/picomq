@@ -117,6 +117,11 @@ fn apply_inner(
         MetadataCommand::DeleteKvIfMatches { key, expected } => {
             delete_kv_if_matches(state, key, expected)
         }
+        MetadataCommand::PutKvIfMatches {
+            key,
+            expected,
+            value,
+        } => put_kv_if_matches(state, key, expected, value),
         MetadataCommand::TransferStream {
             stream_id,
             from_node,
@@ -1140,6 +1145,20 @@ fn delete_kv(state: &mut MetadataState, key: &str) -> Result<MetadataResult, Met
     Ok(MetadataResult::Value(removed))
 }
 
+fn put_kv_if_matches(
+    state: &mut MetadataState,
+    key: &str,
+    expected: &bytes::Bytes,
+    value: &bytes::Bytes,
+) -> Result<MetadataResult, MetadataError> {
+    match state.kv.get(key) {
+        Some(current) if current == expected => put_kv(state, key, value),
+        _ => Err(MetadataError::Redundant {
+            message: format!("kv key {key} missing or value mismatch"),
+        }),
+    }
+}
+
 fn delete_kv_if_matches(
     state: &mut MetadataState,
     key: &str,
@@ -1841,6 +1860,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn put_kv_if_matches_swaps_only_the_expected_value() {
+        let mut state = MetadataState::new();
+        let hello = Bytes::from_static(b"hello");
+        let world = Bytes::from_static(b"world!");
+
+        assert!(
+            apply(
+                &mut state,
+                &MetadataCommand::PutKvIfMatches {
+                    key: "k".into(),
+                    expected: hello.clone(),
+                    value: world.clone(),
+                },
+            )
+            .unwrap_err()
+            .is_redundant()
+        );
+        assert!(state.kv.get("k").is_none());
+
+        apply(
+            &mut state,
+            &MetadataCommand::PutKv {
+                key: "k".into(),
+                value: hello.clone(),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            apply(
+                &mut state,
+                &MetadataCommand::PutKvIfMatches {
+                    key: "k".into(),
+                    expected: world.clone(),
+                    value: world.clone(),
+                },
+            )
+            .unwrap_err()
+            .is_redundant()
+        );
+        assert_eq!(state.kv.get("k"), Some(&hello));
+
+        let result = apply(
+            &mut state,
+            &MetadataCommand::PutKvIfMatches {
+                key: "k".into(),
+                expected: hello,
+                value: world.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result, MetadataResult::Value(Some(world.clone())));
+        assert_eq!(state.kv.get("k"), Some(&world));
+        assert_eq!(state.kv_bytes, ("k".len() + world.len()) as u64);
+    }
+
     /// Determinism over a scripted random command sequence.
     #[test]
     fn applying_same_operations_produces_identical_state() {
@@ -2109,6 +2185,16 @@ mod tests {
                         expected: Bytes::from(v),
                     }
                 }),
+                (
+                    "[a-c]{1,2}",
+                    proptest::collection::vec(any::<u8>(), 0..4),
+                    proptest::collection::vec(any::<u8>(), 0..4)
+                )
+                    .prop_map(|(k, e, v)| MetadataCommand::PutKvIfMatches {
+                        key: k,
+                        expected: Bytes::from(e),
+                        value: Bytes::from(v),
+                    }),
             ]
         }
 

@@ -19,9 +19,9 @@ use picomq_metadata::lifecycle::{MetadataLifecycle, ObjectCleaner};
 use picomq_metadata::{CommandSink, MetadataCommand, MetadataNodeHandle};
 use picomq_sql::{LeaseConfig, LeaseKeeper, MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
 use s3stream::{
-    AppendContext, Config, CreateStreamOptions, FetchContext, KVClient as _, KeyValue,
-    MemoryObjectStorage, ObjectStorageTrait, ObjectWalConfig, ObjectWalService, OpenStreamOptions,
-    RecordBatch, S3StreamBuilder,
+    AppendContext, Config, CreateStreamOptions, FetchContext, MemoryObjectStorage,
+    ObjectStorageTrait, ObjectWalConfig, ObjectWalService, OpenStreamOptions, RecordBatch,
+    S3StreamBuilder,
 };
 
 const NODE_ID: i32 = 1;
@@ -60,7 +60,6 @@ async fn engine_end_to_end_on_sql_metadata_plane() {
         .write_ahead_log(Arc::new(ObjectWalService::new(wal_storage, wal_config)))
         .stream_manager(Arc::new(handle.stream_manager()))
         .object_manager(Arc::new(handle.object_manager()))
-        .kv_client(Arc::new(handle.kv_client()))
         .build()
         .await
         .unwrap();
@@ -146,16 +145,10 @@ async fn engine_end_to_end_on_sql_metadata_plane() {
 
     // KV through the replicated plane.
     let kv = handle.kv_client();
-    kv.put_kv(KeyValue {
-        key: "topic/0".into(),
-        value: Bytes::from_static(b"42"),
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        kv.get_kv("topic/0").await.unwrap(),
-        Some(Bytes::from_static(b"42"))
-    );
+    kv.put_kv("topic/0", Bytes::from_static(b"42"))
+        .await
+        .unwrap();
+    assert_eq!(kv.get_kv("topic/0"), Some(Bytes::from_static(b"42")));
 
     engine.shutdown().await;
 

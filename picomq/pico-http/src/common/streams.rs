@@ -4,7 +4,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use picomq_auth::Operation;
-use picomq_server::{StreamConfig, UpdateStreamCommand};
+use picomq_server::{Topic, UpdateTopicCommand};
 use serde_json::{Value, json};
 
 use super::{CommonState, gate, service_error};
@@ -34,12 +34,20 @@ async fn get_config(
     {
         return *response;
     }
-    if let Some(response) = route(state.ownership.as_ref(), state.mode, &method, &uri, &name).await
+    if let Some(response) = route(
+        state.ownership.as_ref(),
+        &state.topics,
+        state.mode,
+        &method,
+        &uri,
+        &name,
+    )
+    .await
     {
         return response;
     }
-    match state.service.stream_config(&name).await {
-        Ok(Some(config)) => Json(config_json(&config)).into_response(),
+    match state.topics.get(&name).await {
+        Ok(Some(topic)) => Json(config_json(&topic)).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => service_error(error),
     }
@@ -64,7 +72,15 @@ async fn patch_config(
     {
         return *response;
     }
-    if let Some(response) = route(state.ownership.as_ref(), state.mode, &method, &uri, &name).await
+    if let Some(response) = route(
+        state.ownership.as_ref(),
+        &state.topics,
+        state.mode,
+        &method,
+        &uri,
+        &name,
+    )
+    .await
     {
         return response;
     }
@@ -82,32 +98,28 @@ async fn patch_config(
         Some(Value::Bool(v)) => Some(*v),
         Some(_) => return bad_request("schemaValidate must be a boolean"),
     };
-    let kafka_topic = match obj.get("kafkaTopic") {
-        None => None,
-        Some(Value::Null) => Some(None),
-        Some(Value::String(s)) if !s.is_empty() => Some(Some(s.clone())),
-        Some(_) => return bad_request("kafkaTopic must be a non-empty string or null"),
-    };
+    if obj.contains_key("kafkaTopic") {
+        return bad_request("kafkaTopic is derived from the stream name and cannot be set");
+    }
     match state
-        .service
-        .update_stream(UpdateStreamCommand {
+        .topics
+        .update(UpdateTopicCommand {
             name,
             schema_name,
             schema_validate,
-            kafka_topic,
         })
         .await
     {
-        Ok(config) => Json(config_json(&config)).into_response(),
+        Ok(topic) => Json(config_json(&topic)).into_response(),
         Err(error) => service_error(error),
     }
 }
 
-fn config_json(config: &StreamConfig) -> Value {
+fn config_json(topic: &Topic) -> Value {
     json!({
-        "schema": config.schema_name,
-        "schemaValidate": config.schema_validate,
-        "kafkaTopic": config.kafka_topic,
+        "schema": topic.schema_name,
+        "schemaValidate": topic.schema_validate,
+        "kafkaTopic": topic.name.kafka(),
     })
 }
 

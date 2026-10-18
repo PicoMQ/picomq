@@ -9,13 +9,14 @@ use kafka_protocol::messages::delete_topics_response::{
 };
 use kafka_protocol::messages::{CreateTopicsRequest, DeleteTopicsRequest};
 use kafka_protocol::protocol::Decodable;
-use picomq_server::{CreateCommand, alias};
+use picomq_server::CreateCommand;
+use picomq_server::topic::is_kafka_name;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
     INVALID_REQUEST, NO_ERROR, TOPIC_ALREADY_EXISTS, UNKNOWN_TOPIC_OR_PARTITION, encode_response,
-    new_topic_id, resolve_topic, service_error_code, topic_name,
+    resolve_topic, service_error_code, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -36,7 +37,7 @@ pub async fn create(
     let mut topics = Vec::with_capacity(request.topics.len());
     for topic in request.topics {
         let name = topic.name.to_string();
-        if !alias::is_valid_topic(&name) {
+        if !is_kafka_name(&name) {
             topics.push(
                 CreatableTopicResult::default()
                     .with_name(topic_name(&name))
@@ -44,7 +45,7 @@ pub async fn create(
             );
             continue;
         }
-        if topic.num_partitions != 1 || topic.replication_factor != 1 {
+        if !matches!(topic.num_partitions, 1 | -1) || !matches!(topic.replication_factor, 1 | -1) {
             topics.push(
                 CreatableTopicResult::default()
                     .with_name(topic_name(&name))
@@ -63,26 +64,21 @@ pub async fn create(
                 continue;
             }
         };
-        let mut command = CreateCommand::with_external_id(
-            alias::stream_name_for_topic(&name),
-            KAFKA_CREATED_CT,
-            new_topic_id(),
-        )
-        .with_kafka_topic(&name);
+        let mut command = CreateCommand::new(&name, KAFKA_CREATED_CT);
         if let Some(schema_name) = schema_name {
             command = command
                 .with_schema_name(schema_name)
                 .with_schema_validate(schema_validate);
         }
-        match ctx.service.create(command).await {
+        match ctx.topics.create(command).await {
             Ok(result) if result.created => topics.push(
                 CreatableTopicResult::default()
                     .with_name(topic_name(&name))
                     .with_error_code(NO_ERROR)
                     .with_topic_config_error_code(NO_ERROR)
-                    .with_num_partitions(1)
+                    .with_num_partitions(result.meta.topic.partitions as i32)
                     .with_replication_factor(1)
-                    .with_topic_id(uuid::Uuid::from_bytes(result.meta.external_id)),
+                    .with_topic_id(uuid::Uuid::from_bytes(result.meta.topic.id.0)),
             ),
             Ok(_) => topics.push(
                 CreatableTopicResult::default()
@@ -130,8 +126,8 @@ pub async fn delete(
 
     let mut responses = Vec::with_capacity(names.len());
     for name in names {
-        let stream = match resolve_topic(ctx, &name).await {
-            Ok(stream) => stream,
+        let topic = match resolve_topic(ctx, &name).await {
+            Ok(topic) => topic,
             Err(code) => {
                 responses.push(
                     DeletableTopicResult::default()
@@ -141,7 +137,7 @@ pub async fn delete(
                 continue;
             }
         };
-        match ctx.service.delete(&stream).await {
+        match ctx.topics.delete(topic.name.spelling()).await {
             Ok(true) => responses.push(
                 DeletableTopicResult::default()
                     .with_name(Some(topic_name(&name)))

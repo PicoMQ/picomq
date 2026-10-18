@@ -1,7 +1,6 @@
-//! Engine-facing manager implementations over a [`CommandSink`] + published
-//! views: the adapters that make the metadata plane look like the engine's
-//! `StreamManager` / `ObjectManager` / `KVClient` traits. Writes become
-//! proposed commands; reads run on the latest published view.
+//! Manager implementations over a [`CommandSink`] + published views: the
+//! engine's `StreamManager` / `ObjectManager` traits and PicoMQ's KV client.
+//! Writes become proposed commands; reads run on the latest published view.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,8 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use s3stream::{
     CommitStreamSetObjectRequest, CommitStreamSetObjectResponse, CompactStreamObjectRequest,
-    Error as StreamError, KVClient, KeyValue, ObjectManagerTrait, S3ObjectMetadata,
-    StreamManagerTrait, StreamMetadata,
+    Error as StreamError, ObjectManagerTrait, S3ObjectMetadata, StreamManagerTrait, StreamMetadata,
 };
 
 use crate::command::{MetadataCommand, MetadataResult};
@@ -406,85 +404,89 @@ impl ObjectManagerTrait for MetadataObjectManager {
     }
 }
 
+#[derive(Clone)]
 pub struct MetadataKvClient {
     node: MetadataNodeHandle,
 }
 
-#[async_trait]
-impl KVClient for MetadataKvClient {
-    async fn put_kv_if_absent(&self, kv: KeyValue) -> Result<Bytes, StreamError> {
-        match self
-            .node
-            .propose(MetadataCommand::PutKvIfAbsent {
-                key: kv.key,
-                value: kv.value,
-            })
-            .await?
-        {
+impl MetadataKvClient {
+    pub fn get_kv(&self, key: &str) -> Option<Bytes> {
+        self.node.views.load().state.get_kv(key)
+    }
+
+    pub fn list_kv(&self, prefix: &str) -> Vec<(String, Bytes)> {
+        self.node.views.load().state.list_kv(prefix)
+    }
+
+    pub async fn put_kv(&self, key: &str, value: Bytes) -> Result<Bytes, StreamError> {
+        let command = MetadataCommand::PutKv {
+            key: key.to_owned(),
+            value,
+        };
+
+        match self.node.propose(command).await? {
             MetadataResult::Value(Some(value)) => Ok(value),
             other => Err(unexpected_result(other)),
         }
     }
 
-    async fn put_kv(&self, kv: KeyValue) -> Result<Bytes, StreamError> {
-        match self
-            .node
-            .propose(MetadataCommand::PutKv {
-                key: kv.key,
-                value: kv.value,
-            })
-            .await?
-        {
+    pub async fn put_kv_if_absent(&self, key: &str, value: Bytes) -> Result<Bytes, StreamError> {
+        let command = MetadataCommand::PutKvIfAbsent {
+            key: key.to_owned(),
+            value,
+        };
+
+        match self.node.propose(command).await? {
             MetadataResult::Value(Some(value)) => Ok(value),
             other => Err(unexpected_result(other)),
         }
     }
 
-    async fn get_kv(&self, key: &str) -> Result<Option<Bytes>, StreamError> {
-        Ok(self.node.views.load().state.get_kv(key))
+    pub async fn put_kv_if(
+        &self,
+        key: &str,
+        expected: &Bytes,
+        value: Bytes,
+    ) -> Result<Option<Bytes>, StreamError> {
+        self.conditional(MetadataCommand::PutKvIfMatches {
+            key: key.to_owned(),
+            expected: expected.clone(),
+            value,
+        })
+        .await
     }
 
-    async fn del_kv(&self, key: &str) -> Result<Option<Bytes>, StreamError> {
-        match self
-            .node
-            .propose(MetadataCommand::DeleteKv {
-                key: key.to_owned(),
-            })
-            .await?
-        {
+    pub async fn del_kv(&self, key: &str) -> Result<Option<Bytes>, StreamError> {
+        let command = MetadataCommand::DeleteKv {
+            key: key.to_owned(),
+        };
+
+        match self.node.propose(command).await? {
             MetadataResult::Value(value) => Ok(value),
             other => Err(unexpected_result(other)),
         }
     }
 
-    async fn del_kv_if(&self, key: &str, expected: &Bytes) -> Result<Option<Bytes>, StreamError> {
-        let proposed = self
-            .node
-            .sink
-            .propose(MetadataCommand::DeleteKvIfMatches {
-                key: key.to_owned(),
-                expected: expected.clone(),
-            })
-            .await;
-        match proposed {
-            Ok(p) => match p.result {
+    pub async fn del_kv_if(
+        &self,
+        key: &str,
+        expected: &Bytes,
+    ) -> Result<Option<Bytes>, StreamError> {
+        self.conditional(MetadataCommand::DeleteKvIfMatches {
+            key: key.to_owned(),
+            expected: expected.clone(),
+        })
+        .await
+    }
+
+    async fn conditional(&self, command: MetadataCommand) -> Result<Option<Bytes>, StreamError> {
+        match self.node.sink.propose(command).await {
+            Ok(proposed) => match proposed.result {
                 MetadataResult::Value(value) => Ok(value),
                 other => Err(unexpected_result(other)),
             },
-            Err(e) if e.is_redundant() => Ok(None),
-            Err(e) => Err(e.to_stream_error()),
+            Err(error) if error.is_redundant() => Ok(None),
+            Err(error) => Err(error.to_stream_error()),
         }
-    }
-
-    async fn list_kv(&self, prefix: &str) -> Result<Vec<KeyValue>, StreamError> {
-        Ok(self
-            .node
-            .views
-            .load()
-            .state
-            .list_kv(prefix)
-            .into_iter()
-            .map(|(key, value)| KeyValue { key, value })
-            .collect())
     }
 }
