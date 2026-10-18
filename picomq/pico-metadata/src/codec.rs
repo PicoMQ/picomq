@@ -167,12 +167,25 @@ fn put_command_body(buf: &mut BytesMut, command: &MetadataCommand) {
             http_address,
             slots,
             protocol_addresses,
+            wal,
         } => {
             buf.put_i32_le(*node_id);
             buf.put_i64_le(*node_epoch);
             put_str(buf, http_address);
             buf.put_u32_le(*slots);
             put_str_map(buf, protocol_addresses);
+            put_str(buf, wal);
+        }
+        MetadataCommand::Heartbeat {
+            node_id,
+            node_epoch,
+        }
+        | MetadataCommand::FenceNode {
+            node_id,
+            node_epoch,
+        } => {
+            buf.put_i32_le(*node_id);
+            buf.put_i64_le(*node_epoch);
         }
         MetadataCommand::CreateStream {
             node_id,
@@ -390,12 +403,14 @@ fn get_command_body(buf: &mut &[u8]) -> Result<MetadataCommand, CodecError> {
             let http_address = get_str(buf)?;
             let slots = get_u32(buf)?;
             let protocol_addresses = get_str_map(buf)?;
+            let wal = get_str(buf)?;
             MetadataCommand::RegisterNode {
                 node_id,
                 node_epoch,
                 http_address,
                 slots,
                 protocol_addresses,
+                wal,
             }
         }
         11 => {
@@ -445,6 +460,14 @@ fn get_command_body(buf: &mut &[u8]) -> Result<MetadataCommand, CodecError> {
             key: get_str(buf)?,
             expected: get_blob(buf)?,
             value: get_blob(buf)?,
+        },
+        22 => MetadataCommand::Heartbeat {
+            node_id: get_i32(buf)?,
+            node_epoch: get_i64(buf)?,
+        },
+        23 => MetadataCommand::FenceNode {
+            node_id: get_i32(buf)?,
+            node_epoch: get_i64(buf)?,
         },
         other => return Err(CodecError::UnknownCommand(other)),
     })
@@ -752,6 +775,7 @@ mod tests {
             },
             MetadataCommand::ExpirePreparedObjects { now_ms: 99 },
             MetadataCommand::RegisterNode {
+                wal: "2@s3://wal/node-7".into(),
                 node_id: 7,
                 node_epoch: 100,
                 http_address: "http://127.0.0.1:8080".into(),
@@ -762,6 +786,7 @@ mod tests {
                 )]),
             },
             MetadataCommand::RegisterNode {
+                wal: String::new(),
                 node_id: 7,
                 node_epoch: 100,
                 http_address: "".into(),
@@ -769,6 +794,14 @@ mod tests {
                 protocol_addresses: Default::default(),
             },
             MetadataCommand::PlaceStream { stream_id: 42 },
+            MetadataCommand::Heartbeat {
+                node_id: 7,
+                node_epoch: 100,
+            },
+            MetadataCommand::FenceNode {
+                node_id: 8,
+                node_epoch: 200,
+            },
             MetadataCommand::TransferStream {
                 stream_id: 3,
                 from_node: 7,
@@ -872,7 +905,7 @@ mod tests {
         ));
 
         // Unknown codes must be rejected, never misparsed.
-        for type_code in [0u8, 22, 200] {
+        for type_code in [0u8, 24, 200] {
             let bytes = [CODEC_VERSION, type_code];
             assert!(matches!(
                 decode_command(&bytes),
@@ -891,12 +924,7 @@ mod tests {
     fn rejects_truncation_and_trailing_bytes() {
         for command in all_commands() {
             let bytes = encode_command(&command);
-            let old_register_len =
-                matches!(&command, MetadataCommand::RegisterNode { .. }).then(|| bytes.len() - 4);
             for len in 0..bytes.len() {
-                if old_register_len == Some(len) {
-                    continue;
-                }
                 assert!(
                     decode_command(&bytes[..len]).is_err(),
                     "prefix of {len} bytes must be rejected for {command:?}"
@@ -953,11 +981,13 @@ mod tests {
                 any::<i64>(),
                 "[a-z/]{0,32}",
                 1u32..8,
-                proptest::collection::btree_map("[a-z]{1,8}", "[a-z:]{0,16}", 0..3)
+                proptest::collection::btree_map("[a-z]{1,8}", "[a-z:]{0,16}", 0..3),
+                "[a-z0-9@:/]{0,24}"
             )
                 .prop_map(
-                    |(node_id, node_epoch, http_address, slots, protocol_addresses)| {
+                    |(node_id, node_epoch, http_address, slots, protocol_addresses, wal)| {
                         MetadataCommand::RegisterNode {
+                            wal,
                             node_id,
                             node_epoch,
                             http_address,
@@ -967,6 +997,18 @@ mod tests {
                     }
                 ),
             any::<u64>().prop_map(|stream_id| MetadataCommand::PlaceStream { stream_id }),
+            (any::<i32>(), any::<i64>()).prop_map(|(node_id, node_epoch)| {
+                MetadataCommand::Heartbeat {
+                    node_id,
+                    node_epoch,
+                }
+            }),
+            (any::<i32>(), any::<i64>()).prop_map(|(node_id, node_epoch)| {
+                MetadataCommand::FenceNode {
+                    node_id,
+                    node_epoch,
+                }
+            }),
             (any::<u64>(), any::<i32>(), any::<i32>()).prop_map(
                 |(stream_id, from_node, to_node)| MetadataCommand::TransferStream {
                     stream_id,

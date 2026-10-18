@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 s3stream = { workspace = true }
+s3stream-wal = { workspace = true }
 picomq-metadata = { workspace = true }
 picomq-common = { workspace = true }
 picomq-auth = { workspace = true }

@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore};
-use picomq_http::{HttpProtocol, RoutingMode, RunningServer, ServeOptions, serve};
+use picomq_http::{HttpProtocol, RoutingMode, RunningServer, ServeOptions, bind, serve};
 use picomq_server::PicoNode;
 use serde_json::{Value, json};
 
@@ -28,9 +28,9 @@ async fn admin_server() -> (RunningServer, String, Arc<PicoNode>) {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node.clone(),
+        bind(loopback, 1024).unwrap(),
         ServeOptions {
             protocol: HttpProtocol::Pico,
-            addr: loopback,
             admin_addr: Some(loopback),
             routing_mode: RoutingMode::LocalAlways,
             authorizer: Some(node.authorizer()),

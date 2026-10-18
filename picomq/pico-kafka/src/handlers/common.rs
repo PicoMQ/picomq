@@ -116,8 +116,7 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
     }
 }
 
-/// Advertised Kafka listener of `node_id`, `None` when the node is unknown
-/// or does not serve Kafka.
+/// Advertised Kafka listener of `node_id`, `None` when the node is unknown.
 pub fn broker_address(state: &MetadataState, node_id: i32) -> Option<&str> {
     state.get_node_protocol_address(node_id, crate::PROTOCOL_NAME)
 }

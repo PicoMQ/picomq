@@ -14,10 +14,7 @@ fn config(dir: &Path, wal: &str, cluster_id: &str, node_epoch: i64) -> ServerCon
         addr: loopback(),
         admin_addr: None,
         http_protocol: HttpProtocol::Pico,
-        kafka: KafkaConfig {
-            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-            advertise: None,
-        },
+        kafka: KafkaConfig::new(loopback()),
         meta_backend: MetaBackend::parse(&format!("sqlite:{}", dir.join("meta.db").display()))
             .unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),

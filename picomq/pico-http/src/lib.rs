@@ -16,4 +16,4 @@ pub use auth::{Permit, gate};
 pub use ds::DsFrontend;
 pub use pico::PicoFrontend;
 pub use route::RoutingMode;
-pub use serve::{HttpProtocol, RunningServer, ServeOptions, bind, serve, serve_on};
+pub use serve::{HttpProtocol, RunningServer, ServeOptions, bind, serve};

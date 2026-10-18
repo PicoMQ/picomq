@@ -9,7 +9,7 @@ use std::sync::Arc;
 use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
-use picomq_http::{HttpProtocol, RoutingMode, ServeOptions, serve};
+use picomq_http::{HttpProtocol, RoutingMode, ServeOptions, bind, serve};
 use picomq_server::PicoNode;
 
 fn full_stream_scope(prefix: &str, auto_prefix: bool) -> Scope {
@@ -46,9 +46,9 @@ async fn gated_server(
 
     let server = serve(
         node.clone(),
+        bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024).unwrap(),
         ServeOptions {
             protocol,
-            addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             admin_addr: None,
             routing_mode: RoutingMode::LocalAlways,
             authorizer: Some(node.authorizer()),

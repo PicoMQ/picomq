@@ -2217,6 +2217,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "getrandom 0.4.3",
+ "picomq-common",
  "serde_json",
  "sha2 0.11.0",
  "subtle",
@@ -2329,6 +2330,7 @@ dependencies = [
 name = "picomq-runtime"
 version = "0.1.1"
 dependencies = [
+ "async-trait",
  "picomq-auth",
  "picomq-common",
  "picomq-http",
@@ -2372,6 +2374,7 @@ dependencies = [
  "bytes",
  "crc32c",
  "futures",
+ "hex",
  "kafka-protocol",
  "picomq-auth",
  "picomq-common",
@@ -2379,6 +2382,7 @@ dependencies = [
  "picomq-protocol",
  "picomq-schema",
  "s3stream",
+ "s3stream-wal",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",

@@ -1,4 +1,7 @@
 # Two pico nodes. Postgres + object storage are external (see .env.example).
+# Kafka stays on loopback. To expose it, set PICO_KAFKA_LISTEN=0.0.0.0:9092 and
+# PICO_INSECURE_ALLOW_REMOTE=true, give each node its own PICO_KAFKA_ADVERTISE,
+# and publish a distinct host port per node.
 
 x-pico: &pico
   build:

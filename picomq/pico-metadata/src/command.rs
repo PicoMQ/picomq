@@ -26,6 +26,17 @@ pub enum MetadataCommand {
         http_address: String,
         slots: u32,
         protocol_addresses: std::collections::BTreeMap<String, String>,
+        wal: String,
+    },
+
+    Heartbeat {
+        node_id: i32,
+        node_epoch: i64,
+    },
+
+    FenceNode {
+        node_id: i32,
+        node_epoch: i64,
     },
 
     PlaceStream {
@@ -208,6 +219,8 @@ impl MetadataCommand {
             MetadataCommand::DeleteKvIfMatches { .. } => 19,
             MetadataCommand::AllocateProducerIds { .. } => 20,
             MetadataCommand::PutKvIfMatches { .. } => 21,
+            MetadataCommand::Heartbeat { .. } => 22,
+            MetadataCommand::FenceNode { .. } => 23,
         }
     }
 }

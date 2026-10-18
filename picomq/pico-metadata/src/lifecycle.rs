@@ -235,6 +235,7 @@ mod tests {
         let (sink, views) = LocalSink::new();
         let sink = Arc::new(sink);
         sink.propose(MetadataCommand::RegisterNode {
+            wal: String::new(),
             node_id: NODE,
             node_epoch: EPOCH,
             http_address: String::new(),

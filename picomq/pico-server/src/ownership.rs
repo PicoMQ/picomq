@@ -79,7 +79,12 @@ impl OwnershipService for MetadataOwnershipService {
         let Some(row) = view.state.streams.get(&stream_id).copied() else {
             return Ok(Owner::local(Some(stream_id), epoch));
         };
-        let routable = row.state == StreamState::Opened || (row.epoch == -1 && row.node_id != -1);
+        let owner_live = view
+            .state
+            .nodes
+            .get(&row.node_id)
+            .is_some_and(|node| !node.fenced);
+        let routable = owner_live && (row.state == StreamState::Opened || row.node_id != -1);
         if !routable || row.node_id == self.node_id {
             return Ok(Owner::local(Some(stream_id), epoch));
         }

@@ -5,6 +5,8 @@ use picomq_http::HttpProtocol;
 use picomq_runtime::{KafkaConfig, MetaBackend, PicoServer, ServerConfig};
 use tempfile::TempDir;
 
+use crate::suite::Suite;
+
 pub struct Target {
     url: Option<String>,
     bootstrap: Option<String>,
@@ -18,14 +20,19 @@ struct Node {
 }
 
 impl Target {
-    pub async fn start(protocol: HttpProtocol) -> anyhow::Result<Self> {
+    pub async fn start(suite: Suite) -> anyhow::Result<Self> {
         let dir = tempfile::tempdir()?;
 
-        let kafka = container_reachable()?;
+        let kafka = match suite {
+            Suite::Kafka => container_reachable()?,
+            Suite::Ds => KafkaConfig::new(loopback()),
+        };
         let bootstrap = kafka.advertise.clone();
-        let host_address = Some(format!("127.0.0.1:{}", kafka.listen.port()));
+        let host_address = bootstrap
+            .as_ref()
+            .map(|_| format!("127.0.0.1:{}", kafka.listen.port()));
 
-        let server = picomq_runtime::start(config(&dir, protocol, kafka)?).await?;
+        let server = picomq_runtime::start(config(&dir, suite.protocol(), kafka)?).await?;
 
         Ok(Self {
             url: Some(format!("http://{}", server.local_addr())),
@@ -67,6 +74,10 @@ impl Target {
     }
 }
 
+fn loopback() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 0))
+}
+
 fn container_reachable() -> anyhow::Result<KafkaConfig> {
     let port = TcpListener::bind(("0.0.0.0", 0))?.local_addr()?.port();
 
@@ -82,13 +93,12 @@ fn config(
     kafka: KafkaConfig,
 ) -> anyhow::Result<ServerConfig> {
     let path = dir.path();
-    let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
 
     Ok(ServerConfig {
-        addr: loopback,
-        admin_addr: Some(loopback),
+        addr: loopback(),
+        admin_addr: Some(loopback()),
         http_protocol: protocol,
-        insecure_allow_remote: true,
+        insecure_allow_remote: !kafka.listen.ip().is_loopback(),
         kafka,
         meta_backend: MetaBackend::parse(&format!("sqlite:{}", path.join("meta.db").display()))?,
         storage_uri: format!("1@file://{}", path.join("objects").display()),

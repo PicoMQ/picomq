@@ -564,6 +564,18 @@ async fn remote_owner_redirects() {
         .unwrap();
     assert_eq!(without_partition.status(), 400);
 
+    let existing = http
+        .put(format!("{base_url}/streams/demo"))
+        .header("Content-Type", "text/plain")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(existing.status(), 307);
+    assert_eq!(
+        existing.headers()["Location"],
+        "http://owner.example:4437/streams/demo"
+    );
+
     let put = http
         .put(format!("{base_url}/streams/fresh"))
         .header("Content-Type", "text/plain")

@@ -36,7 +36,7 @@ async fn run(service: Arc<S3StreamService>, views: Arc<ViewPublisher>, node_id: 
     loop {
         let view = views.load();
         process(&service, &view, node_id, &mut incoming).await;
-        let _ = tokio::time::timeout(RETRY_TICK, views.wait_applied(view.applied_index + 1)).await;
+        views.wait_past(view.applied_index, RETRY_TICK).await;
     }
 }
 

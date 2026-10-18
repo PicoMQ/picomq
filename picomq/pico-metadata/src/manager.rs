@@ -52,13 +52,21 @@ impl MetadataNodeHandle {
                 http_address: http_address.to_owned(),
                 slots: 1,
                 protocol_addresses: Default::default(),
+                wal: String::new(),
             })
             .await?;
         Ok(())
     }
 
     pub fn stream_manager(&self) -> MetadataStreamManager {
-        MetadataStreamManager { node: self.clone() }
+        self.stream_manager_of(self.node_id)
+    }
+
+    pub fn stream_manager_of(&self, owner: i32) -> MetadataStreamManager {
+        MetadataStreamManager {
+            node: self.clone(),
+            owner,
+        }
     }
 
     pub fn object_manager(&self) -> MetadataObjectManager {
@@ -86,6 +94,7 @@ impl MetadataNodeHandle {
         http_address: &str,
         slots: u32,
         protocol_addresses: std::collections::BTreeMap<String, String>,
+        wal: &str,
     ) -> Result<(), MetadataError> {
         self.sink
             .propose(MetadataCommand::RegisterNode {
@@ -94,6 +103,7 @@ impl MetadataNodeHandle {
                 http_address: http_address.to_owned(),
                 slots,
                 protocol_addresses,
+                wal: wal.to_owned(),
             })
             .await?;
         Ok(())
@@ -147,9 +157,35 @@ impl MetadataNodeHandle {
                 http_address: String::new(),
                 slots,
                 protocol_addresses: Default::default(),
+                wal: String::new(),
             })
             .await?;
         Ok(())
+    }
+
+    pub async fn heartbeat(&self) -> Result<(), MetadataError> {
+        self.sink
+            .propose(MetadataCommand::Heartbeat {
+                node_id: self.node_id,
+                node_epoch: self.node_epoch,
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn fence_node(&self, node_id: i32, node_epoch: i64) -> Result<(), MetadataError> {
+        match self
+            .sink
+            .propose(MetadataCommand::FenceNode {
+                node_id,
+                node_epoch,
+            })
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) if e.is_redundant() => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Request a live ownership move of a stream to another node.
@@ -212,17 +248,13 @@ fn unexpected_result(result: MetadataResult) -> StreamError {
 #[derive(Clone)]
 pub struct MetadataStreamManager {
     node: MetadataNodeHandle,
+    owner: i32,
 }
 
 #[async_trait]
 impl StreamManagerTrait for MetadataStreamManager {
     async fn get_opening_streams(&self) -> Result<Vec<StreamMetadata>, StreamError> {
-        Ok(self
-            .node
-            .views
-            .load()
-            .state
-            .get_opening_streams(self.node.node_id))
+        Ok(self.node.views.load().state.get_opening_streams(self.owner))
     }
 
     async fn get_streams(&self, stream_ids: &[u64]) -> Result<Vec<StreamMetadata>, StreamError> {

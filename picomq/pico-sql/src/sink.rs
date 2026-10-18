@@ -639,6 +639,7 @@ mod tests {
 
     fn register(node_id: i32, node_epoch: i64) -> MetadataCommand {
         MetadataCommand::RegisterNode {
+            wal: String::new(),
             node_id,
             node_epoch,
             http_address: String::new(),

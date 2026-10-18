@@ -9,14 +9,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use picomq_auth::Authorizer;
-use picomq_metadata::{CommandSink, MetadataNodeHandle, ViewPublisher};
+use picomq_metadata::{CommandSink, MetadataError, MetadataNodeHandle, ViewPublisher};
 use s3stream::{
     Config, ObjectStorageTrait, ObjectWalConfig, ObjectWalService, S3StreamBuilder, S3StreamEngine,
     WriteAheadLogTrait,
 };
+use tokio::sync::watch;
 
 use crate::auth::TokenService;
 use crate::error::ServiceError;
+use crate::failover::{Factory, Failover, ObjectWalTakeover, WalTakeover};
 use crate::group::GroupCoordinator;
 use crate::log::Log;
 use crate::ownership::MetadataOwnershipService;
@@ -41,6 +43,7 @@ pub struct NodeConfig {
     /// name (e.g. `"kafka"`).
     pub protocol_addresses: std::collections::BTreeMap<String, String>,
     pub cluster_id: String,
+    pub heartbeat_interval: Duration,
     pub engine: Config,
 }
 
@@ -53,6 +56,7 @@ impl Default for NodeConfig {
             slots: 1,
             protocol_addresses: Default::default(),
             cluster_id: "picomq".to_owned(),
+            heartbeat_interval: Duration::from_secs(5),
             engine: Config::default(),
         }
     }
@@ -62,7 +66,7 @@ pub struct PicoNode {
     config: NodeConfig,
     handle: MetadataNodeHandle,
     views: Arc<ViewPublisher>,
-    engine: S3StreamEngine,
+    engine: Arc<S3StreamEngine>,
     service: Arc<S3StreamService>,
     topics: Arc<Topics>,
     ownership: Arc<MetadataOwnershipService>,
@@ -70,6 +74,8 @@ pub struct PicoNode {
     tokens: Arc<TokenService>,
     transfer_watcher: tokio::task::JoinHandle<()>,
     deleted_cleanup: tokio::task::JoinHandle<()>,
+    heartbeat: tokio::task::JoinHandle<()>,
+    fenced: watch::Sender<bool>,
 }
 
 impl PicoNode {
@@ -89,7 +95,17 @@ impl PicoNode {
         wal_config.node_id = config.node_id as u32;
         wal_config.epoch = config.node_epoch as u64;
         let wal = Arc::new(ObjectWalService::new(wal_storage, wal_config));
-        Self::start_with_wal(config, sink, views, object_storage, wal, schema_registry).await
+        let takeover = Arc::new(ObjectWalTakeover::new(&config.cluster_id));
+        Self::start_with_wal(
+            config,
+            sink,
+            views,
+            object_storage,
+            wal,
+            takeover,
+            schema_registry,
+        )
+        .await
     }
 
     pub async fn start_with_wal(
@@ -98,6 +114,7 @@ impl PicoNode {
         views: Arc<ViewPublisher>,
         object_storage: Arc<dyn ObjectStorageTrait>,
         wal: Arc<dyn WriteAheadLogTrait>,
+        takeover: Arc<dyn WalTakeover>,
         schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
     ) -> Result<Self, ServiceError> {
         let handle =
@@ -107,6 +124,7 @@ impl PicoNode {
                 &config.http_address,
                 config.slots,
                 config.protocol_addresses.clone(),
+                &config.engine.wal_config,
             )
             .await
             .map_err(|e| e.to_stream_error())?;
@@ -116,8 +134,10 @@ impl PicoNode {
             .write_ahead_log(wal)
             .stream_manager(Arc::new(handle.stream_manager()))
             .object_manager(Arc::new(handle.object_manager()))
+            .failover_factory(Arc::new(Factory::new(handle.clone(), takeover)))
             .build()
             .await?;
+        let engine = Arc::new(engine);
 
         let kv_client = handle.kv_client();
         let streams = Arc::new(Streams::new(
@@ -154,6 +174,8 @@ impl PicoNode {
         let transfer_watcher =
             TransferWatcher::spawn(service.clone(), views.clone(), config.node_id);
         let deleted_cleanup = service.spawn_deleted_cleanup(DELETED_CLEANUP_TICK);
+        let fenced = watch::Sender::new(false);
+        let heartbeat = spawn_heartbeat(handle.clone(), config.heartbeat_interval, fenced.clone());
 
         Ok(Self {
             config,
@@ -167,6 +189,8 @@ impl PicoNode {
             tokens,
             transfer_watcher,
             deleted_cleanup,
+            heartbeat,
+            fenced,
         })
     }
 
@@ -231,6 +255,26 @@ impl PicoNode {
         Ok(stream_id)
     }
 
+    pub fn spawn_failover(
+        &self,
+        leadership: watch::Receiver<bool>,
+        tick: Duration,
+        timeout: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let failover = Failover {
+            handle: self.handle.clone(),
+            views: self.views.clone(),
+            engine: self.engine.clone(),
+            streams: self.service.streams().clone(),
+        };
+
+        tokio::spawn(failover.run(leadership, tick, timeout))
+    }
+
+    pub fn fenced(&self) -> watch::Receiver<bool> {
+        self.fenced.subscribe()
+    }
+
     pub fn views(&self) -> Arc<ViewPublisher> {
         self.views.clone()
     }
@@ -242,7 +286,38 @@ impl PicoNode {
     pub async fn close(&self) {
         self.transfer_watcher.abort();
         self.deleted_cleanup.abort();
+        self.heartbeat.abort();
         self.service.shutdown().await;
         self.engine.shutdown().await;
+
+        if !*self.fenced.borrow()
+            && let Err(error) = self
+                .handle
+                .fence_node(self.config.node_id, self.config.node_epoch)
+                .await
+        {
+            tracing::warn!(%error, "could not hand off this node's streams");
+        }
     }
+}
+
+fn spawn_heartbeat(
+    handle: MetadataNodeHandle,
+    interval: Duration,
+    fenced: watch::Sender<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            match handle.heartbeat().await {
+                Ok(()) => {}
+                Err(error @ MetadataError::NodeEpochMismatch { .. }) => {
+                    tracing::error!(%error, "this node was fenced, stopping");
+                    fenced.send_replace(true);
+                    return;
+                }
+                Err(error) => tracing::warn!(%error, "heartbeat failed"),
+            }
+        }
+    })
 }

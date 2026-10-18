@@ -40,14 +40,36 @@ pub fn start(dir: &std::path::Path, protocol: &str) -> Server {
 }
 
 pub fn start_with(dir: &std::path::Path, protocol: &str, extra: &[&str]) -> Server {
+    let wal = format!("2@file://{}", dir.join("wal").display());
+    let tuning = [
+        "--protocol",
+        protocol,
+        "--long-poll-timeout-sec",
+        "1",
+        "--wal-upload-interval-ms",
+        "200",
+    ];
+
+    launch(dir, &wal, &[&tuning[..], extra].concat())
+}
+
+pub fn start_node(dir: &std::path::Path, node_id: i32, wal: &str, extra: &[&str]) -> Server {
+    let node_id = node_id.to_string();
+
+    launch(
+        dir,
+        wal,
+        &[&["--node-id", node_id.as_str()][..], extra].concat(),
+    )
+}
+
+fn launch(dir: &std::path::Path, wal: &str, extra: &[&str]) -> Server {
     let http = free_port();
     let admin = free_port();
     let kafka = free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_pico"))
         .args([
             "serve",
-            "--protocol",
-            protocol,
             "--listen",
             &format!("127.0.0.1:{http}"),
             "--admin-listen",
@@ -59,17 +81,12 @@ pub fn start_with(dir: &std::path::Path, protocol: &str, extra: &[&str]) -> Serv
             "--storage",
             &format!("1@file://{}", dir.join("objects").display()),
             "--wal",
-            &format!("2@file://{}", dir.join("wal").display()),
-            // Keep an idle tail from holding the test for the default poll.
-            "--long-poll-timeout-sec",
-            "1",
-            // Commit low-volume writes promptly so trims can advance.
-            "--wal-upload-interval-ms",
-            "200",
+            wal,
         ])
         .args(extra)
         .spawn()
         .unwrap();
+
     Server {
         child,
         base_url: format!("http://127.0.0.1:{http}"),

@@ -76,12 +76,18 @@ pub struct KafkaConfig {
     pub advertise: Option<String>,
 }
 
-impl Default for KafkaConfig {
-    fn default() -> Self {
+impl KafkaConfig {
+    pub fn new(listen: SocketAddr) -> Self {
         Self {
-            listen: SocketAddr::from(([127, 0, 0, 1], 9092)),
+            listen,
             advertise: None,
         }
+    }
+}
+
+impl Default for KafkaConfig {
+    fn default() -> Self {
+        Self::new(SocketAddr::from(([127, 0, 0, 1], 9092)))
     }
 }
 
@@ -103,6 +109,8 @@ pub struct ServerConfig {
     pub cluster_id: String,
     pub routing_mode: RoutingMode,
     pub slots: u32,
+    pub heartbeat_interval: Duration,
+    pub node_timeout: Duration,
     pub long_poll_timeout: Duration,
     pub sse_max_duration: Duration,
     pub max_chunk_size: usize,
@@ -141,6 +149,8 @@ impl Default for ServerConfig {
             cluster_id: "picomq".to_owned(),
             routing_mode: RoutingMode::Redirect,
             slots: 1,
+            heartbeat_interval: Duration::from_secs(5),
+            node_timeout: Duration::from_secs(30),
             long_poll_timeout: Duration::from_secs(25),
             sse_max_duration: Duration::from_secs(55),
             max_chunk_size: 64 * 1024,

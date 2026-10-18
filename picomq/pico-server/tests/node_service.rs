@@ -25,6 +25,7 @@ async fn start_node(
             node_id,
             node_epoch: 1,
             http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
+            heartbeat_interval: Duration::from_millis(100),
             ..Default::default()
         },
         sink,
@@ -491,37 +492,33 @@ async fn ownership_routes_to_open_owner() {
         .unwrap();
     let log = log_of(&node1.topics(), "/own/a").await;
 
-    let placed = node1.ownership().owner_of(&log).await.unwrap();
-    let (owner, other, owner_id) = match placed.owner_node_id {
-        Some(2) => (&node2, &node1, 2),
-        _ => (&node1, &node2, 1),
-    };
-    assert_eq!(placed.epoch, -1);
+    let placed = node2.ownership().owner_of(&log).await.unwrap();
+    assert!(!placed.local);
+    assert_eq!(placed.owner_node_id, Some(1));
 
-    owner
+    node1
         .topics()
         .append("/own/a", 0, append(&[b"opened"], "text/plain"))
         .await
         .unwrap();
-    let local = owner.ownership().owner_of(&log).await.unwrap();
+    let local = node1.ownership().owner_of(&log).await.unwrap();
     assert!(local.local);
-    assert!(local.epoch >= 0);
 
-    let remote = other.ownership().owner_of(&log).await.unwrap();
+    let remote = node2.ownership().owner_of(&log).await.unwrap();
     assert!(!remote.local);
-    assert_eq!(remote.owner_node_id, Some(owner_id));
+    assert_eq!(remote.owner_node_id, Some(1));
     assert_eq!(remote.epoch, local.epoch);
     assert_eq!(
-        remote.owner_advertised_address,
-        Some(format!("http://127.0.0.1:{}", 4000 + owner_id))
+        remote.owner_advertised_address.as_deref(),
+        Some("http://127.0.0.1:4001")
     );
 
-    owner.close().await;
-    let released = other.ownership().owner_of(&log).await.unwrap();
+    node1.close().await;
+    let released = node2.ownership().owner_of(&log).await.unwrap();
     assert!(released.local);
     assert!(released.stream_id.is_some());
 
-    other.close().await;
+    node2.close().await;
 }
 
 async fn start_shared_node(
@@ -686,6 +683,7 @@ async fn stale_transfer_completes_when_source_restarts() {
     .await;
 
     sink.propose(MetadataCommand::RegisterNode {
+        wal: String::new(),
         node_id: 1,
         node_epoch: 1,
         http_address: "http://127.0.0.1:4001".into(),
@@ -1512,14 +1510,22 @@ async fn partition_counts_are_capped() {
     node.close().await;
 }
 
-fn placements(node: &PicoNode, topic: &Topic) -> Vec<(i32, StreamState)> {
-    let view = node.views().load();
-
+fn stream_ids(node: &PicoNode, topic: &Topic) -> Vec<u64> {
     (0..topic.partitions)
         .map(|index| {
             let log = partition_log(topic, index).unwrap();
-            let stream_id = node.service().stream_id(&log).unwrap().unwrap();
-            let row = view.state.streams[&stream_id];
+            node.service().stream_id(&log).unwrap().unwrap()
+        })
+        .collect()
+}
+
+fn placements(node: &PicoNode, topic: &Topic) -> Vec<(i32, StreamState)> {
+    let view = node.views().load();
+
+    stream_ids(node, topic)
+        .iter()
+        .map(|stream_id| {
+            let row = view.state.streams[stream_id];
             (row.node_id, row.state)
         })
         .collect()
@@ -1557,8 +1563,13 @@ async fn partitions_are_placed_across_nodes() {
     }
 
     let grown = node2.topics().grow("/spread", 6).await.unwrap();
-    let placed = placements(&node1, &grown);
-    assert!(placed.iter().all(|(owner, _)| [1, 2].contains(owner)));
+    let added = &placements(&node1, &grown)[4..];
+    for node_id in [1, 2] {
+        assert!(
+            added.iter().any(|(owner, _)| *owner == node_id),
+            "{added:?}"
+        );
+    }
 
     node1.close().await;
     node2.close().await;
@@ -1608,16 +1619,14 @@ async fn deleted_topics_release_streams_held_by_other_nodes() {
         .meta
         .topic;
     let mut held = Vec::new();
-    for index in 0..topic.partitions {
-        let log = partition_log(&topic, index).unwrap();
-        let stream_id = node1.service().stream_id(&log).unwrap().unwrap();
+    for (index, stream_id) in stream_ids(&node1, &topic).into_iter().enumerate() {
         if views.load().state.streams[&stream_id].node_id != 2 {
             continue;
         }
 
         node2
             .topics()
-            .append("/doomed", index, append(&[b"x"], "text/plain"))
+            .append("/doomed", index as u32, append(&[b"x"], "text/plain"))
             .await
             .unwrap();
         held.push(stream_id);
@@ -1633,6 +1642,72 @@ async fn deleted_topics_release_streams_held_by_other_nodes() {
         held.iter().all(|id| !view.state.streams.contains_key(id))
     })
     .await;
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn a_clean_shutdown_hands_streams_to_the_survivors() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+    let (_lease, leadership) = tokio::sync::watch::channel(true);
+    let failover = node1.spawn_failover(
+        leadership,
+        Duration::from_millis(50),
+        Duration::from_secs(30),
+    );
+
+    let topic = node1
+        .topics()
+        .create(CreateCommand {
+            partitions: 2,
+            ..create("/handoff", "text/plain")
+        })
+        .await
+        .unwrap()
+        .meta
+        .topic;
+    assert!(
+        placements(&node1, &topic)
+            .iter()
+            .any(|(owner, _)| *owner == 2)
+    );
+
+    node2.close().await;
+
+    let streams = stream_ids(&node1, &topic);
+    wait_for_view(&views, "streams of node 2 placed on node 1", |view| {
+        streams
+            .iter()
+            .all(|stream_id| view.state.streams[stream_id].node_id == 1)
+    })
+    .await;
+
+    failover.abort();
+    node1.close().await;
+}
+
+#[tokio::test]
+async fn a_fenced_node_notices() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+    let mut fenced = node2.fenced();
+
+    node1
+        .metadata()
+        .fence_node(2, node2.config().node_epoch)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), fenced.wait_for(|fenced| *fenced))
+        .await
+        .expect("node 2 never noticed the fence")
+        .unwrap();
 
     node1.close().await;
     node2.close().await;

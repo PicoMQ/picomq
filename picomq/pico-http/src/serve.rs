@@ -37,9 +37,6 @@ pub enum HttpProtocol {
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
     pub protocol: HttpProtocol,
-    /// Where the protocol listener binds. Port 0 binds an ephemeral port. Read
-    /// the effective address back from [`RunningServer::local_addr`].
-    pub addr: SocketAddr,
     /// Where `/health` and `/ready` bind. `None` disables the admin listener
     pub admin_addr: Option<SocketAddr>,
     pub routing_mode: RoutingMode,
@@ -64,7 +61,6 @@ impl Default for ServeOptions {
     fn default() -> Self {
         Self {
             protocol: HttpProtocol::Pico,
-            addr: SocketAddr::from(([127, 0, 0, 1], 4437)),
             admin_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9090))),
             routing_mode: RoutingMode::Redirect,
             long_poll_timeout: Duration::from_secs(25),
@@ -91,20 +87,13 @@ pub struct RunningServer {
     shutdown_drain: Duration,
 }
 
-/// Bind `options.protocol` on `options.addr` and, when configured, the admin
+/// Serve `options.protocol` on `listener` and, when configured, the admin
 /// routes on `options.admin_addr`.
 ///
 /// The node is constructed by the caller, which lets one node be served by
 /// different sockets in tests and keeps this crate free of metadata-backend
 /// choices.
-pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Result<RunningServer> {
-    let listener = bind(options.addr, options.backlog)?;
-    serve_on(node, listener, options).await
-}
-
-/// Serve on a listener the caller already bound, so the bound address can be
-/// advertised before the node registers.
-pub async fn serve_on(
+pub async fn serve(
     node: Arc<PicoNode>,
     listener: TcpListener,
     options: ServeOptions,

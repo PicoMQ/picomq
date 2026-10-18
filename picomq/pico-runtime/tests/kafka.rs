@@ -26,10 +26,7 @@ fn config(dir: &Path, node_epoch: i64) -> ServerConfig {
         node_epoch,
         addr: loopback(),
         admin_addr: None,
-        kafka: KafkaConfig {
-            listen: loopback(),
-            advertise: None,
-        },
+        kafka: KafkaConfig::new(loopback()),
         meta_backend: MetaBackend::parse(&format!("sqlite:{}", dir.join("meta.db").display()))
             .unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),

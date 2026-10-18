@@ -37,6 +37,7 @@ async fn run_gate(total: u64) {
     let (sink, views) = SqlSink::open(store.clone(), config()).await.unwrap();
     let sink = Arc::new(sink);
     sink.propose(MetadataCommand::RegisterNode {
+        wal: String::new(),
         node_id: NODE,
         node_epoch: EPOCH,
         http_address: String::new(),

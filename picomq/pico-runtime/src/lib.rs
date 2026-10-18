@@ -9,11 +9,14 @@ use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore, Verifier};
 use picomq_http::{RunningServer, ServeOptions};
 use picomq_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
 use picomq_pgwal::PgWal;
+use picomq_server::failover::{ObjectWalTakeover, WalTakeover};
 use picomq_server::{KvTokenStore, NodeConfig, PicoNode};
 use picomq_sql::{
     LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig, SqliteStore,
 };
-use s3stream::{IdUri, ObjectStorageTrait, ObjectStoreAdapter, WriteAheadLogTrait};
+use s3stream::{
+    FailoverRequest, IdUri, ObjectStorageTrait, ObjectStoreAdapter, WalError, WriteAheadLogTrait,
+};
 
 pub use config::{AuthMode, KafkaConfig, MetaBackend, ServerConfig};
 
@@ -54,6 +57,11 @@ pub enum RuntimeError {
     BootstrapToken(#[from] picomq_auth::AuthError),
     #[error("bootstrap token {id:?} conflicts with a stored token of the same id")]
     BootstrapConflict { id: String },
+    #[error("node timeout {timeout:?} must exceed a non-zero heartbeat interval {interval:?}")]
+    Liveness {
+        interval: Duration,
+        timeout: Duration,
+    },
 }
 
 /// A running PicoMQ process: metadata log, node, background maintenance and
@@ -66,6 +74,7 @@ pub struct PicoServer {
     lifecycle: tokio::task::JoinHandle<()>,
     token_expiry: tokio::task::JoinHandle<()>,
     ttl_sweep: tokio::task::JoinHandle<()>,
+    failover: tokio::task::JoinHandle<()>,
     compaction_check: tokio::task::JoinHandle<()>,
     /// Kept alive for the process lifetime: dropping it aborts the log's
     /// flusher/tailer tasks, so it must outlive the node.
@@ -77,6 +86,13 @@ pub struct PicoServer {
 /// in that order: metadata first (a node must be registered before it can
 /// own streams), then storage and the engine, then listeners.
 pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
+    if config.heartbeat_interval.is_zero() || config.node_timeout <= config.heartbeat_interval {
+        return Err(RuntimeError::Liveness {
+            interval: config.heartbeat_interval,
+            timeout: config.node_timeout,
+        });
+    }
+
     if !config.insecure_allow_remote {
         // The Kafka listener carries no authentication, so a non-loopback
         // bind needs the explicit opt-out regardless of auth mode.
@@ -146,11 +162,13 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         slots: config.slots,
         protocol_addresses,
         cluster_id: config.cluster_id.clone(),
+        heartbeat_interval: config.heartbeat_interval,
         engine,
     };
     let wal_uri = config.wal_uri();
     let node = if picomq_pgwal::Config::accepts(&wal_uri) {
         let wal = postgres_wal(&wal_uri, &node_config)?;
+        let takeover = Arc::new(PostgresWalTakeover::new(&wal_uri, &node_config.cluster_id)?);
         node_config.engine.wal_config = wal.uri().to_owned();
         PicoNode::start_with_wal(
             node_config,
@@ -158,6 +176,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             views,
             object_storage.clone(),
             wal,
+            takeover,
             schema_registry.clone(),
         )
         .await?
@@ -199,6 +218,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     let ttl_sweep = node
         .topics()
         .spawn_ttl_sweep(lease.leadership(), LIFECYCLE_TICK);
+    let failover = node.spawn_failover(lease.leadership(), LIFECYCLE_TICK, config.node_timeout);
     let compaction_check = node
         .service()
         .streams()
@@ -210,12 +230,11 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         AuthMode::Required => Some(node.authorizer()),
         AuthMode::Off => None,
     };
-    let server = picomq_http::serve_on(
+    let server = picomq_http::serve(
         node,
         http_listener,
         ServeOptions {
             protocol: config.http_protocol,
-            addr,
             admin_addr: config.admin_addr,
             routing_mode: config.routing_mode,
             long_poll_timeout: config.long_poll_timeout,
@@ -239,6 +258,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         lifecycle,
         token_expiry,
         ttl_sweep,
+        failover,
         compaction_check,
         sink,
         schema_registry,
@@ -331,6 +351,49 @@ fn postgres_wal(uri: &str, node: &NodeConfig) -> Result<Arc<dyn WriteAheadLogTra
     Ok(Arc::new(PgWal::new(config)?))
 }
 
+struct PostgresWalTakeover {
+    config: picomq_pgwal::Config,
+    objects: ObjectWalTakeover,
+}
+
+impl PostgresWalTakeover {
+    fn new(uri: &str, cluster_id: &str) -> Result<Self, RuntimeError> {
+        let config = picomq_pgwal::Config::parse(uri)?.identity(cluster_id, 0, 0);
+
+        Ok(Self {
+            config,
+            objects: ObjectWalTakeover::new(cluster_id),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl WalTakeover for PostgresWalTakeover {
+    async fn open(
+        &self,
+        request: &FailoverRequest,
+    ) -> Result<Arc<dyn WriteAheadLogTrait>, s3stream::Error> {
+        if !picomq_pgwal::Config::accepts(&request.wal_config) {
+            return self.objects.open(request).await;
+        }
+
+        let wal_error = |error: picomq_pgwal::Error| s3stream::Error::from(WalError::from(error));
+        let theirs = picomq_pgwal::Config::parse(&request.wal_config).map_err(wal_error)?;
+        if theirs.location() != self.config.location() {
+            return Err(s3stream::Error::Unexpected(format!(
+                "node {} keeps its WAL in {}, not in this node's database",
+                request.node_id,
+                theirs.redacted()
+            )));
+        }
+
+        let wal = PgWal::recovering(self.config.clone(), request.node_id, request.node_epoch)
+            .await
+            .map_err(wal_error)?;
+        Ok(Arc::new(wal))
+    }
+}
+
 async fn open_store(backend: &MetaBackend) -> Result<Arc<dyn MetaStore>, RuntimeError> {
     Ok(match backend {
         MetaBackend::Sqlite(None) => Arc::new(SqliteStore::memory().await?),
@@ -370,18 +433,46 @@ impl PicoServer {
         self.kafka_addr
     }
 
+    pub fn fenced(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.server.node().fenced()
+    }
+
     pub fn schema_registry(&self) -> Option<&Arc<dyn picomq_schema::SchemaStore>> {
         self.schema_registry.as_ref()
     }
 
     pub async fn shutdown(self) {
         self.kafka.abort();
-        self.server.shutdown().await;
         self.lifecycle.abort();
         self.token_expiry.abort();
         self.ttl_sweep.abort();
+        self.failover.abort();
         self.compaction_check.abort();
+        self.server.shutdown().await;
         self.lease.shutdown().await;
         drop(self.sink);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn postgres_takeover_refuses_a_wal_in_another_database() {
+        let takeover =
+            PostgresWalTakeover::new("postgres://wal:secret@db-a:5432/pico", "cluster").unwrap();
+        let request = FailoverRequest {
+            node_id: 2,
+            node_epoch: 1,
+            wal_config: "postgres://wal:***@db-b:5432/pico".to_owned(),
+        };
+
+        let error = takeover.open(&request).await.err().unwrap();
+
+        assert!(
+            error.to_string().contains("not in this node's database"),
+            "{error}"
+        );
     }
 }

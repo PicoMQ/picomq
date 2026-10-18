@@ -21,6 +21,7 @@ fn build(total: u64, open_every: u64) -> MetadataState {
         apply(
             &mut state,
             &MetadataCommand::RegisterNode {
+                wal: String::new(),
                 node_id,
                 node_epoch: EPOCH,
                 http_address: String::new(),

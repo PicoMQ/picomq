@@ -3,7 +3,9 @@
 pub mod auth;
 mod codec;
 pub mod error;
+pub mod failover;
 pub mod group;
+mod leadership;
 pub mod log;
 pub mod node;
 pub mod ownership;

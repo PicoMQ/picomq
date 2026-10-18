@@ -106,27 +106,35 @@ impl Streams {
         Ok(Some(epoch))
     }
 
-    pub async fn destroy(&self, stream_id: u64) {
+    pub async fn destroy(&self, stream_id: u64) -> Result<(), ServiceError> {
         let held = self.open.lock().unwrap().remove(&stream_id);
-        self.epochs.lock().unwrap().remove(&stream_id);
-
         let stream = match held {
             Some(stream) => stream,
             None => {
-                let epoch = self.next_epoch(stream_id);
                 let options = OpenStreamOptions {
-                    epoch,
+                    epoch: self.next_epoch(stream_id),
                     ..Default::default()
                 };
                 match self.client.open_stream(stream_id, options).await {
                     Ok(stream) => stream,
-                    Err(_) => return,
+                    Err(error) => {
+                        self.epochs.lock().unwrap().remove(&stream_id);
+                        return match self.open_error(stream_id, error) {
+                            error if error.kind == ErrorKind::NotFound => Ok(()),
+                            error => Err(error),
+                        };
+                    }
                 }
             }
         };
 
-        let _ = stream.destroy().await;
+        if let Err(error) = stream.destroy().await {
+            self.hold(stream);
+            return Err(error.into());
+        }
+
         self.epochs.lock().unwrap().remove(&stream_id);
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
@@ -273,11 +281,9 @@ impl Streams {
                 ));
             }
 
-            let _ = tokio::time::timeout(
-                TRANSFER_SETTLE_POLL,
-                self.views.wait_applied(view.applied_index + 1),
-            )
-            .await;
+            self.views
+                .wait_past(view.applied_index, TRANSFER_SETTLE_POLL)
+                .await;
         }
     }
 }

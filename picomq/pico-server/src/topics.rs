@@ -224,7 +224,7 @@ impl Topics {
     pub fn meta(&self, topic: Topic) -> Result<TopicMeta, ServiceError> {
         let partitions = partition_logs(&topic)
             .iter()
-            .map(|log| self.service.current_offsets(log))
+            .map(|log| self.service.offsets(log))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(TopicMeta { topic, partitions })
@@ -617,12 +617,8 @@ impl Topics {
 
         tokio::spawn(async move {
             let mut cursor: Option<String> = None;
-            loop {
-                tokio::time::sleep(tick).await;
-                if leadership.has_changed().is_err() {
-                    return;
-                }
-                if !*leadership.borrow_and_update() {
+            while let Some(leading) = crate::leadership::tick(&mut leadership, tick).await {
+                if !leading {
                     continue;
                 }
 
@@ -686,11 +682,11 @@ impl Topics {
             let created = if local == Some(index) {
                 self.service.create_local_log(&log).await
             } else {
-                self.service.create_log(&log).await
+                self.service.create_placed_log(&log).await
             };
 
             if let Err(error) = created {
-                self.unprovision(id, indexes.start..index).await;
+                self.unprovision(id, indexes.start..index + 1).await;
                 return Err(error);
             }
         }

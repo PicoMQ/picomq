@@ -18,10 +18,7 @@ async fn start(dir: &std::path::Path) -> (picomq_runtime::PicoServer, String) {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
         http_protocol: ServeProtocol::Pico,
-        kafka: KafkaConfig {
-            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-            advertise: None,
-        },
+        kafka: KafkaConfig::new(SocketAddr::from(([127, 0, 0, 1], 0))),
         meta_backend: MetaBackend::parse("sqlite::memory:").unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
         wal_uri: Some(format!(

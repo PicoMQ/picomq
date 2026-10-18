@@ -138,15 +138,9 @@ impl TokenService {
     ) -> tokio::task::JoinHandle<()> {
         let service = self.clone();
         tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(tick).await;
-                if leadership.has_changed().is_err() {
-                    return;
-                }
-                if !*leadership.borrow_and_update() {
-                    continue;
-                }
-                if let Err(error) = service.remove_expired(picomq_common::now_ms()).await {
+            while let Some(leading) = crate::leadership::tick(&mut leadership, tick).await {
+                if leading && let Err(error) = service.remove_expired(picomq_common::now_ms()).await
+                {
                     tracing::debug!(%error, "token expiry failed");
                 }
             }

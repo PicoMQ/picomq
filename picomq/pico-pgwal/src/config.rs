@@ -4,6 +4,7 @@ use std::time::Duration;
 use url::Url;
 
 use crate::error::Error;
+use crate::node::Claim;
 
 const LEVELS: [&str; 4] = ["on", "remote_apply", "remote_write", "local"];
 const SECRETS: [&str; 2] = ["password", "sslpassword"];
@@ -21,8 +22,10 @@ pub struct Config {
     pub segments: u32,
     pub synchronous_commit: String,
     pub allow_unsafe: bool,
+    pub(crate) failover: bool,
     connection: String,
     redacted: String,
+    location: String,
 }
 
 impl Config {
@@ -73,6 +76,17 @@ impl Config {
         if !passthrough.is_empty() {
             url.query_pairs_mut().extend_pairs(&passthrough);
         }
+        let mut location = url.clone();
+        let _ = location.set_password(None);
+        location.set_query(None);
+        let public: Vec<&(String, String)> = passthrough
+            .iter()
+            .filter(|(key, _)| !SECRETS.contains(&key.as_str()))
+            .collect();
+        if !public.is_empty() {
+            location.query_pairs_mut().extend_pairs(public);
+        }
+        config.location = location.into();
         config.connection = url.into();
         config.redacted = shown.into();
         config.validate()?;
@@ -84,6 +98,18 @@ impl Config {
         self.node_id = node_id;
         self.epoch = epoch;
         self
+    }
+
+    pub fn location(&self) -> &str {
+        &self.location
+    }
+
+    pub(crate) fn claim(&self) -> Claim {
+        Claim {
+            node_id: self.node_id,
+            epoch: self.epoch,
+            failover: self.failover,
+        }
     }
 
     pub fn redacted(&self) -> &str {
@@ -111,8 +137,10 @@ impl Config {
             segments: 8,
             synchronous_commit: "on".to_owned(),
             allow_unsafe: false,
+            failover: false,
             connection: String::new(),
             redacted: String::new(),
+            location: String::new(),
         }
     }
 
@@ -157,6 +185,19 @@ fn typed<T: FromStr>(key: &str, value: &str) -> Result<T, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn location_drops_the_password_and_tuning() {
+        let config = Config::parse(
+            "postgres://wal:secret@db:5432/pico?segments=4&sslmode=require&password=hidden",
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.location(),
+            "postgres://wal@db:5432/pico?sslmode=require"
+        );
+    }
 
     #[test]
     fn strips_wal_parameters_and_keeps_the_rest() {

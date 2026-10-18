@@ -19,10 +19,7 @@ async fn start(protocol: Protocol, dir: &std::path::Path) -> Server {
     let server = picomq_runtime::start(ServerConfig {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
-        kafka: KafkaConfig {
-            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-            advertise: None,
-        },
+        kafka: KafkaConfig::new(SocketAddr::from(([127, 0, 0, 1], 0))),
         http_protocol: match protocol {
             Protocol::Pico => ServeProtocol::Pico,
             Protocol::Ds => ServeProtocol::Ds,

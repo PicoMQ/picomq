@@ -245,6 +245,7 @@ mod tests {
             apply(
                 &mut state,
                 &MetadataCommand::RegisterNode {
+                    wal: String::new(),
                     node_id,
                     node_epoch,
                     http_address: addr.into(),

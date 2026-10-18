@@ -22,10 +22,7 @@ fn config(dir: &Path, protocol: HttpProtocol, node_epoch: i64) -> ServerConfig {
         addr: loopback(),
         admin_addr: Some(loopback()),
         http_protocol: protocol,
-        kafka: KafkaConfig {
-            listen: loopback(),
-            advertise: None,
-        },
+        kafka: KafkaConfig::new(loopback()),
         meta_backend: MetaBackend::parse(&format!("sqlite:{}", dir.join("meta.db").display()))
             .unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
@@ -184,6 +181,23 @@ async fn kafka_listener_runs_alongside_each_http_protocol() {
 }
 
 #[tokio::test]
+async fn liveness_settings_are_validated() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut silent = config(dir.path(), HttpProtocol::Pico, 1);
+    silent.heartbeat_interval = Duration::ZERO;
+    let mut impatient = config(dir.path(), HttpProtocol::Pico, 1);
+    impatient.node_timeout = impatient.heartbeat_interval;
+
+    for refused in [silent, impatient] {
+        assert!(matches!(
+            picomq_runtime::start(refused).await,
+            Err(RuntimeError::Liveness { .. })
+        ));
+    }
+}
+
+#[tokio::test]
 async fn auth_off_refuses_non_loopback_binds() {
     let dir = tempfile::tempdir().unwrap();
     let mut refused = config(dir.path(), HttpProtocol::Pico, 1);
@@ -208,10 +222,7 @@ async fn kafka_non_loopback_bind_refused_regardless_of_auth() {
     let dir = tempfile::tempdir().unwrap();
     let mut refused = config(dir.path(), HttpProtocol::Pico, 1);
     refused.auth_mode = AuthMode::Required;
-    refused.kafka = KafkaConfig {
-        listen: SocketAddr::from(([0, 0, 0, 0], 0)),
-        advertise: None,
-    };
+    refused.kafka = KafkaConfig::new(SocketAddr::from(([0, 0, 0, 0], 0)));
     assert!(matches!(
         picomq_runtime::start(refused).await,
         Err(RuntimeError::InsecureBind { .. })

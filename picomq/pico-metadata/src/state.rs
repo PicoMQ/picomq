@@ -48,9 +48,11 @@ pub struct NodeRow {
     /// Placement weight for stream assignment. Default 1.
     pub slots: u32,
     /// Advertised listener addresses of additional wire protocols, keyed by
-    /// protocol name (e.g. `"kafka"`). Absent when the node does not serve
-    /// that protocol.
+    /// protocol name (e.g. `"kafka"`).
     pub protocol_addresses: BTreeMap<String, String>,
+    pub wal: String,
+    pub heartbeats: u64,
+    pub fenced: bool,
 }
 
 /// One in-flight ownership transfer.

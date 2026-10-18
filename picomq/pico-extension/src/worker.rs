@@ -59,7 +59,13 @@ pub extern "C-unwind" fn pico_worker_main(_argument: pg_sys::Datum) {
         Err(e) => error!("pico: {e}"),
     };
     log!("pico: serving on {}", server.local_addr());
-    while BackgroundWorker::wait_latch(Some(TICK)) {}
+    let fenced = server.fenced();
+    while BackgroundWorker::wait_latch(Some(TICK)) {
+        if *fenced.borrow() {
+            warning!("pico: this node was fenced by the cluster, stopping");
+            break;
+        }
+    }
     if runtime
         .block_on(async { tokio::time::timeout(SHUTDOWN, server.shutdown()).await })
         .is_err()

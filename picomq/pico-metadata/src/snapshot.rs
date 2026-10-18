@@ -48,6 +48,9 @@ pub fn encode(state: &MetadataState) -> Bytes {
         put_str(&mut buf, &node.http_address);
         buf.put_u32_le(node.slots);
         put_str_map(&mut buf, &node.protocol_addresses);
+        put_str(&mut buf, &node.wal);
+        buf.put_u64_le(node.heartbeats);
+        buf.put_u8(u8::from(node.fenced));
     }
     buf.put_u64_le(state.next_producer_id);
 
@@ -128,7 +131,7 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
         state.streams.insert(stream_id, row);
         if stream_state == StreamState::Opened {
             state.opening_by_node.insert((node_id, stream_id), ());
-        } else if stream_state == StreamState::Closed && epoch == -1 && node_id != -1 {
+        } else if node_id != -1 {
             state.placed_by_node.insert((node_id, stream_id), ());
         }
     }
@@ -139,6 +142,13 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
         let http_address = get_str(&mut buf)?;
         let slots = get_u32(&mut buf)?;
         let protocol_addresses = get_str_map(&mut buf)?;
+        let wal = get_str(&mut buf)?;
+        let heartbeats = get_u64(&mut buf)?;
+        let fenced = match get_u8(&mut buf)? {
+            0 => false,
+            1 => true,
+            other => return Err(SnapshotError::Corrupt(format!("fenced flag {other}"))),
+        };
         state.nodes.insert(
             node_id,
             NodeRow {
@@ -147,9 +157,13 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
                 http_address,
                 slots,
                 protocol_addresses,
+                wal,
+                heartbeats,
+                fenced,
             },
         );
     }
+
     state.next_producer_id = get_u64(&mut buf)?;
 
     state.next_object_id = get_u64(&mut buf)?;
@@ -355,6 +369,7 @@ mod tests {
             apply(
                 &mut state,
                 &MetadataCommand::RegisterNode {
+                    wal: format!("2@s3://wal/node-{node_id}"),
                     node_id,
                     node_epoch,
                     http_address: addr.into(),
@@ -377,6 +392,14 @@ mod tests {
                 node_id: 1,
                 node_epoch: 10,
                 count: 5,
+            },
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &MetadataCommand::FenceNode {
+                node_id: 2,
+                node_epoch: 20,
             },
         )
         .unwrap();

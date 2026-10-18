@@ -84,6 +84,14 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = 55)]
     sse_max_duration_sec: u64,
 
+    /// Seconds between this node's heartbeats.
+    #[arg(long, env = "PICO_HEARTBEAT_INTERVAL_SEC", default_value_t = 5)]
+    heartbeat_interval_sec: u64,
+
+    /// Seconds a node may miss heartbeats before its partitions fail over.
+    #[arg(long, env = "PICO_NODE_TIMEOUT_SEC", default_value_t = 30)]
+    node_timeout_sec: u64,
+
     #[arg(long, default_value_t = 64 * 1024)]
     max_chunk_size: usize,
 
@@ -217,6 +225,8 @@ impl ServeArgs {
             slots: self.slots,
             long_poll_timeout: Duration::from_secs(self.long_poll_timeout_sec),
             sse_max_duration: Duration::from_secs(self.sse_max_duration_sec),
+            heartbeat_interval: Duration::from_secs(self.heartbeat_interval_sec),
+            node_timeout: Duration::from_secs(self.node_timeout_sec),
             max_chunk_size: self.max_chunk_size,
             max_request_size: self.max_request_size,
             shutdown_drain: Duration::from_secs(self.shutdown_drain_sec),

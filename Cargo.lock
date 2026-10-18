@@ -2571,6 +2571,7 @@ dependencies = [
 name = "picomq-runtime"
 version = "0.1.1"
 dependencies = [
+ "async-trait",
  "bytes",
  "humantime",
  "picomq-auth",
@@ -2634,6 +2635,7 @@ dependencies = [
  "picomq-schema",
  "picomq-sql",
  "s3stream",
+ "s3stream-wal",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",

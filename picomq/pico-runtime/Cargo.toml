@@ -8,6 +8,7 @@ description = "PicoMQ runtime assembly: a ServerConfig to a running node + HTTP 
 repository.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 s3stream = { workspace = true }
 picomq-auth = { workspace = true }
 picomq-metadata = { workspace = true }

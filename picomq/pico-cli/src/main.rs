@@ -118,10 +118,20 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
             if let Some(admin) = server.admin_addr() {
                 println!("admin on http://{admin}");
             }
-            tokio::signal::ctrl_c().await?;
-            println!("shutting down");
+            let mut fenced = server.fenced();
+            let code = tokio::select! {
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    println!("shutting down");
+                    0
+                }
+                _ = fenced.wait_for(|fenced| *fenced) => {
+                    eprintln!("this node was fenced by the cluster, shutting down");
+                    1
+                }
+            };
             server.shutdown().await;
-            Ok(0)
+            Ok(code)
         }
     }
 }

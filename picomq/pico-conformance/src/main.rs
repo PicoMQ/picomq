@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<ExitCode> {
     let known = KnownFailures::load(cli.suite)?;
 
     let target = match (cli.target, cli.bootstrap) {
-        (None, None) => Target::start(cli.suite.protocol()).await?,
+        (None, None) => Target::start(cli.suite).await?,
         (url, bootstrap) => Target::remote(url, bootstrap, cli.host_address),
     };
 
