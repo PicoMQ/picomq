@@ -1,9 +1,8 @@
 //! Stored access-token record and its length-prefixed binary encoding.
 //!
 //! The value under `auth/token/{id}` holds everything needed to authenticate
-//! and authorize except the secret. Layout mirrors the explicit binary style
-//! of the stream registry entry. There is no format-version byte: the product
-//! is unreleased, so the shape can change in place.
+//! and authorize except the secret. There is no format-version byte: the
+//! product is unreleased, so the shape can change in place.
 
 use std::collections::BTreeSet;
 

@@ -56,11 +56,13 @@ impl PicoClient {
     pub async fn append_as(
         &self,
         name: &str,
+        partition: Option<u32>,
         records: &[Bytes],
         producer: &ProducerRef<'_>,
     ) -> Result<ProducerAck> {
         let records_wire = wire_records(records);
         let mut request = AppendRequest::new(name, &records_wire);
+        request.partition = partition;
         request.producer = Some(*producer);
         let response = self.call(request.encode()).await?;
         let ack = AppendResponse::decode(response.headers());
@@ -80,10 +82,13 @@ impl PicoClient {
         })
     }
 
-    pub async fn trim(&self, name: &str, seq: u64) -> Result<String> {
-        let response = self
-            .call(TrimRequest { stream: name, seq }.encode())
-            .await?;
+    pub async fn trim(&self, name: &str, partition: Option<u32>, seq: u64) -> Result<String> {
+        let request = TrimRequest {
+            stream: name,
+            partition,
+            seq,
+        };
+        let response = self.call(request.encode()).await?;
         Ok(seq_string(
             TrimResponse::decode(response.headers()).start_seq,
         ))
@@ -178,8 +183,12 @@ impl PicoClient {
         expect(response, ok).await
     }
 
-    async fn head_once(&self, name: &str) -> Result<Option<StreamInfo>> {
-        let response = self.call(HeadRequest { stream: name }.encode()).await?;
+    async fn head_once(&self, name: &str, partition: Option<u32>) -> Result<Option<StreamInfo>> {
+        let request = HeadRequest {
+            stream: name,
+            partition,
+        };
+        let response = self.call(request.encode()).await?;
         let Some(head) = HeadResponse::decode(response.status().as_u16(), response.headers())
         else {
             return Ok(None);
@@ -187,8 +196,9 @@ impl PicoClient {
         Ok(Some(StreamInfo {
             name: name.to_owned(),
             content_type: head.content_type,
-            start: seq_string(head.start_seq),
-            next: seq_string(head.next_seq),
+            partitions: head.partitions,
+            start: head.start_seq.map(|seq| seq.to_string()),
+            next: head.next_seq.map(|seq| seq.to_string()),
             closed: head.closed,
             ttl_seconds: head.ttl_seconds,
             expires_at: head.expires_at,
@@ -198,11 +208,13 @@ impl PicoClient {
     async fn read_once(
         &self,
         name: &str,
+        partition: Option<u32>,
         from: &str,
         live: Live,
         limits: ReadLimits,
     ) -> Result<ReadPage> {
         let mut request = ReadRequest::new(name, from);
+        request.partition = partition;
         request.count = limits.count;
         request.bytes = limits.bytes;
         request.live = (live == Live::LongPoll).then_some(LIVE_LONG_POLL);
@@ -251,8 +263,9 @@ impl PicoClient {
                 .map(|entry| StreamInfo {
                     name: entry.name,
                     content_type: entry.content_type,
-                    start: entry.start_seq.to_string(),
-                    next: entry.next_seq.to_string(),
+                    partitions: entry.partitions,
+                    start: entry.start_seq.map(|seq| seq.to_string()),
+                    next: entry.next_seq.map(|seq| seq.to_string()),
                     closed: entry.closed,
                     ttl_seconds: entry.ttl_seconds,
                     expires_at: entry.expires_at,
@@ -291,20 +304,21 @@ impl StreamApi for PicoClient {
         Ok(CreateResponse::decode(response.status().as_u16(), response.headers()).created)
     }
 
-    async fn head(&self, name: &str) -> Result<Option<StreamInfo>> {
-        self.retry.run(|| self.head_once(name)).await
+    async fn head(&self, name: &str, partition: Option<u32>) -> Result<Option<StreamInfo>> {
+        self.retry.run(|| self.head_once(name, partition)).await
     }
 
     async fn append(
         &self,
         name: &str,
+        partition: Option<u32>,
         records: &[Bytes],
         _content_type: &str,
     ) -> Result<AppendAck> {
         let records_wire = wire_records(records);
-        let response = self
-            .call(AppendRequest::new(name, &records_wire).encode())
-            .await?;
+        let mut request = AppendRequest::new(name, &records_wire);
+        request.partition = partition;
+        let response = self.call(request.encode()).await?;
         let ack = AppendResponse::decode(response.headers());
         let next = seq_string(ack.next_seq);
         Ok(AppendAck {
@@ -320,12 +334,13 @@ impl StreamApi for PicoClient {
     async fn read(
         &self,
         name: &str,
+        partition: Option<u32>,
         from: &str,
         live: Live,
         limits: ReadLimits,
     ) -> Result<ReadPage> {
         self.retry
-            .run(|| self.read_once(name, from, live, limits))
+            .run(|| self.read_once(name, partition, from, live, limits))
             .await
     }
 

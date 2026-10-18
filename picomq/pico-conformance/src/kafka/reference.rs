@@ -1,8 +1,6 @@
-use tokio::process::Command;
+use crate::kafka::docker::{docker, docker_unchecked};
 
-use crate::kafka::docker::{docker, remove};
-
-const IMAGE: &str = "apache/kafka:4.3.1";
+pub const IMAGE: &str = "apache/kafka:4.3.1";
 
 pub struct Reference {
     network: String,
@@ -58,16 +56,14 @@ impl Reference {
         args.push(IMAGE);
         docker(&args).await?;
 
-        let port = Command::new("docker")
-            .args(["port", &reference.container, "9092/tcp"])
-            .output()
-            .await?;
-        reference.host_address = String::from_utf8_lossy(&port.stdout)
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_owned();
+        let port = docker(&["port", &reference.container, "9092/tcp"]).await?;
+        reference.host_address = port.lines().next().unwrap_or_default().trim().to_owned();
+
+        anyhow::ensure!(
+            !reference.host_address.is_empty(),
+            "docker port printed no address for {}",
+            reference.container
+        );
 
         Ok(reference)
     }
@@ -87,18 +83,13 @@ impl Reference {
 
 impl Drop for Reference {
     fn drop(&mut self) {
-        remove(&["rm", "-f", &self.container]);
+        docker_unchecked(&["rm", "-f", &self.container]);
 
         let filter = format!("network={}", self.network);
-        if let Ok(attached) = std::process::Command::new("docker")
-            .args(["ps", "-aq", "--filter", &filter])
-            .output()
-        {
-            for id in String::from_utf8_lossy(&attached.stdout).split_whitespace() {
-                remove(&["rm", "-f", id]);
-            }
+        for id in docker_unchecked(&["ps", "-aq", "--filter", &filter]).split_whitespace() {
+            docker_unchecked(&["rm", "-f", id]);
         }
 
-        remove(&["network", "rm", &self.network]);
+        docker_unchecked(&["network", "rm", &self.network]);
     }
 }

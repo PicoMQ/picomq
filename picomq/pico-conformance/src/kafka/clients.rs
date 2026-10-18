@@ -1,15 +1,11 @@
-use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use crate::kafka::docker::{docker, docker_unchecked, output};
+use crate::kafka::reference::IMAGE;
 
-use crate::kafka::docker::{docker, remove};
-
-const KAFKA: &str = "apache/kafka:4.3.1";
-const KCAT: &str = "pico-conformance-kcat";
-const OLD_KCAT: &str = "edenhill/kcat:1.7.1";
-const HOST: &str = "--add-host=host.docker.internal:host-gateway";
+pub const KCAT: &str = "pico-conformance-kcat";
+pub const OLD_KCAT: &str = "edenhill/kcat:1.7.1";
+const ADD_HOST: &str = "--add-host=host.docker.internal:host-gateway";
 const TIMEOUT: Duration = Duration::from_secs(60);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -40,10 +36,10 @@ impl Clients {
             &clients.container,
             "--network",
             network,
-            HOST,
+            ADD_HOST,
             "--entrypoint",
             "sleep",
-            KAFKA,
+            IMAGE,
             "infinity",
         ])
         .await?;
@@ -89,16 +85,16 @@ impl Clients {
         run(&command, input).await
     }
 
-    pub async fn kcat(&self, args: &[&str], input: Option<&str>) -> Output {
-        self.kcat_image(KCAT, args, input).await
-    }
-
-    pub async fn old_kcat(&self, args: &[&str], input: Option<&str>) -> Output {
-        self.kcat_image(OLD_KCAT, args, input).await
-    }
-
-    async fn kcat_image(&self, image: &str, args: &[&str], input: Option<&str>) -> Output {
-        let mut command = vec!["run", "--rm", "-i", "--network", &self.network, HOST, image];
+    pub async fn kcat(&self, image: &str, args: &[&str], input: Option<&str>) -> Output {
+        let mut command = vec![
+            "run",
+            "--rm",
+            "-i",
+            "--network",
+            &self.network,
+            ADD_HOST,
+            image,
+        ];
         command.extend_from_slice(args);
 
         run(&command, input).await
@@ -107,36 +103,19 @@ impl Clients {
 
 impl Drop for Clients {
     fn drop(&mut self) {
-        remove(&["rm", "-f", &self.container]);
+        docker_unchecked(&["rm", "-f", &self.container]);
     }
 }
 
 async fn run(args: &[&str], input: Option<&str>) -> Output {
-    let failed = Output {
-        ok: false,
-        stdout: String::new(),
-    };
-
-    let Ok(mut child) = Command::new("docker")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    else {
-        return failed;
-    };
-
-    if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
-        let _ = stdin.write_all(input.as_bytes()).await;
-    }
-
-    match tokio::time::timeout(TIMEOUT, child.wait_with_output()).await {
+    match tokio::time::timeout(TIMEOUT, output(args, input)).await {
         Ok(Ok(output)) => Output {
             ok: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         },
-        _ => failed,
+        _ => Output {
+            ok: false,
+            stdout: String::new(),
+        },
     }
 }

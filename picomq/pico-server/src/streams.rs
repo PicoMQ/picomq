@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use picomq_metadata::{MetadataNodeHandle, ViewPublisher};
-use s3stream::{CreateStreamOptions, OpenStreamOptions, Stream, StreamClientTrait as StreamClient};
+use s3stream::{
+    CreateStreamOptions, OpenStreamOptions, Stream, StreamClientTrait as StreamClient, StreamState,
+};
 
 use crate::error::{ErrorKind, ServiceError};
 
@@ -74,7 +76,8 @@ impl Streams {
                     ..Default::default()
                 },
             )
-            .await?;
+            .await
+            .map_err(|error| self.open_error(stream_id, error))?;
 
         self.hold(opened.clone());
         Ok(opened)
@@ -218,6 +221,21 @@ impl Streams {
         let next = current + 1;
         epochs.insert(stream_id, next);
         next
+    }
+
+    fn open_error(&self, stream_id: u64, error: s3stream::Error) -> ServiceError {
+        let view = self.views.load();
+        match view.state.streams.get(&stream_id) {
+            Some(row) if row.state == StreamState::Opened && row.node_id != self.node.node_id() => {
+                ServiceError::with_message(
+                    ErrorKind::Transferring,
+                    None,
+                    false,
+                    format!("stream {stream_id} is open on node {}", row.node_id),
+                )
+            }
+            _ => error.into(),
+        }
     }
 
     async fn await_transfer_settled(&self, stream_id: u64) -> Result<(), ServiceError> {

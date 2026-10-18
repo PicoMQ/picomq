@@ -27,8 +27,8 @@ use crate::handlers::common::{
     COORDINATOR_NOT_AVAILABLE, FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND, GROUP_MAX_SIZE_REACHED,
     ILLEGAL_GENERATION, INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, KAFKA_STORAGE_ERROR,
     MEMBER_ID_REQUIRED, NO_ERROR, NOT_COORDINATOR, REBALANCE_IN_PROGRESS, UNKNOWN_MEMBER_ID,
-    UNKNOWN_TOPIC_OR_PARTITION, broker_address, broker_id, encode_response, parse_host_port,
-    resolve_topic, topic_name,
+    broker_address, broker_id, encode_response, parse_host_port, partition_of, resolve_topic,
+    topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 use picomq_server::{
@@ -606,13 +606,6 @@ async fn offset_fetch(
         req.api_version,
         &response,
     )))
-}
-
-fn partition_of(topic: &Topic, index: i32) -> Result<Partition, i16> {
-    match u32::try_from(index) {
-        Ok(index) if index < topic.partitions => Ok(Partition::new(topic.id, index)),
-        _ => Err(UNKNOWN_TOPIC_OR_PARTITION),
-    }
 }
 
 fn fetched_partition(

@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -58,6 +61,93 @@ var _ = ginkgo.Describe("Pico client", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(page.Records).To(HaveLen(1))
 		Expect(page.Records[0].Body).To(Equal([]byte("x")))
+	})
+
+	ginkgo.It("sends the partition from partition handles", func() {
+		var mu sync.Mutex
+		var requests []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			requests = append(requests, r.Method+"?"+strings.Join(r.URL.Query()["partition"], ","))
+			mu.Unlock()
+
+			switch {
+			case r.Method == http.MethodHead:
+				w.Header().Set("Pico-Partitions", "3")
+				if r.URL.Query().Has("partition") {
+					w.Header().Set("Pico-Start-Seq", "0")
+					w.Header().Set("Pico-Next-Seq", "4")
+				}
+			case r.Method == http.MethodPost && r.Header.Get("Pico-Trim-Seq") != "":
+				w.Header().Set("Pico-Start-Seq", "2")
+			case r.Method == http.MethodPost:
+				w.Header().Set("Pico-Start-Seq", "0")
+				w.Header().Set("Pico-Next-Seq", "1")
+			case r.URL.Query().Get("live") == "sse":
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: control\ndata: {\"next_seq\":4,\"up_to_date\":true,\"closed\":true}\n\n")
+			default:
+				w.Header().Set("Pico-Next-Seq", "4")
+				w.Header().Set("Pico-Up-To-Date", "true")
+			}
+		}))
+		defer server.Close()
+
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+		ctx := context.Background()
+		partition := client.Stream("orders").Partition(2)
+
+		info, err := client.Head(ctx, "orders")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(*info).To(Equal(StreamInfo{Name: "orders", Partitions: 3}))
+		info, err = partition.Head(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(info.Partitions).To(Equal(uint32(3)))
+		Expect(info.Start).To(Equal("0"))
+		Expect(info.Next).To(Equal("4"))
+
+		_, err = partition.Append(ctx, AppendRecord{Body: []byte("a")})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = partition.AppendAs(ctx, []AppendRecord{{Body: []byte("b")}}, ProducerRef{ID: "writer", Seq: 0})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = partition.Read(ctx, "0", ReadOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		start, err := partition.Trim(ctx, 2)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(start).To(Equal("2"))
+
+		subscription := partition.Subscribe(ctx, "0", SubscribeOptions{DisableReconnect: true})
+		event, err := subscription.Next()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(event.Closed).To(BeTrue())
+		_, err = partition.Records(RecordsOptions{}).Next(ctx)
+		Expect(err).To(MatchError(io.EOF))
+
+		producer := partition.NewProducer("writer", nil)
+		_, err = producer.SendDurable(ctx, AppendRecord{Body: []byte("c")})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(producer.Close(ctx)).To(Succeed())
+
+		mu.Lock()
+		defer mu.Unlock()
+		Expect(requests).To(Equal([]string{"HEAD?", "HEAD?2", "POST?2", "POST?2", "GET?2", "POST?2", "GET?2", "GET?2", "POST?2"}))
+	})
+
+	ginkgo.It("lists partition counts and omits offsets the server does not send", func() {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, `{"streams":[{"name":"/single","content_type":"application/octet-stream","start_seq":0,"next_seq":5,"partitions":1},{"name":"/multi","content_type":"application/octet-stream","partitions":4}],"has_more":false}`)
+		}))
+		defer server.Close()
+
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+		listing, err := client.List(context.Background(), "/", 0)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(listing.Streams).To(Equal([]StreamInfo{
+			{Name: "/single", ContentType: "application/octet-stream", Start: "0", Next: "5", Partitions: 1},
+			{Name: "/multi", ContentType: "application/octet-stream", Partitions: 4},
+		}))
 	})
 
 	ginkgo.It("authenticates requests without explicit headers", func() {

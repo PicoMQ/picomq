@@ -42,7 +42,8 @@ pub use topics::{Topics, partition_log};
 pub use transfer::TransferWatcher;
 pub use types::{
     AppendBatchResult, AppendCommand, AppendResult, BatchReadResult, CloseResult, CreateCommand,
-    CreateResult, LogOffsets, LogRead, NodeMeta, NumericProducer, OffsetToken, Owner, ReadResult,
-    StreamBatch, StreamWatermarks, SubmittedBatchAppend, TopicList, TopicMeta, UpdateTopicCommand,
+    CreateResult, LogOffsets, LogRead, MAX_NEW_PARTITIONS, NodeMeta, NumericProducer, OffsetToken,
+    Owner, ReadResult, StreamBatch, StreamWatermarks, SubmittedBatchAppend, TopicList, TopicMeta,
+    UpdateTopicCommand,
 };
 pub use waiter::StreamWaiterRegistry;

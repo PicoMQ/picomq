@@ -26,6 +26,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 bytes = { workspace = true }
 humantime = { workspace = true }
+picomq-client = { workspace = true }
 picomq-protocol = { workspace = true }
 rdkafka = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }

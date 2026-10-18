@@ -15,6 +15,7 @@ use super::{
 pub(super) const MAX_GROUPS: usize = 1_000;
 pub(super) const MAX_MEMBERS_PER_GROUP: usize = 10_000;
 pub(super) const MAX_STREAMS_PER_GROUP: usize = 10_000;
+pub(super) const MAX_PARTITIONS_PER_GROUP: usize = 10_000;
 pub(super) const MAX_SUBSCRIPTION_ENTRIES_PER_GROUP: usize = 1_000_000;
 pub(super) const MAX_GROUP_ID_BYTES: usize = 255;
 pub(super) const MAX_MEMBER_ID_BYTES: usize = 512;
@@ -134,18 +135,13 @@ pub(super) struct Group {
 }
 
 impl Group {
-    pub(super) fn loaded(
-        epoch: i64,
-        names: Names,
-        offsets: OffsetTable,
-        appends_since_snapshot: u64,
-    ) -> Self {
+    pub(super) fn loaded(epoch: i64, offsets: OffsetTable, appends_since_snapshot: u64) -> Self {
         Self {
             loaded_epoch: epoch,
             phase: GroupState::Empty,
             generation: 0,
             mode: None,
-            names,
+            names: Names::default(),
             members: BTreeMap::new(),
             offsets,
             appends_since_snapshot,

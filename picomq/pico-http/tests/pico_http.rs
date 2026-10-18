@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use picomq_protocol::record::{PicoRecord, decode_batch_read, encode_batch_append};
+use picomq_server::CreateCommand;
 use serde_json::Value;
 
 use common::picomq_server;
@@ -471,11 +472,17 @@ async fn remote_owner_redirects() {
     use picomq_server::ownership::OwnershipService;
     use picomq_server::{Log, NodeMeta, Owner, ServiceError};
 
-    struct RemoteOwnership;
+    struct RemoteOwnership {
+        local: Log,
+    }
 
     #[async_trait::async_trait]
     impl OwnershipService for RemoteOwnership {
-        async fn owner_of(&self, _log: &Log) -> Result<Owner, ServiceError> {
+        async fn owner_of(&self, log: &Log) -> Result<Owner, ServiceError> {
+            if *log == self.local {
+                return Ok(Owner::local(None, -1));
+            }
+
             Ok(Owner::remote(
                 7,
                 1,
@@ -500,9 +507,20 @@ async fn remote_owner_redirects() {
         ))
         .await
         .unwrap();
+    let spread = node
+        .topics()
+        .create(CreateCommand {
+            partitions: 2,
+            ..CreateCommand::new("/streams/spread", "text/plain")
+        })
+        .await
+        .unwrap()
+        .meta
+        .topic;
+    let local = picomq_server::partition_log(&spread, 0).unwrap();
     let frontend = std::sync::Arc::new(picomq_http::PicoFrontend::new(
         node.topics(),
-        std::sync::Arc::new(RemoteOwnership),
+        std::sync::Arc::new(RemoteOwnership { local }),
         picomq_http::RoutingMode::Redirect,
     ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -523,6 +541,29 @@ async fn remote_owner_redirects() {
         "http://owner.example:4437/streams/demo?seq=0&format=raw"
     );
 
+    let remote_partition = http
+        .get(format!("{base_url}/streams/spread?partition=1&seq=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(remote_partition.status(), 307);
+    assert_eq!(
+        remote_partition.headers()["Location"],
+        "http://owner.example:4437/streams/spread?partition=1&seq=0"
+    );
+    let local_partition = http
+        .get(format!("{base_url}/streams/spread?partition=0&seq=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(local_partition.status(), 200);
+    let without_partition = http
+        .get(format!("{base_url}/streams/spread?seq=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(without_partition.status(), 400);
+
     let put = http
         .put(format!("{base_url}/streams/fresh"))
         .header("Content-Type", "text/plain")
@@ -533,4 +574,150 @@ async fn remote_owner_redirects() {
 
     let list = http.get(format!("{base_url}/")).send().await.unwrap();
     assert_eq!(list.status(), 200);
+}
+
+#[tokio::test]
+async fn partitions_are_addressed_one_at_a_time() {
+    let server = picomq_server().await;
+    let http = client();
+    let url = format!("{}/spread", server.base_url);
+    server
+        .node
+        .topics()
+        .create(CreateCommand {
+            partitions: 3,
+            ..CreateCommand::new("/spread", "text/plain")
+        })
+        .await
+        .unwrap();
+
+    for (partition, body) in [(0, "zero"), (1, "one"), (2, "two"), (2, "two-again")] {
+        let appended = http
+            .post(format!("{url}?partition={partition}"))
+            .header("Content-Type", "text/plain")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(appended.status(), 200);
+    }
+
+    let without_partition = http
+        .post(&url)
+        .header("Content-Type", "text/plain")
+        .body("lost")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(without_partition.status(), 400);
+    let beyond = http
+        .get(format!("{url}?partition=3&seq=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(beyond.status(), 404);
+    let malformed = http
+        .get(format!("{url}?partition=x&seq=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), 400);
+
+    let head = http.head(&url).send().await.unwrap();
+    assert_eq!(head.headers()["Pico-Partitions"], "3");
+    assert!(head.headers().get("Pico-Next-Seq").is_none());
+    let head = http
+        .head(format!("{url}?partition=2"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.headers()["Pico-Next-Seq"], "2");
+
+    let first = http
+        .get(format!("{url}?partition=0&seq=0"))
+        .send()
+        .await
+        .unwrap();
+    let second = http
+        .get(format!("{url}?partition=1&seq=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(first.headers()["ETag"], second.headers()["ETag"]);
+    assert!(first.text().await.unwrap().contains(r#""body":"zero""#));
+    assert!(second.text().await.unwrap().contains(r#""body":"one""#));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let trimmed = http
+            .post(format!("{url}?partition=2"))
+            .header("Pico-Trim-Seq", "1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(trimmed.status(), 200);
+        if trimmed.headers()["Pico-Start-Seq"] == "1" {
+            break;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "trim never committed"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let trimmed = http
+        .head(format!("{url}?partition=2"))
+        .send()
+        .await
+        .unwrap();
+    let untouched = http
+        .head(format!("{url}?partition=1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(trimmed.headers()["Pico-Start-Seq"], "1");
+    assert_eq!(untouched.headers()["Pico-Start-Seq"], "0");
+
+    let waiting = {
+        let http = http.clone();
+        let url = url.clone();
+        tokio::spawn(async move {
+            http.get(format!("{url}?partition=1&seq=1&live=long-poll"))
+                .send()
+                .await
+                .unwrap()
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for (partition, body) in [(0, "elsewhere"), (1, "late")] {
+        http.post(format!("{url}?partition={partition}"))
+            .header("Content-Type", "text/plain")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let woken = waiting.await.unwrap().text().await.unwrap();
+    assert!(woken.contains(r#""body":"late""#), "{woken}");
+
+    let streamed = http
+        .get(format!("{url}?partition=2&seq=1&live=sse"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(streamed.contains(r#""body":"two-again""#));
+    assert!(!streamed.contains(r#""body":"zero""#));
+
+    let close = http
+        .post(format!("{url}?partition=0"))
+        .header("Pico-Closed", "true")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(close.status(), 400);
 }

@@ -4,9 +4,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
 use picomq_server::{
-    CommittedOffset, GroupCoordinator, GroupError, GroupState, JoinInput, JoinOutcome,
-    JoinProtocol, Joined, MemberFence, MemberRole, Membership, NodeConfig, OffsetCommit, Partition,
-    PicoNode, SyncInput, TopicId,
+    CommittedOffset, CreateCommand, GroupCoordinator, GroupError, GroupState, JoinInput,
+    JoinOutcome, JoinProtocol, Joined, MemberFence, MemberRole, Membership, NodeConfig,
+    OffsetCommit, Partition, PicoNode, SyncInput, TopicId,
 };
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
@@ -145,7 +145,6 @@ async fn offsets_replay_into_a_fresh_coordinator() {
         node.service(),
         node.topics(),
         node.ownership(),
-        node.views(),
     );
     let fetched = restarted
         .fetch_offsets("orders", Some(&[partition(1), partition(2)]))
@@ -420,6 +419,47 @@ async fn a_group_keeps_one_membership_mode_until_empty() {
         .join(join("g", "", client("consumer", "range", "")))
         .await;
     assert!(switched.result.is_ok());
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn snapshots_drop_offsets_of_deleted_topics() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let topics = node.topics();
+
+    let kept = topics
+        .create(CreateCommand::new("/kept", "text/plain"))
+        .await
+        .unwrap()
+        .meta
+        .topic;
+    let deleted = topics
+        .create(CreateCommand::new("/deleted", "text/plain"))
+        .await
+        .unwrap()
+        .meta
+        .topic;
+    let kept = Partition::new(kept.id, 0);
+    let deleted_partition = Partition::new(deleted.id, 0);
+
+    node.groups()
+        .commit_offsets("orders", None, &[commit(deleted_partition, 3)])
+        .await
+        .unwrap();
+    assert!(topics.delete("/deleted").await.unwrap());
+
+    for position in 0..64 {
+        node.groups()
+            .commit_offsets("orders", None, &[commit(kept, position)])
+            .await
+            .unwrap();
+    }
+
+    let fetched = node.groups().fetch_offsets("orders", None).await.unwrap();
+    assert_eq!(fetched.len(), 1);
+    assert_eq!(fetched[&kept].position, 63);
 
     node.close().await;
 }

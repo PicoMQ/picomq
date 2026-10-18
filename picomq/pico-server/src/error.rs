@@ -26,6 +26,7 @@ pub enum ErrorKind {
     SequenceGap,
     MatchFailed,
     Durability,
+    Internal,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -108,6 +109,15 @@ impl From<RecordError> for ServiceError {
 
 impl From<s3stream::Error> for ServiceError {
     fn from(e: s3stream::Error) -> Self {
-        Self::with_message(ErrorKind::BadRequest, None, false, e.to_string())
+        let kind = match e {
+            s3stream::Error::Fenced { .. } | s3stream::Error::Closed { .. } => {
+                ErrorKind::Transferring
+            }
+            s3stream::Error::NotExist { .. } => ErrorKind::NotFound,
+            s3stream::Error::OffsetOutOfRange { .. } => ErrorKind::BadRequest,
+            _ => ErrorKind::Internal,
+        };
+
+        Self::with_message(kind, None, false, e.to_string())
     }
 }

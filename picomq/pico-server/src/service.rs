@@ -146,10 +146,6 @@ impl S3StreamService {
         &self.streams
     }
 
-    pub fn waiters(&self) -> Arc<StreamWaiterRegistry> {
-        self.waiters.clone()
-    }
-
     pub async fn create_log(&self, log: &Log) -> Result<(), ServiceError> {
         let key = log.key();
         if self.entry(&key)?.is_some() {
@@ -188,6 +184,7 @@ impl S3StreamService {
 
         self.streams.destroy(entry.stream_id).await;
         gate.reset();
+        self.gates.lock().unwrap().remove(&key);
         self.waiters.notify_closed(&key);
     }
 

@@ -7,6 +7,8 @@ use crate::record::LogRecord;
 pub use crate::record::StreamRecord;
 use crate::topic::Topic;
 
+pub const MAX_NEW_PARTITIONS: u32 = 10_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OffsetToken {
     record_offset: u64,
@@ -191,6 +193,15 @@ impl CreateCommand {
                 "a topic needs at least one partition",
             ));
         }
+        if self.partitions > MAX_NEW_PARTITIONS {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                format!("a topic is created with at most {MAX_NEW_PARTITIONS} partitions"),
+            ));
+        }
+
         Ok(())
     }
 }

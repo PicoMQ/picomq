@@ -22,12 +22,13 @@ use picomq_auth::{
     check_issue, scope_from_json, scope_to_json,
 };
 use picomq_metadata::MetadataState;
-use picomq_server::{OwnershipService, PicoNode, partition_log};
+use picomq_server::{Log, OwnershipService, PicoNode, ServiceError, Topic, partition_log};
 use s3stream::StreamState;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::common::{auth_error, authenticate, gate, service_error};
+use crate::partition;
 
 /// What `/ready` reports on.
 ///
@@ -268,6 +269,7 @@ async fn nodes(State(state): State<AdminState>, headers: HeaderMap) -> Response 
 async fn stream(
     State(state): State<AdminState>,
     Path(name): Path<String>,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
     if let Err(response) = gate(
@@ -281,13 +283,17 @@ async fn stream(
         return *response;
     }
     let name = format!("/{name}");
+    let requested = match partition::requested(&uri) {
+        Ok(requested) => requested,
+        Err(e) => return service_error(e),
+    };
     let topic = match state.node.topics().get(&name).await {
         Ok(Some(topic)) => topic,
         Ok(None) => return not_found(&name),
         Err(e) => return service_error(e),
     };
-    let log = match partition_log(&topic, 0) {
-        Ok(log) => log,
+    let (index, log) = match partition_of(&topic, requested) {
+        Ok(chosen) => chosen,
         Err(e) => return service_error(e),
     };
     let stream_id = match state.node.service().stream_id(&log) {
@@ -320,6 +326,7 @@ async fn stream(
         "name": topic.name.spelling(),
         "topicId": topic.id.hex(),
         "partitions": topic.partitions,
+        "partition": index,
         "streamId": stream_id,
         "ownerNodeId": owner_node_id,
         "ownerAdvertisedAddress": owner_address,
@@ -365,13 +372,20 @@ async fn transfer(
     let Some(to_node) = body.get("toNode").and_then(Value::as_i64) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"toNode\"");
     };
+    let requested = match body.get("partition") {
+        None => None,
+        Some(value) => match value.as_u64().and_then(|index| u32::try_from(index).ok()) {
+            Some(index) => Some(index),
+            None => return error_response(StatusCode::BAD_REQUEST, "invalid \"partition\""),
+        },
+    };
     let topic = match state.node.topics().get(name).await {
         Ok(Some(topic)) => topic,
         Ok(None) => return not_found(name),
         Err(e) => return service_error(e),
     };
-    let log = match partition_log(&topic, 0) {
-        Ok(log) => log,
+    let (index, log) = match partition_of(&topic, requested) {
+        Ok(chosen) => chosen,
         Err(e) => return service_error(e),
     };
     match state.node.transfer(&log, to_node as i32).await {
@@ -379,6 +393,7 @@ async fn transfer(
             StatusCode::ACCEPTED,
             Json(json!({
                 "stream": name,
+                "partition": index,
                 "streamId": stream_id,
                 "toNode": to_node,
                 "pending": true,
@@ -624,4 +639,11 @@ fn not_found(name: &str) -> Response {
 
 fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
+}
+
+fn partition_of(topic: &Topic, requested: Option<u32>) -> Result<(u32, Log), ServiceError> {
+    let index = partition::choose(topic, requested)?;
+    let log = partition_log(topic, index)?;
+
+    Ok((index, log))
 }

@@ -21,6 +21,7 @@ type StreamInfo struct {
 	ContentType string
 	Start       string
 	Next        string
+	Partitions  uint32
 	Closed      bool
 	TTL         time.Duration
 	ExpiresAt   string

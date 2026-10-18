@@ -15,18 +15,22 @@ export interface CallOptions {
   signal?: AbortSignal
 }
 
-export interface AppendOptions extends CallOptions {
+export interface PartitionOptions extends CallOptions {
+  partition?: number
+}
+
+export interface AppendOptions extends PartitionOptions {
   contentType?: string
 }
 
-export interface SubscribeOptions extends CallOptions {
+export interface SubscribeOptions extends PartitionOptions {
   reconnect?: boolean
   maxReconnectAttempts?: number
   reconnectDelayMs?: number
   maxReconnectDelayMs?: number
 }
 
-export interface RecordsOptions extends CallOptions {
+export interface RecordsOptions extends PartitionOptions {
   live?: boolean
   batch?: ReadLimits
 }
@@ -46,8 +50,9 @@ export type AppendInput =
 export interface StreamInfo {
   name: string
   contentType?: string
-  start: string
-  next: string
+  partitions: number
+  start?: string
+  next?: string
   closed: boolean
   ttlSeconds?: number
   expiresAt?: string
@@ -165,14 +170,14 @@ export interface StreamApi {
     ttlSeconds?: number,
     options?: CallOptions,
   ): Promise<boolean>
-  head(name: string, options?: CallOptions): Promise<StreamInfo | null>
+  head(name: string, options?: PartitionOptions): Promise<StreamInfo | null>
   append(name: string, records: AppendInput[], options?: AppendOptions): Promise<AppendAck>
   read(
     name: string,
     from: string,
     live: Live,
     limits?: ReadLimits,
-    options?: CallOptions,
+    options?: PartitionOptions,
   ): Promise<ReadPage>
   subscribe(name: string, from: string, options?: SubscribeOptions): AsyncIterable<SseEvent>
   list(prefix: string, limit?: number, options?: CallOptions): Promise<StreamListing>

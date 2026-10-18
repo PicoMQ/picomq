@@ -6,6 +6,7 @@ import type {
   AppendOptions,
   CallOptions,
   Live,
+  PartitionOptions,
   ProducerAck,
   ProducerRef,
   ReadLimits,
@@ -28,7 +29,7 @@ export class Stream {
     return this.api.create(this.name, contentType, ttlSeconds, options)
   }
 
-  head(options?: CallOptions): Promise<StreamInfo | null> {
+  head(options?: PartitionOptions): Promise<StreamInfo | null> {
     return this.api.head(this.name, options)
   }
 
@@ -36,7 +37,12 @@ export class Stream {
     return this.api.append(this.name, records, options)
   }
 
-  read(from: string, live: Live, limits?: ReadLimits, options?: CallOptions): Promise<ReadPage> {
+  read(
+    from: string,
+    live: Live,
+    limits?: ReadLimits,
+    options?: PartitionOptions,
+  ): Promise<ReadPage> {
     return this.api.read(this.name, from, live, limits, options)
   }
 
@@ -58,9 +64,12 @@ export class Stream {
   ): AsyncGenerator<StreamRecord, void, undefined> {
     let offset = from ?? this.api.beginning()
     const live = options.live ?? false
-    const callOptions: CallOptions = {}
+    const callOptions: PartitionOptions = {}
     if (options.signal !== undefined) {
       callOptions.signal = options.signal
+    }
+    if (options.partition !== undefined) {
+      callOptions.partition = options.partition
     }
     for (;;) {
       const page = await this.api.read(
@@ -91,12 +100,12 @@ export class PicoStream extends Stream {
   appendAs(
     records: AppendInput[],
     producer: ProducerRef,
-    options?: CallOptions,
+    options?: PartitionOptions,
   ): Promise<ProducerAck> {
     return this.client.appendAs(this.name, records, producer, options)
   }
 
-  trim(seq: number, options?: CallOptions): Promise<string> {
+  trim(seq: number, options?: PartitionOptions): Promise<string> {
     return this.client.trim(this.name, seq, options)
   }
 

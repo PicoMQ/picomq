@@ -145,7 +145,6 @@ impl PicoNode {
             service.clone(),
             topics.clone(),
             ownership.clone(),
-            views.clone(),
         );
         let tokens = Arc::new(TokenService::new(kv_client));
         let transfer_watcher =
@@ -210,6 +209,15 @@ impl PicoNode {
         let Some(row) = view.state.streams.get(&stream_id).copied() else {
             return Err(ServiceError::kind(crate::ErrorKind::NotFound));
         };
+        if !view.state.nodes.contains_key(&to_node) {
+            return Err(ServiceError::with_message(
+                crate::ErrorKind::BadRequest,
+                None,
+                false,
+                format!("node {to_node} is not registered"),
+            ));
+        }
+
         self.handle
             .propose_transfer(stream_id, row.node_id, to_node)
             .await

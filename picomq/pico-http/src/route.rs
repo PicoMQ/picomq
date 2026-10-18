@@ -11,7 +11,9 @@ use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
 
 use picomq_server::ownership::OwnershipService;
-use picomq_server::{Log, Topics, partition_log};
+use picomq_server::{ErrorKind, Log, Topics, partition_log};
+
+use crate::partition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RoutingMode {
@@ -20,9 +22,6 @@ pub enum RoutingMode {
     LocalAlways,
 }
 
-/// Decide whether this request is served here. `Some(response)` short-circuits
-/// (redirect or routing error).`None` means handle locally. Ownership is by
-/// the topic's partition log. The redirect location is from the original URI.
 pub async fn route(
     ownership: &dyn OwnershipService,
     topics: &Topics,
@@ -30,21 +29,22 @@ pub async fn route(
     method: &Method,
     uri: &Uri,
     name: &str,
+    requested: Option<u32>,
 ) -> Option<Response> {
     if stream_name(uri) == "/" || *method == Method::PUT || *method == Method::OPTIONS {
-        return None;
-    }
-    if mode == RoutingMode::LocalAlways {
         return None;
     }
 
     let topic = match topics.get(name).await {
         Ok(Some(topic)) => topic,
-        Ok(None) | Err(_) => return None,
+        Ok(None) => return None,
+        Err(error) if error.kind == ErrorKind::BadRequest => return None,
+        Err(error) => return Some(routing_error(&error.message)),
     };
-    let log = match partition_log(&topic, 0) {
-        Ok(log) => log,
-        Err(e) => return Some(routing_error(&e.message)),
+    let Ok(log) =
+        partition::choose(&topic, requested).and_then(|index| partition_log(&topic, index))
+    else {
+        return None;
     };
 
     owner_redirect(ownership, mode, uri, &log).await

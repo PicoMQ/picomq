@@ -11,6 +11,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::routing::any;
@@ -19,16 +20,16 @@ use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
 
 use picomq_auth::{Audience, Authorizer};
-use picomq_protocol::mime::{mime_equals, mime_of};
+use picomq_protocol::mime::mime_of;
 use picomq_protocol::pico::{
     CT_BATCH_BINARY, CT_BATCH_JSON, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT, E_BAD_REQUEST, E_CLOSED,
-    E_CONFLICT, E_DURABILITY, E_FENCED, E_MATCH_FAILED, E_NOT_FOUND, E_SCHEMA_VIOLATION,
-    E_SEQUENCE_GAP, ErrorBody, FORMAT_BINARY, FORMAT_JSON, FORMAT_RAW, H_CLOSED, H_CURSOR,
-    H_EXPECTED_SEQ, H_EXPIRES_AT, H_KAFKA_TOPIC, H_KEY, H_MATCH_SEQ, H_NEXT_SEQ, H_PRODUCER_EPOCH,
-    H_PRODUCER_ID, H_PRODUCER_SEQ, H_RECEIVED_SEQ, H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ,
-    H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, Listing, Q_BYTES,
-    Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT, Q_LIVE, Q_PREFIX, Q_SEQ, Q_START_AFTER, SEQ_NOW,
-    StreamEntry, sse_control_event, sse_data_event,
+    E_CONFLICT, E_DURABILITY, E_FENCED, E_INTERNAL, E_MATCH_FAILED, E_NOT_FOUND,
+    E_SCHEMA_VIOLATION, E_SEQUENCE_GAP, ErrorBody, FORMAT_BINARY, FORMAT_JSON, FORMAT_RAW,
+    H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT, H_KAFKA_TOPIC, H_KEY, H_MATCH_SEQ,
+    H_NEXT_SEQ, H_PARTITIONS, H_PRODUCER_EPOCH, H_PRODUCER_ID, H_PRODUCER_SEQ, H_RECEIVED_SEQ,
+    H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE,
+    LIVE_LONG_POLL, LIVE_SSE, Listing, Q_BYTES, Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT, Q_LIVE,
+    Q_PREFIX, Q_SEQ, Q_START_AFTER, SEQ_NOW, StreamEntry, sse_control_event, sse_data_event,
 };
 use picomq_protocol::record::{
     PicoRecord, SequencedRecord, decode_batch_append, decode_json_append, encode_batch_read,
@@ -36,8 +37,8 @@ use picomq_protocol::record::{
 };
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{
-    AppendCommand, CreateCommand, ErrorKind, LogRecord, OffsetToken, ReadResult, ServiceError,
-    StreamRecord, TopicMeta, Topics,
+    AppendCommand, CreateCommand, ErrorKind, LogOffsets, LogRecord, OffsetToken, ReadResult,
+    ServiceError, StreamRecord, Topic, Topics,
 };
 
 use crate::auth::Permit;
@@ -46,6 +47,7 @@ use crate::http::{
     parse_instant_header, parse_strict_u64, parse_strict_u64_header, query_param, set_header,
     truthy,
 };
+use crate::partition;
 use crate::route::{RoutingMode, route, stream_name};
 
 const CACHE_CATCH_UP: &str = "public, max-age=60, stale-while-revalidate=300";
@@ -151,6 +153,10 @@ async fn dispatch(
         Some(permit) => permit.stream_name.clone(),
         None => stream_name(&parts.uri),
     };
+    let requested = match partition::requested(&parts.uri) {
+        Ok(requested) => requested,
+        Err(e) => return service_error_response(e),
+    };
     if let Some(response) = route(
         frontend.ownership.as_ref(),
         &frontend.topics,
@@ -158,6 +164,7 @@ async fn dispatch(
         &parts.method,
         &parts.uri,
         &name,
+        requested,
     )
     .await
     {
@@ -167,28 +174,35 @@ async fn dispatch(
         Ok(body) => body,
         Err(_) => return error(413, "internal", "content too large", None),
     };
-    frontend
-        .handle(parts.method, parts.uri, parts.headers, body, name, permit)
-        .await
+    frontend.handle(parts, body, name, requested, permit).await
 }
 
 impl PicoFrontend {
     async fn handle(
         &self,
-        method: Method,
-        uri: Uri,
-        headers: HeaderMap,
+        parts: Parts,
         body: Bytes,
         name: String,
+        requested: Option<u32>,
         permit: Option<Permit>,
     ) -> Response {
+        let Parts {
+            method,
+            uri,
+            headers,
+            ..
+        } = parts;
+
         let result = match method {
             Method::OPTIONS => Ok(options()),
             Method::PUT => self.put(&uri, &headers, &body, &name).await,
-            Method::POST => self.post(&uri, &headers, &body, &name).await,
+            Method::POST => self.post(&uri, &headers, &body, &name, requested).await,
             Method::DELETE => self.delete(&name).await,
-            Method::HEAD => self.head(&name).await,
-            Method::GET => self.get(&uri, &headers, &name, permit.as_ref()).await,
+            Method::HEAD => self.head(&name, requested).await,
+            Method::GET => {
+                self.get(&uri, &headers, &name, requested, permit.as_ref())
+                    .await
+            }
             _ => Ok(error(405, "method_not_allowed", "method not allowed", None)),
         };
         result.unwrap_or_else(service_error_response)
@@ -242,37 +256,28 @@ impl PicoFrontend {
             })
             .await?;
         let meta = result.meta;
-
-        if !result.created && !mime_equals(Some(&meta.topic.content_type), Some(&content_type)) {
-            return Ok(error(
-                409,
-                E_CONFLICT,
-                &format!(
-                    "stream exists with content type {}",
-                    meta.topic.content_type
-                ),
-                Some(next_of(&meta)),
-            ));
-        }
+        let offsets = meta.partitions.first();
 
         let mut response = respond(
             if result.created { 201 } else { 200 },
-            Some(next_of(&meta)),
+            offsets.map(|offsets| &offsets.next_offset),
             meta.topic.closed,
         );
-        write_meta(&mut response, &meta);
+        write_meta(&mut response, &meta.topic, offsets);
         if result.created {
             set_header(&mut response, header::LOCATION.as_str(), uri.path());
         }
         Ok(response)
     }
 
-    async fn head(&self, name: &str) -> Result<Response, ServiceError> {
-        let Some(meta) = self.topics.head(name).await? else {
+    async fn head(&self, name: &str, requested: Option<u32>) -> Result<Response, ServiceError> {
+        let Some((topic, offsets)) = partition::head(&self.topics, name, requested).await? else {
             return Ok(respond(404, None, false));
         };
-        let mut response = respond(200, Some(next_of(&meta)), meta.topic.closed);
-        write_meta(&mut response, &meta);
+
+        let next = offsets.map(|offsets| offsets.next_offset);
+        let mut response = respond(200, next.as_ref(), topic.closed);
+        write_meta(&mut response, &topic, offsets.as_ref());
         Ok(response)
     }
 
@@ -282,6 +287,7 @@ impl PicoFrontend {
         headers: &HeaderMap,
         body: &Bytes,
         name: &str,
+        requested: Option<u32>,
     ) -> Result<Response, ServiceError> {
         if stream_name(uri) == "/" {
             return Ok(error(400, E_BAD_REQUEST, "no stream in path", None));
@@ -292,17 +298,21 @@ impl PicoFrontend {
             if !body.is_empty() {
                 return Err(bad_request("trim takes no body"));
             }
-            let start = self.topics.trim(name, 0, trim_seq).await?;
+            let partition = partition::resolve(&self.topics, name, requested).await?;
+            let start = self.topics.trim(name, partition, trim_seq).await?;
             let mut response = respond(200, None, false);
             set_header(&mut response, H_START_SEQ, &start.to_string());
             return Ok(response);
         }
-        self.append(name, headers, body).await
+
+        let partition = partition::resolve(&self.topics, name, requested).await?;
+        self.append(name, partition, headers, body).await
     }
 
     async fn append(
         &self,
         name: &str,
+        partition: u32,
         headers: &HeaderMap,
         body: &Bytes,
     ) -> Result<Response, ServiceError> {
@@ -324,7 +334,7 @@ impl PicoFrontend {
             .topics
             .append(
                 name,
-                0,
+                partition,
                 AppendCommand {
                     records,
                     content_type: None,
@@ -361,19 +371,27 @@ impl PicoFrontend {
         uri: &Uri,
         headers: &HeaderMap,
         name: &str,
+        requested: Option<u32>,
         permit: Option<&Permit>,
     ) -> Result<Response, ServiceError> {
         if stream_name(uri) == "/" {
             return self.list(uri, permit).await;
         }
-        let seq = self.parse_seq(uri, headers, name).await?;
+
+        let partition = partition::resolve(&self.topics, name, requested).await?;
+        let scope = format!("{name}:{partition}");
+        let seq = self.parse_seq(uri, headers, name, partition).await?;
+
         match query_param(uri, Q_LIVE) {
             None => {
-                let out = self.read(name, seq, uri).await?;
-                self.write_read(uri, headers, name, seq, out, false)
+                let out = self.read(name, partition, seq, uri).await?;
+                self.write_read(uri, headers, &scope, seq, out, false)
             }
-            Some(mode) if mode == LIVE_LONG_POLL => self.long_poll(uri, headers, name, seq).await,
-            Some(mode) if mode == LIVE_SSE => self.sse(name, seq).await,
+            Some(mode) if mode == LIVE_LONG_POLL => {
+                self.long_poll(uri, headers, name, partition, &scope, seq)
+                    .await
+            }
+            Some(mode) if mode == LIVE_SSE => self.sse(name, partition, seq).await,
             Some(mode) => Err(bad_request(format!("invalid live mode: {mode}"))),
         }
     }
@@ -410,11 +428,13 @@ impl PicoFrontend {
                         Some(permit) => permit.principal.scope.strip_stream_name(spelling),
                         None => spelling,
                     };
+                    let single = (meta.partitions.len() == 1).then(|| &meta.partitions[0]);
                     StreamEntry {
                         name: name.to_owned(),
                         content_type: Some(meta.topic.content_type.clone()),
-                        start_seq: meta.partitions[0].start_offset.record_offset(),
-                        next_seq: next_of(meta).record_offset(),
+                        partitions: meta.topic.partitions,
+                        start_seq: single.map(|offsets| offsets.start_offset.record_offset()),
+                        next_seq: single.map(|offsets| offsets.next_offset.record_offset()),
                         closed: meta.topic.closed,
                         ttl_seconds: meta.topic.ttl_seconds,
                         expires_at: meta.topic.expires_at_ms.map(format_instant),
@@ -434,6 +454,7 @@ impl PicoFrontend {
     async fn read(
         &self,
         name: &str,
+        partition: u32,
         seq: OffsetToken,
         uri: &Uri,
     ) -> Result<ReadResult, ServiceError> {
@@ -445,7 +466,7 @@ impl PicoFrontend {
             Some(bytes) => (bytes as usize).min(cap),
         };
         self.topics
-            .read(name, 0, seq, max_bytes, count.unwrap_or(0) as usize)
+            .read(name, partition, seq, max_bytes, count.unwrap_or(0) as usize)
             .await
     }
 
@@ -454,38 +475,46 @@ impl PicoFrontend {
         uri: &Uri,
         headers: &HeaderMap,
         name: &str,
+        partition: u32,
+        scope: &str,
         seq: OffsetToken,
     ) -> Result<Response, ServiceError> {
         let cursor = cursor(query_param(uri, Q_CURSOR).as_deref());
-        let out = self.read(name, seq, uri).await?;
+        let out = self.read(name, partition, seq, uri).await?;
         if !(out.records.is_empty() && out.up_to_date) || out.closed {
-            let mut response = self.write_read(uri, headers, name, seq, out, true)?;
+            let mut response = self.write_read(uri, headers, scope, seq, out, true)?;
             set_header(&mut response, H_CURSOR, &cursor.to_string());
             return Ok(response);
         }
 
         if self
             .topics
-            .wait_appended(name, 0, seq, self.long_poll_timeout)
+            .wait_appended(name, partition, seq, self.long_poll_timeout)
             .await?
         {
-            let out = self.read(name, seq, uri).await?;
-            let mut response = self.write_read(uri, headers, name, seq, out, true)?;
+            let out = self.read(name, partition, seq, uri).await?;
+            let mut response = self.write_read(uri, headers, scope, seq, out, true)?;
             set_header(&mut response, H_CURSOR, &cursor.to_string());
             return Ok(response);
         }
 
-        let Some(meta) = self.topics.head(name).await? else {
+        let Some((topic, offsets)) = partition::offsets(&self.topics, name, partition).await?
+        else {
             return Ok(respond(404, None, false));
         };
-        let mut response = respond(204, Some(next_of(&meta)), meta.topic.closed);
+        let mut response = respond(204, Some(&offsets.next_offset), topic.closed);
         set_header(&mut response, H_CURSOR, &cursor.to_string());
         set_header(&mut response, H_UP_TO_DATE, "true");
         Ok(response)
     }
 
-    async fn sse(&self, name: &str, start: OffsetToken) -> Result<Response, ServiceError> {
-        if self.topics.head(name).await?.is_none() {
+    async fn sse(
+        &self,
+        name: &str,
+        partition: u32,
+        start: OffsetToken,
+    ) -> Result<Response, ServiceError> {
+        if self.topics.get(name).await?.is_none() {
             return Ok(respond(404, None, false));
         }
 
@@ -498,7 +527,7 @@ impl PicoFrontend {
             let mut seq = start;
             let mut announced_caught_up = false;
             while tokio::time::Instant::now() < deadline {
-                let Ok(read) = topics.read(&name, 0, seq, max_chunk_size, 0).await else {
+                let Ok(read) = topics.read(&name, partition, seq, max_chunk_size, 0).await else {
                     return;
                 };
 
@@ -542,7 +571,7 @@ impl PicoFrontend {
                 }
 
                 if topics
-                    .wait_appended(&name, 0, seq, Duration::from_secs(1))
+                    .wait_appended(&name, partition, seq, Duration::from_secs(1))
                     .await
                     .is_err()
                 {
@@ -567,7 +596,7 @@ impl PicoFrontend {
         &self,
         uri: &Uri,
         headers: &HeaderMap,
-        name: &str,
+        scope: &str,
         start: OffsetToken,
         out: ReadResult,
         live: bool,
@@ -597,7 +626,7 @@ impl PicoFrontend {
 
         if !live {
             let etag = etag(
-                &format!("{name}:{format}"),
+                &format!("{scope}:{format}"),
                 &start,
                 &out.next_offset,
                 out.closed && empty_tail,
@@ -645,6 +674,7 @@ impl PicoFrontend {
         uri: &Uri,
         headers: &HeaderMap,
         name: &str,
+        partition: u32,
     ) -> Result<OffsetToken, ServiceError> {
         let Some(raw) = query_param(uri, Q_SEQ) else {
             if let Some(last_event_id) =
@@ -655,11 +685,9 @@ impl PicoFrontend {
             return Ok(OffsetToken::beginning());
         };
         if raw.eq_ignore_ascii_case(SEQ_NOW) {
-            return self
-                .topics
-                .head(name)
+            return partition::offsets(&self.topics, name, partition)
                 .await?
-                .map(|meta| *next_of(&meta))
+                .map(|(_, offsets)| offsets.next_offset)
                 .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound));
         }
         OffsetToken::parse(Some(&raw))
@@ -690,7 +718,7 @@ fn options() -> Response {
     response
 }
 
-fn service_error_response(e: ServiceError) -> Response {
+pub(crate) fn service_error_response(e: ServiceError) -> Response {
     match e.kind {
         ErrorKind::NotFound => error(404, E_NOT_FOUND, "no such stream", None),
         ErrorKind::BadRequest | ErrorKind::CorruptBatch => {
@@ -724,6 +752,7 @@ fn service_error_response(e: ServiceError) -> Response {
             response
         }
         ErrorKind::Durability => error(500, E_DURABILITY, &e.message, None),
+        ErrorKind::Internal => error(500, E_INTERNAL, &e.message, None),
     }
 }
 
@@ -776,14 +805,16 @@ fn producer_of(
     Ok(Some(picomq_server::types::Producer::new(id, epoch, seq)?))
 }
 
-fn write_meta(response: &mut Response, meta: &TopicMeta) {
-    let topic = &meta.topic;
+fn write_meta(response: &mut Response, topic: &Topic, offsets: Option<&LogOffsets>) {
     set_header(response, header::CONTENT_TYPE.as_str(), &topic.content_type);
-    set_header(
-        response,
-        H_START_SEQ,
-        &meta.partitions[0].start_offset.record_offset().to_string(),
-    );
+    set_header(response, H_PARTITIONS, &topic.partitions.to_string());
+    if let Some(offsets) = offsets {
+        set_header(
+            response,
+            H_START_SEQ,
+            &offsets.start_offset.record_offset().to_string(),
+        );
+    }
     if let Some(ttl) = topic.ttl_seconds {
         set_header(response, H_TTL, &ttl.to_string());
     }
@@ -796,10 +827,6 @@ fn write_meta(response: &mut Response, meta: &TopicMeta) {
     if let Some(kafka) = topic.name.kafka() {
         set_header(response, H_KAFKA_TOPIC, kafka);
     }
-}
-
-fn next_of(meta: &TopicMeta) -> &OffsetToken {
-    &meta.partitions[0].next_offset
 }
 
 fn to_sequenced(records: &[StreamRecord]) -> Vec<SequencedRecord> {

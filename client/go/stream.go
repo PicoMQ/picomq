@@ -6,19 +6,9 @@ import (
 	"time"
 )
 
-type streamAPI interface {
-	Create(context.Context, string, string, time.Duration) (bool, error)
-	Head(context.Context, string) (*StreamInfo, error)
-	Append(context.Context, string, []AppendRecord) (AppendAck, error)
-	Read(context.Context, string, string, ReadOptions) (ReadPage, error)
-	Close(context.Context, string) (string, error)
-	Delete(context.Context, string) (bool, error)
-}
-
 type Stream struct {
-	api       streamAPI
-	name      string
-	beginning string
+	client *DurableStreamsClient
+	name   string
 }
 
 type PicoStream struct {
@@ -26,78 +16,99 @@ type PicoStream struct {
 	name   string
 }
 
-func (s *Stream) Name() string     { return s.name }
+func (s *Stream) Name() string { return s.name }
+
 func (s *PicoStream) Name() string { return s.name }
-func (s *Stream) Create(ctx context.Context, contentType string, ttl time.Duration) (bool, error) {
-	return s.api.Create(ctx, s.name, contentType, ttl)
+
+func (s *Stream) Partition(index uint32) *Partition {
+	return &Partition{client: s.client, name: s.name, index: index}
 }
+
+func (s *PicoStream) Partition(index uint32) *PicoPartition {
+	return &PicoPartition{client: s.client, name: s.name, index: index}
+}
+
+func (s *Stream) Create(ctx context.Context, contentType string, ttl time.Duration) (bool, error) {
+	return s.client.Create(ctx, s.name, contentType, ttl)
+}
+
 func (s *PicoStream) Create(ctx context.Context, contentType string, ttl time.Duration) (bool, error) {
 	return s.client.Create(ctx, s.name, contentType, ttl)
 }
-func (s *Stream) Head(ctx context.Context) (*StreamInfo, error) { return s.api.Head(ctx, s.name) }
+
+func (s *Stream) Head(ctx context.Context) (*StreamInfo, error) {
+	return s.client.head(ctx, s.name, nil)
+}
+
 func (s *PicoStream) Head(ctx context.Context) (*StreamInfo, error) {
-	return s.client.Head(ctx, s.name)
+	return s.client.head(ctx, s.name, nil)
 }
+
 func (s *Stream) Append(ctx context.Context, records ...AppendRecord) (AppendAck, error) {
-	return s.api.Append(ctx, s.name, records)
+	return s.client.append(ctx, s.name, nil, records)
 }
+
 func (s *PicoStream) Append(ctx context.Context, records ...AppendRecord) (AppendAck, error) {
-	return s.client.Append(ctx, s.name, records)
+	return s.client.append(ctx, s.name, nil, records)
 }
-func (s *Stream) Read(ctx context.Context, from string, options ReadOptions) (ReadPage, error) {
-	return s.api.Read(ctx, s.name, from, options)
-}
-func (s *PicoStream) Read(ctx context.Context, from string, options ReadOptions) (ReadPage, error) {
-	return s.client.Read(ctx, s.name, from, options)
-}
-func (s *Stream) Close(ctx context.Context) (string, error)     { return s.api.Close(ctx, s.name) }
-func (s *PicoStream) Close(ctx context.Context) (string, error) { return s.client.Close(ctx, s.name) }
-func (s *Stream) Delete(ctx context.Context) (bool, error)      { return s.api.Delete(ctx, s.name) }
-func (s *PicoStream) Delete(ctx context.Context) (bool, error)  { return s.client.Delete(ctx, s.name) }
-func (s *PicoStream) Trim(ctx context.Context, seq uint64) (string, error) {
-	return s.client.Trim(ctx, s.name, seq)
-}
+
 func (s *PicoStream) AppendAs(ctx context.Context, records []AppendRecord, producer ProducerRef) (ProducerAck, error) {
-	return s.client.AppendAs(ctx, s.name, records, producer)
+	return s.client.appendAs(ctx, s.name, nil, records, producer)
 }
+
+func (s *Stream) Read(ctx context.Context, from string, options ReadOptions) (ReadPage, error) {
+	return s.client.read(ctx, s.name, nil, from, options)
+}
+
+func (s *PicoStream) Read(ctx context.Context, from string, options ReadOptions) (ReadPage, error) {
+	return s.client.read(ctx, s.name, nil, from, options)
+}
+
+func (s *PicoStream) Trim(ctx context.Context, seq uint64) (string, error) {
+	return s.client.trim(ctx, s.name, nil, seq)
+}
+
 func (s *Stream) Subscribe(ctx context.Context, from string, options SubscribeOptions) *Subscription {
-	switch client := s.api.(type) {
-	case *DurableStreamsClient:
-		return client.Subscribe(ctx, s.name, from, options)
-	case *PicoClient:
-		return client.Subscribe(ctx, s.name, from, options)
-	default:
-		panic("picomq: unsupported stream client")
-	}
+	return s.client.subscribe(ctx, s.name, nil, from, options)
 }
+
 func (s *PicoStream) Subscribe(ctx context.Context, from string, options SubscribeOptions) *Subscription {
-	return s.client.Subscribe(ctx, s.name, from, options)
+	return s.client.subscribe(ctx, s.name, nil, from, options)
 }
 
 func (s *Stream) Records(options RecordsOptions) *RecordIterator {
-	from := options.From
-	if from == "" {
-		from = s.beginning
-	}
-	return &RecordIterator{ctxAPI: s.api, name: s.name, next: from, live: options.Live, limits: options.Limits}
-}
-func (s *PicoStream) Records(options RecordsOptions) *RecordIterator {
-	from := options.From
-	if from == "" {
-		from = s.client.Beginning()
-	}
-	return &RecordIterator{ctxAPI: s.client, name: s.name, next: from, live: options.Live, limits: options.Limits}
+	return newRecordIterator(s.Read, s.client.Beginning(), options)
 }
 
+func (s *PicoStream) Records(options RecordsOptions) *RecordIterator {
+	return newRecordIterator(s.Read, s.client.Beginning(), options)
+}
+
+func (s *Stream) Close(ctx context.Context) (string, error) { return s.client.Close(ctx, s.name) }
+
+func (s *PicoStream) Close(ctx context.Context) (string, error) { return s.client.Close(ctx, s.name) }
+
+func (s *Stream) Delete(ctx context.Context) (bool, error) { return s.client.Delete(ctx, s.name) }
+
+func (s *PicoStream) Delete(ctx context.Context) (bool, error) { return s.client.Delete(ctx, s.name) }
+
 type RecordIterator struct {
-	ctxAPI streamAPI
-	name   string
+	read   func(context.Context, string, ReadOptions) (ReadPage, error)
 	next   string
 	live   bool
 	limits ReadLimits
 	page   []Record
 	index  int
 	done   bool
+}
+
+func newRecordIterator(read func(context.Context, string, ReadOptions) (ReadPage, error), beginning string, options RecordsOptions) *RecordIterator {
+	from := options.From
+	if from == "" {
+		from = beginning
+	}
+
+	return &RecordIterator{read: read, next: from, live: options.Live, limits: options.Limits}
 }
 
 func (it *RecordIterator) Next(ctx context.Context) (Record, error) {
@@ -110,15 +121,18 @@ func (it *RecordIterator) Next(ctx context.Context) (Record, error) {
 		if it.done {
 			return Record{}, io.EOF
 		}
+
 		before := it.next
 		mode := LiveOff
 		if it.live {
 			mode = LiveLongPoll
 		}
-		page, err := it.ctxAPI.Read(ctx, it.name, it.next, ReadOptions{Live: mode, Limits: it.limits})
+
+		page, err := it.read(ctx, it.next, ReadOptions{Live: mode, Limits: it.limits})
 		if err != nil {
 			return Record{}, err
 		}
+
 		it.next = page.Next
 		it.page = page.Records
 		it.index = 0

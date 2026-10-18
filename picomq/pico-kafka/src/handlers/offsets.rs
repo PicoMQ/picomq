@@ -4,13 +4,13 @@ use kafka_protocol::messages::list_offsets_response::{
 };
 use kafka_protocol::protocol::Decodable;
 
-use picomq_server::{Log, ServiceError};
+use picomq_server::{ServiceError, Topic};
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    EARLIEST_TIMESTAMP, LATEST_TIMESTAMP, MAX_TIMESTAMP, NO_ERROR, encode_response, leader_log,
-    resolve_topic, service_error_code, topic_name,
+    EARLIEST_TIMESTAMP, LATEST_TIMESTAMP, MAX_TIMESTAMP, NO_ERROR, encode_response,
+    leader_partition, resolve_topic, service_error_code, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -31,13 +31,23 @@ pub async fn handle(
         let mut partitions = Vec::with_capacity(topic.partitions.len());
         for partition in topic.partitions {
             let index = partition.partition_index;
-            let log = match &resolved {
-                Ok(resolved) => leader_log(ctx, resolved, index).await,
+            let leader = match &resolved {
+                Ok(resolved) => leader_partition(ctx, resolved, index)
+                    .await
+                    .map(|leader| (resolved, leader)),
                 Err(code) => Err(*code),
             };
-            partitions.push(match log {
-                Ok(log) => {
-                    list_partition(ctx, &log, index, partition.timestamp, req.api_version).await
+            partitions.push(match leader {
+                Ok((topic, leader)) => {
+                    list_partition(
+                        ctx,
+                        topic,
+                        leader,
+                        index,
+                        partition.timestamp,
+                        req.api_version,
+                    )
+                    .await
                 }
                 Err(code) => ListOffsetsPartitionResponse::default()
                     .with_partition_index(index)
@@ -62,12 +72,13 @@ pub async fn handle(
 
 async fn list_partition(
     ctx: &BrokerContext,
-    log: &Log,
+    topic: &Topic,
+    partition: u32,
     index: i32,
     timestamp: i64,
     api_version: i16,
 ) -> ListOffsetsPartitionResponse {
-    let (code, offset, timestamp) = match list_offset(ctx, log, timestamp).await {
+    let (code, offset, timestamp) = match list_offset(ctx, topic, partition, timestamp).await {
         Ok((offset, timestamp)) => (NO_ERROR, offset, timestamp),
         Err(error) => (service_error_code(&error), -1, -1),
     };
@@ -87,20 +98,29 @@ async fn list_partition(
 
 async fn list_offset(
     ctx: &BrokerContext,
-    log: &Log,
+    topic: &Topic,
+    partition: u32,
     timestamp: i64,
 ) -> Result<(i64, i64), ServiceError> {
     let found = match timestamp {
         EARLIEST_TIMESTAMP => {
-            let watermarks = ctx.service.watermarks(log).await?;
+            let watermarks = ctx.topics.watermarks(topic, partition).await?;
             return Ok((watermarks.log_start_offset as i64, timestamp));
         }
         LATEST_TIMESTAMP => {
-            let watermarks = ctx.service.watermarks(log).await?;
+            let watermarks = ctx.topics.watermarks(topic, partition).await?;
             return Ok((watermarks.high_watermark as i64, timestamp));
         }
-        MAX_TIMESTAMP => ctx.service.record_with_max_timestamp(log).await?,
-        target => ctx.service.record_at_or_after(log, target).await?,
+        MAX_TIMESTAMP => {
+            ctx.topics
+                .record_with_max_timestamp(topic, partition)
+                .await?
+        }
+        target => {
+            ctx.topics
+                .record_at_or_after(topic, partition, target)
+                .await?
+        }
     };
 
     Ok(found

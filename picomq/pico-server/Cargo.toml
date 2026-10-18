@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "PicoMQ server: named-stream registry + stream service over the s3stream engine"
+description = "PicoMQ server: topics, partitions and logs over the s3stream engine"
 repository.workspace = true
 
 [dependencies]
@@ -19,6 +19,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 crc32c = { workspace = true }
 futures = { workspace = true }
+hex = { workspace = true }
 kafka-protocol = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::{BrokerId, ResponseHeader, TopicName};
 use kafka_protocol::protocol::{Encodable, HeaderVersion, StrBytes};
 use picomq_metadata::MetadataState;
-use picomq_server::{ErrorKind, Log, ServiceError, Topic, partition_log};
+use picomq_server::{ErrorKind, Log, OwnershipService, Partition, ServiceError, Topic};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
@@ -10,6 +10,7 @@ use crate::broker::BrokerContext;
 #[derive(Debug, Clone)]
 pub struct ResponseFrame(pub Bytes);
 
+pub const UNKNOWN_SERVER_ERROR: i16 = -1;
 pub const NO_ERROR: i16 = 0;
 pub const OFFSET_OUT_OF_RANGE: i16 = 1;
 pub const CORRUPT_MESSAGE: i16 = 2;
@@ -23,6 +24,9 @@ pub const UNKNOWN_MEMBER_ID: i16 = 25;
 pub const REBALANCE_IN_PROGRESS: i16 = 27;
 pub const UNSUPPORTED_VERSION: i16 = 35;
 pub const TOPIC_ALREADY_EXISTS: i16 = 36;
+pub const INVALID_PARTITIONS: i16 = 37;
+pub const INVALID_REPLICATION_FACTOR: i16 = 38;
+pub const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
 pub const INVALID_REQUEST: i16 = 42;
 pub const POLICY_VIOLATION: i16 = 44;
 pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
@@ -34,6 +38,8 @@ pub const MEMBER_ID_REQUIRED: i16 = 79;
 pub const GROUP_MAX_SIZE_REACHED: i16 = 81;
 pub const FENCED_INSTANCE_ID: i16 = 82;
 pub const UNKNOWN_TOPIC_ID: i16 = 100;
+
+pub const EXCESSIVE_PARTITIONS: &str = "Excessively large number of partitions per request.";
 
 pub const EARLIEST_TIMESTAMP: i64 = -2;
 pub const LATEST_TIMESTAMP: i64 = -1;
@@ -66,6 +72,33 @@ pub fn topic_uuid(bytes: [u8; 16]) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+pub type Failure = (i16, Option<String>);
+
+pub fn service_failure(error: ServiceError) -> Failure {
+    (service_error_code(&error), Some(error.message))
+}
+
+pub fn check_replicas(ctx: &BrokerContext, brokers: &[BrokerId]) -> Result<(), Failure> {
+    let [broker] = brokers else {
+        return Err((
+            INVALID_REPLICA_ASSIGNMENT,
+            Some(format!(
+                "PicoMQ keeps one replica of each partition, {} were assigned",
+                brokers.len()
+            )),
+        ));
+    };
+
+    if broker_address(&ctx.views.load().state, broker.0).is_none() {
+        return Err((
+            INVALID_REPLICA_ASSIGNMENT,
+            Some(format!("broker {} is not registered", broker.0)),
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn service_error_code(error: &ServiceError) -> i16 {
     match error.kind {
         ErrorKind::NotFound => UNKNOWN_TOPIC_OR_PARTITION,
@@ -77,22 +110,9 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
         ErrorKind::Fenced => INVALID_PRODUCER_EPOCH,
         ErrorKind::SequenceGap => OUT_OF_ORDER_SEQUENCE_NUMBER,
         ErrorKind::Closed => POLICY_VIOLATION,
+        ErrorKind::MatchFailed => INVALID_REQUEST,
         ErrorKind::Durability => KAFKA_STORAGE_ERROR,
-        _ => INVALID_REQUEST,
-    }
-}
-
-pub async fn ensure_local_leader(ctx: &BrokerContext, log: &Log) -> Result<(), i16> {
-    use picomq_server::OwnershipService;
-    let owner = ctx
-        .ownership
-        .owner_of(log)
-        .await
-        .map_err(|_| NOT_LEADER_OR_FOLLOWER)?;
-    if owner.local {
-        Ok(())
-    } else {
-        Err(NOT_LEADER_OR_FOLLOWER)
+        ErrorKind::Internal => UNKNOWN_SERVER_ERROR,
     }
 }
 
@@ -126,11 +146,26 @@ pub async fn resolve_topic(ctx: &BrokerContext, topic: &str) -> Result<Topic, i1
         .ok_or(UNKNOWN_TOPIC_OR_PARTITION)
 }
 
-pub async fn leader_log(ctx: &BrokerContext, topic: &Topic, index: i32) -> Result<Log, i16> {
-    let index = u32::try_from(index).map_err(|_| UNKNOWN_TOPIC_OR_PARTITION)?;
-    let log = partition_log(topic, index).map_err(|_| UNKNOWN_TOPIC_OR_PARTITION)?;
-    ensure_local_leader(ctx, &log).await?;
-    Ok(log)
+pub fn partition_of(topic: &Topic, index: i32) -> Result<Partition, i16> {
+    match u32::try_from(index) {
+        Ok(index) if index < topic.partitions => Ok(Partition::new(topic.id, index)),
+        _ => Err(UNKNOWN_TOPIC_OR_PARTITION),
+    }
+}
+
+pub async fn leader_partition(ctx: &BrokerContext, topic: &Topic, index: i32) -> Result<u32, i16> {
+    let partition = partition_of(topic, index)?;
+    let owner = ctx
+        .ownership
+        .owner_of(&Log::Partition(partition))
+        .await
+        .map_err(|_| NOT_LEADER_OR_FOLLOWER)?;
+
+    if !owner.local {
+        return Err(NOT_LEADER_OR_FOLLOWER);
+    }
+
+    Ok(partition.index)
 }
 
 pub fn is_internal_topic(topic: &str) -> bool {

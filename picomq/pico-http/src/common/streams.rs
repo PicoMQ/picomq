@@ -41,6 +41,7 @@ async fn get_config(
         &method,
         &uri,
         &name,
+        Some(0),
     )
     .await
     {
@@ -79,6 +80,7 @@ async fn patch_config(
         &method,
         &uri,
         &name,
+        Some(0),
     )
     .await
     {
@@ -120,6 +122,7 @@ fn config_json(topic: &Topic) -> Value {
         "schema": topic.schema_name,
         "schemaValidate": topic.schema_validate,
         "kafkaTopic": topic.name.kafka(),
+        "partitions": topic.partitions,
     })
 }
 

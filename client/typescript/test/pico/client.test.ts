@@ -260,3 +260,135 @@ describe('PicoClient groups', () => {
     expect(fetch).toHaveBeenCalledTimes(3)
   })
 })
+
+describe('PicoClient partitions', () => {
+  function urls(fetch: ReturnType<typeof vi.fn>): string[] {
+    return fetch.mock.calls.map((call) => call[0] as string)
+  }
+
+  it('sends the partition on head, append, appendAs, trim, and read when set', async () => {
+    const fetch = vi.fn().mockImplementation(async () =>
+      ackResponse({ 'Pico-Start-Seq': '0', 'Pico-Next-Seq': '1', 'Pico-Up-To-Date': 'true' }),
+    )
+    vi.stubGlobal('fetch', fetch)
+
+    const client = new PicoClient('http://example.test')
+    const ref = { id: 'p', epoch: 0, seq: 0 }
+
+    await client.head('/s', { partition: 2 })
+    await client.append('/s', ['x'], { partition: 2 })
+    await client.appendAs('/s', ['x'], ref, { partition: 2 })
+    await client.trim('/s', 1, { partition: 2 })
+    await client.read('/s', '0', 'long-poll', { count: 5 }, { partition: 2 })
+
+    expect(urls(fetch)).toEqual([
+      'http://example.test/s?partition=2',
+      'http://example.test/s?partition=2',
+      'http://example.test/s?partition=2',
+      'http://example.test/s?partition=2',
+      'http://example.test/s?format=binary&seq=0&count=5&live=long-poll&partition=2',
+    ])
+  })
+
+  it('omits the partition when unset', async () => {
+    const fetch = vi.fn().mockImplementation(async () =>
+      ackResponse({ 'Pico-Start-Seq': '0', 'Pico-Next-Seq': '1', 'Pico-Up-To-Date': 'true' }),
+    )
+    vi.stubGlobal('fetch', fetch)
+
+    const client = new PicoClient('http://example.test')
+
+    await client.head('/s')
+    await client.append('/s', ['x'])
+    await client.appendAs('/s', ['x'], { id: 'p', epoch: 0, seq: 0 })
+    await client.trim('/s', 1)
+    await client.read('/s', '0', 'off')
+
+    expect(urls(fetch)).toEqual([
+      'http://example.test/s',
+      'http://example.test/s',
+      'http://example.test/s',
+      'http://example.test/s',
+      'http://example.test/s?format=binary&seq=0',
+    ])
+  })
+
+  it('sends the partition on subscribe only when set', async () => {
+    const fetch = vi.fn().mockImplementation(
+      async () =>
+        new Response('event: control\ndata: {"next_seq":0,"up_to_date":true,"closed":true}\n\n', {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetch)
+
+    const client = new PicoClient('http://example.test')
+    const events = []
+    for await (const event of client.subscribe('/s', '0', { partition: 3, reconnect: false })) {
+      events.push(event)
+    }
+    for await (const event of client.subscribe('/s', '0', { reconnect: false })) {
+      events.push(event)
+    }
+
+    expect(events).toHaveLength(2)
+
+    expect(urls(fetch)).toEqual([
+      'http://example.test/s?seq=0&live=sse&partition=3',
+      'http://example.test/s?seq=0&live=sse',
+    ])
+  })
+
+  it('decodes partitions from head with absent offsets', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(ackResponse({ 'Pico-Partitions': '3', 'Pico-Closed': 'false' })),
+    )
+    const client = new PicoClient('http://example.test')
+
+    expect(await client.head('/s')).toEqual({ name: '/s', partitions: 3, closed: false })
+  })
+
+  it('decodes a single-partition head with offsets', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        ackResponse({ 'Pico-Partitions': '1', 'Pico-Start-Seq': '2', 'Pico-Next-Seq': '5' }),
+      ),
+    )
+    const client = new PicoClient('http://example.test')
+
+    expect(await client.head('/s')).toEqual({
+      name: '/s',
+      partitions: 1,
+      start: '2',
+      next: '5',
+      closed: false,
+    })
+  })
+
+  it('decodes partitions from list with absent offsets', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        json({
+          streams: [
+            { name: '/a', partitions: 1, start_seq: 0, next_seq: 4, closed: false },
+            { name: '/b', partitions: 3, closed: false },
+          ],
+          has_more: false,
+        }),
+      ),
+    )
+    const client = new PicoClient('http://example.test')
+
+    expect(await client.list('/')).toEqual({
+      streams: [
+        { name: '/a', partitions: 1, start: '0', next: '4', closed: false },
+        { name: '/b', partitions: 3, closed: false },
+      ],
+      hasMore: false,
+    })
+  })
+})

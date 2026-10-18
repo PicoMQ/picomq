@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
+use picomq_common::name::canonical;
 use picomq_common::now_ms;
 use picomq_metadata::{MetadataKvClient, ViewPublisher};
 use picomq_protocol::mime::mime_equals;
@@ -12,11 +14,12 @@ use tokio::sync::RwLock;
 use crate::error::{ErrorKind, ServiceError};
 use crate::log::{Log, ProducerDecision};
 use crate::partition::Partition;
-use crate::record::{self, LogRecord};
+use crate::record::{self, LogRecord, StreamRecord};
 use crate::service::S3StreamService;
 use crate::topic::{ClosedBy, Topic, TopicId, TopicName, deadline_of};
 use crate::types::{
-    AppendCommand, AppendResult, CloseResult, CreateCommand, CreateResult, OffsetToken, ReadResult,
+    AppendBatchResult, AppendCommand, AppendResult, BatchReadResult, CloseResult, CreateCommand,
+    CreateResult, LogOffsets, MAX_NEW_PARTITIONS, OffsetToken, ReadResult, StreamWatermarks,
     SubmittedBatchAppend, TopicList, TopicMeta, UpdateTopicCommand,
 };
 
@@ -58,10 +61,6 @@ impl Topics {
         self.schemas.as_ref()
     }
 
-    pub fn service(&self) -> &Arc<S3StreamService> {
-        &self.service
-    }
-
     pub async fn create(&self, mut command: CreateCommand) -> Result<CreateResult, ServiceError> {
         if command.schema_name.is_none() {
             command.schema_validate = false;
@@ -83,11 +82,12 @@ impl Topics {
         }
 
         let id = TopicId::random();
-        let logs: Vec<Log> = (0..command.partitions)
-            .map(|index| Log::Partition(Partition::new(id, index)))
-            .collect();
-        for log in &logs {
-            self.service.create_log(log).await?;
+        self.kv
+            .put_kv(&id_key(&id), Bytes::from(name.canonical().to_owned()))
+            .await?;
+        if let Err(error) = self.provision(id, 0..command.partitions).await {
+            let _ = self.kv.del_kv(&id_key(&id)).await;
+            return Err(error);
         }
 
         let candidate = Topic {
@@ -107,18 +107,18 @@ impl Topics {
         let stored = self
             .kv
             .put_kv_if_absent(&topic_key(name.canonical()), candidate.encode())
-            .await?;
-        let current = Topic::decode(&stored)?;
-        if current.id != id {
-            for log in &logs {
-                self.service.destroy_log(log).await;
+            .await;
+        let current = match stored
+            .map_err(ServiceError::from)
+            .and_then(|stored| Topic::decode(&stored))
+        {
+            Ok(current) if current.id == id => current,
+            outcome => {
+                self.unprovision(id, 0..command.partitions).await;
+                let _ = self.kv.del_kv(&id_key(&id)).await;
+                return self.existing(outcome?, &command).await;
             }
-            return self.existing(current, &command).await;
-        }
-
-        self.kv
-            .put_kv(&id_key(&id), Bytes::from(name.canonical().to_owned()))
-            .await?;
+        };
 
         if !command.initial_records.is_empty() {
             self.append_initial_records(&current, command.initial_records)
@@ -158,23 +158,23 @@ impl Topics {
     }
 
     pub async fn by_id(&self, id: &TopicId) -> Result<Option<Topic>, ServiceError> {
-        let Some(canonical) = self
-            .kv
-            .get_kv(&id_key(id))
-            .and_then(|value| String::from_utf8(value.to_vec()).ok())
-        else {
+        let Some((topic, stored)) = self.find(id)? else {
             return Ok(None);
         };
 
-        Ok(self.get(&canonical).await?.filter(|topic| topic.id == *id))
+        if topic.expired(now_ms()) {
+            self.expire(&topic, &stored).await;
+            return Ok(None);
+        }
+
+        Ok(Some(topic))
     }
 
     pub fn exists(&self, id: &TopicId) -> bool {
-        self.kv
-            .get_kv(&id_key(id))
-            .and_then(|value| String::from_utf8(value.to_vec()).ok())
-            .and_then(|canonical| self.load(&canonical).ok().flatten())
-            .is_some_and(|(topic, _)| topic.id == *id && !topic.expired(now_ms()))
+        self.find(id)
+            .ok()
+            .flatten()
+            .is_some_and(|(topic, _)| !topic.expired(now_ms()))
     }
 
     pub fn kafka_topics(&self) -> Vec<Topic> {
@@ -187,11 +187,37 @@ impl Topics {
             .collect()
     }
 
-    pub async fn head(&self, name: &str) -> Result<Option<TopicMeta>, ServiceError> {
-        match self.get(name).await? {
-            Some(topic) => Ok(Some(self.live_meta(topic).await?)),
-            None => Ok(None),
-        }
+    pub async fn offsets(&self, topic: &Topic, partition: u32) -> Result<LogOffsets, ServiceError> {
+        let log = partition_log(topic, partition)?;
+        self.service.live_offsets(&log).await
+    }
+
+    pub async fn watermarks(
+        &self,
+        topic: &Topic,
+        partition: u32,
+    ) -> Result<StreamWatermarks, ServiceError> {
+        let log = partition_log(topic, partition)?;
+        self.service.watermarks(&log).await
+    }
+
+    pub async fn record_at_or_after(
+        &self,
+        topic: &Topic,
+        partition: u32,
+        timestamp_ms: i64,
+    ) -> Result<Option<StreamRecord>, ServiceError> {
+        let log = partition_log(topic, partition)?;
+        self.service.record_at_or_after(&log, timestamp_ms).await
+    }
+
+    pub async fn record_with_max_timestamp(
+        &self,
+        topic: &Topic,
+        partition: u32,
+    ) -> Result<Option<StreamRecord>, ServiceError> {
+        let log = partition_log(topic, partition)?;
+        self.service.record_with_max_timestamp(&log).await
     }
 
     pub fn committed_meta(&self, topic: Topic) -> Result<TopicMeta, ServiceError> {
@@ -214,13 +240,13 @@ impl Topics {
         } else {
             DEFAULT_LIST_LIMIT
         };
-        let prefix = format!("{TOPIC_PREFIX}{}", canonical_prefix(prefix));
+        let prefix = format!("{TOPIC_PREFIX}{}", canonical(prefix));
         let now = now_ms();
 
         let view = self.views.load();
         let mut cursor = start_after
             .filter(|after| !after.is_empty())
-            .map(|after| format!("{TOPIC_PREFIX}{}", canonical_prefix(after)));
+            .map(|after| format!("{TOPIC_PREFIX}{}", canonical(after)));
         let mut selected: Vec<Topic> = Vec::new();
 
         'pages: loop {
@@ -267,9 +293,9 @@ impl Topics {
 
         let lock = self.lock(name.canonical());
         let _exclusive = lock.write().await;
-        self.require_live(name.canonical())?;
+        let topic = self.require_live(name.canonical())?;
 
-        self.modify(name.canonical(), |mut topic| {
+        self.modify(&topic, |mut topic| {
             match &command.schema_name {
                 Some(Some(schema_name)) => topic.schema_name = Some(schema_name.clone()),
                 Some(None) => {
@@ -287,6 +313,51 @@ impl Topics {
             topic
         })
         .await
+    }
+
+    pub async fn grow(&self, name: &str, partitions: u32) -> Result<Topic, ServiceError> {
+        let name = TopicName::parse(name)?;
+        let lock = self.lock(name.canonical());
+        let _exclusive = lock.write().await;
+
+        let topic = self.require_live(name.canonical())?;
+        if topic.closed {
+            return Err(ServiceError::kind(ErrorKind::Closed));
+        }
+        if partitions <= topic.partitions {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                format!(
+                    "topic already has {} partitions, it can only grow",
+                    topic.partitions
+                ),
+            ));
+        }
+        if partitions - topic.partitions > MAX_NEW_PARTITIONS {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                format!("at most {MAX_NEW_PARTITIONS} partitions can be added at once"),
+            ));
+        }
+
+        let added = topic.partitions..partitions;
+        self.provision(topic.id, added.clone()).await?;
+
+        let grown = self
+            .modify(&topic, |mut topic| {
+                topic.partitions = topic.partitions.max(partitions);
+                topic
+            })
+            .await;
+        if grown.is_err() {
+            self.unprovision(topic.id, added).await;
+        }
+
+        grown
     }
 
     pub async fn delete(&self, name: &str) -> Result<bool, ServiceError> {
@@ -326,16 +397,21 @@ impl Topics {
         let command = command.normalized();
         let name = TopicName::parse(name)?;
         let lock = self.lock(name.canonical());
-        let _shared = match command.close_after {
-            true => None,
-            false => Some(lock.read().await),
-        };
-        let _exclusive = match command.close_after {
-            true => Some(lock.write().await),
-            false => None,
+        let (_shared, _exclusive) = if command.close_after {
+            (None, Some(lock.write().await))
+        } else {
+            (Some(lock.read().await), None)
         };
 
         let topic = self.require_live(name.canonical())?;
+        if command.close_after && topic.partitions > 1 {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "a topic with more than one partition cannot be closed",
+            ));
+        }
         let log = partition_log(&topic, partition)?;
         let append = self.service.begin_append(&log).await?;
         let next = append.next_offset();
@@ -386,6 +462,9 @@ impl Topics {
         if !close_only {
             self.validate_records(&topic, &command.records).await?;
         }
+        if !command.close_after {
+            self.touch(&topic).await?;
+        }
 
         let committed = append
             .commit(
@@ -403,8 +482,6 @@ impl Topics {
                 seq: p.seq,
             });
             self.seal(&topic, closed_by).await?;
-        } else {
-            self.touch(&topic).await?;
         }
 
         Ok(AppendResult {
@@ -430,22 +507,25 @@ impl Topics {
         if topic.closed {
             return Err(ServiceError::kind(ErrorKind::Closed));
         }
-        if let Some(schema_name) = topic.validation_schema() {
-            let records = record::decode_batches(&payload)?;
-            let batch = schema_batch(
-                &records
-                    .into_iter()
-                    .map(|record| record.record)
-                    .collect::<Vec<_>>(),
-            );
-            self.validate_schema(schema_name, &batch).await?;
+        if topic.validation_schema().is_some() {
+            let records: Vec<LogRecord> = record::decode_batches(&payload)?
+                .into_iter()
+                .map(|record| record.record)
+                .collect();
+            self.validate_records(&topic, &records).await?;
         }
 
         let log = partition_log(&topic, partition)?;
-        let submitted = self.service.submit_batch_append(&log, payload).await?;
         self.touch(&topic).await?;
 
-        Ok(submitted)
+        self.service.submit_batch_append(&log, payload).await
+    }
+
+    pub async fn finish_batch(
+        &self,
+        submitted: SubmittedBatchAppend,
+    ) -> Result<AppendBatchResult, ServiceError> {
+        self.service.finish_batch_append(submitted).await
     }
 
     pub async fn read(
@@ -474,6 +554,19 @@ impl Topics {
         })
     }
 
+    pub async fn read_batches(
+        &self,
+        topic: &Topic,
+        partition: u32,
+        from: u64,
+        max_bytes: usize,
+    ) -> Result<BatchReadResult, ServiceError> {
+        let log = partition_log(topic, partition)?;
+        self.touch(topic).await?;
+
+        self.service.read_batches(&log, from, max_bytes).await
+    }
+
     pub async fn wait_appended(
         &self,
         name: &str,
@@ -488,7 +581,17 @@ impl Topics {
             return Ok(true);
         }
 
-        let log = partition_log(&topic, partition)?;
+        self.wait_partition(&topic, partition, from, timeout).await
+    }
+
+    pub async fn wait_partition(
+        &self,
+        topic: &Topic,
+        partition: u32,
+        from: OffsetToken,
+        timeout: Duration,
+    ) -> Result<bool, ServiceError> {
+        let log = partition_log(topic, partition)?;
         self.service.wait_appended(&log, from, timeout).await
     }
 
@@ -575,13 +678,28 @@ impl Topics {
         self.validate_records(topic, &records).await?;
 
         let log = partition_log(topic, 0)?;
-        self.service
-            .begin_append(&log)
-            .await?
-            .commit(records, None, None, None)
-            .await?;
+        self.service.append_records(&log, records).await?;
 
         Ok(())
+    }
+
+    async fn provision(&self, id: TopicId, indexes: Range<u32>) -> Result<(), ServiceError> {
+        for index in indexes.clone() {
+            let log = Log::Partition(Partition::new(id, index));
+            if let Err(error) = self.service.create_log(&log).await {
+                self.unprovision(id, indexes.start..index).await;
+                return Err(error);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn unprovision(&self, id: TopicId, indexes: Range<u32>) {
+        for index in indexes {
+            let log = Log::Partition(Partition::new(id, index));
+            self.service.destroy_log(&log).await;
+        }
     }
 
     async fn seal(
@@ -590,7 +708,7 @@ impl Topics {
         closed_by: Option<ClosedBy>,
     ) -> Result<Topic, ServiceError> {
         let sealed = self
-            .modify(topic.name.canonical(), |mut topic| {
+            .modify(topic, |mut topic| {
                 topic.closed = true;
                 if closed_by.is_some() {
                     topic.closed_by = closed_by.clone();
@@ -611,18 +729,22 @@ impl Topics {
             return Ok(topic.clone());
         }
 
-        self.modify(topic.name.canonical(), Topic::touched).await
+        self.modify(topic, Topic::touched).await
     }
 
     async fn modify(
         &self,
-        canonical: &str,
+        topic: &Topic,
         change: impl Fn(Topic) -> Topic,
     ) -> Result<Topic, ServiceError> {
+        let canonical = topic.name.canonical();
         let key = topic_key(canonical);
 
         for _ in 0..MAX_WRITE_ATTEMPTS {
-            let Some((current, stored)) = self.load(canonical)? else {
+            let Some((current, stored)) = self
+                .load(canonical)?
+                .filter(|(current, _)| current.id == topic.id)
+            else {
                 return Err(ServiceError::kind(ErrorKind::NotFound));
             };
 
@@ -699,6 +821,18 @@ impl Topics {
             .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound))
     }
 
+    fn find(&self, id: &TopicId) -> Result<Option<(Topic, Bytes)>, ServiceError> {
+        let Some(canonical) = self
+            .kv
+            .get_kv(&id_key(id))
+            .and_then(|value| String::from_utf8(value.to_vec()).ok())
+        else {
+            return Ok(None);
+        };
+
+        Ok(self.load(&canonical)?.filter(|(topic, _)| topic.id == *id))
+    }
+
     fn load(&self, canonical: &str) -> Result<Option<(Topic, Bytes)>, ServiceError> {
         let Some(stored) = self.kv.get_kv(&topic_key(canonical)) else {
             return Ok(None);
@@ -709,12 +843,13 @@ impl Topics {
     }
 
     fn lock(&self, canonical: &str) -> Arc<RwLock<()>> {
-        self.locks
-            .lock()
-            .unwrap()
-            .entry(canonical.to_owned())
-            .or_default()
-            .clone()
+        let mut locks = self.locks.lock().unwrap();
+        if let Some(lock) = locks.get(canonical) {
+            return lock.clone();
+        }
+
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        locks.entry(canonical.to_owned()).or_default().clone()
     }
 
     async fn validate_records(
@@ -722,9 +857,6 @@ impl Topics {
         topic: &Topic,
         records: &[LogRecord],
     ) -> Result<(), ServiceError> {
-        if self.schemas.is_none() {
-            return Ok(());
-        }
         let Some(schema_name) = topic.validation_schema() else {
             return Ok(());
         };
@@ -790,10 +922,6 @@ fn topic_key(canonical: &str) -> String {
 
 fn id_key(id: &TopicId) -> String {
     format!("{TOPIC_ID_PREFIX}{}", id.hex())
-}
-
-fn canonical_prefix(prefix: &str) -> String {
-    prefix.strip_prefix('/').unwrap_or(prefix).replace('/', ".")
 }
 
 fn config_matches(topic: &Topic, command: &CreateCommand) -> bool {
@@ -906,17 +1034,4 @@ fn schema_batch(records: &[LogRecord]) -> picomq_schema::Batch {
 
 fn schema_error(message: impl Into<String>) -> ServiceError {
     ServiceError::with_message(ErrorKind::BadRequest, None, false, message.into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prefixes_are_canonical() {
-        assert_eq!(canonical_prefix("/"), "");
-        assert_eq!(canonical_prefix(""), "");
-        assert_eq!(canonical_prefix("/native/"), "native.");
-        assert_eq!(canonical_prefix("/acct.orders"), "acct.orders");
-    }
 }

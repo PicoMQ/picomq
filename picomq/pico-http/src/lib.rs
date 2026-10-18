@@ -6,6 +6,7 @@ pub mod common;
 pub mod ds;
 pub mod groups;
 mod http;
+mod partition;
 pub mod pico;
 pub mod route;
 pub mod serve;

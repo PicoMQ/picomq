@@ -26,9 +26,17 @@ struct Cli {
 
     #[arg(
         long,
+        requires = "host_address",
         help = "Kafka bootstrap of an existing node, reachable from containers"
     )]
     bootstrap: Option<String>,
+
+    #[arg(
+        long,
+        requires = "bootstrap",
+        help = "Kafka address of the same node, reachable from this host"
+    )]
+    host_address: Option<String>,
 }
 
 #[tokio::main]
@@ -38,13 +46,13 @@ async fn main() -> anyhow::Result<ExitCode> {
 
     let target = match (cli.target, cli.bootstrap) {
         (None, None) => Target::start(cli.suite.listeners()).await?,
-        (url, bootstrap) => Target::remote(url, bootstrap),
+        (url, bootstrap) => Target::remote(url, bootstrap, cli.host_address),
     };
 
     let outcomes = cli.suite.run(&target).await;
     target.stop().await;
 
-    let report = known.judge(outcomes?);
+    let report = known.classify(outcomes?);
     print!("{report}");
 
     Ok(if report.passed() {

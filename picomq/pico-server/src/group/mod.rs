@@ -50,9 +50,10 @@ pub use state::GroupState;
 
 use offsets::{OffsetTable, decode_into, encode_commits, encode_snapshot};
 use state::{
-    Group, MAX_MEMBERS_PER_GROUP, MAX_STREAMS_PER_GROUP, MAX_SUBSCRIPTION_ENTRIES_PER_GROUP, Mode,
-    Names, Rebalance, Role, compatible, complete_rebalance, evict_idle_groups, member_from_input,
-    mode_of, new_member_id, remove_member, send_join_completions, validate_group_id, validate_join,
+    Group, MAX_MEMBERS_PER_GROUP, MAX_PARTITIONS_PER_GROUP, MAX_STREAMS_PER_GROUP,
+    MAX_SUBSCRIPTION_ENTRIES_PER_GROUP, Mode, Rebalance, Role, compatible, complete_rebalance,
+    evict_idle_groups, member_from_input, mode_of, new_member_id, remove_member,
+    send_join_completions, validate_group_id, validate_join,
 };
 
 const OFFSET_SNAPSHOT_INTERVAL: u64 = 64;
@@ -187,7 +188,6 @@ pub struct GroupCoordinator {
     service: Arc<S3StreamService>,
     topics: Arc<Topics>,
     ownership: Arc<MetadataOwnershipService>,
-    views: Arc<picomq_metadata::ViewPublisher>,
     groups: StdMutex<HashMap<String, Arc<Mutex<Group>>>>,
 }
 
@@ -197,14 +197,12 @@ impl GroupCoordinator {
         service: Arc<S3StreamService>,
         topics: Arc<Topics>,
         ownership: Arc<MetadataOwnershipService>,
-        views: Arc<picomq_metadata::ViewPublisher>,
     ) -> Arc<Self> {
         Arc::new(Self {
             node_id,
             service,
             topics,
             ownership,
-            views,
             groups: StdMutex::new(HashMap::new()),
         })
     }
@@ -601,7 +599,7 @@ impl GroupCoordinator {
             .map(|commit| commit.partition)
             .collect::<BTreeSet<_>>()
             .len();
-        if state.offsets.len() + new_partitions > MAX_STREAMS_PER_GROUP {
+        if state.offsets.len() + new_partitions > MAX_PARTITIONS_PER_GROUP {
             return Err(GroupError::CapacityExceeded);
         }
         if let Err(error) = self
@@ -765,22 +763,10 @@ impl GroupCoordinator {
             .owner_of(&log)
             .await
             .map_err(|_| GroupError::NotCoordinator)?;
-        if !owner.local {
+        if !owner.local || owner.stream_id.is_none() {
             return Err(GroupError::NotCoordinator);
         }
-        let stream_id = self
-            .service
-            .stream_id(&log)
-            .map_err(|_| GroupError::NotCoordinator)?
-            .ok_or(GroupError::NotCoordinator)?;
-        let epoch = self
-            .views
-            .load()
-            .state
-            .streams
-            .get(&stream_id)
-            .map(|row| row.epoch)
-            .unwrap_or(-1);
+        let epoch = owner.epoch;
 
         let group = {
             let mut groups = self.groups.lock().expect("group map lock");
@@ -791,12 +777,7 @@ impl GroupCoordinator {
                 if groups.len() >= state::MAX_GROUPS {
                     return Err(GroupError::CapacityExceeded);
                 }
-                let group = Arc::new(Mutex::new(Group::loaded(
-                    i64::MIN,
-                    Names::default(),
-                    OffsetTable::new(),
-                    0,
-                )));
+                let group = Arc::new(Mutex::new(Group::loaded(i64::MIN, OffsetTable::new(), 0)));
                 groups.insert(group_id.to_owned(), Arc::clone(&group));
                 group
             }
@@ -804,7 +785,7 @@ impl GroupCoordinator {
         let mut state = group.lock().await;
         if state.loaded_epoch != epoch {
             let (offsets, replayed) = self.replay_offsets(&log).await?;
-            *state = Group::loaded(epoch, Names::default(), offsets, replayed);
+            *state = Group::loaded(epoch, offsets, replayed);
         }
         drop(state);
         Ok(group)

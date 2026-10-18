@@ -1,6 +1,6 @@
 //! CreateTopics and DeleteTopics.
 
-use kafka_protocol::messages::create_topics_request::CreatableTopicConfig;
+use kafka_protocol::messages::create_topics_request::{CreatableTopic, CreatableTopicConfig};
 use kafka_protocol::messages::create_topics_response::{
     CreatableTopicResult, CreateTopicsResponse,
 };
@@ -8,15 +8,18 @@ use kafka_protocol::messages::delete_topics_response::{
     DeletableTopicResult, DeleteTopicsResponse,
 };
 use kafka_protocol::messages::{CreateTopicsRequest, DeleteTopicsRequest};
-use kafka_protocol::protocol::Decodable;
-use picomq_server::CreateCommand;
+use kafka_protocol::protocol::{Decodable, StrBytes};
 use picomq_server::topic::is_kafka_name;
+use picomq_server::{CreateCommand, MAX_NEW_PARTITIONS};
+use uuid::Uuid;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    INVALID_REQUEST, NO_ERROR, TOPIC_ALREADY_EXISTS, UNKNOWN_TOPIC_OR_PARTITION, encode_response,
-    resolve_topic, service_error_code, topic_name,
+    EXCESSIVE_PARTITIONS, Failure, INVALID_PARTITIONS, INVALID_REPLICA_ASSIGNMENT,
+    INVALID_REPLICATION_FACTOR, INVALID_REQUEST, NO_ERROR, POLICY_VIOLATION, TOPIC_ALREADY_EXISTS,
+    UNKNOWN_TOPIC_OR_PARTITION, check_replicas, encode_response, resolve_topic, service_error_code,
+    service_failure, topic_name, topic_uuid,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -34,63 +37,24 @@ pub async fn create(
     let request = CreateTopicsRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
 
+    let requested: u64 = request.topics.iter().map(requested_partitions).sum();
+    let oversized = requested > u64::from(MAX_NEW_PARTITIONS);
+
     let mut topics = Vec::with_capacity(request.topics.len());
-    for topic in request.topics {
-        let name = topic.name.to_string();
-        if !is_kafka_name(&name) {
-            topics.push(
-                CreatableTopicResult::default()
-                    .with_name(topic_name(&name))
-                    .with_error_code(INVALID_REQUEST),
-            );
-            continue;
-        }
-        if !matches!(topic.num_partitions, 1 | -1) || !matches!(topic.replication_factor, 1 | -1) {
-            topics.push(
-                CreatableTopicResult::default()
-                    .with_name(topic_name(&name))
-                    .with_error_code(INVALID_REQUEST),
-            );
-            continue;
-        }
-        let (schema_name, schema_validate) = match schema_configs(&topic.configs) {
-            Ok(parsed) => parsed,
-            Err(code) => {
-                topics.push(
-                    CreatableTopicResult::default()
-                        .with_name(topic_name(&name))
-                        .with_error_code(code),
-                );
-                continue;
-            }
+    for topic in &request.topics {
+        let outcome = if oversized {
+            Err((POLICY_VIOLATION, Some(EXCESSIVE_PARTITIONS.to_owned())))
+        } else {
+            create_topic(ctx, topic, request.validate_only).await
         };
-        let mut command = CreateCommand::new(&name, KAFKA_CREATED_CT);
-        if let Some(schema_name) = schema_name {
-            command = command
-                .with_schema_name(schema_name)
-                .with_schema_validate(schema_validate);
-        }
-        match ctx.topics.create(command).await {
-            Ok(result) if result.created => topics.push(
-                CreatableTopicResult::default()
-                    .with_name(topic_name(&name))
-                    .with_error_code(NO_ERROR)
-                    .with_topic_config_error_code(NO_ERROR)
-                    .with_num_partitions(result.meta.topic.partitions as i32)
-                    .with_replication_factor(1)
-                    .with_topic_id(uuid::Uuid::from_bytes(result.meta.topic.id.0)),
-            ),
-            Ok(_) => topics.push(
-                CreatableTopicResult::default()
-                    .with_name(topic_name(&name))
-                    .with_error_code(TOPIC_ALREADY_EXISTS),
-            ),
-            Err(error) => topics.push(
-                CreatableTopicResult::default()
-                    .with_name(topic_name(&name))
-                    .with_error_code(service_error_code(&error)),
-            ),
-        }
+
+        topics.push(match outcome {
+            Ok(created) => created,
+            Err((code, message)) => CreatableTopicResult::default()
+                .with_name(topic.name.clone())
+                .with_error_code(code)
+                .with_error_message(message.map(StrBytes::from)),
+        });
     }
 
     let response = CreateTopicsResponse::default().with_topics(topics);
@@ -99,6 +63,134 @@ pub async fn create(
         req.api_version,
         &response,
     )))
+}
+
+async fn create_topic(
+    ctx: &BrokerContext,
+    topic: &CreatableTopic,
+    validate_only: bool,
+) -> Result<CreatableTopicResult, Failure> {
+    let name = topic.name.to_string();
+    if !is_kafka_name(&name) {
+        return Err((
+            INVALID_REQUEST,
+            Some(format!("{name} is not a valid topic name")),
+        ));
+    }
+
+    let partitions = partition_count(ctx, topic)?;
+    let (schema_name, schema_validate) = schema_configs(&topic.configs)?;
+
+    let mut command = CreateCommand {
+        partitions,
+        ..CreateCommand::new(&name, KAFKA_CREATED_CT)
+    };
+    if let Some(schema_name) = schema_name {
+        command = command
+            .with_schema_name(schema_name)
+            .with_schema_validate(schema_validate);
+    }
+
+    if validate_only {
+        command.validate().map_err(service_failure)?;
+        if ctx
+            .topics
+            .get_kafka(&name)
+            .await
+            .map_err(service_failure)?
+            .is_some()
+        {
+            return Err(already_exists(&name));
+        }
+
+        return Ok(created(topic, partitions, Uuid::nil()));
+    }
+
+    match ctx.topics.create(command).await {
+        Ok(result) if result.created => Ok(created(
+            topic,
+            result.meta.topic.partitions,
+            topic_uuid(result.meta.topic.id.0),
+        )),
+        Ok(_) => Err(already_exists(&name)),
+        Err(error) => Err(service_failure(error)),
+    }
+}
+
+fn requested_partitions(topic: &CreatableTopic) -> u64 {
+    if topic.assignments.is_empty() {
+        u64::try_from(topic.num_partitions).unwrap_or(1)
+    } else {
+        topic.assignments.len() as u64
+    }
+}
+
+fn partition_count(ctx: &BrokerContext, topic: &CreatableTopic) -> Result<u32, Failure> {
+    if topic.assignments.is_empty() {
+        if !matches!(topic.replication_factor, 1 | -1) {
+            return Err((
+                INVALID_REPLICATION_FACTOR,
+                Some("PicoMQ keeps one replica of each partition, use 1 or -1".to_owned()),
+            ));
+        }
+
+        return match topic.num_partitions {
+            -1 => Ok(1),
+            count if count > 0 => Ok(count as u32),
+            _ => Err((
+                INVALID_PARTITIONS,
+                Some("Number of partitions was set to an invalid non-positive value.".to_owned()),
+            )),
+        };
+    }
+
+    if topic.replication_factor != -1 {
+        return Err((
+            INVALID_REPLICATION_FACTOR,
+            Some(
+                "A manual partition assignment was specified, but replication factor was not set to -1."
+                    .to_owned(),
+            ),
+        ));
+    }
+    if topic.num_partitions != -1 {
+        return Err((
+            INVALID_PARTITIONS,
+            Some(
+                "A manual partition assignment was specified, but numPartitions was not set to -1."
+                    .to_owned(),
+            ),
+        ));
+    }
+
+    for (position, assignment) in topic.assignments.iter().enumerate() {
+        if assignment.partition_index != position as i32 {
+            return Err((
+                INVALID_REPLICA_ASSIGNMENT,
+                Some("partitions should be a consecutive 0-based integer sequence".to_owned()),
+            ));
+        }
+        check_replicas(ctx, &assignment.broker_ids)?;
+    }
+
+    Ok(topic.assignments.len() as u32)
+}
+
+fn created(topic: &CreatableTopic, partitions: u32, id: Uuid) -> CreatableTopicResult {
+    CreatableTopicResult::default()
+        .with_name(topic.name.clone())
+        .with_error_code(NO_ERROR)
+        .with_topic_config_error_code(NO_ERROR)
+        .with_num_partitions(partitions as i32)
+        .with_replication_factor(1)
+        .with_topic_id(id)
+}
+
+fn already_exists(name: &str) -> Failure {
+    (
+        TOPIC_ALREADY_EXISTS,
+        Some(format!("Topic '{name}' already exists.")),
+    )
 }
 
 pub async fn delete(
@@ -164,7 +256,7 @@ pub async fn delete(
     )))
 }
 
-fn schema_configs(configs: &[CreatableTopicConfig]) -> Result<(Option<String>, bool), i16> {
+fn schema_configs(configs: &[CreatableTopicConfig]) -> Result<(Option<String>, bool), Failure> {
     let mut schema_name = None;
     let mut schema_validate = false;
     for config in configs {
@@ -177,24 +269,28 @@ fn schema_configs(configs: &[CreatableTopicConfig]) -> Result<(Option<String>, b
             if config.name.as_str() == SCHEMA_CONFIG
                 || config.name.as_str() == SCHEMA_VALIDATE_CONFIG
             {
-                return Err(INVALID_REQUEST);
+                return Err(invalid_config(config.name.as_str()));
             }
             continue;
         };
         match config.name.as_str() {
             SCHEMA_CONFIG => {
                 if schema_name.is_some() {
-                    return Err(INVALID_REQUEST);
+                    return Err(invalid_config(SCHEMA_CONFIG));
                 }
                 schema_name = Some(value.to_owned());
             }
             SCHEMA_VALIDATE_CONFIG => match value {
                 "true" => schema_validate = true,
                 "false" => schema_validate = false,
-                _ => return Err(INVALID_REQUEST),
+                _ => return Err(invalid_config(SCHEMA_VALIDATE_CONFIG)),
             },
             _ => {}
         }
     }
     Ok((schema_name, schema_validate))
+}
+
+fn invalid_config(name: &str) -> Failure {
+    (INVALID_REQUEST, Some(format!("invalid value for {name}")))
 }

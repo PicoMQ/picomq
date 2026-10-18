@@ -15,6 +15,7 @@ export type {
   MemberDescription,
   MemberFence,
   Offsets,
+  PartitionOptions,
   ProducerAck,
   ProducerRef,
   Protocol,

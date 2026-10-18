@@ -223,9 +223,11 @@ fn message_set(magic: u8, value: &[u8]) -> Bytes {
     let mut message = BytesMut::new();
     message.put_u8(magic);
     message.put_u8(0);
+
     if magic == 1 {
         message.put_i64(0);
     }
+
     message.put_i32(-1);
     message.put_i32(value.len() as i32);
     message.put_slice(value);

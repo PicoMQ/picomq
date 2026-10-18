@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt::Write;
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -30,13 +29,7 @@ impl Log {
                     partition.index
                 )
             }
-            Log::Group(group_id) => {
-                let mut key = String::from("log/group/");
-                for byte in group_id.as_bytes() {
-                    write!(key, "{byte:02x}").expect("write to String");
-                }
-                key
-            }
+            Log::Group(group_id) => format!("log/group/{}", hex::encode(group_id)),
         }
     }
 }

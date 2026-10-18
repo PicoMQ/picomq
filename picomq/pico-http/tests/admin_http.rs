@@ -232,11 +232,7 @@ async fn transfer_validation() {
         .send()
         .await
         .unwrap();
-    assert!(
-        bad_target.status() == 400 || bad_target.status() == 409,
-        "unregistered target rejected: {}",
-        bad_target.status()
-    );
+    assert_eq!(bad_target.status(), 400);
 
     let malformed = client
         .post(format!("{}/admin/transfer", server.admin_url))

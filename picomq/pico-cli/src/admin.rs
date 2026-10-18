@@ -41,12 +41,20 @@ pub enum AdminCommand {
     /// List registered nodes.
     Nodes,
     /// Stream detail by name.
-    Stream { stream: String },
+    Stream {
+        stream: String,
+        /// The partition to inspect, required when the topic has more than one.
+        #[arg(long)]
+        partition: Option<u32>,
+    },
     /// Move a stream to another node.
     Transfer {
         stream: String,
         #[arg(long)]
         to_node: i32,
+        /// The partition to move, required when the topic has more than one.
+        #[arg(long)]
+        partition: Option<u32>,
         /// Poll until the move completes.
         #[arg(long)]
         wait: bool,
@@ -123,14 +131,15 @@ pub async fn run(args: AdminArgs) -> Result<i32, String> {
                 );
             }
         }
-        AdminCommand::Stream { stream } => {
-            let body = api.get(&stream_path(&stream)).await?;
+        AdminCommand::Stream { stream, partition } => {
+            let body = api.get(&stream_path(&stream, partition)).await?;
             if args.json {
                 return print_json(&body);
             }
             println!(
-                "name={} id={} owner={} address={} local={}",
+                "name={} partition={} id={} owner={} address={} local={}",
                 body["name"].as_str().unwrap_or("-"),
+                body["partition"],
                 body["streamId"],
                 body["ownerNodeId"],
                 body["ownerAdvertisedAddress"].as_str().unwrap_or("-"),
@@ -155,20 +164,21 @@ pub async fn run(args: AdminArgs) -> Result<i32, String> {
         AdminCommand::Transfer {
             stream,
             to_node,
+            partition,
             wait,
         } => {
-            let body = api
-                .post(
-                    "/admin/transfer",
-                    &serde_json::json!({ "stream": stream, "toNode": to_node }),
-                )
-                .await?;
+            let mut request = serde_json::json!({ "stream": stream, "toNode": to_node });
+            if let Some(partition) = partition {
+                request["partition"] = partition.into();
+            }
+
+            let body = api.post("/admin/transfer", &request).await?;
             note(format!(
-                "transfer accepted stream={} id={} to={}",
-                stream, body["streamId"], to_node
+                "transfer accepted stream={} partition={} id={} to={}",
+                stream, body["partition"], body["streamId"], to_node
             ));
             if wait {
-                await_transfer(&api, &stream, to_node).await?;
+                await_transfer(&api, &stream, partition, to_node).await?;
                 note("transfer complete");
             }
             if args.json {
@@ -242,17 +252,25 @@ async fn decode(response: reqwest::Response) -> Result<Value, String> {
     }
 }
 
-fn stream_path(stream: &str) -> String {
+fn stream_path(stream: &str, partition: Option<u32>) -> String {
     let name = stream.strip_prefix('/').unwrap_or(stream);
-    format!("/admin/streams/{name}")
+    match partition {
+        Some(partition) => format!("/admin/streams/{name}?partition={partition}"),
+        None => format!("/admin/streams/{name}"),
+    }
 }
 
 /// The move is done once no transfer is pending and the row points at the
 /// target.
-async fn await_transfer(api: &Api, stream: &str, to_node: i32) -> Result<(), String> {
+async fn await_transfer(
+    api: &Api,
+    stream: &str,
+    partition: Option<u32>,
+    to_node: i32,
+) -> Result<(), String> {
     let deadline = Instant::now() + TRANSFER_WAIT_TIMEOUT;
     loop {
-        let body = api.get(&stream_path(stream)).await?;
+        let body = api.get(&stream_path(stream, partition)).await?;
         if body["pendingTransfer"].is_null() && body["nodeId"] == to_node {
             return Ok(());
         }

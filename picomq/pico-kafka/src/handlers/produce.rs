@@ -9,7 +9,7 @@ use picomq_server::{SubmittedBatchAppend, Topic};
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    NO_ERROR, encode_response, leader_log, resolve_topic, service_error_code, topic_name,
+    NO_ERROR, encode_response, leader_partition, resolve_topic, service_error_code, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -28,7 +28,7 @@ pub async fn handle(
         ));
     }
 
-    let mut topics = Vec::with_capacity(request.topic_data.len());
+    let mut pending = Vec::with_capacity(request.topic_data.len());
     for topic in request.topic_data {
         let topic_name_str = topic.name.to_string();
         let resolved = resolve_topic(ctx, &topic_name_str).await;
@@ -48,22 +48,22 @@ pub async fn handle(
                 Err(code) => failed(index, code),
             });
         }
-        topics.push((topic_name_str, partitions));
+        pending.push((topic_name_str, partitions));
     }
 
-    let service = ctx.service.clone();
+    let topics = ctx.topics.clone();
     let acks = request.acks;
     let correlation_id = req.correlation_id;
     let api_version = req.api_version;
     Ok(HandlerOutcome::Deferred(Box::pin(async move {
-        let mut topic_responses = Vec::with_capacity(topics.len());
-        for (topic_name_str, partitions) in topics {
+        let mut topic_responses = Vec::with_capacity(pending.len());
+        for (topic_name_str, partitions) in pending {
             let mut partition_responses = Vec::with_capacity(partitions.len());
             for partition in partitions {
                 partition_responses.push(match partition {
                     PartitionSubmit::Ready(response) => response,
                     PartitionSubmit::Pending(index, submitted) => {
-                        match service.finish_batch_append(submitted).await {
+                        match topics.finish_batch(submitted).await {
                             Ok(result) => PartitionProduceResponse::default()
                                 .with_index(index)
                                 .with_error_code(NO_ERROR)
@@ -115,10 +115,10 @@ async fn submit_partition(
     index: i32,
     records: Bytes,
 ) -> Result<SubmittedBatchAppend, i16> {
-    leader_log(ctx, topic, index).await?;
+    let partition = leader_partition(ctx, topic, index).await?;
 
     ctx.topics
-        .submit_batch(topic, index as u32, records)
+        .submit_batch(topic, partition, records)
         .await
         .map_err(|error| {
             tracing::debug!(%error, topic = %topic.name, index, "produce rejected");

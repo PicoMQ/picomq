@@ -3,6 +3,7 @@ mod fetch;
 mod group;
 mod metadata;
 mod offsets;
+mod partitions;
 mod produce;
 mod producer;
 mod topics;
@@ -67,6 +68,7 @@ pub async fn dispatch(
         key if key == ApiKey::InitProducerId as i16 => producer::handle(ctx, req, body).await,
         key if key == ApiKey::CreateTopics as i16 => topics::create(ctx, req, body).await,
         key if key == ApiKey::DeleteTopics as i16 => topics::delete(ctx, req, body).await,
+        key if key == ApiKey::CreatePartitions as i16 => partitions::create(ctx, req, body).await,
         key if matches!(
             ApiKey::try_from(key),
             Ok(ApiKey::FindCoordinator

@@ -1,5 +1,5 @@
 use crate::kafka::Broker;
-use crate::kafka::clients::Clients;
+use crate::kafka::clients::{Clients, KCAT, OLD_KCAT};
 use crate::kafka::{raw, versions};
 
 #[derive(Debug, Clone, Copy)]
@@ -35,7 +35,7 @@ const RECORDS: &str = "k1:v1\nk2:v2\nk3:v3\n";
 const KEYED: &str = "a:1\nb:2\nc:3\nd:4\ne:5\nf:6\n";
 
 impl Scenario {
-    pub const ALL: [Scenario; 19] = [
+    pub const ALL: &[Scenario] = &[
         Scenario::ApiVersions,
         Scenario::Metadata,
         Scenario::UnknownTopic,
@@ -89,32 +89,16 @@ impl Scenario {
     }
 
     pub async fn run(self, clients: &Clients, broker: &Broker<'_>, topic: &str) -> Vec<String> {
-        let host = broker.host_address;
+        let host_address = broker.host_address;
         let broker = broker.bootstrap;
 
         let lines = match self {
             Scenario::ApiVersions => api_versions(clients, broker).await,
-            Scenario::Metadata => {
-                let mut lines = vec![create(clients, broker, topic, 1).await];
-                lines.extend(metadata(clients, broker, topic).await);
-                lines
-            }
+            Scenario::Metadata => metadata(clients, broker, topic).await,
             Scenario::UnknownTopic => unknown_topic(clients, broker, topic).await,
-            Scenario::ProduceConsume => vec![
-                create(clients, broker, topic, 1).await,
-                produce(clients, broker, topic, RECORDS).await,
-            ]
-            .into_iter()
-            .chain(consume(clients, broker, topic, "%p %o %k %s\\n").await)
-            .collect(),
+            Scenario::ProduceConsume => produce_consume(clients, KCAT, broker, topic).await,
             Scenario::JavaProduceConsume => java_produce_consume(clients, broker, topic).await,
-            Scenario::KeyedPartitions => vec![
-                create(clients, broker, topic, 3).await,
-                produce(clients, broker, topic, KEYED).await,
-            ]
-            .into_iter()
-            .chain(sorted(consume(clients, broker, topic, "%p %k %s\\n").await))
-            .collect(),
+            Scenario::KeyedPartitions => keyed_partitions(clients, broker, topic).await,
             Scenario::GroupConsume => group_consume(clients, broker, topic).await,
             Scenario::ListOffsets => {
                 list_offsets(clients, broker, topic, &["-1", "-2", "0", "4102444800000"]).await
@@ -124,21 +108,12 @@ impl Scenario {
             Scenario::DescribeConfigs => describe_configs(clients, broker, topic).await,
             Scenario::CreatePartitions => create_partitions(clients, broker, topic).await,
             Scenario::OldLibrdkafka => old_librdkafka(clients, broker, topic).await,
-            Scenario::FutureApiVersions => vec![raw::future_api_versions(host).await],
-            Scenario::UnsupportedVersion => vec![raw::unsupported_version(host).await],
-            Scenario::ControllerApi => vec![raw::controller_api(host).await],
-            Scenario::ProduceV0 => vec![
-                create(clients, broker, topic, 1).await,
-                raw::legacy_produce(host, topic, 0).await,
-            ],
-            Scenario::ProduceV2 => vec![
-                create(clients, broker, topic, 1).await,
-                raw::legacy_produce(host, topic, 2).await,
-            ],
-            Scenario::CorruptBatch => vec![
-                create(clients, broker, topic, 1).await,
-                raw::corrupt_produce(host, topic).await,
-            ],
+            Scenario::FutureApiVersions => vec![raw::future_api_versions(host_address).await],
+            Scenario::UnsupportedVersion => vec![raw::unsupported_version(host_address).await],
+            Scenario::ControllerApi => vec![raw::controller_api(host_address).await],
+            Scenario::ProduceV0 => legacy_produce(clients, broker, host_address, topic, 0).await,
+            Scenario::ProduceV2 => legacy_produce(clients, broker, host_address, topic, 2).await,
+            Scenario::CorruptBatch => corrupt_batch(clients, broker, host_address, topic).await,
         };
 
         lines
@@ -182,6 +157,7 @@ async fn api_versions(clients: &Clients, broker: &str) -> Vec<String> {
             None,
         )
         .await;
+
     versions::parse(&output.stdout)
 }
 
@@ -205,19 +181,38 @@ async fn create(clients: &Clients, broker: &str, topic: &str, partitions: u32) -
             None,
         )
         .await;
+
     status("create", output.ok)
 }
 
-async fn produce(clients: &Clients, broker: &str, topic: &str, records: &str) -> String {
+async fn produce(
+    clients: &Clients,
+    kcat: &str,
+    broker: &str,
+    topic: &str,
+    records: &str,
+) -> String {
     let output = clients
-        .kcat(&["-b", broker, "-P", "-t", topic, "-K:"], Some(records))
+        .kcat(
+            kcat,
+            &["-b", broker, "-P", "-t", topic, "-K:"],
+            Some(records),
+        )
         .await;
+
     status("produce", output.ok)
 }
 
-async fn consume(clients: &Clients, broker: &str, topic: &str, format: &str) -> Vec<String> {
+async fn consume(
+    clients: &Clients,
+    kcat: &str,
+    broker: &str,
+    topic: &str,
+    format: &str,
+) -> Vec<String> {
     let output = clients
         .kcat(
+            kcat,
             &[
                 "-b",
                 broker,
@@ -233,18 +228,30 @@ async fn consume(clients: &Clients, broker: &str, topic: &str, format: &str) -> 
             None,
         )
         .await;
+
     lines(&output.stdout)
 }
 
-async fn metadata(clients: &Clients, broker: &str, topic: &str) -> Vec<String> {
-    let output = clients.kcat(&["-b", broker, "-L", "-t", topic], None).await;
+async fn list_metadata(clients: &Clients, kcat: &str, broker: &str, topic: &str) -> Vec<String> {
+    let output = clients
+        .kcat(kcat, &["-b", broker, "-L", "-t", topic], None)
+        .await;
 
     normalize_metadata(&output.stdout)
+}
+
+async fn metadata(clients: &Clients, broker: &str, topic: &str) -> Vec<String> {
+    let mut lines = vec![create(clients, broker, topic, 1).await];
+
+    lines.extend(list_metadata(clients, KCAT, broker, topic).await);
+
+    lines
 }
 
 async fn unknown_topic(clients: &Clients, broker: &str, topic: &str) -> Vec<String> {
     let output = clients
         .kcat(
+            KCAT,
             &[
                 "-b",
                 broker,
@@ -257,42 +264,65 @@ async fn unknown_topic(clients: &Clients, broker: &str, topic: &str) -> Vec<Stri
             None,
         )
         .await;
+
     normalize_metadata(&output.stdout)
 }
 
-async fn old_librdkafka(clients: &Clients, broker: &str, topic: &str) -> Vec<String> {
-    let mut lines = vec![create(clients, broker, topic, 1).await];
+async fn produce_consume(clients: &Clients, kcat: &str, broker: &str, topic: &str) -> Vec<String> {
+    let mut lines = vec![
+        create(clients, broker, topic, 1).await,
+        produce(clients, kcat, broker, topic, RECORDS).await,
+    ];
 
-    let produced = clients
-        .old_kcat(&["-b", broker, "-P", "-t", topic, "-K:"], Some(RECORDS))
-        .await;
-    lines.push(status("produce", produced.ok));
-
-    let consumed = clients
-        .old_kcat(
-            &[
-                "-b",
-                broker,
-                "-C",
-                "-t",
-                topic,
-                "-o",
-                "beginning",
-                "-e",
-                "-f",
-                "%p %o %k %s\\n",
-            ],
-            None,
-        )
-        .await;
-    lines.extend(self::lines(&consumed.stdout));
-
-    let listed = clients
-        .old_kcat(&["-b", broker, "-L", "-t", topic], None)
-        .await;
-    lines.extend(normalize_metadata(&listed.stdout));
+    lines.extend(consume(clients, kcat, broker, topic, "%p %o %k %s\\n").await);
 
     lines
+}
+
+async fn keyed_partitions(clients: &Clients, broker: &str, topic: &str) -> Vec<String> {
+    let mut lines = vec![
+        create(clients, broker, topic, 3).await,
+        produce(clients, KCAT, broker, topic, KEYED).await,
+    ];
+
+    let mut received = consume(clients, KCAT, broker, topic, "%p %k %s\\n").await;
+    received.sort();
+    lines.extend(received);
+
+    lines
+}
+
+async fn old_librdkafka(clients: &Clients, broker: &str, topic: &str) -> Vec<String> {
+    let mut lines = produce_consume(clients, OLD_KCAT, broker, topic).await;
+
+    lines.extend(list_metadata(clients, OLD_KCAT, broker, topic).await);
+
+    lines
+}
+
+async fn legacy_produce(
+    clients: &Clients,
+    broker: &str,
+    host_address: &str,
+    topic: &str,
+    version: i16,
+) -> Vec<String> {
+    vec![
+        create(clients, broker, topic, 1).await,
+        raw::legacy_produce(host_address, topic, version).await,
+    ]
+}
+
+async fn corrupt_batch(
+    clients: &Clients,
+    broker: &str,
+    host_address: &str,
+    topic: &str,
+) -> Vec<String> {
+    vec![
+        create(clients, broker, topic, 1).await,
+        raw::corrupt_produce(host_address, topic).await,
+    ]
 }
 
 fn normalize_metadata(stdout: &str) -> Vec<String> {
@@ -362,7 +392,7 @@ async fn group_consume(clients: &Clients, broker: &str, topic: &str) -> Vec<Stri
 
     let mut lines = vec![
         create(clients, broker, topic, 1).await,
-        produce(clients, broker, topic, RECORDS).await,
+        produce(clients, KCAT, broker, topic, RECORDS).await,
     ];
 
     let received = clients
@@ -412,7 +442,7 @@ async fn list_offsets(clients: &Clients, broker: &str, topic: &str, times: &[&st
     let mut lines = vec![create(clients, broker, topic, 1).await];
 
     for record in RECORDS.lines() {
-        lines.push(produce(clients, broker, topic, &format!("{record}\n")).await);
+        lines.push(produce(clients, KCAT, broker, topic, &format!("{record}\n")).await);
     }
 
     for time in times {
@@ -513,7 +543,7 @@ async fn create_partitions(clients: &Clients, broker: &str, topic: &str) -> Vec<
         .await;
     lines.push(status("alter", output.ok));
 
-    lines.extend(metadata(clients, broker, topic).await);
+    lines.extend(list_metadata(clients, KCAT, broker, topic).await);
 
     lines
 }
@@ -528,10 +558,4 @@ fn lines(stdout: &str) -> Vec<String> {
         .filter(|line| !line.trim().is_empty())
         .map(str::to_owned)
         .collect()
-}
-
-fn sorted(mut lines: Vec<String>) -> Vec<String> {
-    lines.sort();
-
-    lines
 }

@@ -12,6 +12,7 @@ use crate::retry::RetryPolicy;
 #[derive(Debug, Clone)]
 pub struct ProducerConfig {
     pub epoch: u64,
+    pub partition: Option<u32>,
     pub linger: Duration,
     pub max_batch_records: usize,
     pub max_batch_bytes: usize,
@@ -26,6 +27,7 @@ impl Default for ProducerConfig {
     fn default() -> Self {
         Self {
             epoch: 0,
+            partition: None,
             linger: Duration::from_millis(5),
             max_batch_records: 500,
             max_batch_bytes: 1024 * 1024,
@@ -254,7 +256,10 @@ async fn append_with_retries(
 ) -> Result<u64> {
     let mut attempt = 0;
     loop {
-        match client.append_as(name, records, producer).await {
+        match client
+            .append_as(name, config.partition, records, producer)
+            .await
+        {
             Ok(ack) => {
                 if ack.duplicate {
                     let next: u64 = ack.ack.next.parse().unwrap_or_default();

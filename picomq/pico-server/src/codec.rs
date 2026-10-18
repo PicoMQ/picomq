@@ -110,5 +110,5 @@ fn ensure(buf: &[u8], n: usize) -> Result<(), ServiceError> {
 }
 
 fn corrupt(message: &str) -> ServiceError {
-    ServiceError::with_message(ErrorKind::BadRequest, None, false, message)
+    ServiceError::with_message(ErrorKind::Internal, None, false, message)
 }

@@ -98,11 +98,15 @@ fn put_entry(buf: &mut BytesMut, partition: &Partition, value: &CommittedOffset)
     match &value.metadata {
         Some(metadata) => {
             buf.put_u8(1);
-            buf.put_u32(metadata.len() as u32);
-            buf.extend_from_slice(metadata.as_bytes());
+            put_string(buf, metadata);
         }
         None => buf.put_u8(0),
     }
+}
+
+fn put_string(buf: &mut BytesMut, value: &str) {
+    buf.put_u32(value.len() as u32);
+    buf.extend_from_slice(value.as_bytes());
 }
 
 fn take_id(buf: &mut &[u8]) -> Result<[u8; 16], ()> {

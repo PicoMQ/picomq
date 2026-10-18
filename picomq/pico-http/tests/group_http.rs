@@ -6,6 +6,7 @@ use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
 use picomq_http::{HttpProtocol, RoutingMode, ServeOptions, serve};
+use picomq_server::{CommittedOffset, CreateCommand, OffsetCommit, Partition};
 use reqwest::Client;
 use serde_json::{Value, json};
 
@@ -457,5 +458,85 @@ async fn auto_prefix_scopes_see_relative_names() {
     assert_eq!(
         stored[&picomq_server::Partition::new(topic.id, 0)].position,
         11
+    );
+}
+
+#[tokio::test]
+async fn groups_over_http_refuse_multi_partition_topics() {
+    let server = common::picomq_server().await;
+    let base = server.base_url.clone();
+    let client = Client::new();
+    create(&client, &base, "/single").await;
+    let spread = server
+        .node
+        .topics()
+        .create(CreateCommand {
+            partitions: 2,
+            ..CreateCommand::new("/spread", "text/plain")
+        })
+        .await
+        .unwrap()
+        .meta
+        .topic;
+
+    let (status, _) = join(
+        &client,
+        &base,
+        "readers",
+        json!({ "subscription": ["/spread"] }),
+    )
+    .await;
+    assert_eq!(status, 400);
+
+    let commit = client
+        .put(format!("{base}/_groups/readers/offsets"))
+        .json(&json!({ "offsets": { "/spread": { "position": 1 } } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(commit.status(), 400);
+
+    let fetch = client
+        .get(format!("{base}/_groups/readers/offsets?stream=/spread"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fetch.status(), 400);
+
+    let commit = client
+        .put(format!("{base}/_groups/readers/offsets"))
+        .json(&json!({ "offsets": { "/single": { "position": 4 } } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(commit.status(), 204);
+    server
+        .node
+        .groups()
+        .commit_offsets(
+            "readers",
+            None,
+            &[0, 1].map(|index| OffsetCommit {
+                partition: Partition::new(spread.id, index),
+                value: CommittedOffset {
+                    position: 9,
+                    metadata: None,
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    let all: Value = client
+        .get(format!("{base}/_groups/readers/offsets"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        all["offsets"],
+        json!({ "/single": { "position": 4, "metadata": null } })
     );
 }

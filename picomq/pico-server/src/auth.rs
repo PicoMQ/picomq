@@ -1,7 +1,4 @@
 //! KV-backed token store over the metadata plane.
-//!
-//! Records live at `auth/token/{id}` with no leading slash, so they cannot
-//! collide with stream registry keys (which are always URI paths).
 
 use std::sync::Arc;
 use std::time::Duration;

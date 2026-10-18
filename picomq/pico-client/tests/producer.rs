@@ -43,7 +43,7 @@ async fn read_all(client: &PicoClient, name: &str) -> Vec<Bytes> {
     let mut bodies = Vec::new();
     loop {
         let page = client
-            .read(name, &from, Live::Off, ReadLimits::server_default())
+            .read(name, None, &from, Live::Off, ReadLimits::server_default())
             .await
             .unwrap();
         if page.records.is_empty() {
@@ -132,8 +132,12 @@ async fn records_are_batched() {
     // One batch of 100 means one append, so the stream's records all share a
     // timestamp. More usefully, the whole thing completes well inside the time
     // 100 sequential appends would take.
-    let head = client.head("/streams/batched").await.unwrap().unwrap();
-    assert_eq!(head.next, "100");
+    let head = client
+        .head("/streams/batched", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.next.as_deref(), Some("100"));
 
     producer.close().await.unwrap();
     server.shutdown().await;
@@ -154,6 +158,7 @@ async fn resending_a_batch_applies_it_once() {
     let first = client
         .append_as(
             "/streams/dedupe",
+            None,
             &records,
             &picomq_client::pico::ProducerRef {
                 id: "writer-1",
@@ -168,6 +173,7 @@ async fn resending_a_batch_applies_it_once() {
     let again = client
         .append_as(
             "/streams/dedupe",
+            None,
             &records,
             &picomq_client::pico::ProducerRef {
                 id: "writer-1",
@@ -179,8 +185,8 @@ async fn resending_a_batch_applies_it_once() {
         .unwrap();
     assert!(again.duplicate, "same sequence is recognized, not appended");
 
-    let head = client.head("/streams/dedupe").await.unwrap().unwrap();
-    assert_eq!(head.next, "2", "two records, not four");
+    let head = client.head("/streams/dedupe", None).await.unwrap().unwrap();
+    assert_eq!(head.next.as_deref(), Some("2"), "two records, not four");
 
     server.shutdown().await;
 }
@@ -199,6 +205,7 @@ async fn a_batch_out_of_order_is_rejected() {
     client
         .append_as(
             "/streams/gap",
+            None,
             &[Bytes::from_static(b"first")],
             &picomq_client::pico::ProducerRef {
                 id: "writer-1",
@@ -213,6 +220,7 @@ async fn a_batch_out_of_order_is_rejected() {
     let error = client
         .append_as(
             "/streams/gap",
+            None,
             &[Bytes::from_static(b"early")],
             &picomq_client::pico::ProducerRef {
                 id: "writer-1",
@@ -225,8 +233,12 @@ async fn a_batch_out_of_order_is_rejected() {
     assert_eq!(error.kind, ErrorKind::Conflict);
     assert_eq!(error.code, "sequence_gap");
 
-    let head = client.head("/streams/gap").await.unwrap().unwrap();
-    assert_eq!(head.next, "1", "only the in-order record was written");
+    let head = client.head("/streams/gap", None).await.unwrap().unwrap();
+    assert_eq!(
+        head.next.as_deref(),
+        Some("1"),
+        "only the in-order record was written"
+    );
 
     server.shutdown().await;
 }
@@ -283,9 +295,10 @@ async fn flush_waits_for_durability() {
     }
     producer.flush().await.unwrap();
 
-    let head = client.head("/streams/flush").await.unwrap().unwrap();
+    let head = client.head("/streams/flush", None).await.unwrap().unwrap();
     assert_eq!(
-        head.next, "50",
+        head.next.as_deref(),
+        Some("50"),
         "flush returned before everything was durable"
     );
 

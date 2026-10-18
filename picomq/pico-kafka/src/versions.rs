@@ -31,6 +31,7 @@ const APIS: &[SupportedApi] = &[
     SupportedApi::new(ApiKey::Metadata, 0, 12),
     SupportedApi::new(ApiKey::CreateTopics, 2, 7),
     SupportedApi::new(ApiKey::DeleteTopics, 1, 6),
+    SupportedApi::new(ApiKey::CreatePartitions, 0, 3),
     SupportedApi::new(ApiKey::InitProducerId, 0, 4),
     SupportedApi::new(ApiKey::OffsetCommit, 2, 8),
     SupportedApi::new(ApiKey::OffsetFetch, 1, 7),

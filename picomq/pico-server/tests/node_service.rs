@@ -6,8 +6,8 @@ use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
 use picomq_server::ownership::OwnershipService as _;
 use picomq_server::record::encode_batch;
 use picomq_server::{
-    AppendBatchResult, AppendCommand, CreateCommand, ErrorKind, Log, LogRecord, NodeConfig,
-    OffsetToken, PicoNode, ServiceError, Topics, partition_log,
+    AppendBatchResult, AppendCommand, CreateCommand, ErrorKind, Log, LogRecord, MAX_NEW_PARTITIONS,
+    NodeConfig, OffsetToken, PicoNode, ServiceError, Topics, partition_log,
 };
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
@@ -90,8 +90,8 @@ async fn create_append_read_close_via_topics() {
 
     let closed = topics.close("/streams/demo").await.unwrap();
     assert!(closed.next_offset.record_offset() >= 1);
-    let head = topics.head("/streams/demo").await.unwrap().unwrap();
-    assert!(head.topic.closed);
+    let closed = topics.get("/streams/demo").await.unwrap().unwrap();
+    assert!(closed.closed);
 
     topics
         .create(create("/streams/batch", "application/octet-stream"))
@@ -145,8 +145,9 @@ async fn create_append_read_close_via_topics() {
 
     let effective = topics.trim("/streams/batch", 0, 2).await.unwrap();
     assert!(effective <= 2, "effective trim {effective}");
-    let head = topics.head("/streams/batch").await.unwrap().unwrap();
-    assert_eq!(head.partitions[0].start_offset.record_offset(), effective);
+    let topic = topics.get("/streams/batch").await.unwrap().unwrap();
+    let offsets = topics.offsets(&topic, 0).await.unwrap();
+    assert_eq!(offsets.start_offset.record_offset(), effective);
 
     let trimmed = topics
         .read(
@@ -318,7 +319,7 @@ async fn core_flow_on_sql_sink() {
     assert_eq!(&read.records[1].record.value[..], br#"{"b":2}"#);
 
     assert!(topics.delete("/sql/demo").await.unwrap());
-    assert!(topics.head("/sql/demo").await.unwrap().is_none());
+    assert!(topics.get("/sql/demo").await.unwrap().is_none());
     assert!(!topics.delete("/sql/demo").await.unwrap());
 
     node.close().await;
@@ -602,10 +603,7 @@ async fn transfer_moves_partition_to_target_node() {
                 {
                     Ok(_) => applied += 1,
                     Err(e) => {
-                        assert!(
-                            matches!(e.kind, ErrorKind::Transferring | ErrorKind::BadRequest),
-                            "unexpected failure {e:?}"
-                        );
+                        assert_eq!(e.kind, ErrorKind::Transferring, "{e:?}");
                         break;
                     }
                 }
@@ -757,8 +755,9 @@ async fn topics_survive_restart() {
 
     let node = start_shared_node(1, 2, sink, views, object_storage, wal_storage).await;
 
-    let head = node.topics().head("/durable/a").await.unwrap().unwrap();
-    assert_eq!(head.partitions[0].next_offset.record_offset(), 1);
+    let topic = node.topics().get("/durable/a").await.unwrap().unwrap();
+    let offsets = node.topics().offsets(&topic, 0).await.unwrap();
+    assert_eq!(offsets.next_offset.record_offset(), 1);
     let read = node
         .topics()
         .read("/durable/a", 0, OffsetToken::beginning(), 0, 0)
@@ -793,7 +792,7 @@ async fn produce(
 ) -> Result<AppendBatchResult, ServiceError> {
     let topic = topics.get(name).await.unwrap().unwrap();
     let submitted = topics.submit_batch(&topic, 0, payload).await?;
-    topics.service().finish_batch_append(submitted).await
+    topics.finish_batch(submitted).await
 }
 
 #[tokio::test]
@@ -1401,6 +1400,102 @@ async fn append_rejects_schema_invalid_records() {
         )
         .await
         .unwrap();
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn partitions_grow_and_stay_independent() {
+    let node = local_node().await;
+    let topics = node.topics();
+
+    let created = topics
+        .create(CreateCommand {
+            partitions: 2,
+            ..create("/parts", "text/plain")
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.meta.partitions.len(), 2);
+
+    topics
+        .append("/parts", 1, append(&[b"one"], "text/plain"))
+        .await
+        .unwrap();
+    let first = topics
+        .read("/parts", 0, OffsetToken::beginning(), 0, 0)
+        .await
+        .unwrap();
+    let second = topics
+        .read("/parts", 1, OffsetToken::beginning(), 0, 0)
+        .await
+        .unwrap();
+    assert!(first.records.is_empty());
+    assert_eq!(&second.records[0].record.value[..], b"one");
+
+    let grown = topics.grow("/parts", 4).await.unwrap();
+    assert_eq!(grown.partitions, 4);
+    topics
+        .append("/parts", 3, append(&[b"three"], "text/plain"))
+        .await
+        .unwrap();
+    assert_eq!(
+        topics.grow("/parts", 3).await.unwrap_err().kind,
+        ErrorKind::BadRequest
+    );
+
+    let missing = topics
+        .append("/parts", 4, append(&[b"x"], "text/plain"))
+        .await
+        .unwrap_err();
+    assert_eq!(missing.kind, ErrorKind::NotFound);
+
+    let close = topics.close("/parts").await.unwrap_err();
+    assert_eq!(close.kind, ErrorKind::BadRequest);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn closed_topics_do_not_grow() {
+    let node = local_node().await;
+    let topics = node.topics();
+
+    topics
+        .create(create("/sealed", "text/plain"))
+        .await
+        .unwrap();
+    topics.close("/sealed").await.unwrap();
+
+    let grown = topics.grow("/sealed", 2).await.unwrap_err();
+    assert_eq!(grown.kind, ErrorKind::Closed);
+    assert_eq!(topics.get("/sealed").await.unwrap().unwrap().partitions, 1);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn partition_counts_are_capped() {
+    let node = local_node().await;
+    let topics = node.topics();
+
+    let oversized = topics
+        .create(CreateCommand {
+            partitions: MAX_NEW_PARTITIONS + 1,
+            ..create("/huge", "text/plain")
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(oversized.kind, ErrorKind::BadRequest);
+    assert!(topics.get("/huge").await.unwrap().is_none());
+
+    topics.create(create("/small", "text/plain")).await.unwrap();
+    let grown = topics
+        .grow("/small", MAX_NEW_PARTITIONS + 2)
+        .await
+        .unwrap_err();
+    assert_eq!(grown.kind, ErrorKind::BadRequest);
+    assert_eq!(topics.get("/small").await.unwrap().unwrap().partitions, 1);
 
     node.close().await;
 }

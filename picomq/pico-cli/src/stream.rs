@@ -107,10 +107,18 @@ pub enum StreamCommand {
         ttl: Option<u64>,
     },
     /// Print a stream's position and metadata.
-    Head { stream: String },
+    Head {
+        stream: String,
+        /// Partition of a multi-partition topic.
+        #[arg(long)]
+        partition: Option<u32>,
+    },
     /// Append newline-delimited records from stdin.
     Append {
         stream: String,
+        /// Partition of a multi-partition topic.
+        #[arg(long)]
+        partition: Option<u32>,
         #[arg(long, default_value = "application/octet-stream")]
         content_type: String,
         /// Records per request. The Durable Streams protocol allows only 1.
@@ -120,6 +128,9 @@ pub enum StreamCommand {
     /// Read records until caught up.
     Read {
         stream: String,
+        /// Partition of a multi-partition topic.
+        #[arg(long)]
+        partition: Option<u32>,
         /// Position to read from. Defaults to the start of the stream.
         #[arg(long)]
         from: Option<String>,
@@ -127,6 +138,9 @@ pub enum StreamCommand {
     /// Read records appended from now on.
     Tail {
         stream: String,
+        /// Partition of a multi-partition topic.
+        #[arg(long)]
+        partition: Option<u32>,
         /// Keep waiting for new records instead of returning when caught up.
         #[arg(short, long)]
         follow: bool,
@@ -145,6 +159,9 @@ pub enum StreamCommand {
     /// Drop records below a sequence number (Pico protocol only).
     Trim {
         stream: String,
+        /// Partition of a multi-partition topic.
+        #[arg(long)]
+        partition: Option<u32>,
         #[arg(long)]
         seq: u64,
     },
@@ -164,21 +181,23 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
             let created = client.create(&stream, &content_type, ttl).await?;
             note(format!("created={created}"));
         }
-        StreamCommand::Head { stream } => {
-            let Some(head) = client.head(&stream).await? else {
+        StreamCommand::Head { stream, partition } => {
+            let Some(head) = client.head(&stream, partition).await? else {
                 note("not found");
                 return Ok(1);
             };
             println!(
-                "start={} next={} closed={} type={}",
-                head.start,
-                head.next,
+                "partitions={} start={} next={} closed={} type={}",
+                head.partitions,
+                head.start.as_deref().unwrap_or("-"),
+                head.next.as_deref().unwrap_or("-"),
                 head.closed,
                 head.content_type.as_deref().unwrap_or("-")
             );
         }
         StreamCommand::Append {
             stream,
+            partition,
             content_type,
             batch,
         } => {
@@ -188,15 +207,27 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
             for records in
                 stdin_records(batch).map_err(|e| ClientError::transport(e.to_string()))?
             {
-                let ack = client.append(&stream, &records, &content_type).await?;
+                let ack = client
+                    .append(&stream, partition, &records, &content_type)
+                    .await?;
                 note(format!("start={} next={}", ack.start, ack.next));
             }
         }
-        StreamCommand::Read { stream, from } => {
+        StreamCommand::Read {
+            stream,
+            partition,
+            from,
+        } => {
             let mut next = from.unwrap_or_else(|| client.beginning());
             loop {
                 let page = client
-                    .read(&stream, &next, Live::Off, ReadLimits::server_default())
+                    .read(
+                        &stream,
+                        partition,
+                        &next,
+                        Live::Off,
+                        ReadLimits::server_default(),
+                    )
                     .await?;
                 for record in &page.records {
                     print_record(record);
@@ -207,17 +238,39 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
                 }
             }
         }
-        StreamCommand::Tail { stream, follow } => {
+        StreamCommand::Tail {
+            stream,
+            partition,
+            follow,
+        } => {
+            let Some(head) = client.head(&stream, partition).await? else {
+                return Err(ClientError::new(404, ErrorKind::NotFound, "not_found"));
+            };
+            if partition.is_none() && head.partitions > 1 {
+                return Err(ClientError::new(0, ErrorKind::BadRequest, "bad_request")
+                    .with_message(Some(format!(
+                        "{stream} has {} partitions; pass --partition",
+                        head.partitions
+                    ))));
+            }
+
             let mut next = match client.now() {
                 Ok(now) => now,
-                Err(_) => match client.head(&stream).await? {
-                    Some(head) => head.next,
-                    None => return Err(ClientError::new(404, ErrorKind::NotFound, "not_found")),
-                },
+                Err(_) => head.next.ok_or_else(|| {
+                    ClientError::new(0, ErrorKind::Other, "invalid_response")
+                        .with_message(Some(format!("HEAD on {stream} reported no next position")))
+                })?,
             };
+
             loop {
                 let page = client
-                    .read(&stream, &next, Live::LongPoll, ReadLimits::server_default())
+                    .read(
+                        &stream,
+                        partition,
+                        &next,
+                        Live::LongPoll,
+                        ReadLimits::server_default(),
+                    )
                     .await?;
                 for record in &page.records {
                     print_record(record);
@@ -238,8 +291,12 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
             let listing = client.list(&prefix, limit).await?;
             for stream in &listing.streams {
                 println!(
-                    "{} start={} next={} closed={}",
-                    stream.name, stream.start, stream.next, stream.closed
+                    "{} partitions={} start={} next={} closed={}",
+                    stream.name,
+                    stream.partitions,
+                    stream.start.as_deref().unwrap_or("-"),
+                    stream.next.as_deref().unwrap_or("-"),
+                    stream.closed
                 );
             }
             if listing.has_more {
@@ -252,7 +309,11 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
         StreamCommand::Delete { stream } => {
             note(format!("deleted={}", client.delete(&stream).await?));
         }
-        StreamCommand::Trim { stream, seq } => {
+        StreamCommand::Trim {
+            stream,
+            partition,
+            seq,
+        } => {
             if protocol != Protocol::Pico {
                 return Err(ClientError::unsupported(
                     "trim is a Pico protocol operation; use --protocol pico",
@@ -260,7 +321,7 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
             }
             let http = picomq_client::http_client(&endpoint.client_config())?;
             let start = PicoClient::with_http(&endpoint.endpoint, http, Default::default())
-                .trim(&stream, seq)
+                .trim(&stream, partition, seq)
                 .await?;
             note(format!("trimmed start={start}"));
         }

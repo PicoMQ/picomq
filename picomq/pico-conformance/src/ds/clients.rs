@@ -1,14 +1,13 @@
-use std::path::Path;
-
+use anyhow::Context;
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::suite::Outcome;
-
-const DETAIL_LINES: usize = 8;
+const PROJECT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/clients/ds");
 
 #[derive(Deserialize)]
-struct Report {
+struct VitestReport {
+    #[serde(rename = "numFailedTests")]
+    failed: usize,
     #[serde(rename = "testResults")]
     files: Vec<File>,
 }
@@ -20,55 +19,53 @@ struct File {
 }
 
 #[derive(Deserialize)]
-struct Case {
+pub struct Case {
     #[serde(rename = "fullName")]
-    name: String,
-    status: String,
+    pub name: String,
+    pub status: String,
     #[serde(rename = "failureMessages", default)]
-    failures: Vec<String>,
+    pub failures: Vec<String>,
 }
 
-pub async fn run(url: &str) -> anyhow::Result<Vec<Outcome>> {
-    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("clients/ds");
-
-    let installed = Command::new("npm")
+pub async fn install() -> anyhow::Result<()> {
+    let status = Command::new("npm")
         .args(["ci", "--no-audit", "--no-fund", "--silent"])
-        .current_dir(&project)
+        .current_dir(PROJECT)
         .status()
         .await?;
-    anyhow::ensure!(
-        installed.success(),
-        "npm ci failed in {}",
-        project.display()
-    );
 
-    let report = tempfile::NamedTempFile::new()?;
-    Command::new(project.join("node_modules/.bin/vitest"))
+    anyhow::ensure!(status.success(), "npm ci failed in {PROJECT}");
+
+    Ok(())
+}
+
+pub async fn run(url: &str) -> anyhow::Result<Vec<Case>> {
+    let file = tempfile::NamedTempFile::new()?;
+
+    let output = Command::new(format!("{PROJECT}/node_modules/.bin/vitest"))
         .args(["run", "--silent", "--reporter=json"])
-        .arg(format!("--outputFile.json={}", report.path().display()))
+        .arg(format!("--outputFile.json={}", file.path().display()))
         .env("CONFORMANCE_TEST_URL", url)
-        .current_dir(&project)
+        .current_dir(PROJECT)
         .output()
         .await?;
 
-    let report: Report = serde_json::from_slice(&std::fs::read(report.path())?)?;
+    let failed = || {
+        format!(
+            "vitest failed ({}):\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+
+    let report: VitestReport =
+        serde_json::from_slice(&std::fs::read(file.path())?).with_context(failed)?;
+
+    anyhow::ensure!(output.status.success() || report.failed > 0, failed());
 
     Ok(report
         .files
         .into_iter()
         .flat_map(|file| file.cases)
-        .filter(|case| matches!(case.status.as_str(), "passed" | "failed"))
-        .map(|case| Outcome {
-            passed: case.status == "passed",
-            detail: (!case.failures.is_empty()).then(|| {
-                case.failures
-                    .join("\n")
-                    .lines()
-                    .take(DETAIL_LINES)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }),
-            case: case.name,
-        })
         .collect())
 }

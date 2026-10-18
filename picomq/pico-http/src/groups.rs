@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Router;
@@ -19,12 +20,12 @@ use picomq_protocol::pico::{
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{
     CommittedOffset, GroupCoordinator, GroupDescription, GroupError, JoinInput, Joined,
-    MemberFence, MemberRole, Membership, OffsetCommit, Partition, Topics,
+    MemberFence, MemberRole, Membership, OffsetCommit, Partition, Topic, Topics,
 };
 
 use crate::auth::{Caller, authenticate};
 use crate::http::{base_response, query_param, query_params, set_header};
-use crate::pico::error;
+use crate::pico::{error, service_error_response};
 use crate::route::{RoutingMode, owner_redirect};
 
 #[derive(Clone)]
@@ -123,22 +124,37 @@ impl GroupState {
         }
     }
 
+    async fn topic(&self, name: &str) -> Result<Option<Topic>, Box<Response>> {
+        match self.topics.get(name).await {
+            Ok(Some(topic)) if topic.partitions > 1 => Err(Box::new(error(
+                400,
+                E_BAD_REQUEST,
+                &format!(
+                    "{name} has {} partitions, groups over HTTP need one",
+                    topic.partitions
+                ),
+                None,
+            ))),
+            Ok(topic) => Ok(topic),
+            Err(e) => Err(Box::new(service_error_response(e))),
+        }
+    }
+
     async fn partitions(&self, names: &[String]) -> Result<Vec<Partition>, Box<Response>> {
         let mut partitions = Vec::with_capacity(names.len());
+
         for name in names {
-            match self.topics.get(name).await {
-                Ok(Some(topic)) => partitions.push(Partition::new(topic.id, 0)),
-                Ok(None) => {
-                    return Err(Box::new(error(
-                        404,
-                        E_NOT_FOUND,
-                        &format!("no such stream {name}"),
-                        None,
-                    )));
-                }
-                Err(e) => return Err(Box::new(error(400, E_BAD_REQUEST, &e.message, None))),
-            }
+            let Some(topic) = self.topic(name).await? else {
+                return Err(Box::new(error(
+                    404,
+                    E_NOT_FOUND,
+                    &format!("no such stream {name}"),
+                    None,
+                )));
+            };
+            partitions.push(Partition::new(topic.id, 0));
         }
+
         Ok(partitions)
     }
 
@@ -224,6 +240,11 @@ async fn join(
     };
     if let Err(response) = state.allow(&caller, Operation::Read, &subscription) {
         return *response;
+    }
+    for name in &subscription {
+        if let Err(response) = state.topic(name).await {
+            return *response;
+        }
     }
     if let Some(response) = state.redirect(&uri, &request.group).await {
         return response;
@@ -437,16 +458,14 @@ async fn fetch(
     {
         return *response;
     }
+    let partitions = match state.partitions(&requested).await {
+        Ok(partitions) => partitions,
+        Err(response) => return *response,
+    };
     if let Some(response) = state.redirect(&uri, &group).await {
         return response;
     }
 
-    let mut partitions = Vec::with_capacity(requested.len());
-    for name in &requested {
-        if let Ok(Some(topic)) = state.topics.get(name).await {
-            partitions.push(Partition::new(topic.id, 0));
-        }
-    }
     let offsets = match state
         .groups
         .fetch_offsets(
@@ -459,11 +478,15 @@ async fn fetch(
         Err(error) => return group_error(error),
     };
 
-    let mut named = std::collections::BTreeMap::new();
+    let mut named = BTreeMap::new();
     for (partition, value) in offsets {
         let Ok(Some(topic)) = state.topics.by_id(&partition.topic).await else {
             continue;
         };
+        if topic.partitions > 1 {
+            continue;
+        }
+
         let stream = topic.name.spelling();
         if !state.allowed(&caller, stream) {
             continue;

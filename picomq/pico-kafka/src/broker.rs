@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use picomq_metadata::{MetadataNodeHandle, ViewPublisher};
-use picomq_server::{
-    GroupCoordinator, MetadataOwnershipService, PicoNode, S3StreamService, Topics,
-};
+use picomq_server::{GroupCoordinator, MetadataOwnershipService, PicoNode, Topics};
 use tokio::sync::Mutex;
 
 const PRODUCER_ID_BLOCK: u32 = 256;
@@ -28,7 +26,6 @@ impl ProducerIdLease {
 pub struct BrokerContext {
     pub node_id: i32,
     pub cluster_id: String,
-    pub service: Arc<S3StreamService>,
     pub topics: Arc<Topics>,
     pub ownership: Arc<MetadataOwnershipService>,
     pub views: Arc<ViewPublisher>,
@@ -42,7 +39,6 @@ impl BrokerContext {
         Self {
             node_id: node.config().node_id,
             cluster_id: node.config().cluster_id.clone(),
-            service: node.service(),
             topics: node.topics(),
             ownership: node.ownership(),
             views: node.views(),

@@ -24,8 +24,8 @@ pub async fn run(target: &Target) -> anyhow::Result<Vec<Outcome>> {
     let picomq = Broker {
         bootstrap: target.bootstrap().context("target has no kafka listener")?,
         host_address: target
-            .kafka_address()
-            .context("target has no kafka listener")?,
+            .host_address()
+            .context("target has no kafka address reachable from this host")?,
     };
 
     let reference = Reference::start().await?;

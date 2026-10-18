@@ -147,6 +147,18 @@ func (c *coreClient) streamURL(name string, query url.Values) string {
 	return u.String()
 }
 
+func withPartition(query url.Values, partition *uint32) url.Values {
+	if partition == nil {
+		return query
+	}
+
+	if query == nil {
+		query = url.Values{}
+	}
+	query.Set("partition", strconv.FormatUint(uint64(*partition), 10))
+	return query
+}
+
 type wireRequest struct {
 	method, url string
 	headers     http.Header
@@ -261,6 +273,13 @@ func headerBool(header http.Header, name string) bool {
 func headerUint(header http.Header, name string) uint64 {
 	value, _ := strconv.ParseUint(header.Get(name), 10, 64)
 	return value
+}
+
+func partitionCount(value uint64) uint32 {
+	if value == 0 {
+		return 1
+	}
+	return uint32(value)
 }
 
 func expectPico(response *http.Response, expected ...int) ([]byte, error) {

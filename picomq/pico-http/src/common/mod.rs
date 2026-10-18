@@ -100,8 +100,14 @@ pub(crate) fn auth_error(err: &AuthError) -> Response {
 pub(crate) fn service_error(error: ServiceError) -> Response {
     let status = match error.kind {
         ErrorKind::NotFound => StatusCode::NOT_FOUND,
-        ErrorKind::Conflict => StatusCode::CONFLICT,
-        _ => StatusCode::BAD_REQUEST,
+        ErrorKind::Conflict | ErrorKind::Transferring | ErrorKind::Closed => StatusCode::CONFLICT,
+        ErrorKind::Durability | ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorKind::BadRequest
+        | ErrorKind::CorruptBatch
+        | ErrorKind::SchemaViolation
+        | ErrorKind::Fenced
+        | ErrorKind::SequenceGap
+        | ErrorKind::MatchFailed => StatusCode::BAD_REQUEST,
     };
     (status, Json(json!({"error": error.message}))).into_response()
 }

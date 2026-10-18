@@ -16,13 +16,14 @@ import (
 )
 
 type Subscription struct {
-	core     *coreClient
-	protocol Protocol
-	name     string
-	offset   string
-	options  SubscribeOptions
-	ctx      context.Context
-	cancel   context.CancelFunc
+	core      *coreClient
+	protocol  Protocol
+	name      string
+	partition *uint32
+	offset    string
+	options   SubscribeOptions
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	mu          sync.Mutex
 	response    *http.Response
@@ -33,7 +34,7 @@ type Subscription struct {
 	closed      bool
 }
 
-func newSubscription(ctx context.Context, core *coreClient, name, from string, options SubscribeOptions) *Subscription {
+func newSubscription(ctx context.Context, core *coreClient, name string, partition *uint32, from string, options SubscribeOptions) *Subscription {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -47,15 +48,23 @@ func newSubscription(ctx context.Context, core *coreClient, name, from string, o
 	if options.MaxEventBytes <= 0 {
 		options.MaxEventBytes = 16 << 20
 	}
-	return &Subscription{core: core, protocol: core.protocol, name: name, offset: from, options: options, ctx: lifetime, cancel: cancel}
+	return &Subscription{core: core, protocol: core.protocol, name: name, partition: partition, offset: from, options: options, ctx: lifetime, cancel: cancel}
 }
 
 func (c *PicoClient) Subscribe(ctx context.Context, name, from string, options SubscribeOptions) *Subscription {
-	return newSubscription(ctx, c.core, name, from, options)
+	return c.subscribe(ctx, name, nil, from, options)
 }
 
 func (c *DurableStreamsClient) Subscribe(ctx context.Context, name, from string, options SubscribeOptions) *Subscription {
-	return newSubscription(ctx, c.core, name, from, options)
+	return c.subscribe(ctx, name, nil, from, options)
+}
+
+func (c *PicoClient) subscribe(ctx context.Context, name string, partition *uint32, from string, options SubscribeOptions) *Subscription {
+	return newSubscription(ctx, c.core, name, partition, from, options)
+}
+
+func (c *DurableStreamsClient) subscribe(ctx context.Context, name string, partition *uint32, from string, options SubscribeOptions) *Subscription {
+	return newSubscription(ctx, c.core, name, partition, from, options)
 }
 
 func (s *Subscription) Next() (Event, error) {
@@ -175,7 +184,7 @@ func (s *Subscription) open() error {
 	if s.lastEventID != "" {
 		headers.Set("Last-Event-ID", s.lastEventID)
 	}
-	response, err := s.core.send(s.ctx, wireRequest{method: http.MethodGet, url: s.core.streamURL(s.name, query), headers: headers})
+	response, err := s.core.send(s.ctx, wireRequest{method: http.MethodGet, url: s.core.streamURL(s.name, withPartition(query, s.partition)), headers: headers})
 	if err != nil {
 		return err
 	}

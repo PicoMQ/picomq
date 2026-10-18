@@ -80,13 +80,7 @@ impl TopicId {
     }
 
     pub fn hex(&self) -> String {
-        use std::fmt::Write;
-
-        let mut out = String::with_capacity(32);
-        for byte in self.0 {
-            write!(out, "{byte:02x}").expect("write to String");
-        }
-        out
+        hex::encode(self.0)
     }
 }
 

@@ -57,6 +57,7 @@ async fn read_bodies(client: &PicoClient, name: &str) -> Vec<String> {
     let page = client
         .read(
             name,
+            None,
             &client.beginning(),
             Live::Off,
             ReadLimits::server_default(),
@@ -80,6 +81,7 @@ async fn rust_client_lifecycle() {
     let ack = client
         .append(
             &name,
+            None,
             &[Bytes::from_static(b"one"), Bytes::from_static(b"two")],
             "text/plain",
         )
@@ -88,19 +90,19 @@ async fn rust_client_lifecycle() {
     assert_eq!(ack.start, "0");
     assert_eq!(ack.next, "2");
 
-    let head = client.head(&name).await.unwrap().unwrap();
-    assert_eq!(head.next, "2");
+    let head = client.head(&name, None).await.unwrap().unwrap();
+    assert_eq!(head.next.as_deref(), Some("2"));
     assert!(!head.closed);
 
     assert_eq!(read_bodies(&client, &name).await, ["one", "two"]);
     assert_eq!(client.close(&name).await.unwrap(), "2");
     let error = client
-        .append(&name, &[Bytes::from_static(b"late")], "text/plain")
+        .append(&name, None, &[Bytes::from_static(b"late")], "text/plain")
         .await
         .unwrap_err();
     assert_eq!(error.kind, ErrorKind::Closed);
     assert!(client.delete(&name).await.unwrap());
-    assert!(client.head(&name).await.unwrap().is_none());
+    assert!(client.head(&name, None).await.unwrap().is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -109,12 +111,12 @@ async fn rust_client_ttl_and_head() {
     let client = pico();
     let name = unique("ttl");
     client.create(&name, "text/plain", Some(2)).await.unwrap();
-    let head = client.head(&name).await.unwrap().unwrap();
+    let head = client.head(&name, None).await.unwrap().unwrap();
     assert_eq!(head.ttl_seconds, Some(2));
 
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
-        if client.head(&name).await.unwrap().is_none() {
+        if client.head(&name, None).await.unwrap().is_none() {
             break;
         }
         assert!(
@@ -135,6 +137,7 @@ async fn rust_client_gap_duplicate_and_fence() {
     let first = client
         .append_as(
             &name,
+            None,
             &[Bytes::from_static(b"a")],
             &ProducerRef {
                 id: "w1",
@@ -149,6 +152,7 @@ async fn rust_client_gap_duplicate_and_fence() {
     let again = client
         .append_as(
             &name,
+            None,
             &[Bytes::from_static(b"a")],
             &ProducerRef {
                 id: "w1",
@@ -163,6 +167,7 @@ async fn rust_client_gap_duplicate_and_fence() {
     let gap = client
         .append_as(
             &name,
+            None,
             &[Bytes::from_static(b"skip")],
             &ProducerRef {
                 id: "w1",
@@ -178,6 +183,7 @@ async fn rust_client_gap_duplicate_and_fence() {
     let fence = client
         .append_as(
             &name,
+            None,
             &[Bytes::from_static(b"stale")],
             &ProducerRef {
                 id: "w1",
@@ -192,6 +198,7 @@ async fn rust_client_gap_duplicate_and_fence() {
     client
         .append_as(
             &name,
+            None,
             &[Bytes::from_static(b"b")],
             &ProducerRef {
                 id: "w1",
@@ -251,6 +258,7 @@ async fn rust_client_concurrent_producers() {
                 client
                     .append_as(
                         &name,
+                        None,
                         &[Bytes::from(format!("w{w}-{i}"))],
                         &ProducerRef {
                             id: &id,
@@ -277,12 +285,18 @@ async fn rust_and_trait_clients_agree() {
     let name = unique("trait");
     boxed.create(&name, "text/plain", None).await.unwrap();
     boxed
-        .append(&name, &[Bytes::from_static(b"via-trait")], "text/plain")
+        .append(
+            &name,
+            None,
+            &[Bytes::from_static(b"via-trait")],
+            "text/plain",
+        )
         .await
         .unwrap();
     let page = boxed
         .read(
             &name,
+            None,
             &boxed.beginning(),
             Live::Off,
             ReadLimits::server_default(),

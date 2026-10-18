@@ -13,7 +13,7 @@ pub struct Listeners {
 pub struct Target {
     url: Option<String>,
     bootstrap: Option<String>,
-    kafka_address: Option<String>,
+    host_address: Option<String>,
     node: Option<Node>,
 }
 
@@ -26,13 +26,10 @@ impl Target {
     pub async fn start(listeners: Listeners) -> anyhow::Result<Self> {
         let dir = tempfile::tempdir()?;
 
-        let kafka = match listeners.kafka {
-            true => Some(container_reachable()?),
-            false => None,
-        };
+        let kafka = listeners.kafka.then(container_reachable).transpose()?;
 
         let bootstrap = kafka.as_ref().and_then(|k| k.advertise.clone());
-        let kafka_address = kafka
+        let host_address = kafka
             .as_ref()
             .map(|k| format!("127.0.0.1:{}", k.listen.port()));
 
@@ -41,16 +38,20 @@ impl Target {
         Ok(Self {
             url: Some(format!("http://{}", server.local_addr())),
             bootstrap,
-            kafka_address,
+            host_address,
             node: Some(Node { server, _dir: dir }),
         })
     }
 
-    pub fn remote(url: Option<String>, bootstrap: Option<String>) -> Self {
+    pub fn remote(
+        url: Option<String>,
+        bootstrap: Option<String>,
+        host_address: Option<String>,
+    ) -> Self {
         Self {
             url,
-            kafka_address: bootstrap.clone(),
             bootstrap,
+            host_address,
             node: None,
         }
     }
@@ -63,8 +64,8 @@ impl Target {
         self.bootstrap.as_deref()
     }
 
-    pub fn kafka_address(&self) -> Option<&str> {
-        self.kafka_address.as_deref()
+    pub fn host_address(&self) -> Option<&str> {
+        self.host_address.as_deref()
     }
 
     pub async fn stop(self) {

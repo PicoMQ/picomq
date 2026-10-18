@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use crate::suite::{Outcome, Suite};
 
+const DETAIL_LINES: usize = 20;
+
 pub struct KnownFailures {
     cases: BTreeSet<String>,
 }
@@ -42,7 +44,7 @@ impl KnownFailures {
         Ok(Self { cases })
     }
 
-    pub fn judge(&self, outcomes: Vec<Outcome>) -> Report {
+    pub fn classify(&self, outcomes: Vec<Outcome>) -> Report {
         let failed: BTreeSet<&str> = outcomes
             .iter()
             .filter(|o| !o.passed)
@@ -95,7 +97,7 @@ impl fmt::Display for Report {
             writeln!(f, "{label} {}", outcome.case)?;
 
             if let (Status::Regressed, Some(detail)) = (status, &outcome.detail) {
-                for line in detail.lines() {
+                for line in detail.lines().take(DETAIL_LINES) {
                     writeln!(f, "      {line}")?;
                 }
             }
