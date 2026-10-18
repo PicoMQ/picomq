@@ -114,9 +114,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
                 server.local_addr(),
                 server.base_url()
             );
-            if let Some(kafka) = server.kafka_addr() {
-                println!("kafka on {kafka}");
-            }
+            println!("kafka on {}", server.kafka_addr());
             if let Some(admin) = server.admin_addr() {
                 println!("admin on http://{admin}");
             }

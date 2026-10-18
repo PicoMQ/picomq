@@ -1,9 +1,8 @@
 //! Ownership routing shared by both protocols: serve locally or 307 to the
 //! owner of the topic's log.
 //!
-//! One copy for both protocols: PUT and OPTIONS are
-//! always local (create places the stream, redirects start once an owner is
-//! opened elsewhere), the list root `/` is local, everything else redirects
+//! OPTIONS and the list root `/` are local, a request for a topic that does
+//! not exist yet is local (PUT creates it here), everything else redirects
 //! when the owner is a different node with a known address. Routing failures
 //! degrade to 503 with an `X-Error` header rather than guessing.
 
@@ -31,7 +30,7 @@ pub async fn route(
     name: &str,
     requested: Option<u32>,
 ) -> Option<Response> {
-    if stream_name(uri) == "/" || *method == Method::PUT || *method == Method::OPTIONS {
+    if stream_name(uri) == "/" || *method == Method::OPTIONS {
         return None;
     }
 

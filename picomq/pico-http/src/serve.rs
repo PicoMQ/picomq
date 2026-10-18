@@ -98,6 +98,17 @@ pub struct RunningServer {
 /// different sockets in tests and keeps this crate free of metadata-backend
 /// choices.
 pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Result<RunningServer> {
+    let listener = bind(options.addr, options.backlog)?;
+    serve_on(node, listener, options).await
+}
+
+/// Serve on a listener the caller already bound, so the bound address can be
+/// advertised before the node registers.
+pub async fn serve_on(
+    node: Arc<PicoNode>,
+    listener: TcpListener,
+    options: ServeOptions,
+) -> std::io::Result<RunningServer> {
     let common_router = common::router(
         node.topics(),
         node.ownership(),
@@ -155,14 +166,13 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
         .with_authorizer(options.authorizer.clone());
     let mut tasks = Vec::with_capacity(2);
 
-    let (local_addr, task) =
-        spawn_listener(options.addr, options.backlog, protocol_router, &stop).await?;
+    let (local_addr, task) = spawn_listener(listener, protocol_router, &stop)?;
     tasks.push(task);
 
     let mut admin_addr = None;
     if let Some(addr) = options.admin_addr {
-        let (bound, task) =
-            spawn_listener(addr, options.backlog, admin::router(admin.clone()), &stop).await?;
+        let listener = bind(addr, options.backlog)?;
+        let (bound, task) = spawn_listener(listener, admin::router(admin.clone()), &stop)?;
         admin_addr = Some(bound);
         tasks.push(task);
     }
@@ -189,7 +199,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
 /// Bind a listener with an explicit accept queue. `TcpListener::bind` gives
 /// no way to set the backlog, so the socket is built by hand for the one
 /// call that matters (`listen`).
-fn bind(addr: SocketAddr, backlog: i32) -> std::io::Result<TcpListener> {
+pub fn bind(addr: SocketAddr, backlog: i32) -> std::io::Result<TcpListener> {
     let domain = if addr.is_ipv6() {
         Domain::IPV6
     } else {
@@ -204,13 +214,11 @@ fn bind(addr: SocketAddr, backlog: i32) -> std::io::Result<TcpListener> {
     TcpListener::from_std(socket.into())
 }
 
-async fn spawn_listener(
-    addr: SocketAddr,
-    backlog: i32,
+fn spawn_listener(
+    listener: TcpListener,
     router: Router,
     stop: &watch::Sender<bool>,
 ) -> std::io::Result<(SocketAddr, JoinHandle<()>)> {
-    let listener = bind(addr, backlog)?;
     let bound = listener.local_addr()?;
     let mut stop = stop.subscribe();
     let task = tokio::spawn(async move {

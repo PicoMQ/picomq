@@ -42,7 +42,7 @@ pub(crate) struct Settings {
     pub(crate) database_url: Option<String>,
     pub(crate) listen: String,
     pub(crate) admin_listen: Option<String>,
-    pub(crate) kafka_listen: Option<String>,
+    pub(crate) kafka_listen: String,
     pub(crate) advertised_url: Option<String>,
     pub(crate) kafka_advertise: Option<String>,
     pub(crate) cluster_id: String,
@@ -68,7 +68,7 @@ impl Settings {
             database_url: value(&DATABASE_URL),
             listen: value(&LISTEN).unwrap_or_else(|| text_of(DEFAULT_LISTEN)),
             admin_listen: value(&ADMIN_LISTEN),
-            kafka_listen: value(&KAFKA_LISTEN),
+            kafka_listen: value(&KAFKA_LISTEN).unwrap_or_else(|| text_of(DEFAULT_KAFKA_LISTEN)),
             advertised_url: value(&ADVERTISED_URL),
             kafka_advertise: value(&KAFKA_ADVERTISE),
             cluster_id: value(&CLUSTER_ID).unwrap_or_else(|| text_of(DEFAULT_CLUSTER_ID)),
@@ -124,7 +124,7 @@ pub(crate) fn register() {
     );
     text(
         c"pico.kafka_listen",
-        c"Address of the Kafka listener; empty disables it",
+        c"Address of the Kafka listener",
         &KAFKA_LISTEN,
     );
     text(

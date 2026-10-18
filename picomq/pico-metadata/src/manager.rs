@@ -99,6 +99,20 @@ impl MetadataNodeHandle {
         Ok(())
     }
 
+    pub async fn place_stream(&self, stream_id: u64) -> Result<i32, MetadataError> {
+        match self
+            .sink
+            .propose(MetadataCommand::PlaceStream { stream_id })
+            .await?
+            .result
+        {
+            MetadataResult::Id(node_id) => Ok(node_id as i32),
+            other => Err(MetadataError::Unexpected {
+                message: format!("unexpected place result {other:?}"),
+            }),
+        }
+    }
+
     /// Lease a block of `count` numeric producer ids, returning the first.
     pub async fn allocate_producer_ids(&self, count: u32) -> Result<u64, MetadataError> {
         match self

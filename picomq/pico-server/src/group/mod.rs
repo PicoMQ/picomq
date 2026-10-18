@@ -747,7 +747,7 @@ impl GroupCoordinator {
         let log = Self::log(group_id);
         if create {
             self.service
-                .create_log(&log)
+                .create_local_log(&log)
                 .await
                 .map_err(|_| GroupError::CoordinatorNotAvailable)?;
         } else if self

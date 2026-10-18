@@ -73,7 +73,7 @@ impl Topics {
 
         if let Some((existing, stored)) = self.load(name.canonical())? {
             if !existing.expired(now_ms()) {
-                return self.existing(existing, &command).await;
+                return self.existing(existing, &command);
             }
             self.remove(&existing, &stored).await;
         }
@@ -85,7 +85,8 @@ impl Topics {
         self.kv
             .put_kv(&id_key(&id), Bytes::from(name.canonical().to_owned()))
             .await?;
-        if let Err(error) = self.provision(id, 0..command.partitions).await {
+        let local = (!command.initial_records.is_empty()).then_some(0);
+        if let Err(error) = self.provision(id, 0..command.partitions, local).await {
             let _ = self.kv.del_kv(&id_key(&id)).await;
             return Err(error);
         }
@@ -116,7 +117,7 @@ impl Topics {
             outcome => {
                 self.unprovision(id, 0..command.partitions).await;
                 let _ = self.kv.del_kv(&id_key(&id)).await;
-                return self.existing(outcome?, &command).await;
+                return self.existing(outcome?, &command);
             }
         };
 
@@ -132,7 +133,7 @@ impl Topics {
 
         Ok(CreateResult {
             created: true,
-            meta: self.live_meta(current).await?,
+            meta: self.meta(current)?,
         })
     }
 
@@ -220,10 +221,10 @@ impl Topics {
         self.service.record_with_max_timestamp(&log).await
     }
 
-    pub fn committed_meta(&self, topic: Topic) -> Result<TopicMeta, ServiceError> {
+    pub fn meta(&self, topic: Topic) -> Result<TopicMeta, ServiceError> {
         let partitions = partition_logs(&topic)
             .iter()
-            .map(|log| self.service.committed_offsets(log))
+            .map(|log| self.service.current_offsets(log))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(TopicMeta { topic, partitions })
@@ -278,7 +279,7 @@ impl Topics {
         let topics = selected
             .into_iter()
             .take(max)
-            .map(|topic| self.committed_meta(topic))
+            .map(|topic| self.meta(topic))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(TopicList { topics, has_more })
@@ -345,7 +346,7 @@ impl Topics {
         }
 
         let added = topic.partitions..partitions;
-        self.provision(topic.id, added.clone()).await?;
+        self.provision(topic.id, added.clone(), None).await?;
 
         let grown = self
             .modify(&topic, |mut topic| {
@@ -646,7 +647,7 @@ impl Topics {
         })
     }
 
-    async fn existing(
+    fn existing(
         &self,
         existing: Topic,
         command: &CreateCommand,
@@ -657,17 +658,8 @@ impl Topics {
 
         Ok(CreateResult {
             created: false,
-            meta: self.live_meta(existing).await?,
+            meta: self.meta(existing)?,
         })
-    }
-
-    async fn live_meta(&self, topic: Topic) -> Result<TopicMeta, ServiceError> {
-        let mut partitions = Vec::with_capacity(topic.partitions as usize);
-        for log in partition_logs(&topic) {
-            partitions.push(self.service.live_offsets(&log).await?);
-        }
-
-        Ok(TopicMeta { topic, partitions })
     }
 
     async fn append_initial_records(
@@ -683,10 +675,21 @@ impl Topics {
         Ok(())
     }
 
-    async fn provision(&self, id: TopicId, indexes: Range<u32>) -> Result<(), ServiceError> {
+    async fn provision(
+        &self,
+        id: TopicId,
+        indexes: Range<u32>,
+        local: Option<u32>,
+    ) -> Result<(), ServiceError> {
         for index in indexes.clone() {
             let log = Log::Partition(Partition::new(id, index));
-            if let Err(error) = self.service.create_log(&log).await {
+            let created = if local == Some(index) {
+                self.service.create_local_log(&log).await
+            } else {
+                self.service.create_log(&log).await
+            };
+
+            if let Err(error) = created {
                 self.unprovision(id, indexes.start..index).await;
                 return Err(error);
             }

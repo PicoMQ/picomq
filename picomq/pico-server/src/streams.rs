@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use picomq_metadata::{MetadataNodeHandle, ViewPublisher};
 use s3stream::{
-    CreateStreamOptions, OpenStreamOptions, Stream, StreamClientTrait as StreamClient, StreamState,
+    OpenStreamOptions, Stream, StreamClientTrait as StreamClient, StreamManagerTrait as _,
+    StreamState,
 };
 
 use crate::error::{ErrorKind, ServiceError};
@@ -42,17 +43,22 @@ impl Streams {
         &self.node
     }
 
-    pub async fn provision(&self, tag: &str) -> Result<Arc<dyn Stream>, ServiceError> {
-        let stream = self
-            .client
-            .create_and_open_stream(CreateStreamOptions {
-                epoch: 1,
-                tags: HashMap::from([("log".to_owned(), tag.to_owned())]),
-            })
-            .await?;
+    pub async fn register(&self, tag: &str) -> Result<u64, ServiceError> {
+        let tags = HashMap::from([("log".to_owned(), tag.to_owned())]);
+        Ok(self.node.stream_manager().create_stream(tags).await?)
+    }
 
-        self.hold(stream.clone());
-        Ok(stream)
+    pub async fn place(&self, stream_id: u64) -> Result<(), ServiceError> {
+        self.node
+            .place_stream(stream_id)
+            .await
+            .map_err(|error| ServiceError::from(error.to_stream_error()))?;
+
+        Ok(())
+    }
+
+    pub fn held_ids(&self) -> Vec<u64> {
+        self.open.lock().unwrap().keys().copied().collect()
     }
 
     pub async fn ensure_open(&self, stream_id: u64) -> Result<Arc<dyn Stream>, ServiceError> {
@@ -191,7 +197,7 @@ impl Streams {
         })
     }
 
-    fn held(&self, stream_id: u64) -> Option<Arc<dyn Stream>> {
+    pub fn held(&self, stream_id: u64) -> Option<Arc<dyn Stream>> {
         self.open.lock().unwrap().get(&stream_id).cloned()
     }
 

@@ -14,8 +14,8 @@ pub struct Endpoint {
     pub endpoint: Option<String>,
 
     /// Which protocol: the wire client commands speak, and the HTTP frontend
-    /// `serve` serves (`pico` or `ds`; `serve` always adds the Kafka listener
-    /// unless `--no-kafka`). Defaults to the profile's, else `pico`.
+    /// `serve` serves (`pico` or `ds`; `serve` always adds the Kafka listener).
+    /// Defaults to the profile's, else `pico`.
     #[arg(long, value_enum, env = "PICO_PROTOCOL", global = true)]
     pub protocol: Option<ProtocolArg>,
 

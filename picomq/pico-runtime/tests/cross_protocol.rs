@@ -28,16 +28,16 @@ fn loopback() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 0))
 }
 
-fn config(dir: &Path, protocol: HttpProtocol, node_epoch: i64, kafka: bool) -> ServerConfig {
+fn config(dir: &Path, protocol: HttpProtocol, node_epoch: i64) -> ServerConfig {
     ServerConfig {
         node_epoch,
         addr: loopback(),
         admin_addr: Some(loopback()),
         http_protocol: protocol,
-        kafka: kafka.then(|| KafkaConfig {
+        kafka: KafkaConfig {
             listen: loopback(),
             advertise: None,
-        }),
+        },
         meta_backend: MetaBackend::parse(&format!("sqlite:{}", dir.join("meta.db").display()))
             .unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
@@ -58,27 +58,41 @@ struct Node {
     server: PicoServer,
     http: reqwest::Client,
     base: String,
-    bootstrap: Option<String>,
+    bootstrap: String,
 }
 
 impl Node {
-    async fn start(dir: &Path, protocol: HttpProtocol, epoch: i64, kafka: bool) -> Self {
-        let server = picomq_runtime::start(config(dir, protocol, epoch, kafka))
-            .await
-            .unwrap();
+    async fn start(dir: &Path, protocol: HttpProtocol, epoch: i64) -> Self {
+        Self::serve(config(dir, protocol, epoch)).await
+    }
+
+    async fn member(dir: &Path, node_id: i32) -> Self {
+        Self::serve(ServerConfig {
+            node_id,
+            wal_uri: Some(format!(
+                "2@file://{}?batchInterval=5",
+                dir.join(format!("wal-{node_id}")).display()
+            )),
+            ..config(dir, HttpProtocol::Pico, 1)
+        })
+        .await
+    }
+
+    async fn serve(config: ServerConfig) -> Self {
+        let server = picomq_runtime::start(config).await.unwrap();
         Self {
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap(),
             base: format!("http://{}", server.local_addr()),
-            bootstrap: server.kafka_addr().map(|a| a.to_string()),
+            bootstrap: server.kafka_addr().to_string(),
             server,
         }
     }
 
     fn bootstrap(&self) -> &str {
-        self.bootstrap.as_deref().expect("kafka listener enabled")
+        &self.bootstrap
     }
 
     fn url(&self, path: &str) -> String {
@@ -246,7 +260,7 @@ async fn pico_read_json(node: &Node, path: &str) -> Vec<Value> {
 #[tokio::test(flavor = "multi_thread")]
 async fn pico_writes_kafka_reads() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1, true).await;
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
 
     let created = node
         .http
@@ -356,7 +370,7 @@ async fn pico_writes_kafka_reads() {
 #[tokio::test(flavor = "multi_thread")]
 async fn kafka_writes_pico_reads() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1, true).await;
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
     node.create_topic("events", 1).await.unwrap();
 
     let producer = node.producer();
@@ -425,7 +439,7 @@ async fn kafka_writes_pico_reads() {
 #[tokio::test(flavor = "multi_thread")]
 async fn one_group_serves_kafka_and_pico_consumers() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1, true).await;
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
     node.create_topic("jobs", 1).await.unwrap();
     let producer = node.producer();
     for n in 0..3 {
@@ -502,7 +516,7 @@ async fn one_group_serves_kafka_and_pico_consumers() {
 #[tokio::test(flavor = "multi_thread")]
 async fn ds_and_kafka_share_a_json_stream() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Ds, 1, true).await;
+    let node = Node::start(dir.path(), HttpProtocol::Ds, 1).await;
 
     let created = node
         .http
@@ -556,7 +570,7 @@ async fn ds_and_kafka_share_a_json_stream() {
 #[tokio::test(flavor = "multi_thread")]
 async fn mixed_writers_share_one_offset_space() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1, true).await;
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
     node.http
         .put(node.url("/mixed"))
         .header("Content-Type", "text/plain")
@@ -617,7 +631,7 @@ async fn mixed_writers_share_one_offset_space() {
 #[tokio::test(flavor = "multi_thread")]
 async fn slashes_and_dots_name_one_topic() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1, true).await;
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
 
     let created = node
         .http
@@ -679,7 +693,7 @@ async fn slashes_and_dots_name_one_topic() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_binding_applies_to_every_writer() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1, true).await;
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
     let schema = r#"{
         "type": "object",
         "properties": {
@@ -756,14 +770,14 @@ async fn schema_binding_applies_to_every_writer() {
 async fn auth_gates_http_while_kafka_reads_the_same_stream() {
     let dir = tempfile::tempdir().unwrap();
     let (root, _) = AccessToken::issue("ops/root").unwrap();
-    let mut config = config(dir.path(), HttpProtocol::Pico, 1, true);
+    let mut config = config(dir.path(), HttpProtocol::Pico, 1);
     config.auth_mode = AuthMode::Required;
     config.bootstrap_token = Some(root.render());
     let server = picomq_runtime::start(config).await.unwrap();
     let node = Node {
         http: reqwest::Client::new(),
         base: format!("http://{}", server.local_addr()),
-        bootstrap: server.kafka_addr().map(|a| a.to_string()),
+        bootstrap: server.kafka_addr().to_string(),
         server,
     };
 
@@ -812,10 +826,9 @@ async fn auth_gates_http_while_kafka_reads_the_same_stream() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn kafka_listener_can_be_enabled_after_the_fact() {
+async fn topics_survive_restarts_for_both_protocols() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1, false).await;
-    assert!(node.bootstrap.is_none());
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
     node.http
         .put(node.url("/late/bloomer"))
         .header("Content-Type", "text/plain")
@@ -837,7 +850,7 @@ async fn kafka_listener_can_be_enabled_after_the_fact() {
     }
     node.shutdown().await;
 
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 2, true).await;
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 2).await;
     assert!(node.topics().await.contains(&"late.bloomer".to_owned()));
     let consumed = consume_n(&node.consumer("late.bloomer"), 3).await;
     let values: Vec<&[u8]> = consumed.iter().map(|c| c.value.as_slice()).collect();
@@ -846,7 +859,7 @@ async fn kafka_listener_can_be_enabled_after_the_fact() {
     produce(&node.producer(), "late.bloomer", None, "r3").await;
     node.shutdown().await;
 
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 3, false).await;
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 3).await;
     let records = pico_read_json(&node, "/late/bloomer").await;
     assert_eq!(records.len(), 4);
     assert_eq!(records[3]["body"], "r3");
@@ -856,7 +869,7 @@ async fn kafka_listener_can_be_enabled_after_the_fact() {
 #[tokio::test(flavor = "multi_thread")]
 async fn kafka_partitions_are_read_one_at_a_time_over_http() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1, true).await;
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
     node.create_topic("orders", 3).await.unwrap();
     let sent = produce_keyed(&node, "orders", 3).await;
 
@@ -899,7 +912,7 @@ async fn kafka_partitions_are_read_one_at_a_time_over_http() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_appends_land_on_the_named_kafka_partition() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1, true).await;
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
     node.create_topic("orders", 3).await.unwrap();
 
     let appended = node
@@ -942,7 +955,7 @@ async fn http_appends_land_on_the_named_kafka_partition() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rust_client_addresses_kafka_partitions() {
     let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1, true).await;
+    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
     node.create_topic("orders", 3).await.unwrap();
     let client = Arc::new(PicoClient::new(&node.base).unwrap());
 
@@ -1015,4 +1028,63 @@ async fn rust_client_addresses_kafka_partitions() {
     assert_eq!(untouched.start.as_deref(), Some("0"));
 
     node.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kafka_clients_follow_partition_leaders_across_nodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = Node::member(dir.path(), 1).await;
+    let second = Node::member(dir.path(), 2).await;
+    first.create_topic("spread", 4).await.unwrap();
+
+    let metadata = first
+        .consumer("_probe")
+        .fetch_metadata(Some("spread"), Duration::from_secs(10))
+        .unwrap();
+    let leaders: Vec<i32> = metadata.topics()[0]
+        .partitions()
+        .iter()
+        .map(|partition| partition.leader())
+        .collect();
+    assert!(leaders.contains(&1) && leaders.contains(&2), "{leaders:?}");
+
+    let sent = produce_keyed(&first, "spread", 4).await;
+
+    let consumer: StreamConsumer = ClientConfig::new()
+        .set("bootstrap.servers", first.bootstrap())
+        .set("group.id", format!("g-spread-{}", rand_suffix()))
+        .set("enable.auto.commit", "false")
+        .set("auto.offset.reset", "earliest")
+        .create()
+        .unwrap();
+    let mut assignment = rdkafka::TopicPartitionList::new();
+    for partition in 0..4 {
+        assignment
+            .add_partition_offset("spread", partition, rdkafka::Offset::Beginning)
+            .unwrap();
+    }
+    consumer.assign(&assignment).unwrap();
+    let consumed = consume_n(&consumer, sent.iter().map(Vec::len).sum()).await;
+    let mut keys: Vec<Vec<u8>> = consumed.into_iter().filter_map(|c| c.key).collect();
+    let mut expected: Vec<Vec<u8>> = sent.concat().into_iter().map(String::into_bytes).collect();
+    keys.sort();
+    expected.sort();
+    assert_eq!(keys, expected);
+
+    let remote = leaders.iter().position(|leader| *leader == 2).unwrap();
+    let redirected = first
+        .http
+        .get(first.url(&format!("/spread?partition={remote}&seq=0")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(redirected.status(), 307);
+    assert_eq!(
+        redirected.headers()["Location"],
+        second.url(&format!("/spread?partition={remote}&seq=0"))
+    );
+
+    drop(consumer);
+    first.shutdown().await;
+    second.shutdown().await;
 }

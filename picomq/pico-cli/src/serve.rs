@@ -1,8 +1,7 @@
 //! `pico serve` arguments.
 //!
 //! One `--meta-url` points at the SQL metadata log, and `--protocol` picks
-//! which HTTP frontend is mounted. The Kafka listener runs alongside it
-//! unless `--no-kafka` is set.
+//! which HTTP frontend is mounted. The Kafka listener always runs alongside it.
 //!
 //! This module only *parses*: every field maps to
 //! [`picomq_runtime::ServerConfig`], which owns what starting a server means.
@@ -41,10 +40,6 @@ pub struct ServeArgs {
     /// Kafka address advertised to clients. Defaults to `--kafka-listen`.
     #[arg(long, env = "PICO_KAFKA_ADVERTISE")]
     kafka_advertise: Option<String>,
-
-    /// Do not open the Kafka listener.
-    #[arg(long, env = "PICO_NO_KAFKA")]
-    no_kafka: bool,
 
     #[arg(long)]
     no_admin: bool,
@@ -159,7 +154,7 @@ pub enum RoutingArg {
 impl ServeArgs {
     /// `protocol` is the global `--protocol` flag: which HTTP frontend to
     /// serve. Kafka is a listener, not a frontend choice, so `--protocol
-    /// kafka` is rejected here; use `--no-kafka` to turn its listener off.
+    /// kafka` is rejected here.
     pub fn into_config(
         self,
         protocol: ProtocolArg,
@@ -169,8 +164,7 @@ impl ServeArgs {
             ProtocolArg::Ds => HttpProtocol::Ds,
             ProtocolArg::Kafka => {
                 return Err(
-                    "`serve` takes --protocol pico or ds; the Kafka listener is always on unless --no-kafka is set"
-                        .into(),
+                    "`serve` takes --protocol pico or ds; the Kafka listener is always on".into(),
                 );
             }
         };
@@ -208,10 +202,10 @@ impl ServeArgs {
             admin_addr: (!self.no_admin).then_some(self.admin_listen),
             advertised_url: self.http_address,
             http_protocol,
-            kafka: (!self.no_kafka).then_some(KafkaConfig {
+            kafka: KafkaConfig {
                 listen: self.kafka_listen,
                 advertise: self.kafka_advertise,
-            }),
+            },
             meta_backend: MetaBackend::parse(&self.meta_url)?,
             storage_uri: self.storage,
             wal_uri: self.wal,

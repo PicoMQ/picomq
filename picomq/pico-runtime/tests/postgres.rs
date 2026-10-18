@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use picomq_http::HttpProtocol;
-use picomq_runtime::{MetaBackend, ServerConfig};
+use picomq_runtime::{KafkaConfig, MetaBackend, ServerConfig};
 
 fn loopback() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 0))
@@ -14,7 +14,10 @@ fn config(dir: &Path, wal: &str, cluster_id: &str, node_epoch: i64) -> ServerCon
         addr: loopback(),
         admin_addr: None,
         http_protocol: HttpProtocol::Pico,
-        kafka: None,
+        kafka: KafkaConfig {
+            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+            advertise: None,
+        },
         meta_backend: MetaBackend::parse(&format!("sqlite:{}", dir.join("meta.db").display()))
             .unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),

@@ -66,8 +66,8 @@ pub enum AuthMode {
     Required,
 }
 
-/// The Kafka listener. Every stream is reachable over Kafka regardless of
-/// which HTTP protocol wrote it; this only decides whether the socket exists.
+/// The Kafka listener every node runs. Every stream is reachable over Kafka
+/// regardless of which HTTP protocol wrote it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KafkaConfig {
     pub listen: SocketAddr,
@@ -94,8 +94,7 @@ pub struct ServerConfig {
     pub advertised_url: Option<String>,
     /// Which HTTP protocol the data listener speaks.
     pub http_protocol: HttpProtocol,
-    /// `None` disables the Kafka listener.
-    pub kafka: Option<KafkaConfig>,
+    pub kafka: KafkaConfig,
     pub meta_backend: MetaBackend,
     pub storage_uri: String,
     /// WAL bucket URI. Defaults to the data bucket (with the next bucket id)
@@ -135,7 +134,7 @@ impl Default for ServerConfig {
             admin_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9090))),
             advertised_url: None,
             http_protocol: HttpProtocol::Pico,
-            kafka: Some(KafkaConfig::default()),
+            kafka: KafkaConfig::default(),
             meta_backend: MetaBackend::Sqlite(Some(PathBuf::from("./data/meta.db"))),
             storage_uri: "-2@file://./objects".to_owned(),
             wal_uri: None,
@@ -158,10 +157,10 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn advertised_url(&self) -> String {
+    pub fn advertised_url(&self, bound: SocketAddr) -> String {
         self.advertised_url
             .clone()
-            .unwrap_or_else(|| format!("http://{}", self.addr))
+            .unwrap_or_else(|| format!("http://{bound}"))
     }
 
     /// WAL when `--wal` is absent. The bucket id is the engine's per-bucket
@@ -218,7 +217,16 @@ mod tests {
 
     #[test]
     fn advertised_url_defaults_to_the_bound_address() {
-        let config = ServerConfig::default();
-        assert_eq!(config.advertised_url(), "http://127.0.0.1:4437");
+        let bound = SocketAddr::from(([127, 0, 0, 1], 50_123));
+        assert_eq!(
+            ServerConfig::default().advertised_url(bound),
+            "http://127.0.0.1:50123"
+        );
+
+        let configured = ServerConfig {
+            advertised_url: Some("http://pico.example".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(configured.advertised_url(bound), "http://pico.example");
     }
 }

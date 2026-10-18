@@ -60,7 +60,8 @@ pub enum RuntimeError {
 /// the HTTP listeners.
 pub struct PicoServer {
     server: RunningServer,
-    kafka: Option<(std::net::SocketAddr, tokio::task::JoinHandle<()>)>,
+    kafka_addr: std::net::SocketAddr,
+    kafka: tokio::task::JoinHandle<()>,
     lease: LeaseKeeper,
     lifecycle: tokio::task::JoinHandle<()>,
     token_expiry: tokio::task::JoinHandle<()>,
@@ -83,7 +84,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         for addr in [
             auth_off.then_some(config.addr),
             auth_off.then_some(config.admin_addr).flatten(),
-            config.kafka.as_ref().map(|kafka| kafka.listen),
+            Some(config.kafka.listen),
         ]
         .into_iter()
         .flatten()
@@ -122,21 +123,26 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     };
     // Bind before node registration so a default advertise (port 0 configs)
     // carries the real bound port.
-    let kafka_listener = match &config.kafka {
-        Some(kafka) => Some(bind_kafka(kafka.listen).await?),
-        None => None,
-    };
-    let protocol_addresses = match (&config.kafka, &kafka_listener) {
-        (Some(kafka), Some((_, bound))) => {
-            let advertise = kafka.advertise.clone().unwrap_or_else(|| bound.to_string());
-            std::collections::BTreeMap::from([(picomq_kafka::PROTOCOL_NAME.to_owned(), advertise)])
-        }
-        _ => Default::default(),
-    };
+    let addr = config.addr;
+    let http_listener = picomq_http::bind(addr, config.backlog)
+        .map_err(|source| RuntimeError::Bind { addr, source })?;
+    let http_bound = http_listener
+        .local_addr()
+        .map_err(|source| RuntimeError::Bind { addr, source })?;
+    let (kafka_listener, kafka_addr) = bind_kafka(config.kafka.listen).await?;
+    let kafka_advertise = config
+        .kafka
+        .advertise
+        .clone()
+        .unwrap_or_else(|| kafka_addr.to_string());
+    let protocol_addresses = std::collections::BTreeMap::from([(
+        picomq_kafka::PROTOCOL_NAME.to_owned(),
+        kafka_advertise,
+    )]);
     let mut node_config = NodeConfig {
         node_id: config.node_id,
         node_epoch: config.node_epoch,
-        http_address: config.advertised_url(),
+        http_address: config.advertised_url(http_bound),
         slots: config.slots,
         protocol_addresses,
         cluster_id: config.cluster_id.clone(),
@@ -198,16 +204,15 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         .streams()
         .spawn_compaction_check(LIFECYCLE_TICK);
 
-    let kafka = kafka_listener
-        .map(|(listener, bound)| (bound, spawn_kafka(&config, &node, listener, bound)));
+    let kafka = spawn_kafka(&config, &node, kafka_listener, kafka_addr);
 
-    let addr = config.addr;
     let authorizer = match config.auth_mode {
         AuthMode::Required => Some(node.authorizer()),
         AuthMode::Off => None,
     };
-    let server = picomq_http::serve(
+    let server = picomq_http::serve_on(
         node,
+        http_listener,
         ServeOptions {
             protocol: config.http_protocol,
             addr,
@@ -228,6 +233,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
 
     Ok(PicoServer {
         server,
+        kafka_addr,
         kafka,
         lease,
         lifecycle,
@@ -360,9 +366,8 @@ impl PicoServer {
         self.server.node()
     }
 
-    /// The bound Kafka address, when the Kafka listener is enabled.
-    pub fn kafka_addr(&self) -> Option<std::net::SocketAddr> {
-        self.kafka.as_ref().map(|(addr, _)| *addr)
+    pub fn kafka_addr(&self) -> std::net::SocketAddr {
+        self.kafka_addr
     }
 
     pub fn schema_registry(&self) -> Option<&Arc<dyn picomq_schema::SchemaStore>> {
@@ -370,9 +375,7 @@ impl PicoServer {
     }
 
     pub async fn shutdown(self) {
-        if let Some((_, task)) = &self.kafka {
-            task.abort();
-        }
+        self.kafka.abort();
         self.server.shutdown().await;
         self.lifecycle.abort();
         self.token_expiry.abort();

@@ -5,11 +5,6 @@ use picomq_http::HttpProtocol;
 use picomq_runtime::{KafkaConfig, MetaBackend, PicoServer, ServerConfig};
 use tempfile::TempDir;
 
-pub struct Listeners {
-    pub protocol: HttpProtocol,
-    pub kafka: bool,
-}
-
 pub struct Target {
     url: Option<String>,
     bootstrap: Option<String>,
@@ -23,17 +18,14 @@ struct Node {
 }
 
 impl Target {
-    pub async fn start(listeners: Listeners) -> anyhow::Result<Self> {
+    pub async fn start(protocol: HttpProtocol) -> anyhow::Result<Self> {
         let dir = tempfile::tempdir()?;
 
-        let kafka = listeners.kafka.then(container_reachable).transpose()?;
+        let kafka = container_reachable()?;
+        let bootstrap = kafka.advertise.clone();
+        let host_address = Some(format!("127.0.0.1:{}", kafka.listen.port()));
 
-        let bootstrap = kafka.as_ref().and_then(|k| k.advertise.clone());
-        let host_address = kafka
-            .as_ref()
-            .map(|k| format!("127.0.0.1:{}", k.listen.port()));
-
-        let server = picomq_runtime::start(config(&dir, listeners.protocol, kafka)?).await?;
+        let server = picomq_runtime::start(config(&dir, protocol, kafka)?).await?;
 
         Ok(Self {
             url: Some(format!("http://{}", server.local_addr())),
@@ -87,7 +79,7 @@ fn container_reachable() -> anyhow::Result<KafkaConfig> {
 fn config(
     dir: &TempDir,
     protocol: HttpProtocol,
-    kafka: Option<KafkaConfig>,
+    kafka: KafkaConfig,
 ) -> anyhow::Result<ServerConfig> {
     let path = dir.path();
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
@@ -96,7 +88,7 @@ fn config(
         addr: loopback,
         admin_addr: Some(loopback),
         http_protocol: protocol,
-        insecure_allow_remote: kafka.is_some(),
+        insecure_allow_remote: true,
         kafka,
         meta_backend: MetaBackend::parse(&format!("sqlite:{}", path.join("meta.db").display()))?,
         storage_uri: format!("1@file://{}", path.join("objects").display()),

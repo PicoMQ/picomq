@@ -6,6 +6,7 @@
 //! keeper.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use picomq_auth::Authorizer;
 use picomq_metadata::{CommandSink, MetadataNodeHandle, ViewPublisher};
@@ -24,6 +25,8 @@ use crate::streams::Streams;
 use crate::topics::Topics;
 use crate::transfer::TransferWatcher;
 use crate::waiter::StreamWaiterRegistry;
+
+const DELETED_CLEANUP_TICK: Duration = Duration::from_secs(1);
 
 /// Node identity and engine tuning the host passes in.
 #[derive(Debug, Clone)]
@@ -66,6 +69,7 @@ pub struct PicoNode {
     groups: Arc<GroupCoordinator>,
     tokens: Arc<TokenService>,
     transfer_watcher: tokio::task::JoinHandle<()>,
+    deleted_cleanup: tokio::task::JoinHandle<()>,
 }
 
 impl PicoNode {
@@ -149,6 +153,7 @@ impl PicoNode {
         let tokens = Arc::new(TokenService::new(kv_client));
         let transfer_watcher =
             TransferWatcher::spawn(service.clone(), views.clone(), config.node_id);
+        let deleted_cleanup = service.spawn_deleted_cleanup(DELETED_CLEANUP_TICK);
 
         Ok(Self {
             config,
@@ -161,6 +166,7 @@ impl PicoNode {
             groups,
             tokens,
             transfer_watcher,
+            deleted_cleanup,
         })
     }
 
@@ -235,6 +241,7 @@ impl PicoNode {
 
     pub async fn close(&self) {
         self.transfer_watcher.abort();
+        self.deleted_cleanup.abort();
         self.service.shutdown().await;
         self.engine.shutdown().await;
     }

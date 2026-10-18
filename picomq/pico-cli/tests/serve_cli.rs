@@ -71,29 +71,6 @@ async fn serve_rejects_protocol_kafka() {
     assert!(stderr.contains("--protocol pico or ds"), "{stderr}");
 }
 
-/// `--no-kafka` leaves the Kafka port closed while HTTP still serves.
-#[tokio::test]
-async fn no_kafka_closes_the_kafka_listener() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = common::start_with(dir.path(), "pico", &["--no-kafka"]);
-    let client = reqwest::Client::new();
-    await_ready(&client, &server.admin_url).await;
-    assert!(
-        std::net::TcpStream::connect(server.kafka_addr.as_str()).is_err(),
-        "kafka port must be closed"
-    );
-    assert_eq!(
-        client
-            .put(format!("{}/streams/cli", server.base_url))
-            .header("Content-Type", "text/plain")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        201
-    );
-}
-
 #[tokio::test]
 async fn rejects_an_unsupported_meta_url() {
     let output = Command::new(env!("CARGO_BIN_EXE_pico"))

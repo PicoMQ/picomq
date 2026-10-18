@@ -7,9 +7,9 @@ use picomq_server::ownership::OwnershipService as _;
 use picomq_server::record::encode_batch;
 use picomq_server::{
     AppendBatchResult, AppendCommand, CreateCommand, ErrorKind, Log, LogRecord, MAX_NEW_PARTITIONS,
-    NodeConfig, OffsetToken, PicoNode, ServiceError, Topics, partition_log,
+    NodeConfig, OffsetToken, PicoNode, ServiceError, Topic, Topics, partition_log,
 };
-use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
+use s3stream::{MemoryObjectStorage, ObjectStorageTrait, StreamState};
 
 async fn start_node(
     node_id: i32,
@@ -491,25 +491,37 @@ async fn ownership_routes_to_open_owner() {
         .unwrap();
     let log = log_of(&node1.topics(), "/own/a").await;
 
-    let local = node1.ownership().owner_of(&log).await.unwrap();
-    assert!(local.local);
-    assert!(local.epoch >= 1);
+    let placed = node1.ownership().owner_of(&log).await.unwrap();
+    let (owner, other, owner_id) = match placed.owner_node_id {
+        Some(2) => (&node2, &node1, 2),
+        _ => (&node1, &node2, 1),
+    };
+    assert_eq!(placed.epoch, -1);
 
-    let from_node2 = node2.ownership().owner_of(&log).await.unwrap();
-    assert!(!from_node2.local);
-    assert_eq!(from_node2.owner_node_id, Some(1));
-    assert_eq!(from_node2.epoch, local.epoch);
+    owner
+        .topics()
+        .append("/own/a", 0, append(&[b"opened"], "text/plain"))
+        .await
+        .unwrap();
+    let local = owner.ownership().owner_of(&log).await.unwrap();
+    assert!(local.local);
+    assert!(local.epoch >= 0);
+
+    let remote = other.ownership().owner_of(&log).await.unwrap();
+    assert!(!remote.local);
+    assert_eq!(remote.owner_node_id, Some(owner_id));
+    assert_eq!(remote.epoch, local.epoch);
     assert_eq!(
-        from_node2.owner_advertised_address.as_deref(),
-        Some("http://127.0.0.1:4001")
+        remote.owner_advertised_address,
+        Some(format!("http://127.0.0.1:{}", 4000 + owner_id))
     );
 
-    node1.close().await;
-    let released = node2.ownership().owner_of(&log).await.unwrap();
+    owner.close().await;
+    let released = other.ownership().owner_of(&log).await.unwrap();
     assert!(released.local);
     assert!(released.stream_id.is_some());
 
-    node2.close().await;
+    other.close().await;
 }
 
 async fn start_shared_node(
@@ -1498,4 +1510,130 @@ async fn partition_counts_are_capped() {
     assert_eq!(topics.get("/small").await.unwrap().unwrap().partitions, 1);
 
     node.close().await;
+}
+
+fn placements(node: &PicoNode, topic: &Topic) -> Vec<(i32, StreamState)> {
+    let view = node.views().load();
+
+    (0..topic.partitions)
+        .map(|index| {
+            let log = partition_log(topic, index).unwrap();
+            let stream_id = node.service().stream_id(&log).unwrap().unwrap();
+            let row = view.state.streams[&stream_id];
+            (row.node_id, row.state)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn partitions_are_placed_across_nodes() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+
+    let topic = node1
+        .topics()
+        .create(CreateCommand {
+            partitions: 4,
+            ..create("/spread", "text/plain")
+        })
+        .await
+        .unwrap()
+        .meta
+        .topic;
+
+    let placed = placements(&node1, &topic);
+    assert!(
+        placed
+            .iter()
+            .all(|(_, state)| *state == StreamState::Closed)
+    );
+    for node_id in [1, 2] {
+        assert!(
+            placed.iter().any(|(owner, _)| *owner == node_id),
+            "{placed:?}"
+        );
+    }
+
+    let grown = node2.topics().grow("/spread", 6).await.unwrap();
+    let placed = placements(&node1, &grown);
+    assert!(placed.iter().all(|(owner, _)| [1, 2].contains(owner)));
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn initial_records_keep_the_first_partition_local() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+
+    for name in ["/seeded/a", "/seeded/b", "/seeded/c"] {
+        let topic = node2
+            .topics()
+            .create(CreateCommand {
+                initial_records: vec![LogRecord::value(Bytes::from_static(b"seed"))],
+                ..create(name, "text/plain")
+            })
+            .await
+            .unwrap()
+            .meta
+            .topic;
+
+        assert_eq!(placements(&node2, &topic), vec![(2, StreamState::Opened)]);
+    }
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn deleted_topics_release_streams_held_by_other_nodes() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+
+    let topic = node1
+        .topics()
+        .create(CreateCommand {
+            partitions: 4,
+            ..create("/doomed", "text/plain")
+        })
+        .await
+        .unwrap()
+        .meta
+        .topic;
+    let mut held = Vec::new();
+    for index in 0..topic.partitions {
+        let log = partition_log(&topic, index).unwrap();
+        let stream_id = node1.service().stream_id(&log).unwrap().unwrap();
+        if views.load().state.streams[&stream_id].node_id != 2 {
+            continue;
+        }
+
+        node2
+            .topics()
+            .append("/doomed", index, append(&[b"x"], "text/plain"))
+            .await
+            .unwrap();
+        held.push(stream_id);
+    }
+    assert!(!held.is_empty());
+    assert!(
+        held.iter()
+            .all(|id| views.load().state.streams[id].state == StreamState::Opened)
+    );
+
+    assert!(node1.topics().delete("/doomed").await.unwrap());
+    wait_for_view(&views, "held streams deleted", |view| {
+        held.iter().all(|id| !view.state.streams.contains_key(id))
+    })
+    .await;
+
+    node1.close().await;
+    node2.close().await;
 }

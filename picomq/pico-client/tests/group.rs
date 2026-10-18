@@ -7,14 +7,17 @@ use picomq_client::{
     PicoClient, StreamApi,
 };
 use picomq_http::HttpProtocol as ServeProtocol;
-use picomq_runtime::{MetaBackend, ServerConfig};
+use picomq_runtime::{KafkaConfig, MetaBackend, ServerConfig};
 
 async fn start(dir: &std::path::Path) -> (picomq_runtime::PicoServer, Arc<PicoClient>) {
     let server = picomq_runtime::start(ServerConfig {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
         http_protocol: ServeProtocol::Pico,
-        kafka: None,
+        kafka: KafkaConfig {
+            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+            advertise: None,
+        },
         meta_backend: MetaBackend::parse("sqlite::memory:").unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
         wal_uri: Some(format!(

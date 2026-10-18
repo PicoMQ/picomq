@@ -1,7 +1,7 @@
 use clap::ValueEnum;
 use picomq_http::HttpProtocol;
 
-use crate::target::{Listeners, Target};
+use crate::target::Target;
 use crate::{ds, kafka};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -25,16 +25,10 @@ impl Suite {
         }
     }
 
-    pub fn listeners(self) -> Listeners {
+    pub fn protocol(self) -> HttpProtocol {
         match self {
-            Suite::Ds => Listeners {
-                protocol: HttpProtocol::Ds,
-                kafka: false,
-            },
-            Suite::Kafka => Listeners {
-                protocol: HttpProtocol::Pico,
-                kafka: true,
-            },
+            Suite::Ds => HttpProtocol::Ds,
+            Suite::Kafka => HttpProtocol::Pico,
         }
     }
 
