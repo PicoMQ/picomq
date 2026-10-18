@@ -32,6 +32,10 @@ const APIS: &[SupportedApi] = &[
     SupportedApi::new(ApiKey::CreateTopics, 2, 7),
     SupportedApi::new(ApiKey::DeleteTopics, 1, 6),
     SupportedApi::new(ApiKey::CreatePartitions, 0, 3),
+    SupportedApi::new(ApiKey::DeleteRecords, 0, 2),
+    SupportedApi::new(ApiKey::DescribeConfigs, 1, 4),
+    SupportedApi::new(ApiKey::IncrementalAlterConfigs, 0, 1),
+    SupportedApi::new(ApiKey::DescribeCluster, 0, 2),
     SupportedApi::new(ApiKey::InitProducerId, 0, 4),
     SupportedApi::new(ApiKey::OffsetCommit, 2, 8),
     SupportedApi::new(ApiKey::OffsetFetch, 1, 7),
@@ -42,6 +46,8 @@ const APIS: &[SupportedApi] = &[
     SupportedApi::new(ApiKey::SyncGroup, 0, 5),
     SupportedApi::new(ApiKey::DescribeGroups, 0, 5),
     SupportedApi::new(ApiKey::ListGroups, 0, 5),
+    SupportedApi::new(ApiKey::DeleteGroups, 0, 2),
+    SupportedApi::new(ApiKey::OffsetDelete, 0, 0),
     SupportedApi::new(ApiKey::ApiVersions, 0, 4),
 ];
 

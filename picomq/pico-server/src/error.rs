@@ -26,6 +26,7 @@ pub enum ErrorKind {
     SequenceGap,
     MatchFailed,
     Durability,
+    Timeout,
     Internal,
 }
 

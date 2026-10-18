@@ -540,3 +540,41 @@ async fn groups_over_http_refuse_multi_partition_topics() {
         json!({ "/single": { "position": 4, "metadata": null } })
     );
 }
+
+#[tokio::test]
+async fn groups_are_deleted_only_when_empty() {
+    let server = common::picomq_server().await;
+    let base = server.base_url.clone();
+    let client = Client::new();
+    create(&client, &base, "/jobs").await;
+    let remove = || client.delete(format!("{base}/_groups/workers")).send();
+
+    assert_eq!(remove().await.unwrap().status(), 404);
+
+    let (status, joined) = join(
+        &client,
+        &base,
+        "workers",
+        json!({ "clientId": "w1", "subscription": ["/jobs"] }),
+    )
+    .await;
+    assert_eq!(status, 200, "{joined}");
+    let member = joined["memberId"].as_str().unwrap();
+
+    assert_eq!(remove().await.unwrap().status(), 409);
+
+    let left = client
+        .delete(format!("{base}/_groups/workers/members/{member}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(left.status(), 204);
+
+    assert_eq!(remove().await.unwrap().status(), 204);
+    let described = client
+        .get(format!("{base}/_groups/workers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(described.status(), 404);
+}

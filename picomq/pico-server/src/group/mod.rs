@@ -37,6 +37,8 @@ pub enum GroupError {
     Storage,
     #[error("group was not found")]
     GroupNotFound,
+    #[error("group still has members")]
+    NonEmpty,
     #[error("the member ID assigned by the coordinator is required")]
     MemberIdRequired,
     #[error("group capacity was exceeded")]
@@ -48,7 +50,7 @@ pub enum GroupError {
 pub use offsets::{CommittedOffset, OffsetCommit};
 pub use state::GroupState;
 
-use offsets::{OffsetTable, decode_into, encode_commits, encode_snapshot};
+use offsets::{OffsetTable, decode_into, encode_commits, encode_deletes, encode_snapshot};
 use state::{
     Group, MAX_MEMBERS_PER_GROUP, MAX_PARTITIONS_PER_GROUP, MAX_STREAMS_PER_GROUP,
     MAX_SUBSCRIPTION_ENTRIES_PER_GROUP, Mode, Rebalance, Role, compatible, complete_rebalance,
@@ -602,25 +604,75 @@ impl GroupCoordinator {
         if state.offsets.len() + new_partitions > MAX_PARTITIONS_PER_GROUP {
             return Err(GroupError::CapacityExceeded);
         }
-        if let Err(error) = self
-            .service
-            .append_records(&log, vec![LogRecord::value(encode_commits(commits))])
-            .await
-        {
-            return Err(match error.kind {
-                ErrorKind::NotFound | ErrorKind::Fenced => GroupError::NotCoordinator,
-                ErrorKind::Durability => GroupError::Storage,
-                _ => GroupError::InvalidRequest,
-            });
-        }
+
+        self.record(&log, encode_commits(commits)).await?;
         for commit in commits {
             state.offsets.insert(commit.partition, commit.value.clone());
         }
+        self.recorded(&log, &mut state).await;
+
+        Ok(())
+    }
+
+    pub async fn delete_offsets(
+        &self,
+        group_id: &str,
+        partitions: &[Partition],
+    ) -> Result<(), GroupError> {
+        let group = self.local_group(group_id, false).await?;
+        let log = Self::log(group_id);
+        let mut state = group.lock().await;
+        state.last_activity = Instant::now();
+
+        let committed: Vec<Partition> = partitions
+            .iter()
+            .filter(|partition| state.offsets.contains_key(partition))
+            .copied()
+            .collect();
+        if committed.is_empty() {
+            return Ok(());
+        }
+
+        self.record(&log, encode_deletes(&committed)).await?;
+        for partition in &committed {
+            state.offsets.remove(partition);
+        }
+        self.recorded(&log, &mut state).await;
+
+        Ok(())
+    }
+
+    pub async fn delete(&self, group_id: &str) -> Result<(), GroupError> {
+        let group = self.local_group(group_id, false).await?;
+        let mut state = group.lock().await;
+        state.expire_members(Instant::now());
+        if !state.members.is_empty() {
+            return Err(GroupError::NonEmpty);
+        }
+
+        self.service.destroy_log(&Self::log(group_id)).await;
+        self.groups.lock().expect("group map lock").remove(group_id);
+
+        Ok(())
+    }
+
+    async fn record(&self, log: &Log, payload: Bytes) -> Result<(), GroupError> {
+        self.service
+            .append_records(log, vec![LogRecord::value(payload)])
+            .await
+            .map(|_| ())
+            .map_err(|error| match error.kind {
+                ErrorKind::NotFound | ErrorKind::Fenced => GroupError::NotCoordinator,
+                ErrorKind::Durability => GroupError::Storage,
+                _ => GroupError::InvalidRequest,
+            })
+    }
+
+    async fn recorded(&self, log: &Log, state: &mut Group) {
         state.appends_since_snapshot += 1;
         if state.appends_since_snapshot >= OFFSET_SNAPSHOT_INTERVAL {
-            self.snapshot_and_trim(&log, &mut state).await;
+            self.snapshot_and_trim(log, state).await;
         }
-        Ok(())
     }
 
     async fn snapshot_and_trim(&self, log: &Log, state: &mut Group) {

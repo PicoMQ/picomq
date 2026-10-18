@@ -1,5 +1,6 @@
 //! Record layout, big endian:
 //! "PGS2" u8 kind (0 delta, 1 snapshot) u32 count { [16] topic id, u32 partition, u64 position, u8 has_metadata, [string metadata] }
+//! "PGS2" u8 kind (2 delete) u32 count { [16] topic id, u32 partition }
 //! string: u32 length, bytes
 
 use std::collections::BTreeMap;
@@ -12,6 +13,7 @@ use crate::topic::TopicId;
 const MAGIC: &[u8; 4] = b"PGS2";
 const KIND_DELTA: u8 = 0;
 const KIND_SNAPSHOT: u8 = 1;
+const KIND_DELETE: u8 = 2;
 const MAX_ENTRIES_PER_RECORD: u32 = 1 << 20;
 const MAX_STRING_BYTES: usize = 1024 * 1024;
 
@@ -51,6 +53,18 @@ pub(super) fn encode_snapshot(offsets: &OffsetTable) -> Bytes {
     buf.freeze()
 }
 
+pub(super) fn encode_deletes(partitions: &[Partition]) -> Bytes {
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(MAGIC);
+    buf.put_u8(KIND_DELETE);
+    buf.put_u32(partitions.len() as u32);
+    for partition in partitions {
+        buf.put_slice(&partition.topic.0);
+        buf.put_u32(partition.index);
+    }
+    buf.freeze()
+}
+
 pub(super) fn decode_into(payload: &[u8], offsets: &mut OffsetTable) -> Result<(), ()> {
     let mut buf = payload;
     if buf.remaining() < MAGIC.len() || &buf[..MAGIC.len()] != MAGIC {
@@ -59,15 +73,23 @@ pub(super) fn decode_into(payload: &[u8], offsets: &mut OffsetTable) -> Result<(
     buf.advance(MAGIC.len());
 
     let kind = take_u8(&mut buf)?;
-    if kind == KIND_SNAPSHOT {
-        offsets.clear();
-    } else if kind != KIND_DELTA {
-        return Err(());
-    }
-
     let count = take_u32(&mut buf)?;
     if count > MAX_ENTRIES_PER_RECORD {
         return Err(());
+    }
+
+    match kind {
+        KIND_SNAPSHOT => offsets.clear(),
+        KIND_DELTA => {}
+        KIND_DELETE => {
+            for _ in 0..count {
+                let topic = TopicId(take_id(&mut buf)?);
+                let index = take_u32(&mut buf)?;
+                offsets.remove(&Partition::new(topic, index));
+            }
+            return if buf.has_remaining() { Err(()) } else { Ok(()) };
+        }
+        _ => return Err(()),
     }
 
     for _ in 0..count {
@@ -194,6 +216,24 @@ mod tests {
 
         decode_into(&encode_snapshot(&snapshot), &mut table).unwrap();
         assert_eq!(table, snapshot);
+    }
+
+    #[test]
+    fn deletes_remove_entries() {
+        let mut table = OffsetTable::from([
+            (partition(1, 0), committed(1, None)),
+            (partition(2, 0), committed(2, None)),
+        ]);
+
+        decode_into(
+            &encode_deletes(&[partition(1, 0), partition(3, 0)]),
+            &mut table,
+        )
+        .unwrap();
+        assert_eq!(
+            table,
+            OffsetTable::from([(partition(2, 0), committed(2, None))])
+        );
     }
 
     #[test]

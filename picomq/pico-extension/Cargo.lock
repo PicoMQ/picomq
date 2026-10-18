@@ -2275,6 +2275,7 @@ dependencies = [
  "fastrand",
  "futures",
  "kafka-protocol",
+ "picomq-common",
  "picomq-metadata",
  "picomq-server",
  "thiserror 2.0.20",

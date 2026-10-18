@@ -607,6 +607,36 @@ impl Topics {
         self.service.trim(&log, new_start_offset).await
     }
 
+    pub async fn delete_records(
+        &self,
+        topic: &Topic,
+        partition: u32,
+        offset: u64,
+        timeout: Duration,
+    ) -> Result<u64, ServiceError> {
+        let log = partition_log(topic, partition)?;
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            let view = self.views.load();
+            let start = self.service.trim(&log, offset).await?;
+            if start >= offset {
+                return Ok(start);
+            }
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(ServiceError::with_message(
+                    ErrorKind::Timeout,
+                    None,
+                    false,
+                    format!("records below {offset} were not uploaded in time to delete"),
+                ));
+            }
+            self.views.wait_past(view.applied_index, remaining).await;
+        }
+    }
+
     pub fn spawn_ttl_sweep(
         self: &Arc<Self>,
         mut leadership: tokio::sync::watch::Receiver<bool>,

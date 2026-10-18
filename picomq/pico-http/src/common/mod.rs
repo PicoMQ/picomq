@@ -102,6 +102,7 @@ pub(crate) fn service_error(error: ServiceError) -> Response {
         ErrorKind::NotFound => StatusCode::NOT_FOUND,
         ErrorKind::Conflict | ErrorKind::Transferring | ErrorKind::Closed => StatusCode::CONFLICT,
         ErrorKind::Durability | ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorKind::Timeout => StatusCode::GATEWAY_TIMEOUT,
         ErrorKind::BadRequest
         | ErrorKind::CorruptBatch
         | ErrorKind::SchemaViolation

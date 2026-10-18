@@ -1,6 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
+use kafka_protocol::messages::delete_groups_response::{
+    DeletableGroupResult, DeleteGroupsResponse,
+};
 use kafka_protocol::messages::describe_groups_response::{DescribedGroup, DescribedGroupMember};
 use kafka_protocol::messages::find_coordinator_response::FindCoordinatorResponse;
 use kafka_protocol::messages::join_group_response::{JoinGroupResponse, JoinGroupResponseMember};
@@ -11,24 +14,29 @@ use kafka_protocol::messages::list_groups_response::{
 use kafka_protocol::messages::offset_commit_response::{
     OffsetCommitResponse, OffsetCommitResponsePartition, OffsetCommitResponseTopic,
 };
+use kafka_protocol::messages::offset_delete_response::{
+    OffsetDeleteResponse, OffsetDeleteResponsePartition, OffsetDeleteResponseTopic,
+};
 use kafka_protocol::messages::offset_fetch_response::{
     OffsetFetchResponse, OffsetFetchResponsePartition, OffsetFetchResponseTopic,
 };
 use kafka_protocol::messages::{
-    ApiKey, DescribeGroupsRequest, FindCoordinatorRequest, HeartbeatRequest, HeartbeatResponse,
-    JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest, OffsetCommitRequest,
+    ApiKey, ConsumerProtocolSubscription, DeleteGroupsRequest, DescribeGroupsRequest,
+    FindCoordinatorRequest, HeartbeatRequest, HeartbeatResponse, JoinGroupRequest,
+    LeaveGroupRequest, ListGroupsRequest, OffsetCommitRequest, OffsetDeleteRequest,
     OffsetFetchRequest, SyncGroupRequest,
 };
 use kafka_protocol::protocol::{Decodable, StrBytes};
+use picomq_common::name::canonical;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
     COORDINATOR_NOT_AVAILABLE, FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND, GROUP_MAX_SIZE_REACHED,
-    ILLEGAL_GENERATION, INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST, KAFKA_STORAGE_ERROR,
-    MEMBER_ID_REQUIRED, NO_ERROR, NOT_COORDINATOR, REBALANCE_IN_PROGRESS, UNKNOWN_MEMBER_ID,
-    broker_address, broker_id, encode_response, parse_host_port, partition_of, resolve_topic,
-    topic_name,
+    GROUP_SUBSCRIBED_TO_TOPIC, ILLEGAL_GENERATION, INCONSISTENT_GROUP_PROTOCOL, INVALID_REQUEST,
+    KAFKA_STORAGE_ERROR, MEMBER_ID_REQUIRED, NO_ERROR, NON_EMPTY_GROUP, NOT_COORDINATOR,
+    REBALANCE_IN_PROGRESS, UNKNOWN_MEMBER_ID, broker_address, broker_id, encode_response,
+    parse_host_port, partition_of, resolve_topic, topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 use picomq_server::{
@@ -47,6 +55,7 @@ fn error_code(error: GroupError) -> i16 {
         GroupError::InvalidRequest => INVALID_REQUEST,
         GroupError::Storage => KAFKA_STORAGE_ERROR,
         GroupError::GroupNotFound => GROUP_ID_NOT_FOUND,
+        GroupError::NonEmpty => NON_EMPTY_GROUP,
         GroupError::MemberIdRequired => MEMBER_ID_REQUIRED,
         GroupError::CapacityExceeded => GROUP_MAX_SIZE_REACHED,
         GroupError::FencedInstance => FENCED_INSTANCE_ID,
@@ -68,6 +77,8 @@ pub async fn handle(
         key if key == ApiKey::ListGroups as i16 => list_groups(ctx, req, body).await,
         key if key == ApiKey::OffsetCommit as i16 => offset_commit(ctx, req, body).await,
         key if key == ApiKey::OffsetFetch as i16 => offset_fetch(ctx, req, body).await,
+        key if key == ApiKey::DeleteGroups as i16 => delete_groups(ctx, req, body).await,
+        key if key == ApiKey::OffsetDelete as i16 => offset_delete(ctx, req, body).await,
         other => Err(HandlerError::Unimplemented(other)),
     }
 }
@@ -622,4 +633,126 @@ fn fetched_partition(
             .with_metadata(value.metadata.clone().map(StrBytes::from)),
         None => base.with_committed_offset(-1).with_metadata(None),
     }
+}
+
+async fn delete_groups(
+    ctx: &BrokerContext,
+    req: &RequestContext,
+    body: &[u8],
+) -> Result<HandlerOutcome, HandlerError> {
+    let mut body = Bytes::copy_from_slice(body);
+    let request = DeleteGroupsRequest::decode(&mut body, req.api_version)
+        .map_err(|error| HandlerError::Protocol(error.to_string()))?;
+
+    let mut results = Vec::with_capacity(request.groups_names.len());
+    for group in request.groups_names {
+        let code = match ctx.groups.delete(group.as_str()).await {
+            Ok(()) => NO_ERROR,
+            Err(error) => error_code(error),
+        };
+        results.push(
+            DeletableGroupResult::default()
+                .with_group_id(group)
+                .with_error_code(code),
+        );
+    }
+
+    let response = DeleteGroupsResponse::default().with_results(results);
+    Ok(HandlerOutcome::Response(encode_response(
+        req.correlation_id,
+        req.api_version,
+        &response,
+    )))
+}
+
+async fn offset_delete(
+    ctx: &BrokerContext,
+    req: &RequestContext,
+    body: &[u8],
+) -> Result<HandlerOutcome, HandlerError> {
+    let mut body = Bytes::copy_from_slice(body);
+    let request = OffsetDeleteRequest::decode(&mut body, req.api_version)
+        .map_err(|error| HandlerError::Protocol(error.to_string()))?;
+
+    let response = match subscribed_topics(ctx, request.group_id.as_str()).await {
+        Ok(subscribed) => {
+            let mut deletable = Vec::new();
+            let mut topics = Vec::with_capacity(request.topics.len());
+            for topic in &request.topics {
+                let resolved = resolve_topic(ctx, topic.name.as_str()).await;
+                let mut partitions = Vec::with_capacity(topic.partitions.len());
+                for partition in &topic.partitions {
+                    let index = partition.partition_index;
+                    let code = match &resolved {
+                        Err(code) => *code,
+                        Ok(resolved) if subscribed.contains(resolved.name.canonical()) => {
+                            GROUP_SUBSCRIBED_TO_TOPIC
+                        }
+                        Ok(resolved) => match partition_of(resolved, index) {
+                            Ok(partition) => {
+                                deletable.push(partition);
+                                NO_ERROR
+                            }
+                            Err(code) => code,
+                        },
+                    };
+                    partitions.push(
+                        OffsetDeleteResponsePartition::default()
+                            .with_partition_index(index)
+                            .with_error_code(code),
+                    );
+                }
+                topics.push(
+                    OffsetDeleteResponseTopic::default()
+                        .with_name(topic.name.clone())
+                        .with_partitions(partitions),
+                );
+            }
+
+            match ctx
+                .groups
+                .delete_offsets(request.group_id.as_str(), &deletable)
+                .await
+            {
+                Ok(()) => OffsetDeleteResponse::default()
+                    .with_error_code(NO_ERROR)
+                    .with_topics(topics),
+                Err(error) => OffsetDeleteResponse::default().with_error_code(error_code(error)),
+            }
+        }
+        Err(code) => OffsetDeleteResponse::default().with_error_code(code),
+    };
+
+    Ok(HandlerOutcome::Response(encode_response(
+        req.correlation_id,
+        req.api_version,
+        &response,
+    )))
+}
+
+async fn subscribed_topics(ctx: &BrokerContext, group_id: &str) -> Result<BTreeSet<String>, i16> {
+    let described = ctx.groups.describe(group_id).await.map_err(error_code)?;
+
+    let mut subscribed = BTreeSet::new();
+    for member in &described.members {
+        match &member.role {
+            MemberRole::Subscribed { subscription, .. } => {
+                subscribed.extend(subscription.iter().map(|name| canonical(name)));
+            }
+            MemberRole::Client { metadata, .. } if described.protocol_type == "consumer" => {
+                let mut buf = metadata.clone();
+                let subscription = buf
+                    .try_get_i16()
+                    .ok()
+                    .and_then(|version| {
+                        ConsumerProtocolSubscription::decode(&mut buf, version.min(3)).ok()
+                    })
+                    .ok_or(INVALID_REQUEST)?;
+                subscribed.extend(subscription.topics.iter().map(|topic| canonical(topic)));
+            }
+            MemberRole::Client { .. } => return Err(NON_EMPTY_GROUP),
+        }
+    }
+
+    Ok(subscribed)
 }

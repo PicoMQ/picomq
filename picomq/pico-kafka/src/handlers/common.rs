@@ -16,6 +16,7 @@ pub const OFFSET_OUT_OF_RANGE: i16 = 1;
 pub const CORRUPT_MESSAGE: i16 = 2;
 pub const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 pub const NOT_LEADER_OR_FOLLOWER: i16 = 6;
+pub const REQUEST_TIMED_OUT: i16 = 7;
 pub const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 pub const NOT_COORDINATOR: i16 = 16;
 pub const ILLEGAL_GENERATION: i16 = 22;
@@ -27,16 +28,19 @@ pub const TOPIC_ALREADY_EXISTS: i16 = 36;
 pub const INVALID_PARTITIONS: i16 = 37;
 pub const INVALID_REPLICATION_FACTOR: i16 = 38;
 pub const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
+pub const INVALID_CONFIG: i16 = 40;
 pub const INVALID_REQUEST: i16 = 42;
 pub const POLICY_VIOLATION: i16 = 44;
 pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 pub const INVALID_PRODUCER_EPOCH: i16 = 47;
 pub const KAFKA_STORAGE_ERROR: i16 = 56;
 pub const INVALID_RECORD: i16 = 87;
+pub const NON_EMPTY_GROUP: i16 = 68;
 pub const GROUP_ID_NOT_FOUND: i16 = 69;
 pub const MEMBER_ID_REQUIRED: i16 = 79;
 pub const GROUP_MAX_SIZE_REACHED: i16 = 81;
 pub const FENCED_INSTANCE_ID: i16 = 82;
+pub const GROUP_SUBSCRIBED_TO_TOPIC: i16 = 86;
 pub const UNKNOWN_TOPIC_ID: i16 = 100;
 
 pub const EXCESSIVE_PARTITIONS: &str = "Excessively large number of partitions per request.";
@@ -112,6 +116,7 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
         ErrorKind::Closed => POLICY_VIOLATION,
         ErrorKind::MatchFailed => INVALID_REQUEST,
         ErrorKind::Durability => KAFKA_STORAGE_ERROR,
+        ErrorKind::Timeout => REQUEST_TIMED_OUT,
         ErrorKind::Internal => UNKNOWN_SERVER_ERROR,
     }
 }
@@ -119,6 +124,30 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
 /// Advertised Kafka listener of `node_id`, `None` when the node is unknown.
 pub fn broker_address(state: &MetadataState, node_id: i32) -> Option<&str> {
     state.get_node_protocol_address(node_id, crate::PROTOCOL_NAME)
+}
+
+pub struct Broker {
+    pub id: i32,
+    pub host: String,
+    pub port: i32,
+    pub fenced: bool,
+}
+
+pub fn brokers(state: &MetadataState, include_fenced: bool) -> Vec<Broker> {
+    state
+        .nodes
+        .values()
+        .filter(|node| include_fenced || !node.fenced)
+        .filter_map(|node| {
+            let (host, port) = parse_host_port(broker_address(state, node.node_id)?);
+            Some(Broker {
+                id: node.node_id,
+                host,
+                port,
+                fenced: node.fenced,
+            })
+        })
+        .collect()
 }
 
 pub fn parse_host_port(address: &str) -> (String, i32) {

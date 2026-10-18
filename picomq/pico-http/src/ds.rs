@@ -685,6 +685,7 @@ fn service_error_response(e: ServiceError) -> Response {
             respond(409, e.next_offset.as_ref(), e.closed)
         }
         ErrorKind::Durability | ErrorKind::Internal => fail(500, &e.message),
+        ErrorKind::Timeout => fail(504, &e.message),
     }
 }
 

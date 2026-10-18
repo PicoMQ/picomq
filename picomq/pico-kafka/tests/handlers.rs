@@ -9,7 +9,9 @@ use kafka_protocol::messages::{
     ApiKey, ApiVersionsRequest, ApiVersionsResponse, FetchRequest, MetadataRequest, ProduceRequest,
     RequestHeader, ResponseHeader, TopicName,
 };
-use kafka_protocol::protocol::{Decodable, Encodable, StrBytes, encode_request_header_into_buffer};
+use kafka_protocol::protocol::{
+    Decodable, Encodable, HeaderVersion, StrBytes, encode_request_header_into_buffer,
+};
 use kafka_protocol::records::{
     Compression, NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, NO_SEQUENCE, Record,
     RecordBatchEncoder, RecordEncodeOptions, TimestampType,
@@ -25,6 +27,10 @@ fn tn(name: &str) -> TopicName {
 }
 
 async fn test_broker() -> BrokerContext {
+    broker_with(None).await
+}
+
+async fn broker_with(registry: Option<Arc<dyn picomq_schema::SchemaStore>>) -> BrokerContext {
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
@@ -44,7 +50,7 @@ async fn test_broker() -> BrokerContext {
         views,
         object_storage,
         wal_storage,
-        None,
+        registry,
     )
     .await
     .unwrap();
@@ -183,6 +189,17 @@ async fn response_body(broker: &BrokerContext, req: &[u8]) -> Bytes {
         HandlerOutcome::Response(frame) => frame.0,
         _ => panic!("expected response"),
     }
+}
+
+async fn call<Request: Encodable, Response: Decodable + HeaderVersion>(
+    broker: &BrokerContext,
+    api_key: ApiKey,
+    version: i16,
+    request: &Request,
+) -> Response {
+    let mut buf = response_body(broker, &encode_request(api_key, version, 1, request)).await;
+    ResponseHeader::decode(&mut buf, Response::header_version(version)).unwrap();
+    Response::decode(&mut buf, version).unwrap()
 }
 
 #[tokio::test]
@@ -1170,30 +1187,7 @@ async fn create_topics_binds_picomq_schema_and_validates_produce() {
         .await
         .unwrap();
 
-    let (sink, views) = LocalSink::new();
-    let sink: Arc<dyn CommandSink> = Arc::new(sink);
-    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(20));
-    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(21));
-    let node = PicoNode::start(
-        NodeConfig {
-            node_id: 1,
-            node_epoch: 1,
-            http_address: "http://127.0.0.1:4021".into(),
-            protocol_addresses: std::collections::BTreeMap::from([(
-                picomq_kafka::PROTOCOL_NAME.to_owned(),
-                "127.0.0.1:19093".to_owned(),
-            )]),
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        Some(Arc::new(registry)),
-    )
-    .await
-    .unwrap();
-    let broker = BrokerContext::new(&node);
+    let broker = broker_with(Some(Arc::new(registry))).await;
 
     let create_req = encode_request(
         ApiKey::CreateTopics,
@@ -1751,4 +1745,372 @@ async fn offsets_and_commits_address_partitions_past_zero() {
         .map(|p| (p.partition_index, p.committed_offset))
         .collect();
     assert_eq!(positions, vec![(0, -1), (2, 1)]);
+}
+
+async fn describe_configs(
+    broker: &BrokerContext,
+    resource_type: i8,
+    name: &str,
+    keys: Option<&[&str]>,
+) -> kafka_protocol::messages::describe_configs_response::DescribeConfigsResult {
+    use kafka_protocol::messages::describe_configs_request::DescribeConfigsResource;
+    use kafka_protocol::messages::{DescribeConfigsRequest, DescribeConfigsResponse};
+
+    let request = DescribeConfigsRequest::default().with_resources(vec![
+        DescribeConfigsResource::default()
+            .with_resource_type(resource_type)
+            .with_resource_name(StrBytes::from(name.to_owned()))
+            .with_configuration_keys(keys.map(|keys| {
+                keys.iter()
+                    .map(|key| StrBytes::from((*key).to_owned()))
+                    .collect()
+            })),
+    ]);
+    let response: DescribeConfigsResponse =
+        call(broker, ApiKey::DescribeConfigs, 4, &request).await;
+    response.results.into_iter().next().unwrap()
+}
+
+async fn alter_config(
+    broker: &BrokerContext,
+    topic: &str,
+    name: &str,
+    operation: i8,
+    value: Option<&str>,
+    validate_only: bool,
+) -> i16 {
+    use kafka_protocol::messages::incremental_alter_configs_request::{
+        AlterConfigsResource, AlterableConfig,
+    };
+    use kafka_protocol::messages::{
+        IncrementalAlterConfigsRequest, IncrementalAlterConfigsResponse,
+    };
+
+    let request = IncrementalAlterConfigsRequest::default()
+        .with_validate_only(validate_only)
+        .with_resources(vec![
+            AlterConfigsResource::default()
+                .with_resource_type(2)
+                .with_resource_name(StrBytes::from(topic.to_owned()))
+                .with_configs(vec![
+                    AlterableConfig::default()
+                        .with_name(StrBytes::from(name.to_owned()))
+                        .with_config_operation(operation)
+                        .with_value(value.map(|value| StrBytes::from(value.to_owned()))),
+                ]),
+        ]);
+    let response: IncrementalAlterConfigsResponse =
+        call(broker, ApiKey::IncrementalAlterConfigs, 1, &request).await;
+    response.responses[0].error_code
+}
+
+#[tokio::test]
+async fn topic_configs_describe_and_change_the_schema_binding() {
+    let registry = picomq_schema::Registry::new(object_store::memory::InMemory::new());
+    registry
+        .put(
+            "person",
+            picomq_schema::SchemaFormat::Json,
+            Bytes::from_static(br#"{"type": "object"}"#),
+        )
+        .await
+        .unwrap();
+    let broker = broker_with(Some(Arc::new(registry))).await;
+    broker
+        .topics
+        .create(picomq_server::CreateCommand::new(
+            "/orders",
+            "application/octet-stream",
+        ))
+        .await
+        .unwrap();
+    let schema_of = || async {
+        broker
+            .topics
+            .get("/orders")
+            .await
+            .unwrap()
+            .unwrap()
+            .schema_name
+    };
+
+    let described = describe_configs(&broker, 2, "orders", None).await;
+    assert_eq!(described.error_code, 0);
+    let names: Vec<_> = described.configs.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["cleanup.policy", "retention.ms", "retention.bytes"]);
+    assert!(described.configs.iter().all(|config| config.read_only));
+
+    assert_eq!(
+        alter_config(&broker, "orders", "pico.schema", 0, Some("person"), true).await,
+        0
+    );
+    assert_eq!(schema_of().await, None);
+
+    assert_eq!(
+        alter_config(&broker, "orders", "pico.schema", 0, Some("person"), false).await,
+        0
+    );
+    assert_eq!(schema_of().await.as_deref(), Some("person"));
+
+    let described = describe_configs(&broker, 2, "orders", Some(&["pico.schema"])).await;
+    assert_eq!(described.configs.len(), 1);
+    let schema = &described.configs[0];
+    assert_eq!(schema.value.as_deref(), Some("person"));
+    assert_eq!(schema.config_source, 1);
+    assert!(!schema.read_only);
+
+    assert_eq!(
+        alter_config(&broker, "orders", "retention.ms", 0, Some("1000"), false).await,
+        40
+    );
+    assert_eq!(
+        alter_config(
+            &broker,
+            "orders",
+            "pico.schema.validate",
+            0,
+            Some("maybe"),
+            false
+        )
+        .await,
+        40
+    );
+    assert_eq!(
+        alter_config(&broker, "missing", "pico.schema", 0, Some("person"), false).await,
+        3
+    );
+
+    assert_eq!(
+        alter_config(&broker, "orders", "pico.schema", 1, None, false).await,
+        0
+    );
+    assert_eq!(schema_of().await, None);
+
+    assert_eq!(
+        describe_configs(&broker, 2, "missing", None)
+            .await
+            .error_code,
+        3
+    );
+    let own = describe_configs(&broker, 4, "1", None).await;
+    assert_eq!(own.error_code, 0);
+    assert!(own.configs.is_empty());
+    assert_eq!(describe_configs(&broker, 4, "2", None).await.error_code, 42);
+}
+
+#[tokio::test]
+async fn delete_records_checks_offsets_and_times_out_before_upload() {
+    use kafka_protocol::messages::delete_records_request::{
+        DeleteRecordsPartition, DeleteRecordsTopic,
+    };
+    use kafka_protocol::messages::{DeleteRecordsRequest, DeleteRecordsResponse};
+
+    let broker = test_broker().await;
+    broker
+        .topics
+        .create(picomq_server::CreateCommand::new(
+            "/logs",
+            "application/octet-stream",
+        ))
+        .await
+        .unwrap();
+
+    let delete = |topic: &str, offset: i64| {
+        DeleteRecordsRequest::default()
+            .with_timeout_ms(200)
+            .with_topics(vec![
+                DeleteRecordsTopic::default()
+                    .with_name(tn(topic))
+                    .with_partitions(vec![
+                        DeleteRecordsPartition::default()
+                            .with_partition_index(0)
+                            .with_offset(offset),
+                    ]),
+            ])
+    };
+    let result = |response: DeleteRecordsResponse| {
+        let partition = &response.topics[0].partitions[0];
+        (partition.error_code, partition.low_watermark)
+    };
+
+    let response = call(&broker, ApiKey::DeleteRecords, 2, &delete("logs", -1)).await;
+    assert_eq!(result(response), (0, 0));
+
+    let response = call(&broker, ApiKey::DeleteRecords, 2, &delete("logs", 5)).await;
+    assert_eq!(result(response), (1, -1));
+
+    let response = call(&broker, ApiKey::DeleteRecords, 2, &delete("missing", 0)).await;
+    assert_eq!(result(response).0, 3);
+
+    let produce = encode_request(
+        ApiKey::Produce,
+        10,
+        2,
+        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
+            TopicProduceData::default()
+                .with_name(tn("logs"))
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(0)
+                        .with_records(Some(kafka_batch(b"one"))),
+                ]),
+        ]),
+    );
+    response_body(&broker, &produce).await;
+
+    let response = call(&broker, ApiKey::DeleteRecords, 2, &delete("logs", -1)).await;
+    assert_eq!(result(response), (7, -1));
+}
+
+#[tokio::test]
+async fn offset_delete_and_delete_groups_respect_members() {
+    use kafka_protocol::messages::offset_delete_request::{
+        OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
+    };
+    use kafka_protocol::messages::{
+        ConsumerProtocolSubscription, DeleteGroupsRequest, DeleteGroupsResponse, GroupId,
+        OffsetDeleteRequest, OffsetDeleteResponse,
+    };
+    use picomq_server::{
+        CommittedOffset, CreateCommand, JoinInput, JoinProtocol, Membership, OffsetCommit,
+        Partition,
+    };
+
+    let broker = test_broker().await;
+    let mut committed = Vec::new();
+    for name in ["/events", "/other"] {
+        let topic = broker
+            .topics
+            .create(CreateCommand::new(name, "application/octet-stream"))
+            .await
+            .unwrap()
+            .meta
+            .topic;
+        committed.push(OffsetCommit {
+            partition: Partition::new(topic.id, 0),
+            value: CommittedOffset {
+                position: 3,
+                metadata: None,
+            },
+        });
+    }
+    broker
+        .groups
+        .commit_offsets("workers", None, &committed)
+        .await
+        .unwrap();
+
+    let mut subscription = BytesMut::new();
+    subscription.extend_from_slice(&0i16.to_be_bytes());
+    ConsumerProtocolSubscription::default()
+        .with_topics(vec![StrBytes::from_static_str("events")])
+        .encode(&mut subscription, 0)
+        .unwrap();
+    let member = broker
+        .groups
+        .join(JoinInput {
+            group_id: "workers".to_owned(),
+            member_id: String::new(),
+            instance_id: None,
+            client_id: "test".to_owned(),
+            membership: Membership::Client {
+                protocol_type: "consumer".to_owned(),
+                protocols: vec![JoinProtocol {
+                    name: "range".to_owned(),
+                    metadata: subscription.freeze(),
+                }],
+            },
+            session_timeout_ms: 10_000,
+            rebalance_timeout_ms: 2_000,
+            require_known_member_id: false,
+        })
+        .await;
+    assert!(member.result.is_ok());
+
+    let partition = |index| OffsetDeleteRequestPartition::default().with_partition_index(index);
+    let request = OffsetDeleteRequest::default()
+        .with_group_id(GroupId(StrBytes::from_static_str("workers")))
+        .with_topics(vec![
+            OffsetDeleteRequestTopic::default()
+                .with_name(tn("events"))
+                .with_partitions(vec![partition(0)]),
+            OffsetDeleteRequestTopic::default()
+                .with_name(tn("other"))
+                .with_partitions(vec![partition(0), partition(4)]),
+            OffsetDeleteRequestTopic::default()
+                .with_name(tn("missing"))
+                .with_partitions(vec![partition(0)]),
+        ]);
+    let deleted: OffsetDeleteResponse = call(&broker, ApiKey::OffsetDelete, 0, &request).await;
+    assert_eq!(deleted.error_code, 0);
+    let codes: Vec<Vec<i16>> = deleted
+        .topics
+        .iter()
+        .map(|topic| topic.partitions.iter().map(|p| p.error_code).collect())
+        .collect();
+    assert_eq!(codes, [vec![86], vec![0, 3], vec![3]]);
+
+    let remaining = broker.groups.fetch_offsets("workers", None).await.unwrap();
+    assert_eq!(
+        remaining.keys().copied().collect::<Vec<_>>(),
+        [committed[0].partition]
+    );
+
+    let delete = |groups: &[&'static str]| {
+        DeleteGroupsRequest::default().with_groups_names(
+            groups
+                .iter()
+                .map(|group| GroupId(StrBytes::from_static_str(group)))
+                .collect(),
+        )
+    };
+    let response: DeleteGroupsResponse = call(
+        &broker,
+        ApiKey::DeleteGroups,
+        2,
+        &delete(&["workers", "ghost"]),
+    )
+    .await;
+    let codes: Vec<i16> = response.results.iter().map(|r| r.error_code).collect();
+    assert_eq!(codes, [68, 69]);
+
+    broker
+        .groups
+        .leave("workers", &[(member.member_id.clone(), None)])
+        .await;
+    let response: DeleteGroupsResponse =
+        call(&broker, ApiKey::DeleteGroups, 2, &delete(&["workers"])).await;
+    assert_eq!(response.results[0].error_code, 0);
+    assert!(
+        broker
+            .groups
+            .fetch_offsets("workers", None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn describe_cluster_lists_this_node() {
+    use kafka_protocol::messages::{DescribeClusterRequest, DescribeClusterResponse};
+
+    let broker = test_broker().await;
+    let response: DescribeClusterResponse = call(
+        &broker,
+        ApiKey::DescribeCluster,
+        2,
+        &DescribeClusterRequest::default().with_include_fenced_brokers(true),
+    )
+    .await;
+
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.cluster_id.as_str(), "picomq");
+    assert_eq!(response.controller_id.0, 1);
+    assert_eq!(response.brokers.len(), 1);
+    let node = &response.brokers[0];
+    assert_eq!(node.broker_id.0, 1);
+    assert_eq!(node.host.as_str(), "127.0.0.1");
+    assert_eq!(node.port, 19092);
+    assert!(!node.is_fenced);
 }

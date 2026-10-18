@@ -16,6 +16,15 @@ async fn start_node(
     sink: Arc<dyn CommandSink>,
     views: Arc<ViewPublisher>,
 ) -> PicoNode {
+    start_engine(node_id, sink, views, s3stream::Config::default()).await
+}
+
+async fn start_engine(
+    node_id: i32,
+    sink: Arc<dyn CommandSink>,
+    views: Arc<ViewPublisher>,
+    engine: s3stream::Config,
+) -> PicoNode {
     let object_storage: Arc<dyn ObjectStorageTrait> =
         Arc::new(MemoryObjectStorage::new((node_id * 2) as i16));
     let wal_storage: Arc<dyn ObjectStorageTrait> =
@@ -26,6 +35,7 @@ async fn start_node(
             node_epoch: 1,
             http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
             heartbeat_interval: Duration::from_millis(100),
+            engine,
             ..Default::default()
         },
         sink,
@@ -1711,4 +1721,66 @@ async fn a_fenced_node_notices() {
 
     node1.close().await;
     node2.close().await;
+}
+
+#[tokio::test]
+async fn delete_records_waits_for_the_upload() {
+    let (sink, views) = LocalSink::new();
+    let engine = s3stream::Config {
+        wal_upload_interval_ms: 100,
+        ..Default::default()
+    };
+    let node = start_engine(1, Arc::new(sink), views, engine).await;
+    let topics = node.topics();
+
+    topics
+        .create(create("/trimmed", "text/plain"))
+        .await
+        .unwrap();
+    topics
+        .append("/trimmed", 0, append(&[b"a", b"b", b"c"], "text/plain"))
+        .await
+        .unwrap();
+    let topic = topics.get("/trimmed").await.unwrap().unwrap();
+
+    let start = topics
+        .delete_records(&topic, 0, 2, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(start >= 2, "start {start}");
+    assert_eq!(
+        topics
+            .offsets(&topic, 0)
+            .await
+            .unwrap()
+            .start_offset
+            .record_offset(),
+        start
+    );
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn delete_records_times_out_before_the_upload() {
+    let node = local_node().await;
+    let topics = node.topics();
+
+    topics
+        .create(create("/pending", "text/plain"))
+        .await
+        .unwrap();
+    topics
+        .append("/pending", 0, append(&[b"a", b"b"], "text/plain"))
+        .await
+        .unwrap();
+    let topic = topics.get("/pending").await.unwrap().unwrap();
+
+    let error = topics
+        .delete_records(&topic, 0, 2, Duration::from_millis(200))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Timeout);
+
+    node.close().await;
 }

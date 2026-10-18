@@ -24,12 +24,13 @@ use picomq_protocol::mime::mime_of;
 use picomq_protocol::pico::{
     CT_BATCH_BINARY, CT_BATCH_JSON, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT, E_BAD_REQUEST, E_CLOSED,
     E_CONFLICT, E_DURABILITY, E_FENCED, E_INTERNAL, E_MATCH_FAILED, E_NOT_FOUND,
-    E_SCHEMA_VIOLATION, E_SEQUENCE_GAP, ErrorBody, FORMAT_BINARY, FORMAT_JSON, FORMAT_RAW,
-    H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT, H_KAFKA_TOPIC, H_KEY, H_MATCH_SEQ,
-    H_NEXT_SEQ, H_PARTITIONS, H_PRODUCER_EPOCH, H_PRODUCER_ID, H_PRODUCER_SEQ, H_RECEIVED_SEQ,
-    H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE,
-    LIVE_LONG_POLL, LIVE_SSE, Listing, Q_BYTES, Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT, Q_LIVE,
-    Q_PREFIX, Q_SEQ, Q_START_AFTER, SEQ_NOW, StreamEntry, sse_control_event, sse_data_event,
+    E_SCHEMA_VIOLATION, E_SEQUENCE_GAP, E_TIMEOUT, ErrorBody, FORMAT_BINARY, FORMAT_JSON,
+    FORMAT_RAW, H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT, H_KAFKA_TOPIC, H_KEY,
+    H_MATCH_SEQ, H_NEXT_SEQ, H_PARTITIONS, H_PRODUCER_EPOCH, H_PRODUCER_ID, H_PRODUCER_SEQ,
+    H_RECEIVED_SEQ, H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL,
+    H_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, Listing, Q_BYTES, Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT,
+    Q_LIVE, Q_PREFIX, Q_SEQ, Q_START_AFTER, SEQ_NOW, StreamEntry, sse_control_event,
+    sse_data_event,
 };
 use picomq_protocol::record::{
     PicoRecord, SequencedRecord, decode_batch_append, decode_json_append, encode_batch_read,
@@ -753,6 +754,7 @@ pub(crate) fn service_error_response(e: ServiceError) -> Response {
         }
         ErrorKind::Durability => error(500, E_DURABILITY, &e.message, None),
         ErrorKind::Internal => error(500, E_INTERNAL, &e.message, None),
+        ErrorKind::Timeout => error(504, E_TIMEOUT, &e.message, None),
     }
 }
 

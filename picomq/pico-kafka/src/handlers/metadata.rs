@@ -1,7 +1,10 @@
-use kafka_protocol::messages::MetadataRequest;
+use kafka_protocol::messages::describe_cluster_response::{
+    DescribeClusterBroker, DescribeClusterResponse,
+};
 use kafka_protocol::messages::metadata_response::{
     MetadataResponse, MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
 };
+use kafka_protocol::messages::{DescribeClusterRequest, MetadataRequest};
 use kafka_protocol::protocol::{Decodable, StrBytes};
 use picomq_server::topic::is_kafka_name;
 use picomq_server::{CreateCommand, OwnershipService, Topic, partition_log};
@@ -10,8 +13,8 @@ use uuid::Uuid;
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_address, broker_id, encode_response,
-    is_internal_topic, parse_host_port, service_error_code, topic_name, topic_uuid,
+    NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_id, brokers, encode_response, is_internal_topic,
+    service_error_code, topic_name, topic_uuid,
 };
 use crate::handlers::topics::KAFKA_CREATED_CT;
 use crate::handlers::{HandlerError, HandlerOutcome};
@@ -25,21 +28,16 @@ pub async fn handle(
     let request = MetadataRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
 
-    let mut brokers = Vec::new();
-    let view = ctx.views.load();
-    for node_id in view.state.nodes.keys() {
-        let Some(host) = broker_address(&view.state, *node_id) else {
-            continue;
-        };
-        let (host, port) = parse_host_port(host);
-        brokers.push(
+    let brokers = brokers(&ctx.views.load().state, false)
+        .into_iter()
+        .map(|broker| {
             MetadataResponseBroker::default()
-                .with_node_id(broker_id(*node_id))
-                .with_host(StrBytes::from(host))
-                .with_port(port)
-                .with_rack(None),
-        );
-    }
+                .with_node_id(broker_id(broker.id))
+                .with_host(StrBytes::from(broker.host))
+                .with_port(broker.port)
+                .with_rack(None)
+        })
+        .collect();
 
     let requested: Option<Vec<String>> = match &request.topics {
         None => None,
@@ -160,4 +158,39 @@ fn topic_error(topic: &str, code: i16) -> MetadataResponseTopic {
     MetadataResponseTopic::default()
         .with_error_code(code)
         .with_name(Some(topic_name(topic)))
+}
+
+pub async fn describe_cluster(
+    ctx: &BrokerContext,
+    req: &RequestContext,
+    body: &[u8],
+) -> Result<HandlerOutcome, HandlerError> {
+    let mut body = bytes::Bytes::copy_from_slice(body);
+    let request = DescribeClusterRequest::decode(&mut body, req.api_version)
+        .map_err(|error| HandlerError::Protocol(error.to_string()))?;
+
+    let brokers = brokers(&ctx.views.load().state, request.include_fenced_brokers)
+        .into_iter()
+        .map(|broker| {
+            DescribeClusterBroker::default()
+                .with_broker_id(broker_id(broker.id))
+                .with_host(StrBytes::from(broker.host))
+                .with_port(broker.port)
+                .with_rack(None)
+                .with_is_fenced(broker.fenced)
+        })
+        .collect();
+
+    let response = DescribeClusterResponse::default()
+        .with_error_code(NO_ERROR)
+        .with_endpoint_type(request.endpoint_type)
+        .with_cluster_id(StrBytes::from(ctx.cluster_id.clone()))
+        .with_controller_id(broker_id(ctx.node_id))
+        .with_brokers(brokers)
+        .with_cluster_authorized_operations(i32::MIN);
+    Ok(HandlerOutcome::Response(encode_response(
+        req.correlation_id,
+        req.api_version,
+        &response,
+    )))
 }

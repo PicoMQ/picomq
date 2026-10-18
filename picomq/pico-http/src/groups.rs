@@ -13,9 +13,9 @@ use picomq_protocol::groups::{
     JoinRequest, JoinResponse, OffsetsResponse, Q_GENERATION, Q_INSTANCE_ID, Q_STREAM,
 };
 use picomq_protocol::pico::{
-    CT_JSON, E_BAD_REQUEST, E_CAPACITY_EXCEEDED, E_COORDINATOR_UNAVAILABLE, E_DURABILITY, E_FENCED,
-    E_ILLEGAL_GENERATION, E_INCONSISTENT_PROTOCOL, E_NOT_FOUND, E_REBALANCE_IN_PROGRESS,
-    E_UNKNOWN_MEMBER,
+    CT_JSON, E_BAD_REQUEST, E_CAPACITY_EXCEEDED, E_CONFLICT, E_COORDINATOR_UNAVAILABLE,
+    E_DURABILITY, E_FENCED, E_ILLEGAL_GENERATION, E_INCONSISTENT_PROTOCOL, E_NOT_FOUND,
+    E_REBALANCE_IN_PROGRESS, E_UNKNOWN_MEMBER,
 };
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{
@@ -40,7 +40,7 @@ pub struct GroupState {
 pub fn router(state: GroupState, max_request_size: usize) -> Router {
     Router::new()
         .route("/_groups", get(list))
-        .route("/_groups/{group}", get(describe))
+        .route("/_groups/{group}", get(describe).delete(remove))
         .route("/_groups/{group}/members", post(join))
         .route(
             "/_groups/{group}/members/{member}",
@@ -215,6 +215,28 @@ async fn describe(
     }
     match state.groups.describe(&group).await {
         Ok(described) => ok(description(&state, &caller, described).encode()),
+        Err(error) => group_error(error),
+    }
+}
+
+async fn remove(
+    State(state): State<GroupState>,
+    Path(group): Path<String>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    let caller = match state.admit(&headers).await {
+        Ok(caller) => caller,
+        Err(response) => return *response,
+    };
+    if let Err(response) = state.allow(&caller, Operation::Delete, &[]) {
+        return *response;
+    }
+    if let Some(response) = state.redirect(&uri, &group).await {
+        return response;
+    }
+    match state.groups.delete(&group).await {
+        Ok(()) => no_content(),
         Err(error) => group_error(error),
     }
 }
@@ -580,6 +602,7 @@ fn group_error(err: GroupError) -> Response {
         GroupError::InvalidRequest | GroupError::MemberIdRequired => (400, E_BAD_REQUEST),
         GroupError::Storage => (500, E_DURABILITY),
         GroupError::GroupNotFound => (404, E_NOT_FOUND),
+        GroupError::NonEmpty => (409, E_CONFLICT),
         GroupError::CapacityExceeded => (429, E_CAPACITY_EXCEEDED),
         GroupError::FencedInstance => (403, E_FENCED),
     };

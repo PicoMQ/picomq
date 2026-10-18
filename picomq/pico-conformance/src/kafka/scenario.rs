@@ -23,6 +23,10 @@ pub enum Scenario {
     ProduceV0,
     ProduceV2,
     CorruptBatch,
+    DeleteRecords,
+    DeleteGroups,
+    DeleteOffsets,
+    ClusterId,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -55,6 +59,10 @@ impl Scenario {
         Scenario::ProduceV0,
         Scenario::ProduceV2,
         Scenario::CorruptBatch,
+        Scenario::DeleteRecords,
+        Scenario::DeleteGroups,
+        Scenario::DeleteOffsets,
+        Scenario::ClusterId,
     ];
 
     pub fn name(self) -> &'static str {
@@ -78,6 +86,10 @@ impl Scenario {
             Scenario::ProduceV0 => "produce-v0",
             Scenario::ProduceV2 => "produce-v2",
             Scenario::CorruptBatch => "corrupt-batch",
+            Scenario::DeleteRecords => "delete-records",
+            Scenario::DeleteGroups => "delete-groups",
+            Scenario::DeleteOffsets => "delete-offsets",
+            Scenario::ClusterId => "cluster-id",
         }
     }
 
@@ -114,6 +126,10 @@ impl Scenario {
             Scenario::ProduceV0 => legacy_produce(clients, broker, host_address, topic, 0).await,
             Scenario::ProduceV2 => legacy_produce(clients, broker, host_address, topic, 2).await,
             Scenario::CorruptBatch => corrupt_batch(clients, broker, host_address, topic).await,
+            Scenario::DeleteRecords => delete_records(clients, broker, topic).await,
+            Scenario::DeleteGroups => delete_groups(clients, broker, topic).await,
+            Scenario::DeleteOffsets => delete_offsets(clients, broker, topic).await,
+            Scenario::ClusterId => cluster_id(clients, broker).await,
         };
 
         lines
@@ -389,32 +405,7 @@ async fn java_produce_consume(clients: &Clients, broker: &str, topic: &str) -> V
 
 async fn group_consume(clients: &Clients, broker: &str, topic: &str) -> Vec<String> {
     let group = format!("{topic}-group");
-
-    let mut lines = vec![
-        create(clients, broker, topic, 1).await,
-        produce(clients, KCAT, broker, topic, RECORDS).await,
-    ];
-
-    let received = clients
-        .java(
-            "kafka-console-consumer",
-            &[
-                "--bootstrap-server",
-                broker,
-                "--topic",
-                topic,
-                "--group",
-                &group,
-                "--from-beginning",
-                "--max-messages",
-                "3",
-                "--timeout-ms",
-                "30000",
-            ],
-            None,
-        )
-        .await;
-    lines.extend(self::lines(&received.stdout));
+    let mut lines = consume_as_group(clients, broker, topic, &group).await;
 
     let described = clients
         .java(
@@ -546,6 +537,148 @@ async fn create_partitions(clients: &Clients, broker: &str, topic: &str) -> Vec<
     lines.extend(list_metadata(clients, KCAT, broker, topic).await);
 
     lines
+}
+
+async fn consume_as_group(
+    clients: &Clients,
+    broker: &str,
+    topic: &str,
+    group: &str,
+) -> Vec<String> {
+    let mut lines = vec![
+        create(clients, broker, topic, 1).await,
+        produce(clients, KCAT, broker, topic, RECORDS).await,
+    ];
+
+    let received = clients
+        .java(
+            "kafka-console-consumer",
+            &[
+                "--bootstrap-server",
+                broker,
+                "--topic",
+                topic,
+                "--group",
+                group,
+                "--from-beginning",
+                "--max-messages",
+                "3",
+                "--timeout-ms",
+                "30000",
+            ],
+            None,
+        )
+        .await;
+    lines.extend(self::lines(&received.stdout));
+
+    lines
+}
+
+async fn delete_records(clients: &Clients, broker: &str, topic: &str) -> Vec<String> {
+    let mut lines = vec![
+        create(clients, broker, topic, 1).await,
+        produce(clients, KCAT, broker, topic, RECORDS).await,
+    ];
+
+    let offsets =
+        format!(r#"{{"partitions":[{{"topic":"{topic}","partition":0,"offset":2}}],"version":1}}"#);
+    let deleted = clients
+        .java(
+            "kafka-delete-records",
+            &[
+                "--bootstrap-server",
+                broker,
+                "--offset-json-file",
+                "/dev/stdin",
+            ],
+            Some(&offsets),
+        )
+        .await;
+    lines.push(status("delete", deleted.ok));
+    lines.extend(self::lines(&deleted.stdout));
+
+    lines.extend(consume(clients, KCAT, broker, topic, "%o %k %s\\n").await);
+
+    lines
+}
+
+async fn delete_groups(clients: &Clients, broker: &str, topic: &str) -> Vec<String> {
+    let group = format!("{topic}-group");
+    let mut lines = consume_as_group(clients, broker, topic, &group).await;
+
+    let deleted = clients
+        .java(
+            "kafka-consumer-groups",
+            &["--bootstrap-server", broker, "--delete", "--group", &group],
+            None,
+        )
+        .await;
+    lines.push(status("delete", deleted.ok));
+    lines.extend(self::lines(&deleted.stdout));
+
+    let again = clients
+        .java(
+            "kafka-consumer-groups",
+            &["--bootstrap-server", broker, "--delete", "--group", &group],
+            None,
+        )
+        .await;
+    lines.push(status("delete again", again.ok));
+
+    lines
+}
+
+async fn delete_offsets(clients: &Clients, broker: &str, topic: &str) -> Vec<String> {
+    let group = format!("{topic}-group");
+    let mut lines = consume_as_group(clients, broker, topic, &group).await;
+
+    let deleted = clients
+        .java(
+            "kafka-consumer-groups",
+            &[
+                "--bootstrap-server",
+                broker,
+                "--delete-offsets",
+                "--group",
+                &group,
+                "--topic",
+                topic,
+            ],
+            None,
+        )
+        .await;
+    lines.push(status("delete offsets", deleted.ok));
+    lines.extend(
+        deleted
+            .stdout
+            .lines()
+            .map(|row| row.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|row| !row.is_empty()),
+    );
+
+    lines
+}
+
+async fn cluster_id(clients: &Clients, broker: &str) -> Vec<String> {
+    let output = clients
+        .java(
+            "kafka-cluster",
+            &["cluster-id", "--bootstrap-server", broker],
+            None,
+        )
+        .await;
+
+    vec![
+        status("cluster-id", output.ok),
+        status(
+            "id present",
+            output
+                .stdout
+                .trim()
+                .strip_prefix("Cluster ID: ")
+                .is_some_and(|id| !id.is_empty()),
+        ),
+    ]
 }
 
 fn status(step: &str, ok: bool) -> String {

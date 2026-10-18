@@ -463,3 +463,71 @@ async fn snapshots_drop_offsets_of_deleted_topics() {
 
     node.close().await;
 }
+
+#[tokio::test]
+async fn offset_deletes_survive_replay_and_snapshots() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+
+    groups
+        .commit_offsets(
+            "orders",
+            None,
+            &[commit(partition(1), 1), commit(partition(2), 2)],
+        )
+        .await
+        .unwrap();
+    groups
+        .delete_offsets("orders", &[partition(1), partition(3)])
+        .await
+        .unwrap();
+
+    let replayed = || {
+        GroupCoordinator::new(
+            node.config().node_id,
+            node.service(),
+            node.topics(),
+            node.ownership(),
+        )
+    };
+    let fetched = replayed().fetch_offsets("orders", None).await.unwrap();
+    assert_eq!(fetched.keys().copied().collect::<Vec<_>>(), [partition(2)]);
+
+    for position in 0..64 {
+        groups
+            .commit_offsets("orders", None, &[commit(partition(2), position)])
+            .await
+            .unwrap();
+    }
+
+    let fetched = replayed().fetch_offsets("orders", None).await.unwrap();
+    assert_eq!(fetched.keys().copied().collect::<Vec<_>>(), [partition(2)]);
+    assert_eq!(fetched[&partition(2)].position, 63);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn groups_delete_only_when_empty() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+
+    assert_eq!(groups.delete("g").await, Err(GroupError::GroupNotFound));
+
+    let member = groups.join(join("g", "", subscribed(&["/a"]))).await;
+    groups
+        .commit_offsets("g", None, &[commit(partition(1), 5)])
+        .await
+        .unwrap();
+    assert_eq!(groups.delete("g").await, Err(GroupError::NonEmpty));
+
+    groups.leave("g", &[(member.member_id.clone(), None)]).await;
+    groups.delete("g").await.unwrap();
+
+    assert_eq!(groups.delete("g").await, Err(GroupError::GroupNotFound));
+    assert!(groups.fetch_offsets("g", None).await.unwrap().is_empty());
+
+    node.close().await;
+}
