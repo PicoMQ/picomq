@@ -1,0 +1,4 @@
+create-partitions
+describe-configs
+describe-topic
+keyed-partitions

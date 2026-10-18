@@ -10,7 +10,6 @@ mod versions;
 
 use bytes::Bytes;
 use kafka_protocol::messages::ApiKey;
-use picomq_server::ServiceError;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
@@ -23,8 +22,6 @@ pub enum HandlerError {
     Protocol(String),
     #[error("unimplemented api key {0}")]
     Unimplemented(i16),
-    #[error(transparent)]
-    Service(#[from] ServiceError),
 }
 
 pub type DeferredOutcome = std::pin::Pin<

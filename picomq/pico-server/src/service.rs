@@ -729,7 +729,7 @@ impl S3StreamService {
         if entry.schema_validate
             && let Some(schema_name) = entry.schema_name.as_deref()
         {
-            let records = record::decode_batches(&command.payload).map_err(corrupt_batch)?;
+            let records = record::decode_batches(&command.payload)?;
             let batch = schema_batch(&records.into_iter().map(|r| r.record).collect::<Vec<_>>());
             self.validate_schema(schema_name, &batch).await?;
         }
@@ -1196,7 +1196,7 @@ impl S3StreamService {
         let Some(tail) = fetch.records.last() else {
             return Ok(0);
         };
-        let headers = record::batch_headers(&tail.payload).map_err(corrupt_batch)?;
+        let headers = record::batch_headers(&tail.payload)?;
         Ok(headers
             .iter()
             .filter(|h| h.log_append_time)
@@ -1743,15 +1743,6 @@ fn topic_taken(topic: &str) -> ServiceError {
     )
 }
 
-fn corrupt_batch(error: record::RecordError) -> ServiceError {
-    ServiceError::with_message(
-        ErrorKind::CorruptBatch,
-        None,
-        false,
-        format!("stored record batch: {error}"),
-    )
-}
-
 fn config_matches(entry: &RegistryEntry, command: &CreateCommand) -> bool {
     mime_equals(Some(&entry.content_type), Some(&command.content_type))
         && entry.ttl_seconds == command.ttl_seconds
@@ -1939,10 +1930,17 @@ fn parse_batches(payload: &Bytes) -> Result<Vec<BatchHeader>, ServiceError> {
     if payload.is_empty() {
         return Err(bad("empty batch payload".into()));
     }
-    let headers = record::batch_headers(payload).map_err(corrupt_batch)?;
+    let headers = record::batch_headers(payload)?;
     if headers.is_empty() {
         return Err(bad("empty batch payload".into()));
     }
+
+    let mut pos = 0;
+    for header in &headers {
+        record::verify_crc(&payload[pos..pos + header.len])?;
+        pos += header.len;
+    }
+
     if headers.iter().any(|h| h.transactional_or_control) {
         return Err(bad("transactional produce is not supported".into()));
     }
@@ -1998,7 +1996,7 @@ fn collect_records(
         if batch.base_offset >= end {
             break;
         }
-        for stream_record in record::decode_batches(&batch.payload).map_err(corrupt_batch)? {
+        for stream_record in record::decode_batches(&batch.payload)? {
             let offset = stream_record.offset.record_offset();
             if offset < start {
                 continue;

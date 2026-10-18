@@ -1,12 +1,12 @@
 use kafka_protocol::messages::api_versions_response::ApiVersion;
-use kafka_protocol::messages::{ApiVersionsRequest, ApiVersionsResponse};
+use kafka_protocol::messages::{ApiKey, ApiVersionsRequest, ApiVersionsResponse};
 use kafka_protocol::protocol::Decodable;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{UNSUPPORTED_VERSION, encode_response};
 use crate::handlers::{HandlerError, HandlerOutcome};
-use crate::versions;
+use crate::versions::{self, SupportedApi};
 
 pub async fn handle(
     _ctx: &BrokerContext,
@@ -14,7 +14,16 @@ pub async fn handle(
     body: &[u8],
 ) -> Result<HandlerOutcome, HandlerError> {
     if !versions::is_supported(req.api_key, req.api_version) {
-        let response = ApiVersionsResponse::default().with_error_code(UNSUPPORTED_VERSION);
+        let api_versions = versions::supported_apis()
+            .iter()
+            .filter(|api| api.api_key == ApiKey::ApiVersions as i16)
+            .map(advertised)
+            .collect();
+
+        let response = ApiVersionsResponse::default()
+            .with_error_code(UNSUPPORTED_VERSION)
+            .with_api_keys(api_versions);
+
         return Ok(HandlerOutcome::Response(encode_response(
             req.correlation_id,
             0,
@@ -26,19 +35,19 @@ pub async fn handle(
     ApiVersionsRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
 
-    let api_keys = versions::supported_apis()
-        .iter()
-        .map(|api| {
-            ApiVersion::default()
-                .with_api_key(api.api_key)
-                .with_min_version(api.min_version)
-                .with_max_version(api.max_version)
-        })
-        .collect();
+    let api_keys = versions::supported_apis().iter().map(advertised).collect();
     let response = ApiVersionsResponse::default().with_api_keys(api_keys);
+
     Ok(HandlerOutcome::Response(encode_response(
         req.correlation_id,
         req.api_version,
         &response,
     )))
+}
+
+fn advertised(api: &SupportedApi) -> ApiVersion {
+    ApiVersion::default()
+        .with_api_key(api.api_key)
+        .with_min_version(api.advertised_min_version)
+        .with_max_version(api.max_version)
 }

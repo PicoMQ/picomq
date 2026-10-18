@@ -39,3 +39,5 @@ picomq/pico-http/_dashboard/*
 # OS
 .DS_Store
 Thumbs.db
+# Conformance clients
+picomq/pico-conformance/clients/ds/node_modules/

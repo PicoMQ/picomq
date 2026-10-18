@@ -2455,6 +2455,24 @@ name = "picomq-common"
 version = "0.1.1"
 
 [[package]]
+name = "picomq-conformance"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "crc32fast",
+ "kafka-protocol",
+ "picomq-http",
+ "picomq-runtime",
+ "s3stream",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "picomq-http"
 version = "0.1.1"
 dependencies = [

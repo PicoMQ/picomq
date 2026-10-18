@@ -1,0 +1,9 @@
+{
+  "name": "pico-conformance-ds",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@durable-streams/server-conformance-tests": "0.3.6",
+    "vitest": "~4.0.0"
+  }
+}

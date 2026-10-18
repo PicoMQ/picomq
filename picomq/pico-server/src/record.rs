@@ -78,6 +78,8 @@ pub enum RecordError {
     Magic(i8),
     #[error("record batch has no records")]
     Empty,
+    #[error("record batch crc does not match its contents")]
+    Crc,
     #[error("record batch: {0}")]
     Decode(String),
 }
@@ -194,6 +196,19 @@ pub fn batch_header(payload: &[u8]) -> Result<BatchHeader, RecordError> {
     })
 }
 
+pub fn verify_crc(batch: &[u8]) -> Result<(), RecordError> {
+    if batch.len() < BATCH_HEADER_LEN {
+        return Err(RecordError::Truncated);
+    }
+
+    let stored = u32::from_be_bytes(batch[17..21].try_into().expect("4 bytes"));
+    if crc32c::crc32c(&batch[21..]) != stored {
+        return Err(RecordError::Crc);
+    }
+
+    Ok(())
+}
+
 pub fn patch_base_offset(payload: &mut [u8], at: usize, base_offset: u64) {
     payload[at..at + 8].copy_from_slice(&(base_offset as i64).to_be_bytes());
 }
@@ -306,6 +321,21 @@ mod tests {
             decode_batches(&Bytes::from(corrupted)),
             Err(RecordError::Decode(_))
         ));
+    }
+
+    #[test]
+    fn verify_crc_accepts_valid_and_rejects_flipped_batches() {
+        let encoded = encode_batch(0, 1, &records()).to_vec();
+        assert!(verify_crc(&encoded).is_ok());
+
+        let mut patched = encoded.clone();
+        patch_base_offset(&mut patched, 0, 99);
+        assert!(verify_crc(&patched).is_ok());
+
+        let mut corrupted = encoded;
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0x01;
+        assert!(matches!(verify_crc(&corrupted), Err(RecordError::Crc)));
     }
 
     #[test]

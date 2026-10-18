@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use kafka_protocol::messages::BrokerId;
 use kafka_protocol::messages::fetch_request::{FetchPartition, FetchTopic};
 use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
 use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
@@ -68,6 +69,10 @@ fn encode_request<T: Encodable>(
 }
 
 fn kafka_batch(payload: &[u8]) -> Bytes {
+    timed_batch(payload, 1)
+}
+
+fn timed_batch(payload: &[u8], timestamp: i64) -> Bytes {
     let records = vec![Record {
         transactional: false,
         control: false,
@@ -78,7 +83,7 @@ fn kafka_batch(payload: &[u8]) -> Bytes {
         timestamp_type: TimestampType::Creation,
         offset: 0,
         sequence: NO_SEQUENCE,
-        timestamp: 1,
+        timestamp,
         key: None,
         value: Some(Bytes::copy_from_slice(payload)),
         headers: Default::default(),
@@ -121,6 +126,49 @@ async fn api_versions_handler_lists_supported_apis() {
             .iter()
             .any(|api| api.api_key == ApiKey::Metadata as i16)
     );
+
+    let produce = response
+        .api_keys
+        .iter()
+        .find(|api| api.api_key == ApiKey::Produce as i16)
+        .unwrap();
+    assert_eq!(produce.min_version, 0);
+}
+
+#[tokio::test]
+async fn advertised_produce_versions_below_three_are_still_refused() {
+    let broker = test_broker().await;
+
+    let mut req = BytesMut::new();
+    let header = RequestHeader::default()
+        .with_request_api_key(ApiKey::Produce as i16)
+        .with_request_api_version(2)
+        .with_correlation_id(1);
+    encode_request_header_into_buffer(&mut req, &header).unwrap();
+
+    assert!(dispatch(&broker, &req).await.is_err());
+}
+
+#[tokio::test]
+async fn future_api_versions_request_gets_the_supported_range() {
+    let broker = test_broker().await;
+
+    let mut req = BytesMut::new();
+    let header = RequestHeader::default()
+        .with_request_api_key(ApiKey::ApiVersions as i16)
+        .with_request_api_version(99)
+        .with_correlation_id(1);
+    encode_request_header_into_buffer(&mut req, &header).unwrap();
+    ApiVersionsRequest::default().encode(&mut req, 3).unwrap();
+
+    let mut buf = response_body(&broker, &req).await;
+    ResponseHeader::decode(&mut buf, 0).unwrap();
+    let response = ApiVersionsResponse::decode(&mut buf, 0).unwrap();
+
+    assert_eq!(response.error_code, 35);
+    assert_eq!(response.api_keys.len(), 1);
+    assert_eq!(response.api_keys[0].api_key, ApiKey::ApiVersions as i16);
+    assert_eq!(response.api_keys[0].max_version, 4);
 }
 
 async fn resolve(outcome: HandlerOutcome) -> HandlerOutcome {
@@ -264,6 +312,151 @@ async fn metadata_create_produce_and_fetch_roundtrip() {
     ResponseHeader::decode(&mut buf, 1).unwrap();
     let oor = FetchResponse::decode(&mut buf, 13).unwrap();
     assert_eq!(oor.responses[0].partitions[0].error_code, 1);
+}
+
+async fn metadata_topics(
+    broker: &BrokerContext,
+    version: i16,
+    topics: Option<Vec<MetadataRequestTopic>>,
+) -> Vec<String> {
+    use kafka_protocol::messages::MetadataResponse;
+
+    let request = encode_request(
+        ApiKey::Metadata,
+        version,
+        1,
+        &MetadataRequest::default().with_topics(topics),
+    );
+
+    let mut body = response_body(broker, &request).await;
+    ResponseHeader::decode(&mut body, ApiKey::Metadata.response_header_version(version)).unwrap();
+
+    MetadataResponse::decode(&mut body, version)
+        .unwrap()
+        .topics
+        .iter()
+        .filter_map(|topic| topic.name.as_ref().map(|name| name.0.to_string()))
+        .collect()
+}
+
+#[tokio::test]
+async fn metadata_empty_topic_list_means_all_topics_only_at_v0() {
+    let broker = test_broker().await;
+
+    let named = Some(vec![
+        MetadataRequestTopic::default().with_name(Some(tn("listed"))),
+    ]);
+    assert_eq!(metadata_topics(&broker, 12, named).await, ["listed"]);
+
+    assert_eq!(metadata_topics(&broker, 0, Some(vec![])).await, ["listed"]);
+    assert_eq!(metadata_topics(&broker, 1, None).await, ["listed"]);
+
+    assert!(metadata_topics(&broker, 1, Some(vec![])).await.is_empty());
+    assert!(metadata_topics(&broker, 12, Some(vec![])).await.is_empty());
+}
+
+#[tokio::test]
+async fn produce_rejects_a_batch_with_a_bad_crc() {
+    use kafka_protocol::messages::ProduceResponse;
+
+    let broker = test_broker().await;
+
+    let create = Some(vec![
+        MetadataRequestTopic::default().with_name(Some(tn("checked"))),
+    ]);
+    metadata_topics(&broker, 12, create).await;
+
+    let mut batch = BytesMut::from(&kafka_batch(b"value")[..]);
+    batch[17] ^= 0xff;
+
+    let produce = encode_request(
+        ApiKey::Produce,
+        10,
+        2,
+        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
+            TopicProduceData::default()
+                .with_name(tn("checked"))
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(0)
+                        .with_records(Some(batch.freeze())),
+                ]),
+        ]),
+    );
+
+    let mut buf = response_body(&broker, &produce).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let response = ProduceResponse::decode(&mut buf, 10).unwrap();
+
+    assert_eq!(response.responses[0].partition_responses[0].error_code, 2);
+}
+
+async fn produce_at(broker: &BrokerContext, topic: &str, timestamp: i64) {
+    let produce = encode_request(
+        ApiKey::Produce,
+        10,
+        1,
+        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
+            TopicProduceData::default()
+                .with_name(tn(topic))
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(0)
+                        .with_records(Some(timed_batch(b"value", timestamp))),
+                ]),
+        ]),
+    );
+
+    response_body(broker, &produce).await;
+}
+
+async fn offset_for(broker: &BrokerContext, topic: &str, timestamp: i64) -> (i64, i64) {
+    use kafka_protocol::messages::ListOffsetsRequest;
+    use kafka_protocol::messages::ListOffsetsResponse;
+    use kafka_protocol::messages::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
+
+    let request = encode_request(
+        ApiKey::ListOffsets,
+        7,
+        1,
+        &ListOffsetsRequest::default()
+            .with_replica_id(BrokerId(-1))
+            .with_topics(vec![
+                ListOffsetsTopic::default()
+                    .with_name(tn(topic))
+                    .with_partitions(vec![
+                        ListOffsetsPartition::default()
+                            .with_partition_index(0)
+                            .with_timestamp(timestamp),
+                    ]),
+            ]),
+    );
+
+    let mut buf = response_body(broker, &request).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let response = ListOffsetsResponse::decode(&mut buf, 7).unwrap();
+    let partition = &response.topics[0].partitions[0];
+
+    (partition.offset, partition.timestamp)
+}
+
+#[tokio::test]
+async fn list_offsets_resolves_timestamps_like_kafka() {
+    let broker = test_broker().await;
+
+    let create = Some(vec![
+        MetadataRequestTopic::default().with_name(Some(tn("timed"))),
+    ]);
+    metadata_topics(&broker, 12, create).await;
+
+    for timestamp in [10, 30, 20] {
+        produce_at(&broker, "timed", timestamp).await;
+    }
+
+    assert_eq!(offset_for(&broker, "timed", 0).await, (0, 10));
+    assert_eq!(offset_for(&broker, "timed", 20).await, (1, 30));
+    assert_eq!(offset_for(&broker, "timed", 31).await, (-1, -1));
+    assert_eq!(offset_for(&broker, "timed", -3).await, (1, 30));
 }
 
 #[tokio::test]

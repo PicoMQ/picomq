@@ -41,15 +41,11 @@ pub async fn handle(
     }
 
     let requested: Vec<String> = match &request.topics {
-        Some(topics) if !topics.is_empty() => topics
+        None => all_topics(ctx),
+        Some(topics) if topics.is_empty() && req.api_version == 0 => all_topics(ctx),
+        Some(topics) => topics
             .iter()
             .filter_map(|topic| topic.name.as_ref().map(|name| name.to_string()))
-            .collect(),
-        _ => ctx
-            .service
-            .list_topics()
-            .into_iter()
-            .map(|(topic, _)| topic)
             .collect(),
     };
 
@@ -78,6 +74,14 @@ pub async fn handle(
         req.api_version,
         &response,
     )))
+}
+
+fn all_topics(ctx: &BrokerContext) -> Vec<String> {
+    ctx.service
+        .list_topics()
+        .into_iter()
+        .map(|(topic, _)| topic)
+        .collect()
 }
 
 async fn resolve_or_create(

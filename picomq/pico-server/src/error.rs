@@ -4,6 +4,7 @@
 //! companions (`next_offset`, `closed`, producer epoch and expected/received
 //! seq) so handlers never parse messages.
 
+use crate::record::RecordError;
 use crate::types::OffsetToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +97,12 @@ impl ServiceError {
             message: format!("append not durable: {cause}"),
             ..Self::kind(ErrorKind::Durability)
         }
+    }
+}
+
+impl From<RecordError> for ServiceError {
+    fn from(error: RecordError) -> Self {
+        Self::with_message(ErrorKind::CorruptBatch, None, false, error.to_string())
     }
 }
 

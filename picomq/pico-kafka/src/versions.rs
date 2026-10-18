@@ -1,101 +1,50 @@
+use kafka_protocol::messages::ApiKey;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SupportedApi {
     pub api_key: i16,
     pub min_version: i16,
     pub max_version: i16,
+    pub advertised_min_version: i16,
 }
 
-/// Advertised API ranges. librdkafka needs the floors at Produce 3, Fetch 4,
-/// and ListOffsets 1 or it falls back to the v0 message format.
+impl SupportedApi {
+    const fn new(api_key: ApiKey, min_version: i16, max_version: i16) -> Self {
+        Self {
+            api_key: api_key as i16,
+            min_version,
+            max_version,
+            advertised_min_version: min_version,
+        }
+    }
+
+    const fn advertised_from(mut self, version: i16) -> Self {
+        self.advertised_min_version = version;
+        self
+    }
+}
+
+const APIS: &[SupportedApi] = &[
+    SupportedApi::new(ApiKey::Produce, 3, 10).advertised_from(0),
+    SupportedApi::new(ApiKey::Fetch, 4, 16),
+    SupportedApi::new(ApiKey::ListOffsets, 1, 7),
+    SupportedApi::new(ApiKey::Metadata, 0, 12),
+    SupportedApi::new(ApiKey::CreateTopics, 2, 7),
+    SupportedApi::new(ApiKey::DeleteTopics, 1, 6),
+    SupportedApi::new(ApiKey::InitProducerId, 0, 4),
+    SupportedApi::new(ApiKey::OffsetCommit, 2, 8),
+    SupportedApi::new(ApiKey::OffsetFetch, 1, 7),
+    SupportedApi::new(ApiKey::FindCoordinator, 0, 3),
+    SupportedApi::new(ApiKey::JoinGroup, 0, 7),
+    SupportedApi::new(ApiKey::Heartbeat, 0, 4),
+    SupportedApi::new(ApiKey::LeaveGroup, 0, 5),
+    SupportedApi::new(ApiKey::SyncGroup, 0, 5),
+    SupportedApi::new(ApiKey::DescribeGroups, 0, 5),
+    SupportedApi::new(ApiKey::ListGroups, 0, 5),
+    SupportedApi::new(ApiKey::ApiVersions, 0, 4),
+];
+
 pub fn supported_apis() -> &'static [SupportedApi] {
-    use kafka_protocol::messages::ApiKey;
-    const APIS: &[SupportedApi] = &[
-        SupportedApi {
-            api_key: ApiKey::Produce as i16,
-            min_version: 3,
-            max_version: 10,
-        },
-        SupportedApi {
-            api_key: ApiKey::Fetch as i16,
-            min_version: 4,
-            max_version: 16,
-        },
-        SupportedApi {
-            api_key: ApiKey::ListOffsets as i16,
-            min_version: 1,
-            max_version: 7,
-        },
-        SupportedApi {
-            api_key: ApiKey::Metadata as i16,
-            min_version: 10,
-            max_version: 12,
-        },
-        SupportedApi {
-            api_key: ApiKey::CreateTopics as i16,
-            min_version: 2,
-            max_version: 7,
-        },
-        SupportedApi {
-            api_key: ApiKey::DeleteTopics as i16,
-            min_version: 1,
-            max_version: 6,
-        },
-        SupportedApi {
-            api_key: ApiKey::InitProducerId as i16,
-            min_version: 0,
-            max_version: 4,
-        },
-        SupportedApi {
-            api_key: ApiKey::OffsetCommit as i16,
-            min_version: 2,
-            max_version: 8,
-        },
-        SupportedApi {
-            api_key: ApiKey::OffsetFetch as i16,
-            min_version: 1,
-            max_version: 7,
-        },
-        SupportedApi {
-            api_key: ApiKey::FindCoordinator as i16,
-            min_version: 0,
-            max_version: 3,
-        },
-        SupportedApi {
-            api_key: ApiKey::JoinGroup as i16,
-            min_version: 0,
-            max_version: 7,
-        },
-        SupportedApi {
-            api_key: ApiKey::Heartbeat as i16,
-            min_version: 0,
-            max_version: 4,
-        },
-        SupportedApi {
-            api_key: ApiKey::LeaveGroup as i16,
-            min_version: 0,
-            max_version: 5,
-        },
-        SupportedApi {
-            api_key: ApiKey::SyncGroup as i16,
-            min_version: 0,
-            max_version: 5,
-        },
-        SupportedApi {
-            api_key: ApiKey::DescribeGroups as i16,
-            min_version: 0,
-            max_version: 5,
-        },
-        SupportedApi {
-            api_key: ApiKey::ListGroups as i16,
-            min_version: 0,
-            max_version: 5,
-        },
-        SupportedApi {
-            api_key: ApiKey::ApiVersions as i16,
-            min_version: 0,
-            max_version: 4,
-        },
-    ];
     APIS
 }
 

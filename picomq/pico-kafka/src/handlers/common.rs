@@ -37,6 +37,7 @@ pub const UNKNOWN_TOPIC_ID: i16 = 100;
 
 pub const EARLIEST_TIMESTAMP: i64 = -2;
 pub const LATEST_TIMESTAMP: i64 = -1;
+pub const MAX_TIMESTAMP: i64 = -3;
 
 pub fn encode_response<T: Encodable + HeaderVersion>(
     correlation_id: i32,

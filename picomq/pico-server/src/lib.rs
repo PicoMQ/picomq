@@ -10,6 +10,7 @@ pub mod producer;
 pub mod record;
 pub mod registry;
 pub mod service;
+mod timestamps;
 pub mod transfer;
 pub mod types;
 pub mod waiter;

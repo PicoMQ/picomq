@@ -1,0 +1,57 @@
+Fork - Appending should append to a fork
+Fork - Appending should append to source after fork — source independent
+Fork - Appending should support idempotent producer on fork
+Fork - Creation should accept JSON sub-offset equal to flattened message count
+Fork - Creation should accept binary sub-offset equal to message length
+Fork - Creation should allow sub-offset fork creation from a closed source stream
+Fork - Creation should append initial body after the materialized sub-offset prefix
+Fork - Creation should fork at a JSON sub-offset within a flattened batch
+Fork - Creation should fork at a binary sub-offset anchored mid-stream
+Fork - Creation should fork at a binary sub-offset within an append
+Fork - Creation should fork at a specific offset
+Fork - Creation should fork at head offset (all source data inherited)
+Fork - Creation should fork inheriting content-type when header omitted
+Fork - Creation should inherit content-type when sub-offset is supplied without explicit Content-Type
+Fork - Creation should not inherit producer state across binary sub-offset fork boundary
+Fork - Creation should not inherit producer state across sub-offset fork boundary
+Fork - Creation should return 400 for malformed sub-offset values
+Fork - Creation should return 400 when JSON sub-offset overshoots message count
+Fork - Creation should return 400 when Stream-Fork-Sub-Offset is supplied without Stream-Forked-From (even when value is 0)
+Fork - Creation should return 400 when binary sub-offset overshoots message length
+Fork - Creation should return 400 when forking at offset beyond stream length
+Fork - Creation should return 400 when sub-offset > 0 is supplied without Stream-Fork-Offset
+Fork - Creation should return 400 when sub-offset is supplied on an empty source stream
+Fork - Creation should return 404 when forking a nonexistent stream
+Fork - Creation should return 409 when re-creating a JSON fork with mismatched sub-offset
+Fork - Creation should return 409 when re-creating with mismatched sub-offset
+Fork - Creation should support appending to fork after sub-offset boundary
+Fork - Deletion and Lifecycle rejected fork (content-type mismatch) does not leak a source reference
+Fork - Deletion and Lifecycle should block re-creation of soft-deleted source (PUT returns 409)
+Fork - Deletion and Lifecycle should cascade GC through three levels
+Fork - Deletion and Lifecycle should cascade GC when last fork is deleted
+Fork - Deletion and Lifecycle should preserve data when deleting middle of chain
+Fork - Deletion and Lifecycle should return 409 for fork from soft-deleted source
+Fork - Deletion and Lifecycle should return 409 for fork with content-type mismatch
+Fork - Deletion and Lifecycle should return 410 for DELETE on soft-deleted source
+Fork - Deletion and Lifecycle should return 410 for GET on soft-deleted source
+Fork - Deletion and Lifecycle should return 410 for POST on soft-deleted source
+Fork - Deletion and Lifecycle should soft-delete source while fork exists — fork still reads
+Fork - Edge Cases should fork at every offset position
+Fork - Edge Cases should handle fork then immediately delete source
+Fork - Edge Cases should handle many forks of same stream (10 forks)
+Fork - JSON Mode should fork a JSON stream
+Fork - JSON Mode should read forked JSON across boundary
+Fork - Live Modes should handle long-poll handover at fork offset
+Fork - Live Modes should return inherited data immediately on long-poll
+Fork - Live Modes should stream fork data via SSE
+Fork - Reading should not show source appends after fork
+Fork - Reading should read across fork boundary
+Fork - Reading should read entire fork (source + fork data)
+Fork - Reading should read only fork's own data (starting past fork offset)
+Fork - Reading should read only inherited portion
+Fork - Recursive should append at each level independently
+Fork - Recursive should compose sub-offsets across chained forks
+Fork - Recursive should fork at mid-point of inherited data
+Fork - Recursive should read correctly across three levels
+Fork - TTL and Expiry should expire source with living forks (source goes 410)
+Fork - TTL and Expiry should inherit source TTL value when none specified
