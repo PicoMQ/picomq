@@ -1,12 +1,12 @@
 # Transfers
 
-A transfer moves ownership of a stream from one node to another. No record data moves, everything durable is already in the object store, so a transfer is a handoff of session state: close on the source, reopen on the target. It is the tool behind draining a node for maintenance and rebalancing load.
+A transfer moves ownership of a stream from one node to another. No record data moves, everything durable is already in the object store, so a transfer is a handoff of session state: close on the source, reopen on the target. It is the tool for rebalancing load and for moving chosen streams. Stopping a node does not need it: a clean shutdown hands off every stream at once, see [Failover](/docs/design/failover#clean-shutdown).
 
 ## Starting a transfer
 
-A transfer begins as a metadata command, proposed through the admin API or the CLI. Apply validates it: the stream must exist, the target must be a registered node with slots, and the stream must not already be transferring. What lands in the state is a pending transfer record, the pair of source and target node ids keyed by stream id. Proposing the same transfer twice is a no-op, and proposing a conflicting one is rejected.
+A transfer begins as a metadata command, proposed through the admin API or the CLI. Apply validates it: the stream must be open on the source, the target must be a live node with slots, and the stream must not already be transferring. What lands in the state is a pending transfer record, the pair of source and target node ids keyed by stream id. Proposing the same transfer twice is a no-op, and proposing a conflicting one is rejected.
 
-The pending record changes routing immediately. From this point new requests for the stream route to the target, where opens wait for the handoff to settle instead of failing.
+The pending record changes routing immediately, as long as the target stays live. From this point new requests for the stream route to the target, where opens wait for the handoff to settle instead of failing.
 
 ## The handoff
 
@@ -48,7 +48,7 @@ The target sees the pending record disappear and the stream now placed on it, an
 
 ## During the transfer
 
-Requests that arrive mid-handoff route to the target. An open attempt on the target parks and polls until the transfer settles, up to `10` seconds, so clients see added latency rather than errors. A request that reaches any other node while the transfer is pending is rejected with a conflict, which a client retries against the target.
+Requests that arrive mid-handoff route to the target. An open attempt on the target parks and polls until the transfer settles, up to `10` seconds, so clients see added latency rather than errors. A request that reaches any other node while the transfer is pending is rejected as transferring, HTTP `409` or Kafka `NOT_LEADER_OR_FOLLOWER`, and the client retries against the target.
 
 The unavailability window is the source's drain plus two metadata round trips, typically well under a second for a quiet stream and bounded by the buffered data for a busy one.
 
@@ -56,6 +56,12 @@ The unavailability window is the source's drain plus two metadata round trips, t
 
 Every step is idempotent and driven by state that survives crashes, so the process resumes wherever it stopped.
 
-If the source crashes before completing, the pending record stays in the state. The watcher loop on every node retries once per second, and when the source restarts it finds the pending record, finds the stream already closed by its own WAL recovery, and proposes the completion. If the source crashes after proposing, the completion either landed or it did not, and the retry settles it, with the epoch check making a duplicate completion harmless.
+| Crash | Recovery |
+| --- | --- |
+| Source, before completing | If it restarts, its WAL recovery closes the stream and its watcher completes the transfer. If it stays down, [failover](/docs/design/failover) recovers its WAL and completes the transfer itself |
+| Source, after proposing completion | The completion either landed or it did not. The retry settles it, and the epoch check makes a duplicate harmless |
+| Target, before completion | Routing ignores a transfer to a fenced node. The completion still re-points the stream, and failover then places it on a live node |
+
+The watcher loop on every node retries once per second.
 
 The epoch requirement ties each completion to one specific close. A completion left over from an earlier attempt is rejected once the stream has moved on, so retries are always safe and a stale completion cannot undo later state.

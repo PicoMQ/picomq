@@ -1,6 +1,6 @@
 # Reads
 
-Reads are served by the stream's owning node and answered from the fastest tier that holds the data. A consumer following the tail almost never touches the object store. A consumer replaying history streams out of it through a readahead cache.
+Reads are served by the partition's owning node and answered from the fastest tier that holds the data. A consumer following the tail almost never touches the object store. A consumer replaying history streams out of it through a readahead cache.
 
 Every read is bounded by the stream's confirm offset, the highest offset whose WAL upload has completed. A record becomes readable at the same moment it becomes durable, never before, so a reader cannot observe data that a crash could take back.
 
@@ -54,6 +54,8 @@ With long polling the request parks on a per-stream waiter until new data is dur
 
 The same waiter feeds SSE. A client that accepts `text/event-stream` gets each new record as an event on a held-open response, with the connection recycled after `55` seconds so proxies and load balancers never see an idle connection they might kill. The client reconnects from its last offset without losing anything, because offsets, not the connection, track position.
 
-## Reading through a transfer
+A Kafka fetch with a wait time parks on the same waiter. When a node shuts down it ends every waiting read with `503 unavailable`, or Kafka `NOT_LEADER_OR_FOLLOWER`, so clients reconnect to a live node instead of holding the stopping one open, see [Failover](/docs/design/failover#clean-shutdown).
 
-A read hitting a node that no longer owns the stream gets a `307` redirect to the current owner, as described in [Ownership and routing](/docs/design/ownership). Offsets are stable across the move, so a consumer resumes on the new owner from exactly where it left off. The new owner's caches start cold, and the first reads after a transfer pay object store latency until the tail warms up again.
+## Reading through a move
+
+A read reaching a node that does not own the partition follows the rules in [Ownership and routing](/docs/design/ownership): a `307` to the owner over HTTP, `NOT_LEADER_OR_FOLLOWER` over Kafka. When a partition moves, through a transfer or failover, offsets are stable across the move, so a consumer resumes on the new owner from exactly where it left off. The new owner's caches start cold, and the first reads after a move pay object store latency until the tail warms up again.
