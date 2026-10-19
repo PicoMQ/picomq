@@ -88,6 +88,18 @@ struct Gate {
     op: Arc<tokio::sync::Mutex<()>>,
     tail: Mutex<TailCache>,
     last_timestamp_ms: Mutex<Option<i64>>,
+    persisted: tokio::sync::Mutex<Persisted>,
+}
+
+/// What the persisted producer state covers. A snapshot is persisted once its
+/// appends are durable, never moves back, and never comes from a stream epoch
+/// in which an append failed: those snapshots may hold state that never
+/// became durable.
+#[derive(Default)]
+struct Persisted {
+    epoch: u64,
+    offset: u64,
+    failed: Option<u64>,
 }
 
 impl Gate {
@@ -330,6 +342,8 @@ impl S3StreamService {
                     duplicate: true,
                     pending: None,
                     batches: Vec::new(),
+                    epoch: stream.stream_epoch(),
+                    checkpoint: None,
                 });
             }
             Err(error) => {
@@ -367,13 +381,10 @@ impl S3StreamService {
         entry.producer_state_offset = stream.next_offset();
         self.cache_entry(&key, entry.clone());
 
-        if !entry.numeric_producers.is_empty()
+        let checkpoint = (!entry.numeric_producers.is_empty()
             && prev_offset / PRODUCER_CHECKPOINT_INTERVAL
-                != entry.producer_state_offset / PRODUCER_CHECKPOINT_INTERVAL
-            && let Err(error) = self.put_entry(&key, entry).await
-        {
-            tracing::warn!(%error, log = %key, "producer state checkpoint failed");
-        }
+                != entry.producer_state_offset / PRODUCER_CHECKPOINT_INTERVAL)
+            .then_some(entry);
 
         let notify_offset = stream.next_offset();
         Ok(SubmittedBatchAppend {
@@ -385,6 +396,8 @@ impl S3StreamService {
             duplicate: false,
             pending: Some(pending),
             batches,
+            epoch: stream.stream_epoch(),
+            checkpoint,
         })
     }
 
@@ -393,15 +406,27 @@ impl S3StreamService {
         submitted: SubmittedBatchAppend,
     ) -> Result<AppendBatchResult, ServiceError> {
         if let Some(pending) = submitted.pending {
+            let gate = self.gate_of(&submitted.key);
             if let Err(e) = await_durable(vec![pending]).await {
+                self.forget_failed_append(&submitted.key, &gate, submitted.epoch)
+                    .await;
                 self.streams.reset(submitted.stream_id).await;
                 return Err(ServiceError::durability(e));
             }
 
-            let gate = self.gate_of(&submitted.key);
             gate.tail.lock().unwrap().record_append(&submitted.batches);
             self.waiters
                 .notify_append(&submitted.key, submitted.notify_offset);
+            if let Some(checkpoint) = submitted.checkpoint {
+                self.persist_entry(
+                    &submitted.key,
+                    &gate,
+                    checkpoint,
+                    submitted.epoch,
+                    submitted.notify_offset,
+                )
+                .await;
+            }
         }
 
         Ok(AppendBatchResult {
@@ -639,6 +664,7 @@ impl S3StreamService {
                     op: Arc::new(tokio::sync::Mutex::new(())),
                     tail: Mutex::new(TailCache::default()),
                     last_timestamp_ms: Mutex::new(None),
+                    persisted: tokio::sync::Mutex::new(Persisted::default()),
                 })
             })
             .clone()
@@ -667,10 +693,38 @@ impl S3StreamService {
         self.entries.lock().unwrap().insert(key.to_owned(), entry);
     }
 
-    async fn put_entry(&self, key: &str, entry: LogEntry) -> Result<(), ServiceError> {
-        self.kv.put_kv(key, entry.encode()).await?;
-        self.cache_entry(key, entry);
-        Ok(())
+    /// After a failed append at `epoch`: drops the cached entry, so the next
+    /// load reads only what was persisted and, for Kafka producers, replays
+    /// the log, and stops snapshots from that epoch being persisted.
+    async fn forget_failed_append(&self, key: &str, gate: &Gate, epoch: u64) {
+        self.entries.lock().unwrap().remove(key);
+        gate.persisted.lock().await.failed = Some(epoch);
+    }
+
+    /// Persists producer state that covers the log up to `offset` at stream
+    /// `epoch`, once those appends are durable. A failure only costs
+    /// deduplication across a restart.
+    async fn persist_entry(
+        &self,
+        key: &str,
+        gate: &Gate,
+        entry: LogEntry,
+        epoch: u64,
+        offset: u64,
+    ) {
+        let mut persisted = gate.persisted.lock().await;
+        if persisted.failed == Some(epoch) || (epoch, offset) < (persisted.epoch, persisted.offset)
+        {
+            return;
+        }
+
+        match self.kv.put_kv(key, entry.encode()).await {
+            Ok(_) => {
+                persisted.epoch = epoch;
+                persisted.offset = offset;
+            }
+            Err(error) => tracing::warn!(%error, log = %key, "producer state not persisted"),
+        }
     }
 
     async fn batches_from(
@@ -850,17 +904,32 @@ impl Append<'_> {
         }
 
         let updated = apply_append_state(entry.clone(), stream_seq, producer, decision);
-        if updated != entry {
-            service.put_entry(&key, updated).await?;
+        let changed = updated != entry;
+        if changed {
+            service.cache_entry(&key, updated.clone());
         }
 
         let next_offset = OffsetToken::of_record_offset(stream.next_offset());
         drop(op);
 
         if let Err(e) = await_durable(pendings).await {
+            service
+                .forget_failed_append(&key, &gate, stream.stream_epoch())
+                .await;
             service.streams.reset(entry.stream_id).await;
             gate.reset();
             return Err(ServiceError::durability(e));
+        }
+        if changed {
+            service
+                .persist_entry(
+                    &key,
+                    &gate,
+                    updated,
+                    stream.stream_epoch(),
+                    next_offset.record_offset(),
+                )
+                .await;
         }
 
         if !batches.is_empty() {

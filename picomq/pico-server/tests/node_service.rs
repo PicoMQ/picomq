@@ -2143,3 +2143,223 @@ async fn a_failed_append_reopens_the_stream_at_a_new_epoch() {
 
     node.close().await;
 }
+
+/// A node WAL that can be told to fail its next append before writing it.
+struct Faulty {
+    wal: picomq_server::wal::ObjectWal,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl picomq_server::wal::Wal for Faulty {
+    fn location(&self) -> String {
+        self.wal.location()
+    }
+
+    async fn open(
+        &self,
+        node_id: i32,
+        epoch: i64,
+    ) -> Result<Arc<dyn s3stream::WriteAheadLogTrait>, s3stream::Error> {
+        Ok(Arc::new(FaultyLog {
+            log: self.wal.open(node_id, epoch).await?,
+            fail: self.fail.clone(),
+        }))
+    }
+
+    async fn take_over(
+        &self,
+        request: &s3stream::FailoverRequest,
+    ) -> Result<Arc<dyn s3stream::WriteAheadLogTrait>, s3stream::Error> {
+        self.wal.take_over(request).await
+    }
+}
+
+struct FaultyLog {
+    log: Arc<dyn s3stream::WriteAheadLogTrait>,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl s3stream::WriteAheadLogTrait for FaultyLog {
+    async fn start(&self) -> Result<(), s3stream::WalError> {
+        self.log.start().await
+    }
+
+    async fn shutdown_gracefully(&self) {
+        self.log.shutdown_gracefully().await
+    }
+
+    fn metadata(&self) -> s3stream_wal::WalMetadata {
+        self.log.metadata()
+    }
+
+    fn uri(&self) -> &str {
+        self.log.uri()
+    }
+
+    fn submit(
+        &self,
+        record: s3stream::StreamRecordBatch,
+    ) -> Result<s3stream_wal::PendingAppend, s3stream::WalError> {
+        if self.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let failed = std::io::Error::other("injected write failure");
+            return Ok(s3stream_wal::PendingAppend {
+                durable: Box::pin(async move { Err(s3stream::WalError::Io(failed)) }),
+            });
+        }
+        self.log.submit(record)
+    }
+
+    fn set_append_listener(&self, listener: s3stream_wal::AppendListener) {
+        self.log.set_append_listener(listener)
+    }
+
+    async fn get(
+        &self,
+        offset: s3stream_wal::RecordOffset,
+    ) -> Result<s3stream::StreamRecordBatch, s3stream::WalError> {
+        self.log.get(offset).await
+    }
+
+    async fn get_range(
+        &self,
+        start: s3stream_wal::RecordOffset,
+        end: s3stream_wal::RecordOffset,
+    ) -> Result<Vec<s3stream::StreamRecordBatch>, s3stream::WalError> {
+        self.log.get_range(start, end).await
+    }
+
+    fn confirm_offset(&self) -> s3stream_wal::RecordOffset {
+        self.log.confirm_offset()
+    }
+
+    fn recover(&self) -> s3stream_wal::RecoverStream {
+        self.log.recover()
+    }
+
+    async fn reset(&self) -> Result<(), s3stream::WalError> {
+        self.log.reset().await
+    }
+
+    async fn trim(&self, offset: s3stream_wal::RecordOffset) -> Result<(), s3stream::WalError> {
+        self.log.trim(offset).await
+    }
+}
+
+async fn faulty_node() -> (PicoNode, Arc<std::sync::atomic::AtomicBool>) {
+    let (sink, views) = LocalSink::new();
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wal = Faulty {
+        wal: picomq_server::wal::ObjectWal::new(
+            "picomq",
+            "",
+            Arc::new(MemoryObjectStorage::new(1)),
+        ),
+        fail: fail.clone(),
+    };
+    let node = PicoNode::start_with_wal(
+        NodeConfig {
+            node_id: 1,
+            node_epoch: 1,
+            ..Default::default()
+        },
+        Arc::new(sink),
+        views,
+        Arc::new(MemoryObjectStorage::new(0)),
+        Arc::new(wal),
+        None,
+    )
+    .await
+    .unwrap();
+    (node, fail)
+}
+
+async fn values(topics: &Topics, name: &str) -> Vec<Bytes> {
+    topics
+        .read(name, 0, OffsetToken::beginning(), 1 << 20, 0)
+        .await
+        .unwrap()
+        .records
+        .into_iter()
+        .map(|record| record.record.value)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_retry_after_a_failed_append_is_written_not_deduplicated() {
+    use picomq_server::types::Producer;
+
+    let (node, fail) = faulty_node().await;
+    let topics = node.topics();
+    topics
+        .create(create("/retried", "text/plain"))
+        .await
+        .unwrap();
+    let send = |payload: &'static [u8], seq: u64| AppendCommand {
+        producer: Some(Producer::new("p", 0, seq).unwrap()),
+        ..append(&[payload], "text/plain")
+    };
+
+    topics
+        .append("/retried", 0, send(b"zero", 0))
+        .await
+        .unwrap();
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let failed = topics
+        .append("/retried", 0, send(b"one", 1))
+        .await
+        .unwrap_err();
+    assert_eq!(failed.kind, ErrorKind::Durability);
+
+    let retried = topics.append("/retried", 0, send(b"one", 1)).await.unwrap();
+    assert!(
+        retried.applied,
+        "the retry is written, not acked as a duplicate"
+    );
+    assert_eq!(values(&topics, "/retried").await, ["zero", "one"]);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_kafka_retry_after_a_failed_append_is_written_not_deduplicated() {
+    let (node, fail) = faulty_node().await;
+    let topics = node.topics();
+    topics
+        .create(create("/produced", "application/octet-stream"))
+        .await
+        .unwrap();
+
+    produce(
+        &topics,
+        "/produced",
+        kafka_batch(Some((1, 0, 0)), &[b"zero"]),
+    )
+    .await
+    .unwrap();
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let failed = produce(
+        &topics,
+        "/produced",
+        kafka_batch(Some((1, 0, 1)), &[b"one"]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failed.kind, ErrorKind::Durability);
+
+    let retried = produce(
+        &topics,
+        "/produced",
+        kafka_batch(Some((1, 0, 1)), &[b"one"]),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !retried.duplicate,
+        "the retry is written, not acked as a duplicate"
+    );
+    assert_eq!(values(&topics, "/produced").await, ["zero", "one"]);
+
+    node.close().await;
+}
