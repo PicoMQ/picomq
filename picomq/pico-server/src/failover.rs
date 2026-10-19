@@ -108,13 +108,13 @@ impl Failover {
                 self.handle
                     .complete_transfer(stream_id, epoch)
                     .await
-                    .map_err(|error| ServiceError::from(error.to_stream_error()))
+                    .map_err(ServiceError::from)
             } else {
                 self.handle
                     .place_stream(stream_id, None)
                     .await
                     .map(|_| ())
-                    .map_err(|error| ServiceError::from(error.to_stream_error()))
+                    .map_err(ServiceError::from)
             };
 
             if let Err(error) = moved {

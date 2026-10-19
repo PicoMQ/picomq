@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -2147,7 +2148,7 @@ async fn a_failed_append_reopens_the_stream_at_a_new_epoch() {
 /// A node WAL that can be told to fail its next append before writing it.
 struct Faulty {
     wal: picomq_server::wal::ObjectWal,
-    fail: Arc<std::sync::atomic::AtomicBool>,
+    fail: Arc<AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -2177,7 +2178,7 @@ impl picomq_server::wal::Wal for Faulty {
 
 struct FaultyLog {
     log: Arc<dyn s3stream::WriteAheadLogTrait>,
-    fail: Arc<std::sync::atomic::AtomicBool>,
+    fail: Arc<AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -2202,7 +2203,7 @@ impl s3stream::WriteAheadLogTrait for FaultyLog {
         &self,
         record: s3stream::StreamRecordBatch,
     ) -> Result<s3stream_wal::PendingAppend, s3stream::WalError> {
-        if self.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        if self.fail.swap(false, Ordering::SeqCst) {
             let failed = std::io::Error::other("injected write failure");
             return Ok(s3stream_wal::PendingAppend {
                 durable: Box::pin(async move { Err(s3stream::WalError::Io(failed)) }),
@@ -2247,9 +2248,9 @@ impl s3stream::WriteAheadLogTrait for FaultyLog {
     }
 }
 
-async fn faulty_node() -> (PicoNode, Arc<std::sync::atomic::AtomicBool>) {
+async fn faulty_node() -> (PicoNode, Arc<AtomicBool>) {
     let (sink, views) = LocalSink::new();
-    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fail = Arc::new(AtomicBool::new(false));
     let wal = Faulty {
         wal: picomq_server::wal::ObjectWal::new(
             "picomq",
@@ -2305,7 +2306,7 @@ async fn a_retry_after_a_failed_append_is_written_not_deduplicated() {
         .append("/retried", 0, send(b"zero", 0))
         .await
         .unwrap();
-    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    fail.store(true, Ordering::SeqCst);
     let failed = topics
         .append("/retried", 0, send(b"one", 1))
         .await
@@ -2338,7 +2339,7 @@ async fn a_kafka_retry_after_a_failed_append_is_written_not_deduplicated() {
     )
     .await
     .unwrap();
-    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    fail.store(true, Ordering::SeqCst);
     let failed = produce(
         &topics,
         "/produced",
@@ -2360,6 +2361,53 @@ async fn a_kafka_retry_after_a_failed_append_is_written_not_deduplicated() {
         "the retry is written, not acked as a duplicate"
     );
     assert_eq!(values(&topics, "/produced").await, ["zero", "one"]);
+
+    node.close().await;
+}
+
+struct Outage {
+    sink: LocalSink,
+    down: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl CommandSink for Outage {
+    async fn propose(&self, command: MetadataCommand) -> Result<Proposed, MetadataError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(MetadataError::Unavailable {
+                message: "store down".into(),
+            });
+        }
+        self.sink.propose(command).await
+    }
+
+    async fn sync(&self) -> Result<(), MetadataError> {
+        self.sink.sync().await
+    }
+}
+
+#[tokio::test]
+async fn a_metadata_outage_is_reported_as_unavailable() {
+    let (sink, views) = LocalSink::new();
+    let outage = Arc::new(Outage {
+        sink,
+        down: Default::default(),
+    });
+    let node = start_node(1, outage.clone(), views).await;
+    let topics = node.topics();
+
+    outage.down.store(true, Ordering::SeqCst);
+    let error = topics
+        .create(CreateCommand::new("/during", "text/plain"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Unavailable, "{error}");
+
+    outage.down.store(false, Ordering::SeqCst);
+    topics
+        .create(CreateCommand::new("/during", "text/plain"))
+        .await
+        .unwrap();
 
     node.close().await;
 }

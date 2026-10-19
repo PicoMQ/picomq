@@ -260,15 +260,6 @@ impl MetadataNodeHandle {
         }
     }
 
-    async fn propose(&self, command: MetadataCommand) -> Result<MetadataResult, StreamError> {
-        Ok(self
-            .sink
-            .propose(command)
-            .await
-            .map_err(|e| e.to_stream_error())?
-            .result)
-    }
-
     /// Proposes an engine command, retrying while the metadata store is
     /// unavailable. Engine commands are idempotent or deduplicated, and the
     /// engine treats any error as fatal for its upload pipeline.
@@ -301,8 +292,10 @@ impl MetadataNodeHandle {
     }
 }
 
-fn unexpected_result(result: MetadataResult) -> StreamError {
-    StreamError::Unexpected(format!("unexpected metadata result {result:?}"))
+fn unexpected_result(result: MetadataResult) -> MetadataError {
+    MetadataError::Unexpected {
+        message: format!("unexpected metadata result {result:?}"),
+    }
 }
 
 #[derive(Clone)]
@@ -330,7 +323,7 @@ impl StreamManagerTrait for MetadataStreamManager {
             .await?
         {
             MetadataResult::Id(id) => Ok(id),
-            other => Err(unexpected_result(other)),
+            other => Err(unexpected_result(other).to_stream_error()),
         }
     }
 
@@ -350,7 +343,7 @@ impl StreamManagerTrait for MetadataStreamManager {
             .await?
         {
             MetadataResult::Stream(metadata) => Ok(metadata),
-            other => Err(unexpected_result(other)),
+            other => Err(unexpected_result(other).to_stream_error()),
         }
     }
 
@@ -412,7 +405,7 @@ impl ObjectManagerTrait for MetadataObjectManager {
             .await?
         {
             MetadataResult::Id(id) => Ok(id),
-            other => Err(unexpected_result(other)),
+            other => Err(unexpected_result(other).to_stream_error()),
         }
     }
 
@@ -506,12 +499,8 @@ pub struct MetadataKvClient {
 }
 
 impl MetadataKvClient {
-    pub async fn sync(&self) -> Result<(), StreamError> {
-        self.node
-            .sink
-            .sync()
-            .await
-            .map_err(|error| error.to_stream_error())
+    pub async fn sync(&self) -> Result<(), MetadataError> {
+        self.node.sink.sync().await
     }
 
     pub fn get_kv(&self, key: &str) -> Option<Bytes> {
@@ -522,27 +511,27 @@ impl MetadataKvClient {
         self.node.views.load().state.list_kv(prefix)
     }
 
-    pub async fn put_kv(&self, key: &str, value: Bytes) -> Result<Bytes, StreamError> {
+    pub async fn put_kv(&self, key: &str, value: Bytes) -> Result<Bytes, MetadataError> {
         let command = MetadataCommand::PutKv {
             proposer: self.node.proposer(),
             key: key.to_owned(),
             value,
         };
 
-        match self.node.propose(command).await? {
+        match self.node.sink.propose(command).await?.result {
             MetadataResult::Value(Some(value)) => Ok(value),
             other => Err(unexpected_result(other)),
         }
     }
 
-    pub async fn put_kv_if_absent(&self, key: &str, value: Bytes) -> Result<Bytes, StreamError> {
+    pub async fn put_kv_if_absent(&self, key: &str, value: Bytes) -> Result<Bytes, MetadataError> {
         let command = MetadataCommand::PutKvIfAbsent {
             proposer: self.node.proposer(),
             key: key.to_owned(),
             value,
         };
 
-        match self.node.propose(command).await? {
+        match self.node.sink.propose(command).await?.result {
             MetadataResult::Value(Some(value)) => Ok(value),
             other => Err(unexpected_result(other)),
         }
@@ -553,7 +542,7 @@ impl MetadataKvClient {
         key: &str,
         expected: &Bytes,
         value: Bytes,
-    ) -> Result<Option<Bytes>, StreamError> {
+    ) -> Result<Option<Bytes>, MetadataError> {
         self.conditional(MetadataCommand::PutKvIfMatches {
             proposer: self.node.proposer(),
             key: key.to_owned(),
@@ -563,13 +552,13 @@ impl MetadataKvClient {
         .await
     }
 
-    pub async fn del_kv(&self, key: &str) -> Result<Option<Bytes>, StreamError> {
+    pub async fn del_kv(&self, key: &str) -> Result<Option<Bytes>, MetadataError> {
         let command = MetadataCommand::DeleteKv {
             proposer: self.node.proposer(),
             key: key.to_owned(),
         };
 
-        match self.node.propose(command).await? {
+        match self.node.sink.propose(command).await?.result {
             MetadataResult::Value(value) => Ok(value),
             other => Err(unexpected_result(other)),
         }
@@ -579,7 +568,7 @@ impl MetadataKvClient {
         &self,
         key: &str,
         expected: &Bytes,
-    ) -> Result<Option<Bytes>, StreamError> {
+    ) -> Result<Option<Bytes>, MetadataError> {
         self.conditional(MetadataCommand::DeleteKvIfMatches {
             proposer: self.node.proposer(),
             key: key.to_owned(),
@@ -588,14 +577,14 @@ impl MetadataKvClient {
         .await
     }
 
-    async fn conditional(&self, command: MetadataCommand) -> Result<Option<Bytes>, StreamError> {
+    async fn conditional(&self, command: MetadataCommand) -> Result<Option<Bytes>, MetadataError> {
         match self.node.sink.propose(command).await {
             Ok(proposed) => match proposed.result {
                 MetadataResult::Value(value) => Ok(value),
                 other => Err(unexpected_result(other)),
             },
             Err(error) if error.is_redundant() => Ok(None),
-            Err(error) => Err(error.to_stream_error()),
+            Err(error) => Err(error),
         }
     }
 }

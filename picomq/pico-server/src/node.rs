@@ -134,8 +134,7 @@ impl PicoNode {
                 wal: wal.location(),
             },
         )
-        .await
-        .map_err(|e| e.to_stream_error())?;
+        .await?;
 
         let fenced = watch::Sender::new(false);
         let liveness = spawn_liveness(handle.clone(), config.heartbeat_interval, fenced.clone());
@@ -288,8 +287,7 @@ impl PicoNode {
 
         self.handle
             .propose_transfer(stream_id, row.node_id, to_node)
-            .await
-            .map_err(|e| e.to_stream_error())?;
+            .await?;
         Ok(stream_id)
     }
 

@@ -49,10 +49,7 @@ impl Streams {
     }
 
     pub async fn place(&self, stream_id: u64, owner: Option<i32>) -> Result<(), ServiceError> {
-        self.node
-            .place_stream(stream_id, owner)
-            .await
-            .map_err(|error| ServiceError::from(error.to_stream_error()))?;
+        self.node.place_stream(stream_id, owner).await?;
 
         Ok(())
     }
