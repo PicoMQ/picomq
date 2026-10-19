@@ -8,7 +8,7 @@ use picomq_auth::Operation;
 use picomq_server::SchemaFormat;
 use serde_json::json;
 
-use super::{CommonState, gate};
+use super::CommonState;
 
 pub const SCHEMA_PATH_PREFIX: &str = "/_schemas";
 
@@ -25,14 +25,7 @@ async fn put_schema(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(response) = gate(
-        state.authorizer.as_deref(),
-        &headers,
-        Operation::Create,
-        Some(&name),
-    )
-    .await
-    {
+    if let Err(response) = state.admit_schema(&headers, Operation::Create, &name).await {
         return *response;
     }
     let Some(registry) = state.topics.schema_registry() else {
@@ -53,14 +46,7 @@ async fn get_schema(
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = gate(
-        state.authorizer.as_deref(),
-        &headers,
-        Operation::StreamInspect,
-        Some(&name),
-    )
-    .await
-    {
+    if let Err(response) = state.admit_schema(&headers, Operation::Head, &name).await {
         return *response;
     }
     let Some(registry) = state.topics.schema_registry() else {
@@ -85,14 +71,7 @@ async fn delete_schema(
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = gate(
-        state.authorizer.as_deref(),
-        &headers,
-        Operation::Delete,
-        Some(&name),
-    )
-    .await
-    {
+    if let Err(response) = state.admit_schema(&headers, Operation::Delete, &name).await {
         return *response;
     }
     let Some(registry) = state.topics.schema_registry() else {

@@ -131,12 +131,17 @@ async fn dispatch(
     request: axum::extract::Request,
 ) -> Response {
     let (parts, body) = request.into_parts();
+    let body = match axum::body::to_bytes(body, frontend.max_request_size).await {
+        Ok(body) => body,
+        Err(_) => return fail(413, "content too large"),
+    };
     let permit = match crate::auth::gate(
         frontend.authorizer.as_deref(),
         Audience::DurableStreams,
         &parts.method,
         &parts.uri,
         &parts.headers,
+        &body,
     )
     .await
     {
@@ -150,10 +155,6 @@ async fn dispatch(
     let requested = match partition::requested(&parts.uri) {
         Ok(requested) => requested,
         Err(e) => return service_error_response(e),
-    };
-    let body = match axum::body::to_bytes(body, frontend.max_request_size).await {
-        Ok(body) => body,
-        Err(_) => return fail(413, "content too large"),
     };
     if let Some(response) = route(
         frontend.ownership.as_ref(),

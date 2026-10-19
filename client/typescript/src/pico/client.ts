@@ -373,6 +373,10 @@ export class PicoClient implements StreamApi {
     )
   }
 
+  async deleteGroup(group: string, options?: CallOptions): Promise<void> {
+    await this.call('DELETE', groupPath(group), '', undefined, [204], options?.signal)
+  }
+
   async listGroups(options?: CallOptions): Promise<GroupSummary[]> {
     return this.retry.run(
       () => this.listGroupsOnce(options?.signal),

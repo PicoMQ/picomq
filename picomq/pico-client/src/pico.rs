@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use picomq_protocol::WireRequest;
 use picomq_protocol::groups::{
-    AssignmentRequest, AssignmentResponse, CommitRequest, DescribeRequest, FetchOffsetsRequest,
-    GroupDescription, GroupListing, GroupSummary, HeartbeatRequest, JoinRequest, JoinResponse,
-    LeaveRequest, ListGroupsRequest, MemberFence, Offsets, OffsetsResponse,
+    AssignmentRequest, AssignmentResponse, CommitRequest, DeleteGroupRequest, DescribeRequest,
+    FetchOffsetsRequest, GroupDescription, GroupListing, GroupSummary, HeartbeatRequest,
+    JoinRequest, JoinResponse, LeaveRequest, ListGroupsRequest, MemberFence, Offsets,
+    OffsetsResponse,
 };
 use picomq_protocol::pico::{
     AppendRequest, AppendResponse, CloseRequest, CloseResponse, CreateRequest, CreateResponse,
@@ -170,6 +171,13 @@ impl PicoClient {
         };
         let response = self.retry.run(|| self.call(request.encode())).await?;
         GroupDescription::decode(&response.bytes().await?).map_err(invalid_response)
+    }
+
+    pub async fn delete_group(&self, group: &str) -> Result<()> {
+        let request = DeleteGroupRequest {
+            group: group.to_owned(),
+        };
+        self.call(request.encode()).await.map(drop)
     }
 
     pub async fn list_groups(&self) -> Result<Vec<GroupSummary>> {

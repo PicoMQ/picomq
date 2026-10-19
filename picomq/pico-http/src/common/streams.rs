@@ -3,11 +3,12 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use bytes::Bytes;
 use picomq_auth::Operation;
 use picomq_server::{Topic, UpdateTopicCommand};
 use serde_json::{Value, json};
 
-use super::{CommonState, gate, service_error};
+use super::{CommonState, service_error};
 use crate::route::route;
 
 pub const STREAM_CONFIG_PATH_PREFIX: &str = "/_streams";
@@ -23,17 +24,13 @@ async fn get_config(
     uri: Uri,
     headers: HeaderMap,
 ) -> Response {
-    let name = format!("/{name}");
-    if let Err(response) = gate(
-        state.authorizer.as_deref(),
-        &headers,
-        Operation::StreamInspect,
-        Some(&name),
-    )
-    .await
+    let name = match state
+        .admit_stream(&headers, Operation::Head, &format!("/{name}"))
+        .await
     {
-        return *response;
-    }
+        Ok(name) => name,
+        Err(response) => return *response,
+    };
     if let Some(response) = route(
         state.ownership.as_ref(),
         &state.topics,
@@ -60,19 +57,15 @@ async fn patch_config(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Bytes,
 ) -> Response {
-    let name = format!("/{name}");
-    if let Err(response) = gate(
-        state.authorizer.as_deref(),
-        &headers,
-        Operation::Create,
-        Some(&name),
-    )
-    .await
+    let name = match state
+        .admit_stream(&headers, Operation::Create, &format!("/{name}"))
+        .await
     {
-        return *response;
-    }
+        Ok(name) => name,
+        Err(response) => return *response,
+    };
     if let Some(response) = route(
         state.ownership.as_ref(),
         &state.topics,
@@ -86,6 +79,9 @@ async fn patch_config(
     {
         return response;
     }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return bad_request("expected a JSON object");
+    };
     let Some(obj) = body.as_object() else {
         return bad_request("expected a JSON object");
     };

@@ -23,11 +23,12 @@ pub enum Operation {
     StreamInspect,
     TransferStream,
     UpdateNodeSlots,
+    DeleteGroup,
 }
 
 impl Operation {
     /// Every operation. Keep in declaration order when adding variants.
-    pub const ALL: [Operation; 16] = [
+    pub const ALL: [Operation; 17] = [
         Operation::Read,
         Operation::Head,
         Operation::List,
@@ -44,6 +45,7 @@ impl Operation {
         Operation::StreamInspect,
         Operation::TransferStream,
         Operation::UpdateNodeSlots,
+        Operation::DeleteGroup,
     ];
 
     pub fn is_stream_read(self) -> bool {
@@ -73,7 +75,10 @@ impl Operation {
     }
 
     pub fn is_admin_write(self) -> bool {
-        matches!(self, Self::TransferStream | Self::UpdateNodeSlots)
+        matches!(
+            self,
+            Self::TransferStream | Self::UpdateNodeSlots | Self::DeleteGroup
+        )
     }
 }
 
@@ -296,6 +301,19 @@ impl Scope {
             ResourceMatcher::Exact(exact) => canonical(exact) == name,
             ResourceMatcher::Prefix(prefix) => name.starts_with(&canonical(prefix)),
         })
+    }
+
+    /// True when every stream `child` allows is allowed here, comparing the
+    /// canonical names stream access is checked on.
+    pub fn contains_streams(&self, child: &ResourceSet) -> bool {
+        let canonical_set = |set: &ResourceSet| {
+            ResourceSet::any_of(set.matchers().iter().map(|matcher| match matcher {
+                ResourceMatcher::Exact(exact) => ResourceMatcher::Exact(canonical(exact)),
+                ResourceMatcher::Prefix(prefix) => ResourceMatcher::Prefix(canonical(prefix)),
+            }))
+        };
+
+        canonical_set(&self.streams).contains_set(&canonical_set(child))
     }
 
     pub fn allows_token_id(&self, id: &str) -> bool {

@@ -438,6 +438,11 @@ func (c *PicoClient) DescribeGroup(ctx context.Context, group string) (descripti
 	return
 }
 
+func (c *PicoClient) DeleteGroup(ctx context.Context, group string) error {
+	_, err := c.groupCall(ctx, http.MethodDelete, c.core.groupURL(nil, group), nil, http.StatusNoContent)
+	return err
+}
+
 func (c *PicoClient) ListGroups(ctx context.Context) (groups []GroupSummary, err error) {
 	err = c.core.run(ctx, func() error {
 		data, callErr := c.groupCall(ctx, http.MethodGet, c.core.groupURL(nil), nil, http.StatusOK)

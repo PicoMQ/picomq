@@ -579,3 +579,22 @@ async fn groups_are_deleted_only_when_empty() {
         .unwrap();
     assert_eq!(described.status(), 404);
 }
+
+#[tokio::test]
+async fn both_spellings_of_a_stream_are_one_subscription() {
+    let server = common::picomq_server().await;
+    let base = server.base_url.clone();
+    let client = Client::new();
+    create(&client, &base, "/s/a").await;
+
+    let (status, joined) = join(
+        &client,
+        &base,
+        "spellings",
+        json!({ "subscription": ["/s/a", "/s.a"] }),
+    )
+    .await;
+
+    assert_eq!(status, 200, "{joined}");
+    assert_eq!(sorted(&joined["assignment"]), ["/s/a"]);
+}

@@ -132,6 +132,8 @@ async fn operations_join_commit_fetch_describe_and_leave() {
     );
     let listed = client.list_groups().await.unwrap();
     assert!(listed.iter().any(|g| g.group == "ops"));
+    let occupied = client.delete_group("ops").await.unwrap_err();
+    assert_eq!(occupied.code, "conflict");
 
     client
         .leave_group("ops", &joined.member_id, None)
@@ -140,6 +142,10 @@ async fn operations_join_commit_fetch_describe_and_leave() {
     assert_eq!(client.describe_group("ops").await.unwrap().state, "Empty");
     let gone = client.heartbeat("ops", &fence).await.unwrap_err();
     assert_eq!(gone.code, "unknown_member");
+
+    client.delete_group("ops").await.unwrap();
+    let deleted = client.describe_group("ops").await.unwrap_err();
+    assert_eq!(deleted.code, "not_found");
 
     server.shutdown().await;
 }

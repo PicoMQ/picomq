@@ -259,6 +259,7 @@ async fn stream_config_redirects_to_remote_owner() {
         Arc::new(RemoteOwnership),
         picomq_http::RoutingMode::Redirect,
         None,
+        picomq_auth::Audience::Pico,
         32 * 1024 * 1024,
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

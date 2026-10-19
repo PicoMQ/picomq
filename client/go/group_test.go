@@ -135,6 +135,10 @@ var _ = ginkgo.Describe("Pico groups", func() {
 				Expect(r.URL.EscapedPath()).To(Equal("/_groups/orders%2Feu/members/m%2F1"))
 				Expect(r.URL.Query().Get("instanceId")).To(Equal("i-1"))
 				w.WriteHeader(http.StatusNoContent)
+			case 10:
+				Expect(r.Method).To(Equal(http.MethodDelete))
+				Expect(r.URL.EscapedPath()).To(Equal("/_groups/orders%2Feu"))
+				w.WriteHeader(http.StatusNoContent)
 			}
 		}))
 		defer server.Close()
@@ -192,7 +196,8 @@ var _ = ginkgo.Describe("Pico groups", func() {
 		Expect(groups).To(Equal([]GroupSummary{{Group: "orders/eu", State: "Stable"}}))
 
 		Expect(client.LeaveGroup(ctx, "orders/eu", "m/1", "i-1")).To(Succeed())
-		Expect(calls.Load()).To(Equal(int32(9)))
+		Expect(client.DeleteGroup(ctx, "orders/eu")).To(Succeed())
+		Expect(calls.Load()).To(Equal(int32(10)))
 	})
 
 	ginkgo.It("maps group errors and rejects malformed responses", func() {

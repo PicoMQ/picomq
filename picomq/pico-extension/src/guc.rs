@@ -175,7 +175,7 @@ pub(crate) fn register() {
     number(c"pico.threads", c"Worker threads", &THREADS, 1, 256);
     GucRegistry::define_bool_guc(
         c"pico.insecure_allow_remote",
-        c"Permit non-loopback listeners with auth off",
+        c"Permit unauthenticated non-loopback listeners: Kafka always, HTTP with auth off",
         c"",
         &INSECURE_ALLOW_REMOTE,
         GucContext::Postmaster,

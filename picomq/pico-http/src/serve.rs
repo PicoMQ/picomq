@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use picomq_auth::Authorizer;
+use picomq_auth::{Audience, Authorizer};
 use picomq_server::PicoNode;
 use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
 use tokio::net::TcpListener;
@@ -98,11 +98,16 @@ pub async fn serve(
     listener: TcpListener,
     options: ServeOptions,
 ) -> std::io::Result<RunningServer> {
+    let audience = match options.protocol {
+        HttpProtocol::Pico => Audience::Pico,
+        HttpProtocol::Ds => Audience::DurableStreams,
+    };
     let common_router = common::router(
         node.topics(),
         node.ownership(),
         options.routing_mode,
         options.authorizer.clone(),
+        audience,
         options.max_request_size,
     );
     let protocol_router = match options.protocol {

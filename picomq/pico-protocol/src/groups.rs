@@ -283,6 +283,17 @@ impl DescribeRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteGroupRequest {
+    pub group: String,
+}
+
+impl DeleteGroupRequest {
+    pub fn encode(&self) -> WireRequest {
+        WireRequest::new(Method::DELETE, group_path(&self.group), &[204])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberDescription {
     pub member_id: String,
     pub instance_id: Option<String>,
@@ -627,6 +638,14 @@ mod tests {
             wire.path_and_query,
             "/_groups/g/members/m%2F1?generation=3&instanceId=i-1"
         );
+
+        let wire = DeleteGroupRequest {
+            group: "orders/eu".to_owned(),
+        }
+        .encode();
+        assert_eq!(wire.method, Method::DELETE);
+        assert_eq!(wire.path_and_query, "/_groups/orders%2Feu");
+        assert_eq!(wire.ok, [204]);
     }
 
     #[test]

@@ -170,6 +170,17 @@ describe('PicoClient groups', () => {
     expect(leave.url).toBe('http://example.test/_groups/g/members/m%2F1?instanceId=i-1')
   })
 
+  it('deletes a group', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetch)
+
+    await new PicoClient('http://example.test').deleteGroup('orders/eu')
+
+    const deleted = request(fetch, 0)
+    expect(deleted.method).toBe('DELETE')
+    expect(deleted.url).toBe('http://example.test/_groups/orders%2Feu')
+  })
+
   it('commits with an optional fence and fetches offsets per stream', async () => {
     const fetch = vi
       .fn()

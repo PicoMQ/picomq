@@ -207,6 +207,7 @@ fn operation_tag(op: Operation) -> u8 {
         Operation::StreamInspect => 14,
         Operation::TransferStream => 15,
         Operation::UpdateNodeSlots => 16,
+        Operation::DeleteGroup => 17,
     }
 }
 
@@ -228,6 +229,7 @@ fn operation_from_tag(tag: u8) -> Result<Operation, AuthError> {
         14 => Operation::StreamInspect,
         15 => Operation::TransferStream,
         16 => Operation::UpdateNodeSlots,
+        17 => Operation::DeleteGroup,
         _ => return Err(AuthError::Malformed),
     })
 }

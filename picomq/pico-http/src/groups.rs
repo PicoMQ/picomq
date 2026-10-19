@@ -98,7 +98,16 @@ impl GroupState {
         }
     }
 
-    fn allow(
+    /// A cluster-wide group operation: listing, describing, deleting.
+    fn allow_admin(&self, caller: &Option<Caller>, op: Operation) -> Result<(), Box<Response>> {
+        let (Some(authorizer), Some(caller)) = (&self.authorizer, caller) else {
+            return Ok(());
+        };
+        caller.authorize(authorizer, op, None)
+    }
+
+    /// `op` on every stream the request names. Naming none needs nothing.
+    fn allow_streams(
         &self,
         caller: &Option<Caller>,
         op: Operation,
@@ -107,9 +116,6 @@ impl GroupState {
         let (Some(authorizer), Some(caller)) = (&self.authorizer, caller) else {
             return Ok(());
         };
-        if streams.is_empty() {
-            return caller.authorize(authorizer, op, None);
-        }
         streams
             .iter()
             .try_for_each(|stream| caller.authorize(authorizer, op, Some(stream)))
@@ -172,7 +178,7 @@ impl GroupState {
             .subscription(group, member)
             .await
             .map_err(|error| Box::new(group_error(error)))?;
-        self.allow(caller, Operation::Read, &subscription)
+        self.allow_streams(caller, Operation::Read, &subscription)
     }
 }
 
@@ -181,7 +187,7 @@ async fn list(State(state): State<GroupState>, headers: HeaderMap) -> Response {
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow(&caller, Operation::StreamInspect, &[]) {
+    if let Err(response) = state.allow_admin(&caller, Operation::StreamInspect) {
         return *response;
     }
     let groups = state
@@ -207,7 +213,7 @@ async fn describe(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow(&caller, Operation::StreamInspect, &[]) {
+    if let Err(response) = state.allow_admin(&caller, Operation::StreamInspect) {
         return *response;
     }
     if let Some(response) = state.redirect(&uri, &group).await {
@@ -229,7 +235,7 @@ async fn remove(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow(&caller, Operation::Delete, &[]) {
+    if let Err(response) = state.allow_admin(&caller, Operation::DeleteGroup) {
         return *response;
     }
     if let Some(response) = state.redirect(&uri, &group).await {
@@ -260,12 +266,15 @@ async fn join(
         Ok(subscription) => subscription,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow(&caller, Operation::Read, &subscription) {
+    if let Err(response) = state.allow_streams(&caller, Operation::Read, &subscription) {
         return *response;
     }
-    for name in &subscription {
-        if let Err(response) = state.topic(name).await {
-            return *response;
+    let mut subscribed = Vec::with_capacity(subscription.len());
+    for name in subscription {
+        match state.topic(&name).await {
+            Ok(Some(topic)) => subscribed.push(topic.name.spelling().to_owned()),
+            Ok(None) => subscribed.push(name),
+            Err(response) => return *response,
         }
     }
     if let Some(response) = state.redirect(&uri, &request.group).await {
@@ -278,7 +287,7 @@ async fn join(
             member_id: request.member_id.unwrap_or_default(),
             instance_id: request.instance_id,
             client_id: request.client_id.unwrap_or_else(|| "pico".to_owned()),
-            membership: Membership::Subscribed(subscription),
+            membership: Membership::Subscribed(subscribed),
             session_timeout_ms: request
                 .session_timeout_ms
                 .map_or(wire::DEFAULT_SESSION_TIMEOUT_MS as i32, saturating_i32),
@@ -423,7 +432,7 @@ async fn commit(
         Ok(streams) => streams,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow(&caller, Operation::Read, &streams) {
+    if let Err(response) = state.allow_streams(&caller, Operation::Read, &streams) {
         return *response;
     }
     let partitions = match state.partitions(&streams).await {
@@ -476,9 +485,7 @@ async fn fetch(
         Ok(requested) => requested,
         Err(response) => return *response,
     };
-    if !requested.is_empty()
-        && let Err(response) = state.allow(&caller, Operation::Read, &requested)
-    {
+    if let Err(response) = state.allow_streams(&caller, Operation::Read, &requested) {
         return *response;
     }
     let partitions = match state.partitions(&requested).await {

@@ -5,12 +5,13 @@
 
 use axum::http::{HeaderMap, Method, Uri, header};
 use axum::response::Response;
+use bytes::Bytes;
 use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
 use picomq_protocol::ds::H_STREAM_CLOSED;
 use picomq_protocol::pico::{H_CLOSED, H_TRIM_SEQ};
 
 use crate::ds;
-use crate::http::{header_str, set_header, truthy};
+use crate::http::{header_str, parse_strict_u64_header, set_header, truthy};
 use crate::pico;
 use crate::route::stream_name;
 
@@ -21,18 +22,21 @@ pub struct Permit {
     pub stream_name: String,
 }
 
-/// `Ok(None)`: auth off, or OPTIONS (no credential). `Ok(Some)`: allowed.
+/// Runs on the buffered request, so it classifies exactly what the handler
+/// will do. `Ok(None)`: auth off, or OPTIONS (no credential). `Ok(Some)`:
+/// allowed. A method the protocol does not serve is refused before routing.
 pub async fn gate(
     authorizer: Option<&Authorizer>,
     audience: Audience,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
+    body: &Bytes,
 ) -> Result<Option<Permit>, Box<Response>> {
-    let Some(ops) = classify(audience, method, uri, headers) else {
-        return Ok(None);
+    let Some(ops) = classify(audience, method, uri, headers, body) else {
+        return Err(Box::new(method_not_allowed(audience)));
     };
-    let Some(authorizer) = authorizer else {
+    let Some(authorizer) = authorizer.filter(|_| !ops.is_empty()) else {
         return Ok(None);
     };
     let caller = authenticate(authorizer, audience, headers).await?;
@@ -115,26 +119,35 @@ pub(crate) async fn authenticate(
     })
 }
 
+/// The operations a request performs. `None`: a method the protocol does not
+/// serve. OPTIONS performs none.
 fn classify(
     audience: Audience,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
+    body: &Bytes,
 ) -> Option<Vec<Operation>> {
     match audience {
-        Audience::Pico => classify_pico(method, uri, headers),
-        Audience::DurableStreams => classify_ds(method, uri, headers),
-        Audience::Admin => None,
+        Audience::Pico => classify_pico(method, uri, headers, body),
+        Audience::DurableStreams => classify_ds(method, headers, body),
+        Audience::Admin => Some(Vec::new()),
     }
 }
 
-fn classify_pico(method: &Method, uri: &Uri, headers: &HeaderMap) -> Option<Vec<Operation>> {
+fn classify_pico(
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Option<Vec<Operation>> {
+    let closed = truthy(headers, H_CLOSED);
     Some(match *method {
+        Method::OPTIONS => Vec::new(),
+        Method::PUT if closed => vec![Operation::Create, Operation::Close],
         Method::PUT => vec![Operation::Create],
-        Method::POST if header_str(headers, H_TRIM_SEQ).is_some() => {
-            vec![Operation::Trim]
-        }
-        Method::POST => write_ops(truthy(headers, H_CLOSED), empty_body(headers)),
+        Method::POST if trims(headers) => vec![Operation::Trim],
+        Method::POST => write_ops(closed, body.is_empty()),
         Method::DELETE => vec![Operation::Delete],
         Method::HEAD => vec![Operation::Head],
         Method::GET if stream_name(uri) == "/" => vec![Operation::List],
@@ -143,10 +156,21 @@ fn classify_pico(method: &Method, uri: &Uri, headers: &HeaderMap) -> Option<Vec<
     })
 }
 
-fn classify_ds(method: &Method, _uri: &Uri, headers: &HeaderMap) -> Option<Vec<Operation>> {
+fn classify_ds(method: &Method, headers: &HeaderMap, body: &Bytes) -> Option<Vec<Operation>> {
+    let closed = truthy(headers, H_STREAM_CLOSED);
     Some(match *method {
-        Method::PUT => vec![Operation::Create],
-        Method::POST => write_ops(truthy(headers, H_STREAM_CLOSED), empty_body(headers)),
+        Method::OPTIONS => Vec::new(),
+        Method::PUT => {
+            let mut ops = vec![Operation::Create];
+            if !body.is_empty() {
+                ops.push(Operation::Append);
+            }
+            if closed {
+                ops.push(Operation::Close);
+            }
+            ops
+        }
+        Method::POST => write_ops(closed, body.is_empty()),
         Method::DELETE => vec![Operation::Delete],
         Method::HEAD => vec![Operation::Head],
         Method::GET => vec![Operation::Read],
@@ -154,8 +178,13 @@ fn classify_ds(method: &Method, _uri: &Uri, headers: &HeaderMap) -> Option<Vec<O
     })
 }
 
-fn empty_body(headers: &HeaderMap) -> bool {
-    header_str(headers, header::CONTENT_LENGTH.as_str()) == Some("0")
+/// A trim exactly as the POST handler parses it. A malformed value is
+/// rejected by the handler before anything happens.
+fn trims(headers: &HeaderMap) -> bool {
+    !matches!(
+        parse_strict_u64_header(headers, H_TRIM_SEQ, "invalid Pico-Trim-Seq"),
+        Ok(None)
+    )
 }
 
 fn write_ops(close: bool, empty: bool) -> Vec<Operation> {
@@ -163,6 +192,15 @@ fn write_ops(close: bool, empty: bool) -> Vec<Operation> {
         (true, true) => vec![Operation::Close],
         (true, false) => vec![Operation::Append, Operation::Close],
         (false, _) => vec![Operation::Append],
+    }
+}
+
+fn method_not_allowed(audience: Audience) -> Response {
+    match audience {
+        Audience::DurableStreams => ds::fail(405, "method not allowed"),
+        Audience::Pico | Audience::Admin => {
+            pico::error(405, "method_not_allowed", "method not allowed", None)
+        }
     }
 }
 
@@ -243,18 +281,37 @@ mod tests {
     }
 
     #[test]
-    fn pico_classifies_trim_list_and_close() {
+    fn pico_classifies_what_the_handler_does() {
         let uri = Uri::from_static("/orders");
         let root = Uri::from_static("/");
+        let none = Bytes::new();
+        let body = Bytes::from_static(b"data");
+
         assert_eq!(
-            classify_pico(&Method::POST, &uri, &headers_with(&[(H_TRIM_SEQ, "1")])),
+            classify_pico(
+                &Method::POST,
+                &uri,
+                &headers_with(&[(H_TRIM_SEQ, "1")]),
+                &none
+            ),
             Some(vec![Operation::Trim])
         );
         assert_eq!(
             classify_pico(
                 &Method::POST,
                 &uri,
-                &headers_with(&[(H_CLOSED, "true"), ("content-length", "0")])
+                &headers_with(&[(H_TRIM_SEQ, "")]),
+                &body
+            ),
+            Some(vec![Operation::Append]),
+            "an empty trim header is an append, as the handler reads it"
+        );
+        assert_eq!(
+            classify_pico(
+                &Method::POST,
+                &uri,
+                &headers_with(&[(H_CLOSED, "true")]),
+                &none
             ),
             Some(vec![Operation::Close])
         );
@@ -262,41 +319,81 @@ mod tests {
             classify_pico(
                 &Method::POST,
                 &uri,
-                &headers_with(&[(H_CLOSED, "true"), ("content-length", "4")])
+                &headers_with(&[(H_CLOSED, "true")]),
+                &body
             ),
             Some(vec![Operation::Append, Operation::Close])
         );
         assert_eq!(
-            classify_pico(&Method::GET, &root, &HeaderMap::new()),
+            classify_pico(
+                &Method::PUT,
+                &uri,
+                &headers_with(&[(H_CLOSED, "true")]),
+                &none
+            ),
+            Some(vec![Operation::Create, Operation::Close])
+        );
+        assert_eq!(
+            classify_pico(&Method::GET, &root, &HeaderMap::new(), &none),
             Some(vec![Operation::List])
         );
         assert_eq!(
-            classify_pico(&Method::GET, &uri, &HeaderMap::new()),
+            classify_pico(&Method::GET, &uri, &HeaderMap::new(), &none),
             Some(vec![Operation::Read])
         );
-        assert!(classify_pico(&Method::OPTIONS, &uri, &HeaderMap::new()).is_none());
+        assert_eq!(
+            classify_pico(&Method::OPTIONS, &uri, &HeaderMap::new(), &none),
+            Some(Vec::new())
+        );
+        assert!(classify_pico(&Method::PATCH, &uri, &HeaderMap::new(), &none).is_none());
     }
 
     #[test]
-    fn ds_has_no_trim_or_list() {
-        let uri = Uri::from_static("/");
+    fn ds_classifies_what_the_handler_does() {
+        let none = Bytes::new();
+        let body = Bytes::from_static(b"data");
+
+        assert_eq!(
+            classify_ds(
+                &Method::PUT,
+                &headers_with(&[(H_STREAM_CLOSED, "true")]),
+                &body
+            ),
+            Some(vec![Operation::Create, Operation::Append, Operation::Close])
+        );
         assert_eq!(
             classify_ds(
                 &Method::POST,
-                &uri,
-                &headers_with(&[(H_STREAM_CLOSED, "true"), ("content-length", "0")])
+                &headers_with(&[(H_STREAM_CLOSED, "true")]),
+                &none
             ),
             Some(vec![Operation::Close])
         );
         assert_eq!(
-            classify_ds(&Method::POST, &uri, &headers_with(&[(H_TRIM_SEQ, "1")])),
+            classify_ds(&Method::POST, &headers_with(&[(H_TRIM_SEQ, "1")]), &body),
             Some(vec![Operation::Append])
         );
         assert_eq!(
-            classify_ds(&Method::GET, &uri, &HeaderMap::new()),
+            classify_ds(&Method::GET, &HeaderMap::new(), &none),
             Some(vec![Operation::Read])
         );
-        assert!(classify_ds(&Method::OPTIONS, &uri, &HeaderMap::new()).is_none());
+        assert!(classify_ds(&Method::PATCH, &HeaderMap::new(), &none).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unserved_method_is_refused_before_routing() {
+        let response = gate(
+            None,
+            Audience::Pico,
+            &Method::PATCH,
+            &Uri::from_static("/secret"),
+            &HeaderMap::new(),
+            &Bytes::new(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(response.status(), 405);
     }
 
     async fn authorizer(scope: Scope) -> (Authorizer, String) {
@@ -331,10 +428,17 @@ mod tests {
     async fn gate_off_and_options_skip() {
         let uri = Uri::from_static("/acct/orders");
         assert!(
-            gate(None, Audience::Pico, &Method::GET, &uri, &HeaderMap::new())
-                .await
-                .unwrap()
-                .is_none()
+            gate(
+                None,
+                Audience::Pico,
+                &Method::GET,
+                &uri,
+                &HeaderMap::new(),
+                &Bytes::new()
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
         let (auth, wire) = authorizer(read_scope()).await;
         let headers = headers_with(&[("authorization", &format!("Bearer {wire}"))]);
@@ -344,7 +448,8 @@ mod tests {
                 Audience::Pico,
                 &Method::OPTIONS,
                 &uri,
-                &headers
+                &headers,
+                &Bytes::new()
             )
             .await
             .unwrap()
@@ -361,6 +466,7 @@ mod tests {
             &Method::GET,
             &Uri::from_static("/acct/orders"),
             &HeaderMap::new(),
+            &Bytes::new(),
         )
         .await
         .unwrap_err();
@@ -386,6 +492,7 @@ mod tests {
             &Method::POST,
             &Uri::from_static("/acct/orders"),
             &headers,
+            &Bytes::from_static(b"data"),
         )
         .await
         .unwrap_err();
@@ -405,6 +512,7 @@ mod tests {
             &Method::GET,
             &Uri::from_static("/acct/orders"),
             &headers,
+            &Bytes::new(),
         )
         .await
         {

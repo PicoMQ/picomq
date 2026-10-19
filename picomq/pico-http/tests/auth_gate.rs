@@ -475,3 +475,138 @@ async fn ds_gate_rejects_in_plain_text_without_new_vocabulary() {
 
     server.shutdown().await;
 }
+
+async fn seed(node: &PicoNode, id: &str, scope: Scope) -> String {
+    let (token, verifier) = AccessToken::issue(id).unwrap();
+    node.tokens()
+        .store()
+        .put_if_absent(TokenRecord {
+            id: token.id.clone(),
+            verifier,
+            scope,
+            created_at_ms: 1,
+            issued_by: String::new(),
+        })
+        .await
+        .unwrap();
+    token.render()
+}
+
+#[tokio::test]
+async fn deleting_a_group_takes_admin_write() {
+    let manager = Scope {
+        groups: OperationGroups {
+            stream: ReadWrite::all(),
+            admin: ReadWrite::all(),
+            ..OperationGroups::default()
+        },
+        ..full_stream_scope("/g/", false)
+    };
+    let (server, admin, node) = gated_server(HttpProtocol::Pico, manager).await;
+    let reader = seed(&node, "it/reader", full_stream_scope("/g/", false)).await;
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+    node.topics()
+        .create(picomq_server::CreateCommand::new("/g/a", "text/plain"))
+        .await
+        .unwrap();
+
+    let joined: serde_json::Value = client
+        .post(format!("{base}/_groups/g/members"))
+        .bearer_auth(&admin)
+        .json(&serde_json::json!({ "subscription": ["/g/a"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let member = joined["memberId"].as_str().unwrap().to_owned();
+    let delete = |token: &str| {
+        client
+            .delete(format!("{base}/_groups/g"))
+            .bearer_auth(token)
+            .send()
+    };
+
+    assert_eq!(delete(&reader).await.unwrap().status(), 403);
+    assert_eq!(
+        delete(&admin).await.unwrap().status(),
+        409,
+        "still has a member"
+    );
+    client
+        .delete(format!("{base}/_groups/g/members/{member}"))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delete(&admin).await.unwrap().status(), 204);
+}
+
+#[tokio::test]
+async fn an_exact_scope_lists_only_its_stream() {
+    let scope = Scope {
+        streams: ResourceSet::exact("/x/a"),
+        ..full_stream_scope("/", false)
+    };
+    let (server, wire, node) = gated_server(HttpProtocol::Pico, scope).await;
+    for name in ["/x/a", "/x/ab"] {
+        node.topics()
+            .create(picomq_server::CreateCommand::new(name, "text/plain"))
+            .await
+            .unwrap();
+    }
+
+    let listed: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{}/?prefix=/x/a", server.local_addr()))
+        .bearer_auth(&wire)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let names: Vec<&str> = listed["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["/x/a"]);
+}
+
+#[tokio::test]
+async fn a_stream_reader_reads_its_stream_config() {
+    let reader = Scope {
+        groups: OperationGroups {
+            stream: ReadWrite::read_only(),
+            ..OperationGroups::default()
+        },
+        ..full_stream_scope("/cfg/", false)
+    };
+    let (server, wire, node) = gated_server(HttpProtocol::Pico, reader).await;
+    node.topics()
+        .create(picomq_server::CreateCommand::new("/cfg/a", "text/plain"))
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+    let config = |name: &str| {
+        client
+            .get(format!("http://{}/_streams{name}", server.local_addr()))
+            .bearer_auth(&wire)
+            .send()
+    };
+
+    assert_eq!(config("/cfg/a").await.unwrap().status(), 200);
+    assert_eq!(config("/other").await.unwrap().status(), 403);
+    let patched = client
+        .patch(format!("http://{}/_streams/cfg/a", server.local_addr()))
+        .bearer_auth(&wire)
+        .json(&serde_json::json!({ "schemaValidate": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), 403, "changing config takes write");
+}

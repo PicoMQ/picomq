@@ -122,7 +122,8 @@ pub struct ServeArgs {
     #[arg(long, value_enum, env = "PICO_AUTH", default_value_t = AuthArg::Off)]
     auth: AuthArg,
 
-    /// Permit non-loopback binds with auth off.
+    /// Permit non-loopback binds that are unauthenticated: the Kafka
+    /// listener always, and the HTTP listeners when auth is off.
     #[arg(long, env = "PICO_INSECURE_ALLOW_REMOTE")]
     insecure_allow_remote: bool,
 

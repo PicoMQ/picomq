@@ -16,12 +16,15 @@ use crate::RoutingMode;
 pub use schemas::SCHEMA_PATH_PREFIX;
 pub use streams::STREAM_CONFIG_PATH_PREFIX;
 
+/// The stream config and schema routes beside a protocol listener. They
+/// authenticate like that listener's stream routes.
 #[derive(Clone)]
 pub struct CommonState {
     pub topics: Arc<Topics>,
     pub ownership: Arc<dyn OwnershipService>,
     pub mode: RoutingMode,
     pub authorizer: Option<Arc<Authorizer>>,
+    pub audience: Audience,
 }
 
 pub fn router(
@@ -29,6 +32,7 @@ pub fn router(
     ownership: Arc<dyn OwnershipService>,
     mode: RoutingMode,
     authorizer: Option<Arc<Authorizer>>,
+    audience: Audience,
     max_request_size: usize,
 ) -> Router {
     let state = CommonState {
@@ -36,11 +40,45 @@ pub fn router(
         ownership,
         mode,
         authorizer,
+        audience,
     };
     schemas::router()
         .merge(streams::router())
         .layer(axum::extract::DefaultBodyLimit::max(max_request_size))
         .with_state(state)
+}
+
+impl CommonState {
+    /// Authorizes `op` on a stream, resolving the caller's name prefix.
+    /// Returns the stored name. Auth off passes the name through.
+    pub(crate) async fn admit_stream(
+        &self,
+        headers: &HeaderMap,
+        op: Operation,
+        name: &str,
+    ) -> Result<String, Box<Response>> {
+        let Some(authorizer) = self.authorizer.as_deref() else {
+            return Ok(name.to_owned());
+        };
+        let caller = crate::auth::authenticate(authorizer, self.audience, headers).await?;
+        let name = caller.resolve(authorizer, name)?;
+        caller.authorize(authorizer, op, Some(&name))?;
+        Ok(name)
+    }
+
+    /// Authorizes `op` on a schema, matched like a stream name.
+    pub(crate) async fn admit_schema(
+        &self,
+        headers: &HeaderMap,
+        op: Operation,
+        name: &str,
+    ) -> Result<(), Box<Response>> {
+        let Some(authorizer) = self.authorizer.as_deref() else {
+            return Ok(());
+        };
+        let caller = crate::auth::authenticate(authorizer, self.audience, headers).await?;
+        caller.authorize(authorizer, op, Some(name))
+    }
 }
 
 /// Bearer-token gate for admin-audience routes. `Ok(None)`: auth off.

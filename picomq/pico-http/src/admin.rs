@@ -17,6 +17,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use bytes::Bytes;
 use picomq_auth::{
     AccessToken, Audience, AuthError, Authorizer, Operation, TokenRecord, TokenStore as _,
     check_issue, scope_from_json, scope_to_json,
@@ -355,11 +356,7 @@ async fn stream(
 
 /// Requests a live ownership move. Returns 202: the move completes
 /// asynchronously via the transfer watcher on the owning node.
-async fn transfer(
-    State(state): State<AdminState>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Response {
+async fn transfer(State(state): State<AdminState>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(response) = gate(
         state.authorizer.as_deref(),
         &headers,
@@ -370,6 +367,10 @@ async fn transfer(
     {
         return *response;
     }
+    let body = match json_body(&body) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     let Some(name) = body.get("stream").and_then(Value::as_str) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"stream\"");
     };
@@ -414,7 +415,7 @@ async fn update_node(
     State(state): State<AdminState>,
     Path(id): Path<i32>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Bytes,
 ) -> Response {
     if let Err(response) = gate(
         state.authorizer.as_deref(),
@@ -426,6 +427,10 @@ async fn update_node(
     {
         return *response;
     }
+    let body = match json_body(&body) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     let Some(slots) = body.get("slots").and_then(Value::as_u64) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"slots\"");
     };
@@ -481,13 +486,13 @@ async fn list_tokens(State(state): State<AdminState>, headers: HeaderMap) -> Res
 
 /// Issues a token narrowed from the caller's scope. With auth off the issuer
 /// is the root scope. The secret is in the response once and never stored.
-async fn issue_token(
-    State(state): State<AdminState>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Response {
+async fn issue_token(State(state): State<AdminState>, headers: HeaderMap, body: Bytes) -> Response {
     let principal = match authenticate(state.authorizer.as_deref(), &headers).await {
         Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let body = match json_body(&body) {
+        Ok(body) => body,
         Err(response) => return *response,
     };
     let Some(id) = body.get("id").and_then(Value::as_str) else {
@@ -611,6 +616,16 @@ fn node_json(state: &MetadataState, node: &NodeRow, local_id: i32) -> Value {
         "openingCount": opening,
         "placedCount": state.placed_count(node.node_id),
         "fenced": node.fenced,
+    })
+}
+
+/// Request bodies are parsed only once the caller is authorized.
+fn json_body(body: &Bytes) -> Result<Value, Box<Response>> {
+    serde_json::from_slice(body).map_err(|_| {
+        Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            "expected a JSON body",
+        ))
     })
 }
 
