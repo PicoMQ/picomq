@@ -59,11 +59,20 @@ impl Reference {
         let port = docker(&["port", &reference.container, "9092/tcp"]).await?;
         reference.host_address = port.lines().next().unwrap_or_default().trim().to_owned();
 
-        anyhow::ensure!(
-            !reference.host_address.is_empty(),
-            "docker port printed no address for {}",
-            reference.container
-        );
+        if reference.host_address.is_empty() {
+            let status = docker_unchecked(&[
+                "inspect",
+                "-f",
+                "{{.State.Status}} exit {{.State.ExitCode}}",
+                &reference.container,
+            ]);
+            let logs = docker_unchecked(&["logs", "--tail", "20", &reference.container]);
+            anyhow::bail!(
+                "{} has no published port ({}):\n{logs}",
+                reference.container,
+                status.trim()
+            );
+        }
 
         Ok(reference)
     }

@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use picomq_metadata::{MetadataNodeHandle, ViewPublisher};
+use picomq_metadata::{MetadataNodeHandle, MetadataState, ViewPublisher};
 use s3stream::{
     OpenStreamOptions, Stream, StreamClientTrait as StreamClient, StreamManagerTrait as _,
     StreamState,
@@ -48,17 +48,21 @@ impl Streams {
         Ok(self.node.stream_manager().create_stream(tags).await?)
     }
 
-    pub async fn place(&self, stream_id: u64) -> Result<(), ServiceError> {
+    pub async fn place(&self, stream_id: u64, owner: Option<i32>) -> Result<(), ServiceError> {
         self.node
-            .place_stream(stream_id)
+            .place_stream(stream_id, owner)
             .await
             .map_err(|error| ServiceError::from(error.to_stream_error()))?;
 
         Ok(())
     }
 
-    pub fn held_ids(&self) -> Vec<u64> {
-        self.open.lock().unwrap().keys().copied().collect()
+    /// Streams this node answers for: the ones it holds open and the closed
+    /// ones placed on it.
+    pub fn owned(&self, state: &MetadataState) -> BTreeSet<u64> {
+        let mut owned: BTreeSet<u64> = self.open.lock().unwrap().keys().copied().collect();
+        owned.extend(state.placed_on(self.node.node_id()));
+        owned
     }
 
     pub async fn ensure_open(&self, stream_id: u64) -> Result<Arc<dyn Stream>, ServiceError> {
@@ -89,8 +93,10 @@ impl Streams {
         Ok(opened)
     }
 
-    pub fn forget(&self, stream_id: u64) {
-        self.open.lock().unwrap().remove(&stream_id);
+    pub async fn reset(&self, stream_id: u64) {
+        if let Err(error) = self.release(stream_id).await {
+            tracing::warn!(%error, stream_id, "stream not closed after a failed append");
+        }
     }
 
     pub async fn release(&self, stream_id: u64) -> Result<Option<i64>, ServiceError> {

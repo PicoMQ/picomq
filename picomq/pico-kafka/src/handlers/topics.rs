@@ -18,8 +18,8 @@ use crate::dispatch::RequestContext;
 use crate::handlers::common::{
     EXCESSIVE_PARTITIONS, Failure, INVALID_PARTITIONS, INVALID_REPLICA_ASSIGNMENT,
     INVALID_REPLICATION_FACTOR, INVALID_REQUEST, NO_ERROR, POLICY_VIOLATION, TOPIC_ALREADY_EXISTS,
-    UNKNOWN_TOPIC_OR_PARTITION, check_replicas, encode_response, resolve_topic, service_error_code,
-    service_failure, topic_name, topic_uuid,
+    UNKNOWN_TOPIC_OR_PARTITION, assigned_broker, encode_response, resolve_topic,
+    service_error_code, service_failure, topic_name, topic_uuid,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -78,11 +78,12 @@ async fn create_topic(
         ));
     }
 
-    let partitions = partition_count(ctx, topic)?;
+    let (partitions, owners) = partitions(ctx, topic)?;
     let (schema_name, schema_validate) = schema_configs(&topic.configs)?;
 
     let mut command = CreateCommand {
         partitions,
+        owners,
         ..CreateCommand::new(&name, KAFKA_CREATED_CT)
     };
     if let Some(schema_name) = schema_name {
@@ -125,7 +126,9 @@ fn requested_partitions(topic: &CreatableTopic) -> u64 {
     }
 }
 
-fn partition_count(ctx: &BrokerContext, topic: &CreatableTopic) -> Result<u32, Failure> {
+/// The partition count and, for a manual assignment, the broker each
+/// partition goes to.
+fn partitions(ctx: &BrokerContext, topic: &CreatableTopic) -> Result<(u32, Vec<i32>), Failure> {
     if topic.assignments.is_empty() {
         if !matches!(topic.replication_factor, 1 | -1) {
             return Err((
@@ -135,8 +138,8 @@ fn partition_count(ctx: &BrokerContext, topic: &CreatableTopic) -> Result<u32, F
         }
 
         return match topic.num_partitions {
-            -1 => Ok(1),
-            count if count > 0 => Ok(count as u32),
+            -1 => Ok((1, Vec::new())),
+            count if count > 0 => Ok((count as u32, Vec::new())),
             _ => Err((
                 INVALID_PARTITIONS,
                 Some("Number of partitions was set to an invalid non-positive value.".to_owned()),
@@ -163,6 +166,7 @@ fn partition_count(ctx: &BrokerContext, topic: &CreatableTopic) -> Result<u32, F
         ));
     }
 
+    let mut owners = Vec::with_capacity(topic.assignments.len());
     for (position, assignment) in topic.assignments.iter().enumerate() {
         if assignment.partition_index != position as i32 {
             return Err((
@@ -170,10 +174,10 @@ fn partition_count(ctx: &BrokerContext, topic: &CreatableTopic) -> Result<u32, F
                 Some("partitions should be a consecutive 0-based integer sequence".to_owned()),
             ));
         }
-        check_replicas(ctx, &assignment.broker_ids)?;
+        owners.push(assigned_broker(ctx, &assignment.broker_ids)?);
     }
 
-    Ok(topic.assignments.len() as u32)
+    Ok((owners.len() as u32, owners))
 }
 
 fn created(topic: &CreatableTopic, partitions: u32, id: Uuid) -> CreatableTopicResult {

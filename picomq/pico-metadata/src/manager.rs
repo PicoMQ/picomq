@@ -109,10 +109,14 @@ impl MetadataNodeHandle {
         Ok(())
     }
 
-    pub async fn place_stream(&self, stream_id: u64) -> Result<i32, MetadataError> {
+    pub async fn place_stream(
+        &self,
+        stream_id: u64,
+        node_id: Option<i32>,
+    ) -> Result<i32, MetadataError> {
         match self
             .sink
-            .propose(MetadataCommand::PlaceStream { stream_id })
+            .propose(MetadataCommand::PlaceStream { stream_id, node_id })
             .await?
             .result
         {
@@ -456,6 +460,14 @@ pub struct MetadataKvClient {
 }
 
 impl MetadataKvClient {
+    pub async fn sync(&self) -> Result<(), StreamError> {
+        self.node
+            .sink
+            .sync()
+            .await
+            .map_err(|error| error.to_stream_error())
+    }
+
     pub fn get_kv(&self, key: &str) -> Option<Bytes> {
         self.node.views.load().state.get_kv(key)
     }

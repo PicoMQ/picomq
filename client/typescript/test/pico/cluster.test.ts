@@ -19,25 +19,32 @@ async function reachable(url: string): Promise<boolean> {
 const up = (await reachable(NODE1)) && (await reachable(NODE2))
 const text = (body: Uint8Array) => new TextDecoder().decode(body)
 
-async function waitForRedirect(from: string, path: string, ownerHost: string): Promise<string> {
+async function head(node: string, path: string): Promise<Response> {
+  return fetch(`${node}${path}`, {
+    method: 'HEAD',
+    headers: { Authorization: `Bearer ${TOKEN}` },
+    redirect: 'manual',
+  })
+}
+
+async function ownerOf(path: string): Promise<string> {
   const deadline = Date.now() + 15_000
-  let last = 0
-  while (Date.now() < deadline) {
-    const response = await fetch(`${from}${path}`, {
-      method: 'HEAD',
-      headers: { Authorization: `Bearer ${TOKEN}` },
-      redirect: 'manual',
-    })
-    last = response.status
-    if (response.status === 307) {
-      const location = response.headers.get('location')
-      if (!location) throw new Error('307 without location')
-      expect(location).toContain(ownerHost)
-      return location
+  for (;;) {
+    const [first, second] = await Promise.all([head(NODE1, path), head(NODE2, path)])
+    for (const [owner, own, redirect] of [
+      [NODE1, first, second],
+      [NODE2, second, first],
+    ] as const) {
+      if (own.status === 200 && redirect.status === 307) {
+        expect(redirect.headers.get('location')).toContain(`:${new URL(owner).port}/`)
+        return owner
+      }
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`no single owner for ${path} (${first.status}, ${second.status})`)
     }
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
-  throw new Error(`no ownership redirect from ${from} for ${path} (last status ${last})`)
 }
 
 async function waitForGroup(client: PicoClient, group: string): Promise<void> {
@@ -54,14 +61,20 @@ async function waitForGroup(client: PicoClient, group: string): Promise<void> {
 }
 
 describe.runIf(up)('live pico cluster', () => {
-  const owner = connect('pico', NODE1, { token: TOKEN })
-  const other = connect('pico', NODE2, { token: TOKEN })
+  const node1 = connect('pico', NODE1, { token: TOKEN })
+  const node2 = connect('pico', NODE2, { token: TOKEN })
   const anon = connect('pico', NODE2)
+
+  async function locate(path: string): Promise<{ owner: PicoClient; other: PicoClient }> {
+    return (await ownerOf(path)) === NODE1
+      ? { owner: node1, other: node2 }
+      : { owner: node2, other: node1 }
+  }
   const base = `/cluster-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
 
   it('rejects unauthenticated writes when auth is required', async () => {
     const name = `${base}/denied`
-    await owner.stream(name).create(CT)
+    await node1.stream(name).create(CT)
     await expect(anon.append(name, ['nope'])).rejects.toMatchObject({
       kind: 'unauthenticated',
       status: 401,
@@ -70,9 +83,8 @@ describe.runIf(up)('live pico cluster', () => {
 
   it('follows a cross-node 307 and keeps the bearer token', async () => {
     const name = `${base}/owned`
-    expect(await owner.stream(name).create(CT)).toBe(true)
-
-    await waitForRedirect(NODE2, name, 'localhost:4437')
+    expect(await node1.stream(name).create(CT)).toBe(true)
+    const { owner, other } = await locate(name)
 
     const ack = await other.append(name, ['from-other-node'])
     expect(ack.start).toBe('0')
@@ -86,22 +98,21 @@ describe.runIf(up)('live pico cluster', () => {
     expect(text(viaOwner.records[0]!.body)).toBe('from-other-node')
   })
 
-  it('creates on node 2 and reads through a redirect from node 1', async () => {
+  it('creates on node 2 and reads through a redirect from the non-owner', async () => {
     const name = `${base}/other-owner`
-    await other.stream(name).create(CT)
-    await other.append(name, ['seed'])
+    await node2.stream(name).create(CT)
+    await node2.append(name, ['seed'])
+    const { other } = await locate(name)
 
-    await waitForRedirect(NODE1, name, 'localhost:4438')
-
-    const page = await owner.read(name, '0', 'off')
+    const page = await other.read(name, '0', 'off')
     expect(page.records).toHaveLength(1)
     expect(text(page.records[0]!.body)).toBe('seed')
   })
 
   it('produces through the non-owner and keeps sequence', async () => {
     const name = `${base}/producer`
-    await owner.stream(name).create(CT)
-    await waitForRedirect(NODE2, name, 'localhost:4437')
+    await node1.stream(name).create(CT)
+    const { other } = await locate(name)
     const producer = other.stream(name).producer('cluster-writer', { lingerMs: 0, maxInflight: 2 })
     expect(await producer.sendDurable('a')).toBe(0)
     expect(await producer.sendDurable('b')).toBe(1)
@@ -116,42 +127,42 @@ describe.runIf(up)('live pico cluster', () => {
 
   it('drives one group membership through both nodes', { timeout: 20_000 }, async () => {
     const stream = `${base}/group-a`
-    await owner.create(stream, CT)
+    await node1.create(stream, CT)
     const group = `cluster-ops-${base.slice(9)}`
 
-    const joined = await owner.joinGroup(group, [stream], {
+    const joined = await node1.joinGroup(group, [stream], {
       clientId: 'ts-cluster',
       sessionTimeoutMs: 2000,
     })
     const fence = { memberId: joined.memberId, generation: joined.generation }
 
-    await waitForGroup(other, group)
-    await other.heartbeat(group, fence)
-    expect((await other.groupAssignment(group, fence)).assignment).toEqual([stream])
+    await waitForGroup(node2, group)
+    await node2.heartbeat(group, fence)
+    expect((await node2.groupAssignment(group, fence)).assignment).toEqual([stream])
 
-    await other.commitOffsets(group, { [stream]: { position: 5 } }, fence)
-    expect((await other.fetchOffsets(group))[stream]!.position).toBe(5)
-    expect((await other.describeGroup(group)).state).toBe('Stable')
+    await node2.commitOffsets(group, { [stream]: { position: 5 } }, fence)
+    expect((await node2.fetchOffsets(group))[stream]!.position).toBe(5)
+    expect((await node2.describeGroup(group)).state).toBe('Stable')
 
-    const listed = [...(await owner.listGroups()), ...(await other.listGroups())]
+    const listed = [...(await node1.listGroups()), ...(await node2.listGroups())]
     expect(listed.map((g) => g.group)).toContain(group)
 
-    await other.leaveGroup(group, joined.memberId)
-    expect((await owner.describeGroup(group)).state).toBe('Empty')
+    await node2.leaveGroup(group, joined.memberId)
+    expect((await node1.describeGroup(group)).state).toBe('Empty')
   })
 
-  it('rebalances when the second member joins via the other node', { timeout: 30_000 }, async () => {
+  it('rebalances when the second member joins via the node2 node', { timeout: 30_000 }, async () => {
     const streams = ['a', 'b', 'c', 'd'].map((s) => `${base}/gm/${s}`)
-    for (const name of streams) await owner.create(name, CT)
+    for (const name of streams) await node1.create(name, CT)
     const group = `cluster-shared-${base.slice(9)}`
     const config = { sessionTimeoutMs: 2000, heartbeatIntervalMs: 100 }
 
-    const first = await GroupMember.join(owner, group, streams, config)
+    const first = await GroupMember.join(node1, group, streams, config)
     expect(first.assignment()).toEqual({ generation: 1, streams })
 
-    await waitForGroup(other, group)
+    await waitForGroup(node2, group)
     const [second, onFirst] = await Promise.all([
-      GroupMember.join(other, group, streams, config),
+      GroupMember.join(node2, group, streams, config),
       (async () => {
         for await (const assignment of first.assignments()) {
           if (assignment.generation > 1) return assignment
@@ -179,7 +190,7 @@ describe.runIf(up)('live pico cluster', () => {
     expect(first.error()).toBeUndefined()
 
     await first.leave()
-    expect((await other.describeGroup(group)).state).toBe('Empty')
+    expect((await node2.describeGroup(group)).state).toBe('Empty')
   })
 
   it('maps a bad token to unauthenticated', async () => {
@@ -190,7 +201,7 @@ describe.runIf(up)('live pico cluster', () => {
   })
 
   it('cleans up its test streams', { timeout: 20_000 }, async () => {
-    for (const client of [owner, other]) {
+    for (const client of [node1, node2]) {
       const listing = await client.list(`${base}/`, 200)
       for (const info of listing.streams) {
         await client.delete(info.name)

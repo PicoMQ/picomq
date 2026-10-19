@@ -39,8 +39,11 @@ pub enum MetadataCommand {
         node_epoch: i64,
     },
 
+    /// Puts a stream without a live owner on `node_id`, or on the least
+    /// loaded live node when `None`.
     PlaceStream {
         stream_id: u64,
+        node_id: Option<i32>,
     },
 
     /// Assigns the next stream id.

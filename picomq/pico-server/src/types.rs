@@ -144,6 +144,8 @@ pub struct CreateCommand {
     pub name: String,
     pub content_type: String,
     pub partitions: u32,
+    /// Node to place each partition on. Empty lets placement choose.
+    pub owners: Vec<i32>,
     pub ttl_seconds: Option<u64>,
     pub expires_at_ms: Option<i64>,
     pub closed: bool,
@@ -158,6 +160,7 @@ impl CreateCommand {
             name: name.into(),
             content_type: content_type.into(),
             partitions: 1,
+            owners: Vec::new(),
             ttl_seconds: None,
             expires_at_ms: None,
             closed: false,
@@ -200,6 +203,14 @@ impl CreateCommand {
                 None,
                 false,
                 format!("a topic is created with at most {MAX_NEW_PARTITIONS} partitions"),
+            ));
+        }
+        if !self.owners.is_empty() && self.owners.len() != self.partitions as usize {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "owners must name a node for every partition",
             ));
         }
 

@@ -6,6 +6,7 @@ pub mod group;
 pub mod pico;
 pub mod producer;
 pub mod retry;
+mod routes;
 pub mod types;
 
 pub use ds::DsClient;

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use picomq_protocol::WireRequest;
@@ -16,6 +18,7 @@ use reqwest::Response;
 
 use crate::error::{ClientError, ErrorKind, Result};
 use crate::retry::RetryPolicy;
+use crate::routes::Routes;
 use crate::types::{
     AppendAck, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo, StreamListing,
 };
@@ -34,6 +37,7 @@ pub struct PicoClient {
     http: reqwest::Client,
     base_url: String,
     retry: RetryPolicy,
+    routes: Arc<Routes>,
 }
 
 impl PicoClient {
@@ -50,6 +54,7 @@ impl PicoClient {
             http,
             base_url: endpoint.trim_end_matches('/').to_owned(),
             retry,
+            routes: Arc::default(),
         }
     }
 
@@ -179,7 +184,12 @@ impl PicoClient {
 
     async fn call(&self, wire: WireRequest) -> Result<Response> {
         let ok = wire.ok;
-        let response = send(&self.http, build(&self.http, &self.base_url, wire)).await?;
+        let response = send(
+            &self.http,
+            &self.routes,
+            build(&self.http, &self.base_url, wire),
+        )
+        .await?;
         expect(response, ok).await
     }
 
@@ -402,15 +412,27 @@ const MAX_REDIRECT_HOPS: usize = 5;
 // Authorization, rides each redirect hop.
 pub(crate) async fn send(
     http: &reqwest::Client,
+    routes: &Routes,
     builder: reqwest::RequestBuilder,
 ) -> Result<Response> {
     let mut request = builder.build()?;
+    routes.resolve(request.url_mut());
+    let deleting = request.method() == reqwest::Method::DELETE;
     for _ in 0..MAX_REDIRECT_HOPS {
         let base = request.url().clone();
         let retry = request.try_clone();
-        let response = http.execute(request).await?;
+        let response = match http.execute(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                routes.forget(base.path());
+                return Err(error.into());
+            }
+        };
         let status = response.status().as_u16();
         if status != 307 && status != 308 {
+            if deleting && response.status().is_success() {
+                routes.forget(base.path());
+            }
             return Ok(response);
         }
         let Some(target) = header(&response, "location").and_then(|loc| base.join(&loc).ok())
@@ -421,6 +443,7 @@ pub(crate) async fn send(
                 "redirect_without_location",
             ));
         };
+        routes.learn(&base, &target);
         let mut next = retry.expect("bodies are Bytes, always clonable");
         *next.url_mut() = target;
         request = next;

@@ -190,6 +190,54 @@ var _ = ginkgo.Describe("Pico client", func() {
 		Expect(created).To(BeTrue())
 	})
 
+	ginkgo.It("goes straight to a learned owner until it is gone", func() {
+		owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodDelete {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			w.Header().Set("Pico-Next-Seq", "7")
+		}))
+		defer owner.Close()
+		var redirects atomic.Int32
+		var target atomic.Value
+		target.Store(owner.URL)
+		entry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			redirects.Add(1)
+			http.Redirect(w, r, target.Load().(string)+r.URL.Path, http.StatusTemporaryRedirect)
+		}))
+		defer entry.Close()
+		ctx := context.Background()
+
+		client, err := NewPico(entry.URL)
+		Expect(err).NotTo(HaveOccurred())
+		for i := 0; i < 3; i++ {
+			info, err := client.Head(ctx, "orders")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Next).To(Equal("7"))
+		}
+		Expect(redirects.Load()).To(BeEquivalentTo(1))
+
+		deleted, err := client.Delete(ctx, "orders")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(deleted).To(BeTrue())
+		_, err = client.Head(ctx, "orders")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(redirects.Load()).To(BeEquivalentTo(2))
+
+		gone := httptest.NewServer(http.NotFoundHandler())
+		gone.Close()
+		target.Store(gone.URL)
+		fresh, err := NewPico(entry.URL)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = fresh.Head(ctx, "orders")
+		Expect(err).To(HaveOccurred())
+		target.Store(owner.URL)
+		_, err = fresh.Head(ctx, "orders")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(redirects.Load()).To(BeEquivalentTo(4))
+	})
+
 	ginkgo.It("preserves context cancellation", func() {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 		defer server.Close()

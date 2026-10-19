@@ -201,6 +201,24 @@ impl CommandSink for SqlSink {
         })?
     }
 
+    async fn sync(&self) -> Result<(), MetadataError> {
+        let committed =
+            self.shared
+                .store
+                .last_idx()
+                .await
+                .map_err(|error| MetadataError::Unexpected {
+                    message: format!("metadata log is unreachable: {error}"),
+                })?;
+        if self.shared.views.load().applied_index >= committed {
+            return Ok(());
+        }
+
+        self.shared.nudge.notify_one();
+        self.shared.views.wait_applied(committed).await;
+        Ok(())
+    }
+
     fn stats(&self) -> Arc<SinkStats> {
         self.shared.stats.clone()
     }
@@ -464,7 +482,7 @@ async fn commit_batch(
         };
         match shared.store.append(next, payload).await {
             Ok(true) => {
-                shared.nudge.notify_waiters();
+                shared.nudge.notify_one();
                 match rx.await {
                     Ok(results) => {
                         debug_assert_eq!(results.len(), command_count);
@@ -937,6 +955,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(next.result, MetadataResult::Id(30));
+    }
+
+    #[tokio::test]
+    async fn sync_catches_a_lagging_reader_up_without_waiting_for_its_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+
+        let store_b = Arc::new(SqliteStore::open(&path).await.unwrap());
+        let config_b = SqlSinkConfig {
+            poll_interval: Duration::from_secs(60),
+            ..SqlSinkConfig::default()
+        };
+        let (sink_b, views_b) = SqlSink::open(store_b, config_b).await.unwrap();
+
+        let store_a = Arc::new(SqliteStore::open(&path).await.unwrap());
+        let (sink_a, views_a) = SqlSink::open(store_a, fast_config()).await.unwrap();
+        sink_a.propose(register(1, 10)).await.unwrap();
+        sink_a
+            .propose(MetadataCommand::CreateStream {
+                node_id: 1,
+                node_epoch: 10,
+            })
+            .await
+            .unwrap();
+        assert!(views_b.load().applied_index < views_a.load().applied_index);
+
+        tokio::time::timeout(Duration::from_secs(5), sink_b.sync())
+            .await
+            .expect("sync waited for the poll")
+            .unwrap();
+        assert_eq!(views_b.load().state, views_a.load().state);
+
+        tokio::time::timeout(Duration::from_millis(100), sink_b.sync())
+            .await
+            .expect("a current view syncs at once")
+            .unwrap();
     }
 
     /// A reader that lagged past a snapshot+truncation recovers by

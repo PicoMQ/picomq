@@ -68,6 +68,10 @@ impl SnapshotStats {
 pub trait CommandSink: Send + Sync {
     async fn propose(&self, command: MetadataCommand) -> Result<Proposed, MetadataError>;
 
+    /// Returns once this node's view holds every command committed before
+    /// the call.
+    async fn sync(&self) -> Result<(), MetadataError>;
+
     /// Default is a shared all-zero unit: correct for sinks with no
     /// background work (`LocalSink`, test doubles).
     fn stats(&self) -> Arc<SinkStats> {
@@ -121,6 +125,10 @@ impl CommandSink for LocalSink {
             applied_index: *applied_index,
             result,
         })
+    }
+
+    async fn sync(&self) -> Result<(), MetadataError> {
+        Ok(())
     }
 }
 

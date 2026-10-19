@@ -51,7 +51,9 @@ fn apply_inner(
             protocol_addresses,
             wal,
         ),
-        MetadataCommand::PlaceStream { stream_id } => place_stream(state, *stream_id),
+        MetadataCommand::PlaceStream { stream_id, node_id } => {
+            place_stream(state, *stream_id, *node_id)
+        }
         MetadataCommand::CreateStream {
             node_id,
             node_epoch,
@@ -327,12 +329,12 @@ fn create_streams(
     Ok(MetadataResult::Id(first))
 }
 
-/// Pick the live registered node with the lowest `(opening + placed) / slots`
-/// score (×1000 for integer arithmetic), tie-breaking on lowest `node_id`.
 /// A stream that is OPENED, or CLOSED on a live node, keeps its node.
+/// Otherwise it goes to the requested node, or to the least loaded one.
 fn place_stream(
     state: &mut MetadataState,
     stream_id: u64,
+    requested: Option<i32>,
 ) -> Result<MetadataResult, MetadataError> {
     let stream = require_stream(state, stream_id)?;
 
@@ -344,31 +346,15 @@ fn place_stream(
         return Ok(MetadataResult::Id(stream.node_id as u64));
     }
 
-    let mut winner: Option<(i32, u64)> = None;
-    for (node_id, node) in state.nodes.iter() {
-        if node.slots < 1 || node.fenced {
-            continue;
-        }
-        let opening_count = state
-            .opening_by_node
-            .range((*node_id, 0)..=(*node_id, u64::MAX))
-            .count() as u64;
-        let placed_count = state
-            .placed_by_node
-            .range((*node_id, 0)..=(*node_id, u64::MAX))
-            .count() as u64;
-        let score = (opening_count + placed_count) * 1000 / node.slots as u64;
-        match winner {
-            None => winner = Some((*node_id, score)),
-            Some((best_id, best_score))
-                if score < best_score || (score == best_score && *node_id < best_id) =>
-            {
-                winner = Some((*node_id, score));
-            }
-            _ => {}
-        }
-    }
-    let Some((winner, _)) = winner else {
+    let winner = match requested {
+        Some(node_id) => state
+            .nodes
+            .get(&node_id)
+            .is_some_and(|node| node.slots >= 1 && !node.fenced)
+            .then_some(node_id),
+        None => least_loaded(state),
+    };
+    let Some(winner) = winner else {
         return Err(MetadataError::NoLiveNode {
             message: format!("no live node with slots can take stream {stream_id}"),
         });
@@ -385,6 +371,33 @@ fn place_stream(
     );
     state.placed_by_node.insert((winner, stream_id), ());
     Ok(MetadataResult::Id(winner as u64))
+}
+
+/// The live registered node with the lowest `(opening + placed) / slots`
+/// score (×1000 for integer arithmetic), tie-breaking on lowest `node_id`.
+fn least_loaded(state: &MetadataState) -> Option<i32> {
+    let mut winner: Option<(i32, u64)> = None;
+    for (node_id, node) in state.nodes.iter() {
+        if node.slots < 1 || node.fenced {
+            continue;
+        }
+        let opening_count = state
+            .opening_by_node
+            .range((*node_id, 0)..=(*node_id, u64::MAX))
+            .count() as u64;
+        let placed_count = state.placed_count(*node_id) as u64;
+        let score = (opening_count + placed_count) * 1000 / node.slots as u64;
+        match winner {
+            None => winner = Some((*node_id, score)),
+            Some((best_id, best_score))
+                if score < best_score || (score == best_score && *node_id < best_id) =>
+            {
+                winner = Some((*node_id, score));
+            }
+            _ => {}
+        }
+    }
+    winner.map(|(node_id, _)| node_id)
 }
 
 fn require_stream(state: &MetadataState, stream_id: u64) -> Result<StreamRow, MetadataError> {
@@ -1271,7 +1284,15 @@ mod tests {
     }
 
     fn place(state: &mut MetadataState, stream_id: u64) -> i32 {
-        match apply(state, &MetadataCommand::PlaceStream { stream_id }).unwrap() {
+        match apply(
+            state,
+            &MetadataCommand::PlaceStream {
+                stream_id,
+                node_id: None,
+            },
+        )
+        .unwrap()
+        {
             MetadataResult::Id(node_id) => node_id as i32,
             other => panic!("unexpected result {other:?}"),
         }
@@ -2201,7 +2222,10 @@ mod tests {
                     }),
                 stream_id
                     .clone()
-                    .prop_map(|s| MetadataCommand::PlaceStream { stream_id: s }),
+                    .prop_map(|s| MetadataCommand::PlaceStream {
+                        stream_id: s,
+                        node_id: None
+                    }),
                 (node.clone(), 0i64..2).prop_map(|((n, e), bump)| {
                     MetadataCommand::RegisterNode {
                         node_id: n,
@@ -2545,6 +2569,38 @@ mod tests {
     }
 
     #[test]
+    fn placement_honours_a_requested_live_node() {
+        let mut state = setup();
+        let place_on = |state: &mut MetadataState, stream_id, node_id| {
+            apply(
+                state,
+                &MetadataCommand::PlaceStream {
+                    stream_id,
+                    node_id: Some(node_id),
+                },
+            )
+        };
+
+        let requested = create(&mut state, NODE_1, EPOCH_1);
+        assert_eq!(
+            place_on(&mut state, requested, NODE_2).unwrap(),
+            MetadataResult::Id(NODE_2 as u64)
+        );
+        assert_eq!(
+            place_on(&mut state, requested, NODE_1).unwrap(),
+            MetadataResult::Id(NODE_2 as u64),
+            "a stream on a live node keeps it"
+        );
+
+        fence(&mut state, NODE_2, EPOCH_2).unwrap();
+        let refused = create(&mut state, NODE_1, EPOCH_1);
+        for node_id in [NODE_2, 99] {
+            let err = place_on(&mut state, refused, node_id).unwrap_err();
+            assert!(matches!(err, MetadataError::NoLiveNode { .. }), "{err}");
+        }
+    }
+
+    #[test]
     fn opened_streams_keep_their_node_when_placed() {
         let mut state = setup();
         let stream_id = create(&mut state, NODE_1, EPOCH_1);
@@ -2655,7 +2711,14 @@ mod tests {
     #[test]
     fn placing_nonexistent_stream_errors() {
         let mut state = setup();
-        let err = apply(&mut state, &MetadataCommand::PlaceStream { stream_id: 999 }).unwrap_err();
+        let err = apply(
+            &mut state,
+            &MetadataCommand::PlaceStream {
+                stream_id: 999,
+                node_id: None,
+            },
+        )
+        .unwrap_err();
         assert_eq!(err.code(), 1);
     }
 
@@ -2667,7 +2730,14 @@ mod tests {
             create(&mut state, NODE_1, EPOCH_1)
         };
         state.nodes.remove(&NODE_1);
-        let err = apply(&mut state, &MetadataCommand::PlaceStream { stream_id }).unwrap_err();
+        let err = apply(
+            &mut state,
+            &MetadataCommand::PlaceStream {
+                stream_id,
+                node_id: None,
+            },
+        )
+        .unwrap_err();
         assert!(matches!(err, MetadataError::NoLiveNode { .. }), "{err}");
     }
 

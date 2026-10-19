@@ -45,6 +45,8 @@ pub enum GroupError {
     CapacityExceeded,
     #[error("static group member was fenced")]
     FencedInstance,
+    #[error("a newer join from the same member replaced this one")]
+    Superseded,
 }
 
 pub use offsets::{CommittedOffset, OffsetCommit};
@@ -53,9 +55,9 @@ pub use state::GroupState;
 use offsets::{OffsetTable, decode_into, encode_commits, encode_deletes, encode_snapshot};
 use state::{
     Group, MAX_MEMBERS_PER_GROUP, MAX_PARTITIONS_PER_GROUP, MAX_STREAMS_PER_GROUP,
-    MAX_SUBSCRIPTION_ENTRIES_PER_GROUP, Mode, Rebalance, Role, compatible, complete_rebalance,
-    evict_idle_groups, member_from_input, mode_of, new_member_id, remove_member,
-    send_join_completions, validate_group_id, validate_join,
+    MAX_SUBSCRIPTION_ENTRIES_PER_GROUP, Mode, Rebalance, Role, compatible, depart,
+    evict_idle_groups, member_from_input, mode_of, new_member_id, settle, validate_group_id,
+    validate_join,
 };
 
 const OFFSET_SNAPSHOT_INTERVAL: u64 = 64;
@@ -237,7 +239,7 @@ impl GroupCoordinator {
             Err(code) => return JoinOutcome::error(code, input.member_id),
         };
 
-        let (receiver, completion, schedule) = {
+        let (receiver, schedule) = {
             let mut state = group.lock().await;
             let now = Instant::now();
             state.expire_members(now);
@@ -305,7 +307,7 @@ impl GroupCoordinator {
                     .map(|(id, _)| id.clone())
                     .collect();
                 for id in stale {
-                    remove_member(&mut state, &id);
+                    depart(&mut state, &id, GroupError::FencedInstance);
                 }
             }
 
@@ -344,13 +346,13 @@ impl GroupCoordinator {
             let rebalance = state.rebalance.as_mut().expect("rebalance initialized");
             rebalance.expected.insert(member_id.clone());
             rebalance.joined.insert(member_id.clone());
-            rebalance.waiters.insert(member_id, sender);
-            let ready = rebalance.joined == rebalance.expected;
-            let completion = ready.then(|| complete_rebalance(&mut state, false));
-            (receiver, completion, schedule)
+            if let Some(previous) = rebalance.waiters.insert(member_id.clone(), sender) {
+                let _ = previous.send(JoinOutcome::error(GroupError::Superseded, member_id));
+            }
+            settle(&mut state);
+            (receiver, schedule)
         };
 
-        send_join_completions(completion);
         if let Some((id, deadline)) = schedule {
             let coordinator = Arc::clone(self);
             let group_id = input.group_id.clone();
@@ -358,9 +360,7 @@ impl GroupCoordinator {
                 coordinator.watch_rebalance(&group_id, id, deadline).await;
             });
         }
-        receiver.await.unwrap_or_else(|_| {
-            JoinOutcome::error(GroupError::RebalanceInProgress, input.member_id)
-        })
+        receiver.await.expect("a pending join is always answered")
     }
 
     /// Completes a rebalance as soon as every surviving member has joined,
@@ -375,38 +375,38 @@ impl GroupCoordinator {
             return;
         };
         loop {
-            let (completion, next_wake) = {
+            let wake = {
                 let mut state = group.lock().await;
-                if state.rebalance.as_ref().map(|r| r.id) != Some(rebalance_id) {
-                    return;
-                }
                 let now = Instant::now();
                 state.expire_members(now);
-                let Some(rebalance) = state.rebalance.as_ref() else {
+                let Some(rebalance) = state.rebalance.as_ref().filter(|r| r.id == rebalance_id)
+                else {
                     return;
                 };
-                if rebalance.joined == rebalance.expected {
-                    (Some(complete_rebalance(&mut state, false)), None)
-                } else if now >= deadline {
-                    (Some(complete_rebalance(&mut state, true)), None)
-                } else {
-                    let next_expiry = rebalance
+
+                if now >= deadline {
+                    let missing: Vec<String> = rebalance
                         .expected
                         .difference(&rebalance.joined)
-                        .filter_map(|id| state.members.get(id))
-                        .map(|member| member.last_heartbeat + member.session_timeout)
-                        .min()
-                        .unwrap_or(deadline);
-                    (None, Some(next_expiry.min(deadline)))
+                        .cloned()
+                        .collect();
+                    for id in missing {
+                        depart(&mut state, &id, GroupError::UnknownMember);
+                    }
+                    settle(&mut state);
+                    return;
                 }
+
+                rebalance
+                    .expected
+                    .difference(&rebalance.joined)
+                    .filter_map(|id| state.members.get(id))
+                    .map(|member| member.last_heartbeat + member.session_timeout)
+                    .min()
+                    .unwrap_or(deadline)
+                    .min(deadline)
             };
-            if let Some(completion) = completion {
-                send_join_completions(Some(completion));
-                return;
-            }
-            if let Some(wake) = next_wake {
-                tokio::time::sleep_until(tokio::time::Instant::from_std(wake)).await;
-            }
+            tokio::time::sleep_until(tokio::time::Instant::from_std(wake)).await;
         }
     }
 
@@ -450,7 +450,7 @@ impl GroupCoordinator {
                 state.phase = GroupState::Stable;
                 let waiters = std::mem::take(&mut state.sync_waiters);
                 for (id, sender) in waiters {
-                    let _ = sender.send(sync_outcome(&state, &id));
+                    let _ = sender.send(Ok(sync_outcome(&state, &id)));
                 }
                 return Ok(sync_outcome(&state, &input.member_id));
             }
@@ -460,8 +460,8 @@ impl GroupCoordinator {
             (receiver, timeout)
         };
         match tokio::time::timeout(timeout, receiver).await {
-            Ok(Ok(outcome)) => Ok(outcome),
-            _ => Err(GroupError::RebalanceInProgress),
+            Ok(answer) => answer.expect("a pending sync is always answered"),
+            Err(_) => Err(GroupError::RebalanceInProgress),
         }
     }
 
@@ -548,7 +548,7 @@ impl GroupCoordinator {
                     Err(GroupError::FencedInstance)
                 }
                 Some(_) => {
-                    remove_member(&mut state, member_id);
+                    depart(&mut state, member_id, GroupError::UnknownMember);
                     removed_any = true;
                     Ok(())
                 }
@@ -556,20 +556,7 @@ impl GroupCoordinator {
             results.push(result);
         }
         if removed_any {
-            if let Some(rebalance) = state.rebalance.take() {
-                for (_, sender) in rebalance.waiters {
-                    let _ = sender.send(JoinOutcome::error(
-                        GroupError::RebalanceInProgress,
-                        String::new(),
-                    ));
-                }
-            }
-            if state.members.is_empty() {
-                state.reset_empty();
-            } else {
-                state.phase = GroupState::PreparingRebalance;
-                state.names.sweep();
-            }
+            settle(&mut state);
         }
         results
     }
@@ -676,9 +663,17 @@ impl GroupCoordinator {
     }
 
     async fn snapshot_and_trim(&self, log: &Log, state: &mut Group) {
+        let mut deleted = BTreeSet::new();
+        for partition in state.offsets.keys() {
+            if !deleted.contains(&partition.topic)
+                && matches!(self.topics.exists(&partition.topic).await, Ok(false))
+            {
+                deleted.insert(partition.topic);
+            }
+        }
         state
             .offsets
-            .retain(|partition, _| self.topics.exists(&partition.topic));
+            .retain(|partition, _| !deleted.contains(&partition.topic));
 
         let Ok(appended) = self
             .service
@@ -818,7 +813,15 @@ impl GroupCoordinator {
         if !owner.local || owner.stream_id.is_none() {
             return Err(GroupError::NotCoordinator);
         }
-        let epoch = owner.epoch;
+        let epoch = self
+            .service
+            .watermarks(&log)
+            .await
+            .map_err(|error| {
+                tracing::warn!(group = group_id, %error, "group log could not be opened");
+                GroupError::CoordinatorNotAvailable
+            })?
+            .epoch as i64;
 
         let group = {
             let mut groups = self.groups.lock().expect("group map lock");
@@ -836,7 +839,17 @@ impl GroupCoordinator {
         };
         let mut state = group.lock().await;
         if state.loaded_epoch != epoch {
+            if state.loaded_epoch != i64::MIN {
+                tracing::info!(
+                    group = group_id,
+                    from = state.loaded_epoch,
+                    to = epoch,
+                    members = state.members.len(),
+                    "group log moved to a new epoch, reloading the group"
+                );
+            }
             let (offsets, replayed) = self.replay_offsets(&log).await?;
+            state.unload();
             *state = Group::loaded(epoch, offsets, replayed);
         }
         drop(state);

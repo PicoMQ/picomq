@@ -18,7 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT: &str = "pico-conformance";
 const CRC: usize = 17;
 
-enum Reply {
+pub(super) enum Reply {
     Closed,
     Timeout,
     Frame(Bytes),
@@ -151,7 +151,11 @@ fn record_batch() -> Bytes {
     batch.freeze()
 }
 
-fn decode<T: Decodable>(frame: &mut Bytes, api: ApiKey, version: i16) -> anyhow::Result<T> {
+pub(super) fn decode<T: Decodable>(
+    frame: &mut Bytes,
+    api: ApiKey,
+    version: i16,
+) -> anyhow::Result<T> {
     ResponseHeader::decode(frame, api.response_header_version(version))?;
 
     T::decode(frame, version)
@@ -163,7 +167,7 @@ fn api_versions_request() -> ApiVersionsRequest {
         .with_client_software_version(StrBytes::from_static_str("1"))
 }
 
-fn encode(message: &impl Encodable, version: i16) -> Bytes {
+pub(super) fn encode(message: &impl Encodable, version: i16) -> Bytes {
     let mut buf = BytesMut::new();
 
     message
@@ -173,7 +177,7 @@ fn encode(message: &impl Encodable, version: i16) -> Bytes {
     buf.freeze()
 }
 
-async fn exchange(
+pub(super) async fn exchange(
     address: &str,
     api: ApiKey,
     version: i16,

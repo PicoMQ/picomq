@@ -325,8 +325,15 @@ fn put_command_body(buf: &mut BytesMut, command: &MetadataCommand) {
             buf.put_i64_le(*node_epoch);
             buf.put_u32_le(*count);
         }
-        MetadataCommand::PlaceStream { stream_id } => {
+        MetadataCommand::PlaceStream { stream_id, node_id } => {
             buf.put_u64_le(*stream_id);
+            match node_id {
+                Some(node_id) => {
+                    buf.put_u8(1);
+                    buf.put_i32_le(*node_id);
+                }
+                None => buf.put_u8(0),
+            }
         }
     }
 }
@@ -446,6 +453,10 @@ fn get_command_body(buf: &mut &[u8]) -> Result<MetadataCommand, CodecError> {
         },
         18 => MetadataCommand::PlaceStream {
             stream_id: get_u64(buf)?,
+            node_id: match get_u8(buf)? {
+                0 => None,
+                _ => Some(get_i32(buf)?),
+            },
         },
         19 => MetadataCommand::DeleteKvIfMatches {
             key: get_str(buf)?,
@@ -793,7 +804,14 @@ mod tests {
                 slots: 1,
                 protocol_addresses: Default::default(),
             },
-            MetadataCommand::PlaceStream { stream_id: 42 },
+            MetadataCommand::PlaceStream {
+                stream_id: 42,
+                node_id: None,
+            },
+            MetadataCommand::PlaceStream {
+                stream_id: 43,
+                node_id: Some(2),
+            },
             MetadataCommand::Heartbeat {
                 node_id: 7,
                 node_epoch: 100,
@@ -996,7 +1014,9 @@ mod tests {
                         }
                     }
                 ),
-            any::<u64>().prop_map(|stream_id| MetadataCommand::PlaceStream { stream_id }),
+            (any::<u64>(), any::<Option<i32>>()).prop_map(|(stream_id, node_id)| {
+                MetadataCommand::PlaceStream { stream_id, node_id }
+            }),
             (any::<i32>(), any::<i64>()).prop_map(|(node_id, node_epoch)| {
                 MetadataCommand::Heartbeat {
                     node_id,

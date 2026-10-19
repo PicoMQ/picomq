@@ -2,7 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
+use picomq_metadata::sink::Proposed;
+use picomq_metadata::{
+    CommandSink, LocalSink, MetadataCommand, MetadataError, MetadataState, ViewPublisher, apply,
+};
 use picomq_server::ownership::OwnershipService as _;
 use picomq_server::record::encode_batch;
 use picomq_server::{
@@ -1467,14 +1470,14 @@ async fn partitions_grow_and_stay_independent() {
     assert!(first.records.is_empty());
     assert_eq!(&second.records[0].record.value[..], b"one");
 
-    let grown = topics.grow("/parts", 4).await.unwrap();
+    let grown = topics.grow("/parts", 4, &[]).await.unwrap();
     assert_eq!(grown.partitions, 4);
     topics
         .append("/parts", 3, append(&[b"three"], "text/plain"))
         .await
         .unwrap();
     assert_eq!(
-        topics.grow("/parts", 3).await.unwrap_err().kind,
+        topics.grow("/parts", 3, &[]).await.unwrap_err().kind,
         ErrorKind::BadRequest
     );
 
@@ -1501,7 +1504,7 @@ async fn closed_topics_do_not_grow() {
         .unwrap();
     topics.close("/sealed").await.unwrap();
 
-    let grown = topics.grow("/sealed", 2).await.unwrap_err();
+    let grown = topics.grow("/sealed", 2, &[]).await.unwrap_err();
     assert_eq!(grown.kind, ErrorKind::Closed);
     assert_eq!(topics.get("/sealed").await.unwrap().unwrap().partitions, 1);
 
@@ -1525,7 +1528,7 @@ async fn partition_counts_are_capped() {
 
     topics.create(create("/small", "text/plain")).await.unwrap();
     let grown = topics
-        .grow("/small", MAX_NEW_PARTITIONS + 2)
+        .grow("/small", MAX_NEW_PARTITIONS + 2, &[])
         .await
         .unwrap_err();
     assert_eq!(grown.kind, ErrorKind::BadRequest);
@@ -1586,7 +1589,7 @@ async fn partitions_are_placed_across_nodes() {
         );
     }
 
-    let grown = node2.topics().grow("/spread", 6).await.unwrap();
+    let grown = node2.topics().grow("/spread", 6, &[]).await.unwrap();
     let added = &placements(&node1, &grown)[4..];
     for node_id in [1, 2] {
         assert!(
@@ -1825,6 +1828,321 @@ async fn a_retried_close_seals_after_an_interrupted_one() {
     let again = topics.append("/interrupted", 0, last(true)).await.unwrap();
     assert!(again.closed);
     assert_eq!(again.next_offset.record_offset(), 1);
+
+    node.close().await;
+}
+
+async fn start_sqlite_node(
+    path: &std::path::Path,
+    node_id: i32,
+    poll_interval: Duration,
+    object_storage: Arc<dyn ObjectStorageTrait>,
+    wal_storage: Arc<dyn ObjectStorageTrait>,
+) -> (PicoNode, Arc<ViewPublisher>) {
+    use picomq_sql::{MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
+
+    let store: Arc<dyn MetaStore> = Arc::new(SqliteStore::open(path).await.unwrap());
+    let (sink, views) = SqlSink::open(
+        store,
+        SqlSinkConfig {
+            poll_interval,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let node = start_shared_node(
+        node_id,
+        1,
+        Arc::new(sink),
+        views.clone(),
+        object_storage,
+        wal_storage,
+    )
+    .await;
+    (node, views)
+}
+
+async fn start_lagging_pair(
+    path: &std::path::Path,
+) -> (PicoNode, Arc<ViewPublisher>, PicoNode, Arc<ViewPublisher>) {
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let (node1, views1) = start_sqlite_node(
+        path,
+        1,
+        Duration::from_millis(1),
+        object_storage.clone(),
+        wal_storage.clone(),
+    )
+    .await;
+    let (node2, views2) = start_sqlite_node(
+        path,
+        2,
+        Duration::from_secs(60),
+        object_storage,
+        wal_storage,
+    )
+    .await;
+    (node1, views1, node2, views2)
+}
+
+#[tokio::test]
+async fn a_lagging_node_syncs_before_reporting_a_topic_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node1, views1, node2, views2) = start_lagging_pair(&dir.path().join("meta.db")).await;
+
+    node1
+        .topics()
+        .create(create("/fresh", "text/plain"))
+        .await
+        .unwrap();
+    assert!(views2.load().applied_index < views1.load().applied_index);
+
+    let found = tokio::time::timeout(Duration::from_secs(5), node2.topics().get("/fresh"))
+        .await
+        .expect("the lookup waited for the poll")
+        .unwrap();
+    assert!(found.is_some());
+    assert!(node2.topics().get("/missing").await.unwrap().is_none());
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn deleted_topics_destroy_streams_that_were_never_opened() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views.clone()).await;
+    let topics = node.topics();
+
+    topics
+        .create(create("/never-opened", "text/plain"))
+        .await
+        .unwrap();
+    let log = log_of(&topics, "/never-opened").await;
+    let stream_id = node.service().stream_id(&log).unwrap().unwrap();
+    let row = views.load().state.streams[&stream_id];
+    assert_eq!(row.state, StreamState::Closed);
+    assert_eq!(row.node_id, 1);
+
+    assert!(topics.delete("/never-opened").await.unwrap());
+    wait_for_view(&views, "the placed stream to be destroyed", |view| {
+        !view.state.streams.contains_key(&stream_id)
+    })
+    .await;
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn partitions_go_to_the_requested_owners() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let node1 = start_shared_node(
+        1,
+        1,
+        sink.clone(),
+        views.clone(),
+        object_storage.clone(),
+        wal_storage.clone(),
+    )
+    .await;
+    let node2 = start_shared_node(2, 1, sink, views.clone(), object_storage, wal_storage).await;
+    let topics = node1.topics();
+    let owners_of = |topic: &Topic| -> Vec<i32> {
+        let state = &views.load().state;
+        (0..topic.partitions)
+            .map(|index| {
+                let log = partition_log(topic, index).unwrap();
+                let stream_id = node1.service().stream_id(&log).unwrap().unwrap();
+                state.streams[&stream_id].node_id
+            })
+            .collect()
+    };
+
+    topics
+        .create(CreateCommand {
+            partitions: 4,
+            owners: vec![2, 1, 2, 1],
+            ..create("/assigned", "text/plain")
+        })
+        .await
+        .unwrap();
+    let topic = topics.get("/assigned").await.unwrap().unwrap();
+    assert_eq!(owners_of(&topic), [2, 1, 2, 1]);
+
+    let grown = topics.grow("/assigned", 6, &[1, 2]).await.unwrap();
+    assert_eq!(owners_of(&grown), [2, 1, 2, 1, 1, 2]);
+
+    let missing = topics.grow("/assigned", 8, &[1]).await.unwrap_err();
+    assert_eq!(missing.kind, ErrorKind::BadRequest);
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn a_restarted_coordinator_keeps_the_members_that_join_it() {
+    use picomq_server::{JoinInput, Membership};
+
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let join = || JoinInput {
+        group_id: "g".to_owned(),
+        member_id: String::new(),
+        instance_id: None,
+        client_id: "test".to_owned(),
+        membership: Membership::Subscribed(vec!["/a".to_owned()]),
+        session_timeout_ms: 10_000,
+        rebalance_timeout_ms: 2_000,
+        require_known_member_id: false,
+    };
+
+    let node = start_shared_node(
+        1,
+        1,
+        sink.clone(),
+        views.clone(),
+        object_storage.clone(),
+        wal_storage.clone(),
+    )
+    .await;
+    assert!(node.groups().join(join()).await.result.is_ok());
+    node.close().await;
+
+    let restarted = start_shared_node(1, 2, sink, views, object_storage, wal_storage).await;
+    assert!(restarted.groups().join(join()).await.result.is_ok());
+    let described = restarted.groups().describe("g").await.unwrap();
+    assert_eq!(described.members.len(), 1);
+
+    restarted.close().await;
+}
+
+struct Recorder {
+    sink: LocalSink,
+    applied: std::sync::Mutex<Vec<(u64, MetadataCommand)>>,
+}
+
+#[async_trait::async_trait]
+impl CommandSink for Recorder {
+    async fn propose(&self, command: MetadataCommand) -> Result<Proposed, MetadataError> {
+        let proposed = self.sink.propose(command.clone()).await?;
+        self.applied
+            .lock()
+            .unwrap()
+            .push((proposed.applied_index, command));
+        Ok(proposed)
+    }
+
+    async fn sync(&self) -> Result<(), MetadataError> {
+        self.sink.sync().await
+    }
+}
+
+#[tokio::test]
+async fn new_logs_are_published_with_their_owner() {
+    let (sink, views) = LocalSink::new();
+    let recorder = Arc::new(Recorder {
+        sink,
+        applied: Default::default(),
+    });
+    let node = start_node(1, recorder.clone(), views).await;
+    let service = node.service();
+    let local = Log::Group("local".into());
+    let placed = Log::Group("placed".into());
+
+    service.create_local_log(&local).await.unwrap();
+    service.create_placed_log(&placed, None).await.unwrap();
+
+    let streams =
+        [&local, &placed].map(|log| (log.key(), service.stream_id(log).unwrap().unwrap()));
+    let mut applied = recorder.applied.lock().unwrap().clone();
+    applied.sort_by_key(|(index, _)| *index);
+    let mut state = MetadataState::new();
+    for (_, command) in &applied {
+        apply(&mut state, command).unwrap();
+        for (key, stream_id) in &streams {
+            if state.get_kv(key).is_some() {
+                assert_ne!(
+                    state.streams[stream_id].node_id, -1,
+                    "{key} was published before it had an owner"
+                );
+            }
+        }
+    }
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_lost_claim_destroys_its_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node1, _, node2, views2) = start_lagging_pair(&dir.path().join("meta.db")).await;
+    let log = Log::Group("claimed".into());
+
+    node1.service().create_local_log(&log).await.unwrap();
+    node2.service().create_local_log(&log).await.unwrap();
+
+    let winner = node1.service().stream_id(&log).unwrap().unwrap();
+    assert_eq!(node2.service().stream_id(&log).unwrap(), Some(winner));
+    assert!(views2.load().state.streams.keys().eq([&winner]));
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn a_claim_that_cannot_own_its_stream_destroys_it() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views.clone()).await;
+    let log = Log::Group("unowned".into());
+
+    let placed = node.service().create_placed_log(&log, Some(99)).await;
+    assert!(placed.is_err());
+    assert_eq!(node.service().stream_id(&log).unwrap(), None);
+    let state = &views.load().state;
+    assert!(state.streams.is_empty());
+    assert!(state.get_kv(&log.key()).is_none());
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_failed_append_reopens_the_stream_at_a_new_epoch() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views.clone()).await;
+    let topics = node.topics();
+    topics
+        .create(create("/reopened", "text/plain"))
+        .await
+        .unwrap();
+    topics
+        .append("/reopened", 0, append(&[b"first"], "text/plain"))
+        .await
+        .unwrap();
+    let log = log_of(&topics, "/reopened").await;
+    let stream_id = node.service().stream_id(&log).unwrap().unwrap();
+    let held = node.service().streams().held(stream_id).unwrap();
+
+    held.close().await.unwrap();
+    let failed = topics
+        .append("/reopened", 0, append(&[b"lost"], "text/plain"))
+        .await
+        .unwrap_err();
+    assert_eq!(failed.kind, ErrorKind::Durability);
+
+    let appended = topics
+        .append("/reopened", 0, append(&[b"second"], "text/plain"))
+        .await
+        .unwrap();
+    assert_eq!(appended.next_offset.record_offset(), 2);
+    let row = views.load().state.streams[&stream_id];
+    assert_eq!((row.state, row.epoch), (StreamState::Opened, 2));
 
     node.close().await;
 }

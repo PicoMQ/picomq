@@ -1,6 +1,7 @@
 mod clients;
 mod docker;
 mod raw;
+mod rebalance;
 mod reference;
 mod scenario;
 mod versions;

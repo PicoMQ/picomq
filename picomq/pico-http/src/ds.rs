@@ -151,6 +151,10 @@ async fn dispatch(
         Ok(requested) => requested,
         Err(e) => return service_error_response(e),
     };
+    let body = match axum::body::to_bytes(body, frontend.max_request_size).await {
+        Ok(body) => body,
+        Err(_) => return fail(413, "content too large"),
+    };
     if let Some(response) = route(
         frontend.ownership.as_ref(),
         &frontend.topics,
@@ -164,10 +168,6 @@ async fn dispatch(
     {
         return response;
     }
-    let body = match axum::body::to_bytes(body, frontend.max_request_size).await {
-        Ok(body) => body,
-        Err(_) => return fail(413, "content too large"),
-    };
     frontend.handle(parts, body, name, requested).await
 }
 

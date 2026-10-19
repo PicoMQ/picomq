@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use picomq_protocol::record::{PicoRecord, decode_batch_read, encode_batch_append};
-use picomq_server::CreateCommand;
+use picomq_server::ownership::OwnershipService;
+use picomq_server::{CreateCommand, Log, NodeMeta, Owner, ServiceError};
 use serde_json::Value;
 
 use common::picomq_server;
@@ -464,41 +465,38 @@ async fn live_reads() {
     assert!(!body.contains(r#""body":"ping""#));
 }
 
+struct RemoteOwnership {
+    local: Log,
+}
+
+#[async_trait::async_trait]
+impl OwnershipService for RemoteOwnership {
+    async fn owner_of(&self, log: &Log) -> Result<Owner, ServiceError> {
+        if *log == self.local {
+            return Ok(Owner::local(None, -1));
+        }
+
+        Ok(Owner::remote(
+            7,
+            1,
+            2,
+            "http://owner.example:4437/".to_owned(),
+        ))
+    }
+
+    fn local_node(&self) -> NodeMeta {
+        NodeMeta {
+            node_id: 1,
+            advertised_address: "http://127.0.0.1:4437".to_owned(),
+        }
+    }
+}
+
 /// Ownership routing: a stream owned by another node redirects with 307
 /// (path + query preserved). PUT and the list root stay local. Driven
 /// through a stub ownership service.
 #[tokio::test]
 async fn remote_owner_redirects() {
-    use picomq_server::ownership::OwnershipService;
-    use picomq_server::{Log, NodeMeta, Owner, ServiceError};
-
-    struct RemoteOwnership {
-        local: Log,
-    }
-
-    #[async_trait::async_trait]
-    impl OwnershipService for RemoteOwnership {
-        async fn owner_of(&self, log: &Log) -> Result<Owner, ServiceError> {
-            if *log == self.local {
-                return Ok(Owner::local(None, -1));
-            }
-
-            Ok(Owner::remote(
-                7,
-                1,
-                2,
-                "http://owner.example:4437/".to_owned(),
-            ))
-        }
-
-        fn local_node(&self) -> NodeMeta {
-            NodeMeta {
-                node_id: 1,
-                advertised_address: "http://127.0.0.1:4437".to_owned(),
-            }
-        }
-    }
-
     let node = common::start_node().await;
     node.topics()
         .create(picomq_server::CreateCommand::new(
@@ -732,4 +730,57 @@ async fn partitions_are_addressed_one_at_a_time() {
         .await
         .unwrap();
     assert_eq!(close.status(), 400);
+}
+
+/// A write to a stream owned elsewhere is redirected after its body is read,
+/// so the HTTP/2 stream closes cleanly and a busy client keeps its connection.
+#[tokio::test]
+async fn redirected_writes_keep_the_http2_connection() {
+    use futures::StreamExt as _;
+
+    let node = common::start_node().await;
+    node.topics()
+        .create(CreateCommand::new("/streams/elsewhere", "text/plain"))
+        .await
+        .unwrap();
+    let frontend = std::sync::Arc::new(picomq_http::PicoFrontend::new(
+        node.topics(),
+        std::sync::Arc::new(RemoteOwnership {
+            local: Log::Group("none".to_owned()),
+        }),
+        picomq_http::RoutingMode::Redirect,
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://{}/streams/elsewhere",
+        listener.local_addr().unwrap()
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, frontend.router()).await.unwrap();
+    });
+
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .http2_prior_knowledge()
+        .build()
+        .unwrap();
+    let slow_body = || {
+        reqwest::Body::wrap_stream(futures::stream::iter(0..8).then(|_| async {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            Ok::<_, std::io::Error>(Bytes::from(vec![b'x'; 8 * 1024]))
+        }))
+    };
+    let statuses: Vec<_> = futures::stream::iter(0..4096)
+        .map(|_| {
+            http.post(&url)
+                .header("Content-Type", "text/plain")
+                .body(slow_body())
+                .send()
+        })
+        .buffer_unordered(512)
+        .map(|response| response.map(|response| response.status().as_u16()))
+        .collect()
+        .await;
+
+    assert!(statuses.iter().all(|status| matches!(status, Ok(307))));
 }

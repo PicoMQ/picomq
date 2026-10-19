@@ -1,150 +1,20 @@
 //! End-to-end against a running node (Postgres + object storage).
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+mod common;
+
+use common::{Harness, consume_n, produce, unique};
+
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use picomq_protocol::record::{PicoRecord, encode_batch_append};
-use rdkafka::Message;
-use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
-use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::message::Headers as _;
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::producer::FutureRecord;
 use rdkafka::types::RDKafkaErrorCode;
 use serde_json::Value;
 
 const CT_BATCH_BINARY: &str = "application/vnd.picomq.batch";
-
-fn endpoint() -> String {
-    std::env::var("PICO_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:4437".into())
-}
-
-fn bootstrap() -> String {
-    std::env::var("PICO_KAFKA").unwrap_or_else(|_| "127.0.0.1:9092".into())
-}
-
-fn unique(prefix: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    format!("{prefix}-{nanos}")
-}
-
-struct Harness {
-    http: reqwest::Client,
-    base: String,
-    bootstrap: String,
-}
-
-impl Harness {
-    fn new() -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap(),
-            base: endpoint().trim_end_matches('/').to_owned(),
-            bootstrap: bootstrap(),
-        }
-    }
-
-    fn url(&self, path: &str) -> String {
-        format!("{}{path}", self.base)
-    }
-
-    fn producer(&self) -> FutureProducer {
-        ClientConfig::new()
-            .set("bootstrap.servers", &self.bootstrap)
-            .set("enable.idempotence", "true")
-            .set("acks", "all")
-            .set("message.timeout.ms", "30000")
-            .create()
-            .unwrap()
-    }
-
-    fn consumer(&self, topic: &str) -> StreamConsumer {
-        let consumer: StreamConsumer = ClientConfig::new()
-            .set("bootstrap.servers", &self.bootstrap)
-            .set("group.id", format!("e2e-{topic}-{}", unique("g")))
-            .set("enable.auto.commit", "false")
-            .set("auto.offset.reset", "earliest")
-            .create()
-            .unwrap();
-        let mut assignment = rdkafka::TopicPartitionList::new();
-        assignment
-            .add_partition_offset(topic, 0, rdkafka::Offset::Beginning)
-            .unwrap();
-        consumer.assign(&assignment).unwrap();
-        consumer
-    }
-
-    fn admin(&self) -> AdminClient<DefaultClientContext> {
-        ClientConfig::new()
-            .set("bootstrap.servers", &self.bootstrap)
-            .create()
-            .unwrap()
-    }
-
-    async fn create_topic(&self, topic: &str) {
-        let results = self
-            .admin()
-            .create_topics(
-                [&NewTopic::new(topic, 1, TopicReplication::Fixed(1))],
-                &AdminOptions::new(),
-            )
-            .await
-            .unwrap();
-        results[0].as_ref().unwrap();
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct Consumed {
-    offset: i64,
-    key: Option<Vec<u8>>,
-    value: Vec<u8>,
-    headers: Vec<(String, Vec<u8>)>,
-}
-
-async fn consume_n(consumer: &StreamConsumer, count: usize) -> Vec<Consumed> {
-    let mut out = Vec::with_capacity(count);
-    while out.len() < count {
-        let message = tokio::time::timeout(Duration::from_secs(30), consumer.recv())
-            .await
-            .expect("consume timed out")
-            .unwrap();
-        let headers = message
-            .headers()
-            .map(|headers| {
-                headers
-                    .iter()
-                    .map(|h| (h.key.to_owned(), h.value.unwrap_or_default().to_vec()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.push(Consumed {
-            offset: message.offset(),
-            key: message.key().map(<[u8]>::to_vec),
-            value: message.payload().unwrap_or_default().to_vec(),
-            headers,
-        });
-    }
-    out
-}
-
-async fn produce(producer: &FutureProducer, topic: &str, key: Option<&str>, value: &str) -> i64 {
-    let mut record = FutureRecord::to(topic).payload(value);
-    if let Some(key) = key {
-        record = record.key(key);
-    }
-    producer
-        .send(record, Duration::from_secs(20))
-        .await
-        .unwrap()
-        .offset
-}
 
 async fn pico_read_json(h: &Harness, path: &str) -> Vec<Value> {
     let page = h
@@ -246,7 +116,7 @@ async fn consumer_group_is_shared_by_kafka_and_pico_members() {
     let h = Harness::new();
     let topic = unique("e2e-group");
     let group = unique("e2e-shared");
-    h.create_topic(&topic).await;
+    h.create_topic(&topic, 1).await;
     let producer = h.producer();
     for n in 0..5 {
         produce(&producer, &topic, None, &format!("job-{n}")).await;
@@ -370,7 +240,7 @@ async fn consumer_group_is_shared_by_kafka_and_pico_members() {
 async fn kafka_writes_pico_reads() {
     let h = Harness::new();
     let topic = unique("e2e-kp");
-    h.create_topic(&topic).await;
+    h.create_topic(&topic, 1).await;
     let producer = h.producer();
     produce(&producer, &topic, Some("k"), "from-kafka").await;
 
@@ -386,7 +256,7 @@ async fn kafka_writes_pico_reads() {
 async fn mixed_writers_share_one_log() {
     let h = Harness::new();
     let topic = unique("e2e-mix");
-    h.create_topic(&topic).await;
+    h.create_topic(&topic, 1).await;
     let path = format!("/{topic}");
     let producer = h.producer();
 
@@ -761,7 +631,7 @@ async fn concurrent_http_producers_do_not_collide() {
 async fn concurrent_kafka_producers_keep_offsets_dense() {
     let h = Harness::new();
     let topic = unique("e2e-kmp");
-    h.create_topic(&topic).await;
+    h.create_topic(&topic, 1).await;
     let each = 40;
     let left = h.producer();
     let right = h.producer();

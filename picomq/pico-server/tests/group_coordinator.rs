@@ -9,6 +9,7 @@ use picomq_server::{
     OffsetCommit, Partition, PicoNode, SyncInput, TopicId,
 };
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
+use tokio::task::JoinHandle;
 
 async fn start_node(
     node_id: i32,
@@ -529,6 +530,182 @@ async fn groups_delete_only_when_empty() {
 
     assert_eq!(groups.delete("g").await, Err(GroupError::GroupNotFound));
     assert!(groups.fetch_offsets("g", None).await.unwrap().is_empty());
+
+    node.close().await;
+}
+
+async fn stable_member(groups: &Arc<GroupCoordinator>, group: &str) -> String {
+    let first = groups
+        .join(join(group, "", client("consumer", "range", "a")))
+        .await;
+    groups
+        .sync(SyncInput {
+            group_id: group.to_owned(),
+            generation: first.generation,
+            member_id: first.member_id.clone(),
+            instance_id: None,
+            assignments: vec![(first.member_id.clone(), Bytes::from_static(b"all"))],
+        })
+        .await
+        .unwrap();
+    first.member_id
+}
+
+fn spawn_join(groups: &Arc<GroupCoordinator>, input: JoinInput) -> JoinHandle<JoinOutcome> {
+    let groups = Arc::clone(groups);
+    tokio::spawn(async move { groups.join(input).await })
+}
+
+#[tokio::test]
+async fn a_leave_during_a_rebalance_completes_the_pending_joins() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+    let first = stable_member(&groups, "g").await;
+
+    let pending = spawn_join(&groups, join("g", "", client("consumer", "range", "b")));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    groups.leave("g", &[(first, None)]).await;
+
+    let second = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("the pending join completed")
+        .unwrap();
+    let Ok(Joined::Client {
+        leader, members, ..
+    }) = &second.result
+    else {
+        panic!("{second:?}");
+    };
+    assert_eq!(leader, &second.member_id);
+    assert_eq!(members.len(), 1);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_newer_join_supersedes_the_pending_one() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+    let first = stable_member(&groups, "g").await;
+
+    let named = groups
+        .join(JoinInput {
+            require_known_member_id: true,
+            ..join("g", "", client("consumer", "range", "b"))
+        })
+        .await;
+    assert_eq!(
+        named.result.as_ref().err(),
+        Some(&GroupError::MemberIdRequired)
+    );
+    let second = named.member_id;
+
+    let earlier = spawn_join(
+        &groups,
+        join("g", &second, client("consumer", "range", "b")),
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let later = spawn_join(
+        &groups,
+        join("g", &second, client("consumer", "range", "b")),
+    );
+
+    let earlier = earlier.await.unwrap();
+    assert_eq!(earlier.result.err(), Some(GroupError::Superseded));
+
+    groups
+        .join(join("g", &first, client("consumer", "range", "a")))
+        .await
+        .result
+        .unwrap();
+    assert!(later.await.unwrap().result.is_ok());
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_group_on_a_fenced_node_waits_for_its_log_to_be_recovered() {
+    use picomq_metadata::MetadataCommand;
+
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views).await;
+
+    let created = node2
+        .groups()
+        .join(join("g", "", client("consumer", "range", "a")))
+        .await;
+    assert!(created.result.is_ok());
+
+    sink.propose(MetadataCommand::FenceNode {
+        node_id: 2,
+        node_epoch: 1,
+    })
+    .await
+    .unwrap();
+
+    let rejoined = node1
+        .groups()
+        .join(JoinInput {
+            require_known_member_id: true,
+            ..join("g", "", client("consumer", "range", "b"))
+        })
+        .await;
+    assert_eq!(
+        rejoined.result.err(),
+        Some(GroupError::CoordinatorNotAvailable)
+    );
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn an_expired_member_departs_and_the_rebalance_completes_without_it() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+
+    let first = groups
+        .join(JoinInput {
+            session_timeout_ms: 1_000,
+            ..join("g", "", client("consumer", "range", "a"))
+        })
+        .await;
+    groups
+        .sync(SyncInput {
+            group_id: "g".to_owned(),
+            generation: first.generation,
+            member_id: first.member_id.clone(),
+            instance_id: None,
+            assignments: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let second = groups
+        .join(JoinInput {
+            rebalance_timeout_ms: 10_000,
+            ..join("g", "", client("consumer", "range", "b"))
+        })
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let Ok(Joined::Client {
+        leader, members, ..
+    }) = &second.result
+    else {
+        panic!("{second:?}");
+    };
+    assert_eq!(leader, &second.member_id);
+    assert_eq!(members.len(), 1);
 
     node.close().await;
 }

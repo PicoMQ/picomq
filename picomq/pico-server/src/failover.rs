@@ -148,13 +148,7 @@ impl Failover {
     }
 
     async fn take_over(&self, state: &MetadataState, row: &NodeRow) {
-        let stranded: Vec<u64> = state
-            .placed_by_node
-            .range((row.node_id, 0)..=(row.node_id, u64::MAX))
-            .map(|((_, stream_id), ())| *stream_id)
-            .collect();
-
-        for stream_id in stranded {
+        for stream_id in state.placed_on(row.node_id) {
             let moved = if state.get_kv(&stream_id_key(stream_id)).is_none() {
                 self.streams.destroy(stream_id).await
             } else if state.pending_transfers.contains_key(&stream_id) {
@@ -165,7 +159,7 @@ impl Failover {
                     .map_err(|error| ServiceError::from(error.to_stream_error()))
             } else {
                 self.handle
-                    .place_stream(stream_id)
+                    .place_stream(stream_id, None)
                     .await
                     .map(|_| ())
                     .map_err(|error| ServiceError::from(error.to_stream_error()))

@@ -146,20 +146,22 @@ impl S3StreamService {
         &self.streams
     }
 
-    pub async fn create_placed_log(&self, log: &Log) -> Result<(), ServiceError> {
-        if let Some(stream_id) = self.claim_log(log).await? {
-            self.streams.place(stream_id).await?;
-        }
-
-        Ok(())
+    pub async fn create_placed_log(
+        &self,
+        log: &Log,
+        owner: Option<i32>,
+    ) -> Result<(), ServiceError> {
+        self.claim_log(log, async |stream_id| {
+            self.streams.place(stream_id, owner).await
+        })
+        .await
     }
 
     pub async fn create_local_log(&self, log: &Log) -> Result<(), ServiceError> {
-        if let Some(stream_id) = self.claim_log(log).await? {
-            self.streams.ensure_open(stream_id).await?;
-        }
-
-        Ok(())
+        self.claim_log(log, async |stream_id| {
+            self.streams.ensure_open(stream_id).await.map(|_| ())
+        })
+        .await
     }
 
     pub fn spawn_deleted_cleanup(self: &Arc<Self>, tick: Duration) -> tokio::task::JoinHandle<()> {
@@ -168,7 +170,7 @@ impl S3StreamService {
         tokio::spawn(async move {
             loop {
                 let view = service.views.load();
-                for stream_id in service.streams.held_ids() {
+                for stream_id in service.streams.owned(&view.state) {
                     if view.state.get_kv(&stream_id_key(stream_id)).is_none() {
                         service.discard(stream_id).await;
                     }
@@ -187,19 +189,24 @@ impl S3StreamService {
 
         let _ = self.kv.del_kv(&key).await;
         let _ = self.kv.del_kv(&stream_id_key(entry.stream_id)).await;
-        self.discard(entry.stream_id).await;
+        self.forget(&key).await;
     }
 
-    async fn claim_log(&self, log: &Log) -> Result<Option<u64>, ServiceError> {
+    async fn claim_log(
+        &self,
+        log: &Log,
+        own: impl AsyncFnOnce(u64) -> Result<(), ServiceError>,
+    ) -> Result<(), ServiceError> {
         let key = log.key();
         if self.entry(&key)?.is_some() {
-            return Ok(None);
+            return Ok(());
         }
 
         let stream_id = self.streams.register(&key).await?;
         let index = stream_id_key(stream_id);
         let claimed: Result<LogEntry, ServiceError> = async {
             self.kv.put_kv(&index, Bytes::from(key.clone())).await?;
+            own(stream_id).await?;
             let stored = self
                 .kv
                 .put_kv_if_absent(&key, LogEntry::new(stream_id).encode())
@@ -211,14 +218,14 @@ impl S3StreamService {
         match claimed {
             Ok(current) if current.stream_id == stream_id => {
                 self.entries.lock().unwrap().insert(key, current);
-                Ok(Some(stream_id))
+                Ok(())
             }
             outcome => {
-                let _ = self.kv.del_kv(&index).await;
                 if let Err(error) = self.streams.destroy(stream_id).await {
-                    tracing::warn!(%error, stream_id, "unclaimed stream not destroyed");
+                    tracing::warn!(%error, stream_id, "stream of an unclaimed log not destroyed");
                 }
-                outcome.map(|_| None)
+                let _ = self.kv.del_kv(&index).await;
+                outcome.map(|_| ())
             }
         }
     }
@@ -234,18 +241,22 @@ impl S3StreamService {
             .collect();
 
         for key in &keys {
-            let gate = self.gate_of(key);
-            let _op = gate.op.lock().await;
-
-            self.entries.lock().unwrap().remove(key);
-            gate.reset();
-            self.gates.lock().unwrap().remove(key);
-            self.waiters.notify_closed(key);
+            self.forget(key).await;
         }
 
         if let Err(error) = self.streams.destroy(stream_id).await {
             tracing::warn!(%error, stream_id, "stream not destroyed, retrying");
         }
+    }
+
+    async fn forget(&self, key: &str) {
+        let gate = self.gate_of(key);
+        let _op = gate.op.lock().await;
+
+        self.entries.lock().unwrap().remove(key);
+        gate.reset();
+        self.gates.lock().unwrap().remove(key);
+        self.waiters.notify_closed(key);
     }
 
     pub fn stream_id(&self, log: &Log) -> Result<Option<u64>, ServiceError> {
@@ -342,7 +353,7 @@ impl S3StreamService {
         ) {
             Ok(pending) => pending,
             Err(e) => {
-                self.streams.forget(stream_id);
+                self.streams.reset(stream_id).await;
                 return Err(ServiceError::durability(e));
             }
         };
@@ -383,7 +394,7 @@ impl S3StreamService {
     ) -> Result<AppendBatchResult, ServiceError> {
         if let Some(pending) = submitted.pending {
             if let Err(e) = await_durable(vec![pending]).await {
-                self.streams.forget(submitted.stream_id);
+                self.streams.reset(submitted.stream_id).await;
                 return Err(ServiceError::durability(e));
             }
 
@@ -823,7 +834,7 @@ impl Append<'_> {
             ) {
                 Ok(pending) => pendings.push(pending),
                 Err(e) => {
-                    service.streams.forget(entry.stream_id);
+                    service.streams.reset(entry.stream_id).await;
                     gate.reset();
                     return Err(ServiceError::durability(e));
                 }
@@ -847,7 +858,7 @@ impl Append<'_> {
         drop(op);
 
         if let Err(e) = await_durable(pendings).await {
-            service.streams.forget(entry.stream_id);
+            service.streams.reset(entry.stream_id).await;
             gate.reset();
             return Err(ServiceError::durability(e));
         }

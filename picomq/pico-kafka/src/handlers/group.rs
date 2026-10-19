@@ -59,6 +59,7 @@ fn error_code(error: GroupError) -> i16 {
         GroupError::MemberIdRequired => MEMBER_ID_REQUIRED,
         GroupError::CapacityExceeded => GROUP_MAX_SIZE_REACHED,
         GroupError::FencedInstance => FENCED_INSTANCE_ID,
+        GroupError::Superseded => REBALANCE_IN_PROGRESS,
     }
 }
 
@@ -193,6 +194,9 @@ async fn join_group(
         Ok(Joined::Subscribed { .. }) => {
             response = response.with_error_code(INCONSISTENT_GROUP_PROTOCOL);
         }
+        // Kafka never answers a join that a newer join from the same member
+        // replaced.
+        Err(GroupError::Superseded) => std::future::pending().await,
         Err(error) => {
             response = response.with_error_code(error_code(error));
         }

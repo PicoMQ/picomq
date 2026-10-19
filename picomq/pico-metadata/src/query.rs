@@ -34,6 +34,13 @@ impl MetadataState {
             .collect()
     }
 
+    pub fn placed_on(&self, node_id: i32) -> Vec<u64> {
+        self.placed_by_node
+            .range((node_id, 0)..=(node_id, u64::MAX))
+            .map(|((_, stream_id), ())| *stream_id)
+            .collect()
+    }
+
     pub fn placed_count(&self, node_id: i32) -> usize {
         self.placed_by_node
             .range((node_id, 0)..=(node_id, u64::MAX))

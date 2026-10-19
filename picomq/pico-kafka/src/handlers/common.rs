@@ -87,7 +87,7 @@ pub fn service_failure(error: ServiceError) -> Failure {
     (service_error_code(&error), Some(error.message))
 }
 
-pub fn check_replicas(ctx: &BrokerContext, brokers: &[BrokerId]) -> Result<(), Failure> {
+pub fn assigned_broker(ctx: &BrokerContext, brokers: &[BrokerId]) -> Result<i32, Failure> {
     let [broker] = brokers else {
         return Err((
             INVALID_REPLICA_ASSIGNMENT,
@@ -105,7 +105,7 @@ pub fn check_replicas(ctx: &BrokerContext, brokers: &[BrokerId]) -> Result<(), F
         ));
     }
 
-    Ok(())
+    Ok(broker.0)
 }
 
 pub fn service_error_code(error: &ServiceError) -> i16 {

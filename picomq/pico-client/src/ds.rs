@@ -11,6 +11,7 @@ use reqwest::Response;
 use crate::error::{ClientError, Result};
 use crate::pico::{build, default_http, send};
 use crate::retry::RetryPolicy;
+use crate::routes::Routes;
 use crate::types::{
     AppendAck, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo, StreamListing,
 };
@@ -19,6 +20,7 @@ pub struct DsClient {
     http: reqwest::Client,
     base_url: String,
     retry: RetryPolicy,
+    routes: Routes,
 }
 
 impl DsClient {
@@ -35,12 +37,18 @@ impl DsClient {
             http,
             base_url: endpoint.trim_end_matches('/').to_owned(),
             retry,
+            routes: Routes::default(),
         }
     }
 
     async fn call(&self, wire: WireRequest) -> Result<Response> {
         let ok = wire.ok;
-        let response = send(&self.http, build(&self.http, &self.base_url, wire)).await?;
+        let response = send(
+            &self.http,
+            &self.routes,
+            build(&self.http, &self.base_url, wire),
+        )
+        .await?;
         expect(response, ok).await
     }
 

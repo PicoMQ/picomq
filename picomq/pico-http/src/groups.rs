@@ -606,6 +606,7 @@ fn group_error(err: GroupError) -> Response {
         GroupError::NonEmpty => (409, E_CONFLICT),
         GroupError::CapacityExceeded => (429, E_CAPACITY_EXCEEDED),
         GroupError::FencedInstance => (403, E_FENCED),
+        GroupError::Superseded => (409, E_CONFLICT),
     };
     error(status, code, &err.to_string(), None)
 }

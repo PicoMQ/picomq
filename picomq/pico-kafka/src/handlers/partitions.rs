@@ -10,7 +10,7 @@ use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
     EXCESSIVE_PARTITIONS, Failure, INVALID_PARTITIONS, INVALID_REPLICA_ASSIGNMENT, NO_ERROR,
-    POLICY_VIOLATION, check_replicas, encode_response, resolve_topic, service_failure,
+    POLICY_VIOLATION, assigned_broker, encode_response, resolve_topic, service_failure,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -71,6 +71,7 @@ async fn grow(
         return Err((POLICY_VIOLATION, Some(EXCESSIVE_PARTITIONS.to_owned())));
     }
 
+    let mut owners = Vec::new();
     if let Some(assignments) = &requested.assignments {
         if assignments.len() != added as usize {
             let message = format!(
@@ -80,7 +81,7 @@ async fn grow(
             return Err((INVALID_REPLICA_ASSIGNMENT, Some(message)));
         }
         for assignment in assignments {
-            check_replicas(ctx, &assignment.broker_ids)?;
+            owners.push(assigned_broker(ctx, &assignment.broker_ids)?);
         }
     }
 
@@ -89,7 +90,7 @@ async fn grow(
     }
 
     ctx.topics
-        .grow(topic.name.spelling(), count)
+        .grow(topic.name.spelling(), count, &owners)
         .await
         .map(|_| ())
         .map_err(service_failure)

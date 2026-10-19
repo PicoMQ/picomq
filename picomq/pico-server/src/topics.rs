@@ -26,6 +26,7 @@ use crate::types::{
 const DEFAULT_LIST_LIMIT: usize = 1000;
 const MAX_LIST_LIMIT: usize = 10_000;
 const MAX_WRITE_ATTEMPTS: usize = 16;
+const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 const TOPIC_PREFIX: &str = "topic/";
 const TOPIC_ID_PREFIX: &str = "topic-id/";
 
@@ -71,7 +72,7 @@ impl Topics {
         let lock = self.lock(name.canonical());
         let _exclusive = lock.write().await;
 
-        if let Some((existing, stored)) = self.load(name.canonical())? {
+        if let Some((existing, stored)) = self.load(name.canonical()).await? {
             if !existing.expired(now_ms()) {
                 return self.existing(existing, &command);
             }
@@ -86,7 +87,10 @@ impl Topics {
             .put_kv(&id_key(&id), Bytes::from(name.canonical().to_owned()))
             .await?;
         let local = (!command.initial_records.is_empty()).then_some(0);
-        if let Err(error) = self.provision(id, 0..command.partitions, local).await {
+        if let Err(error) = self
+            .provision(id, 0..command.partitions, &command.owners, local)
+            .await
+        {
             let _ = self.kv.del_kv(&id_key(&id)).await;
             return Err(error);
         }
@@ -139,7 +143,7 @@ impl Topics {
 
     pub async fn get(&self, name: &str) -> Result<Option<Topic>, ServiceError> {
         let name = TopicName::parse(name)?;
-        let Some((topic, stored)) = self.load(name.canonical())? else {
+        let Some((topic, stored)) = self.load(name.canonical()).await? else {
             return Ok(None);
         };
 
@@ -159,7 +163,7 @@ impl Topics {
     }
 
     pub async fn by_id(&self, id: &TopicId) -> Result<Option<Topic>, ServiceError> {
-        let Some((topic, stored)) = self.find(id)? else {
+        let Some((topic, stored)) = self.find(id).await? else {
             return Ok(None);
         };
 
@@ -171,11 +175,11 @@ impl Topics {
         Ok(Some(topic))
     }
 
-    pub fn exists(&self, id: &TopicId) -> bool {
-        self.find(id)
-            .ok()
-            .flatten()
-            .is_some_and(|(topic, _)| !topic.expired(now_ms()))
+    pub async fn exists(&self, id: &TopicId) -> Result<bool, ServiceError> {
+        Ok(self
+            .find(id)
+            .await?
+            .is_some_and(|(topic, _)| !topic.expired(now_ms())))
     }
 
     pub fn kafka_topics(&self) -> Vec<Topic> {
@@ -299,7 +303,7 @@ impl Topics {
 
         let lock = self.lock(name.canonical());
         let _exclusive = lock.write().await;
-        let topic = self.require_live(name.canonical())?;
+        let topic = self.require_live(name.canonical()).await?;
 
         self.modify(&topic, |mut topic| {
             match &command.schema_name {
@@ -321,12 +325,17 @@ impl Topics {
         .await
     }
 
-    pub async fn grow(&self, name: &str, partitions: u32) -> Result<Topic, ServiceError> {
+    pub async fn grow(
+        &self,
+        name: &str,
+        partitions: u32,
+        owners: &[i32],
+    ) -> Result<Topic, ServiceError> {
         let name = TopicName::parse(name)?;
         let lock = self.lock(name.canonical());
         let _exclusive = lock.write().await;
 
-        let topic = self.require_live(name.canonical())?;
+        let topic = self.require_live(name.canonical()).await?;
         if topic.closed {
             return Err(ServiceError::kind(ErrorKind::Closed));
         }
@@ -351,7 +360,16 @@ impl Topics {
         }
 
         let added = topic.partitions..partitions;
-        self.provision(topic.id, added.clone(), None).await?;
+        if !owners.is_empty() && owners.len() != added.len() {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "owners must name a node for every added partition",
+            ));
+        }
+        self.provision(topic.id, added.clone(), owners, None)
+            .await?;
 
         let grown = self
             .modify(&topic, |mut topic| {
@@ -371,7 +389,7 @@ impl Topics {
         let lock = self.lock(name.canonical());
         let _exclusive = lock.write().await;
 
-        let Some((topic, stored)) = self.load(name.canonical())? else {
+        let Some((topic, stored)) = self.load(name.canonical()).await? else {
             return Ok(false);
         };
         Ok(self.remove(&topic, &stored).await)
@@ -409,7 +427,7 @@ impl Topics {
             (Some(lock.read().await), None)
         };
 
-        let topic = self.require_live(name.canonical())?;
+        let topic = self.require_live(name.canonical()).await?;
         if command.close_after && topic.partitions > 1 {
             return Err(ServiceError::with_message(
                 ErrorKind::BadRequest,
@@ -511,7 +529,7 @@ impl Topics {
         let lock = self.lock(topic.name.canonical());
         let _shared = lock.read().await;
 
-        let topic = self.require_live(topic.name.canonical())?;
+        let topic = self.require_live(topic.name.canonical()).await?;
         if topic.closed {
             return Err(ServiceError::kind(ErrorKind::Closed));
         }
@@ -712,14 +730,16 @@ impl Topics {
         &self,
         id: TopicId,
         indexes: Range<u32>,
+        owners: &[i32],
         local: Option<u32>,
     ) -> Result<(), ServiceError> {
         for index in indexes.clone() {
             let log = Log::Partition(Partition::new(id, index));
+            let owner = owners.get((index - indexes.start) as usize).copied();
             let created = if local == Some(index) {
                 self.service.create_local_log(&log).await
             } else {
-                self.service.create_placed_log(&log).await
+                self.service.create_placed_log(&log, owner).await
             };
 
             if let Err(error) = created {
@@ -778,7 +798,8 @@ impl Topics {
 
         for _ in 0..MAX_WRITE_ATTEMPTS {
             let Some((current, stored)) = self
-                .load(canonical)?
+                .load(canonical)
+                .await?
                 .filter(|(current, _)| current.id == topic.id)
             else {
                 return Err(ServiceError::kind(ErrorKind::NotFound));
@@ -811,7 +832,7 @@ impl Topics {
         let lock = self.lock(topic.name.canonical());
         let _exclusive = lock.write().await;
 
-        let Ok(Some((current, current_stored))) = self.load(topic.name.canonical()) else {
+        let Ok(Some((current, current_stored))) = self.load(topic.name.canonical()).await else {
             return;
         };
         if current_stored != *stored || !current.expired(now_ms()) {
@@ -850,14 +871,44 @@ impl Topics {
             .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound))
     }
 
-    fn require_live(&self, canonical: &str) -> Result<Topic, ServiceError> {
-        self.load(canonical)?
+    async fn require_live(&self, canonical: &str) -> Result<Topic, ServiceError> {
+        self.load(canonical)
+            .await?
             .map(|(topic, _)| topic)
             .filter(|topic| !topic.expired(now_ms()))
             .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound))
     }
 
-    fn find(&self, id: &TopicId) -> Result<Option<(Topic, Bytes)>, ServiceError> {
+    async fn find(&self, id: &TopicId) -> Result<Option<(Topic, Bytes)>, ServiceError> {
+        self.fresh(|| self.record_by_id(id)).await
+    }
+
+    async fn load(&self, canonical: &str) -> Result<Option<(Topic, Bytes)>, ServiceError> {
+        self.fresh(|| self.record(canonical)).await
+    }
+
+    async fn fresh<T>(
+        &self,
+        read: impl Fn() -> Result<Option<T>, ServiceError>,
+    ) -> Result<Option<T>, ServiceError> {
+        if let Some(found) = read()? {
+            return Ok(Some(found));
+        }
+
+        tokio::time::timeout(SYNC_TIMEOUT, self.kv.sync())
+            .await
+            .map_err(|_| {
+                ServiceError::with_message(
+                    ErrorKind::Timeout,
+                    None,
+                    false,
+                    "metadata did not catch up in time",
+                )
+            })??;
+        read()
+    }
+
+    fn record_by_id(&self, id: &TopicId) -> Result<Option<(Topic, Bytes)>, ServiceError> {
         let Some(canonical) = self
             .kv
             .get_kv(&id_key(id))
@@ -866,10 +917,12 @@ impl Topics {
             return Ok(None);
         };
 
-        Ok(self.load(&canonical)?.filter(|(topic, _)| topic.id == *id))
+        Ok(self
+            .record(&canonical)?
+            .filter(|(topic, _)| topic.id == *id))
     }
 
-    fn load(&self, canonical: &str) -> Result<Option<(Topic, Bytes)>, ServiceError> {
+    fn record(&self, canonical: &str) -> Result<Option<(Topic, Bytes)>, ServiceError> {
         let Some(stored) = self.kv.get_kv(&topic_key(canonical)) else {
             return Ok(None);
         };

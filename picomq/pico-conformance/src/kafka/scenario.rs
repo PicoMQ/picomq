@@ -1,5 +1,6 @@
 use crate::kafka::Broker;
 use crate::kafka::clients::{Clients, KCAT, OLD_KCAT};
+use crate::kafka::rebalance;
 use crate::kafka::{raw, versions};
 
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +28,9 @@ pub enum Scenario {
     DeleteGroups,
     DeleteOffsets,
     ClusterId,
+    GroupLeave,
+    GroupRejoin,
+    GroupMissing,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +67,9 @@ impl Scenario {
         Scenario::DeleteGroups,
         Scenario::DeleteOffsets,
         Scenario::ClusterId,
+        Scenario::GroupLeave,
+        Scenario::GroupRejoin,
+        Scenario::GroupMissing,
     ];
 
     pub fn name(self) -> &'static str {
@@ -90,6 +97,9 @@ impl Scenario {
             Scenario::DeleteGroups => "delete-groups",
             Scenario::DeleteOffsets => "delete-offsets",
             Scenario::ClusterId => "cluster-id",
+            Scenario::GroupLeave => "group-leave-during-rebalance",
+            Scenario::GroupRejoin => "group-rejoin-while-pending",
+            Scenario::GroupMissing => "group-missing-member",
         }
     }
 
@@ -130,6 +140,9 @@ impl Scenario {
             Scenario::DeleteGroups => delete_groups(clients, broker, topic).await,
             Scenario::DeleteOffsets => delete_offsets(clients, broker, topic).await,
             Scenario::ClusterId => cluster_id(clients, broker).await,
+            Scenario::GroupLeave => rebalance::leave(host_address, topic).await,
+            Scenario::GroupRejoin => rebalance::rejoin(host_address, topic).await,
+            Scenario::GroupMissing => rebalance::missing(host_address, topic).await,
         };
 
         lines
