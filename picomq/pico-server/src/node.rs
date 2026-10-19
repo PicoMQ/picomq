@@ -177,6 +177,7 @@ impl PicoNode {
             service.clone(),
             topics.clone(),
             ownership.clone(),
+            views.clone(),
         );
         let tokens = Arc::new(TokenService::new(kv_client));
         let transfer_watcher =

@@ -110,11 +110,6 @@ type GroupDescription struct {
 	Members      []MemberDescription
 }
 
-type GroupSummary struct {
-	Group string
-	State string
-}
-
 type ReadLimits struct {
 	Count uint64
 	Bytes uint64

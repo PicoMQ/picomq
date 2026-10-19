@@ -133,6 +133,34 @@ async fn find_coordinator_is_the_owner_of_the_group_stream() {
 }
 
 #[tokio::test]
+async fn every_node_lists_every_group() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+
+    node1
+        .groups()
+        .commit_offsets("orders", None, &[commit(partition(1), 7)])
+        .await
+        .unwrap();
+    node2
+        .groups()
+        .commit_offsets("a/b", None, &[commit(partition(1), 7)])
+        .await
+        .unwrap();
+
+    for node in [&node1, &node2] {
+        let mut listed = node.groups().list();
+        listed.sort();
+        assert_eq!(listed, ["a/b", "orders"]);
+    }
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
 async fn offsets_replay_into_a_fresh_coordinator() {
     let (sink, views) = LocalSink::new();
     let node = start_node(1, Arc::new(sink), views).await;
@@ -147,6 +175,7 @@ async fn offsets_replay_into_a_fresh_coordinator() {
         node.service(),
         node.topics(),
         node.ownership(),
+        node.views(),
     );
     let fetched = restarted
         .fetch_offsets("orders", Some(&[partition(1), partition(2)]))
@@ -491,6 +520,7 @@ async fn offset_deletes_survive_replay_and_snapshots() {
             node.service(),
             node.topics(),
             node.ownership(),
+            node.views(),
         )
     };
     let fetched = replayed().fetch_offsets("orders", None).await.unwrap();
@@ -526,8 +556,10 @@ async fn groups_delete_only_when_empty() {
     assert_eq!(groups.delete("g").await, Err(GroupError::NonEmpty));
 
     groups.leave("g", &[(member.member_id.clone(), None)]).await;
+    assert_eq!(groups.list(), ["g"]);
     groups.delete("g").await.unwrap();
 
+    assert!(groups.list().is_empty());
     assert_eq!(groups.delete("g").await, Err(GroupError::GroupNotFound));
     assert!(groups.fetch_offsets("g", None).await.unwrap().is_empty());
 

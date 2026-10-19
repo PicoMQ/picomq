@@ -128,7 +128,7 @@ var _ = ginkgo.Describe("Pico groups", func() {
 			case 8:
 				Expect(r.URL.EscapedPath()).To(Equal("/_groups"))
 				writeJSON(w, http.StatusOK, map[string]any{
-					"groups": []map[string]any{{"group": "orders/eu", "state": "Stable"}},
+					"groups": []string{"orders/eu"},
 				})
 			case 9:
 				Expect(r.Method).To(Equal(http.MethodDelete))
@@ -193,7 +193,7 @@ var _ = ginkgo.Describe("Pico groups", func() {
 
 		groups, err := client.ListGroups(ctx)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(groups).To(Equal([]GroupSummary{{Group: "orders/eu", State: "Stable"}}))
+		Expect(groups).To(Equal([]string{"orders/eu"}))
 
 		Expect(client.LeaveGroup(ctx, "orders/eu", "m/1", "i-1")).To(Succeed())
 		Expect(client.DeleteGroup(ctx, "orders/eu")).To(Succeed())

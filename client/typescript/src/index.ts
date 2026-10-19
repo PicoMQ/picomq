@@ -8,7 +8,6 @@ export type {
   GroupAssignment,
   GroupDescription,
   GroupMembership,
-  GroupSummary,
   HeaderValue,
   JoinOptions,
   Live,

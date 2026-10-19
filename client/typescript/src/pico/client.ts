@@ -37,7 +37,6 @@ import type {
   GroupAssignment,
   GroupDescription,
   GroupMembership,
-  GroupSummary,
   HeaderValue,
   JoinOptions,
   Live,
@@ -377,7 +376,7 @@ export class PicoClient implements StreamApi {
     await this.call('DELETE', groupPath(group), '', undefined, [204], options?.signal)
   }
 
-  async listGroups(options?: CallOptions): Promise<GroupSummary[]> {
+  async listGroups(options?: CallOptions): Promise<string[]> {
     return this.retry.run(
       () => this.listGroupsOnce(options?.signal),
       retryableError,
@@ -667,10 +666,10 @@ export class PicoClient implements StreamApi {
     return described
   }
 
-  private async listGroupsOnce(signal?: AbortSignal): Promise<GroupSummary[]> {
+  private async listGroupsOnce(signal?: AbortSignal): Promise<string[]> {
     const response = await this.call('GET', GROUPS_PATH, '', undefined, [200], signal)
 
-    const body = (await response.json()) as { groups?: GroupSummary[] }
+    const body = (await response.json()) as { groups?: string[] }
     return body.groups ?? []
   }
 

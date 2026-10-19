@@ -9,8 +9,8 @@ use axum::response::Response;
 use axum::routing::{get, post, put};
 use picomq_auth::{Audience, Authorizer, Operation};
 use picomq_protocol::groups::{
-    self as wire, AssignmentResponse, CommitRequest, GroupListing, GroupSummary, HeartbeatRequest,
-    JoinRequest, JoinResponse, OffsetsResponse, Q_GENERATION, Q_INSTANCE_ID, Q_STREAM,
+    self as wire, AssignmentResponse, CommitRequest, GroupListing, HeartbeatRequest, JoinRequest,
+    JoinResponse, OffsetsResponse, Q_GENERATION, Q_INSTANCE_ID, Q_STREAM,
 };
 use picomq_protocol::pico::{
     CT_JSON, E_BAD_REQUEST, E_CAPACITY_EXCEEDED, E_CONFLICT, E_COORDINATOR_UNAVAILABLE,
@@ -190,16 +190,7 @@ async fn list(State(state): State<GroupState>, headers: HeaderMap) -> Response {
     if let Err(response) = state.allow_admin(&caller, Operation::StreamInspect) {
         return *response;
     }
-    let groups = state
-        .groups
-        .list()
-        .await
-        .into_iter()
-        .map(|group| GroupSummary {
-            group: group.group_id,
-            state: group.state.as_str().to_owned(),
-        })
-        .collect();
+    let groups = state.groups.list();
     ok(GroupListing { groups }.encode())
 }
 

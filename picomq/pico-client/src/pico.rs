@@ -5,9 +5,8 @@ use bytes::Bytes;
 use picomq_protocol::WireRequest;
 use picomq_protocol::groups::{
     AssignmentRequest, AssignmentResponse, CommitRequest, DeleteGroupRequest, DescribeRequest,
-    FetchOffsetsRequest, GroupDescription, GroupListing, GroupSummary, HeartbeatRequest,
-    JoinRequest, JoinResponse, LeaveRequest, ListGroupsRequest, MemberFence, Offsets,
-    OffsetsResponse,
+    FetchOffsetsRequest, GroupDescription, GroupListing, HeartbeatRequest, JoinRequest,
+    JoinResponse, LeaveRequest, ListGroupsRequest, MemberFence, Offsets, OffsetsResponse,
 };
 use picomq_protocol::pico::{
     AppendRequest, AppendResponse, CloseRequest, CloseResponse, CreateRequest, CreateResponse,
@@ -180,7 +179,7 @@ impl PicoClient {
         self.call(request.encode()).await.map(drop)
     }
 
-    pub async fn list_groups(&self) -> Result<Vec<GroupSummary>> {
+    pub async fn list_groups(&self) -> Result<Vec<String>> {
         let response = self
             .retry
             .run(|| self.call(ListGroupsRequest.encode()))

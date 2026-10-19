@@ -35,6 +35,7 @@ async fn admin_commands() {
     let nodes = admin(&server, &["nodes"]).ok();
     assert!(nodes.stdout.contains("node=1"), "{}", nodes.stdout);
     assert!(nodes.stdout.contains("(this node)"), "{}", nodes.stdout);
+    assert!(nodes.stdout.contains("fenced=false"), "{}", nodes.stdout);
 
     let stream = admin(&server, &["stream", "/streams/adm"]).ok();
     assert!(

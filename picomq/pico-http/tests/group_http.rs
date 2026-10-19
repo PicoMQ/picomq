@@ -204,7 +204,7 @@ async fn members_join_heartbeat_commit_and_leave() {
         .json()
         .await
         .unwrap();
-    assert_eq!(listed["groups"][0]["group"], "workers");
+    assert_eq!(listed["groups"], serde_json::json!(["workers"]));
 
     let left = client
         .delete(format!("{base}/_groups/workers/members/{member2}"))

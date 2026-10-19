@@ -443,7 +443,7 @@ func (c *PicoClient) DeleteGroup(ctx context.Context, group string) error {
 	return err
 }
 
-func (c *PicoClient) ListGroups(ctx context.Context) (groups []GroupSummary, err error) {
+func (c *PicoClient) ListGroups(ctx context.Context) (groups []string, err error) {
 	err = c.core.run(ctx, func() error {
 		data, callErr := c.groupCall(ctx, http.MethodGet, c.core.groupURL(nil), nil, http.StatusOK)
 		if callErr != nil {
@@ -451,19 +451,13 @@ func (c *PicoClient) ListGroups(ctx context.Context) (groups []GroupSummary, err
 		}
 
 		var raw struct {
-			Groups []struct {
-				Group string `json:"group"`
-				State string `json:"state"`
-			} `json:"groups"`
+			Groups []string `json:"groups"`
 		}
 		if callErr = json.Unmarshal(data, &raw); callErr != nil {
 			return invalidResponse(callErr)
 		}
 
-		groups = make([]GroupSummary, 0, len(raw.Groups))
-		for _, group := range raw.Groups {
-			groups = append(groups, GroupSummary{Group: group.Group, State: group.State})
-		}
+		groups = raw.Groups
 		return nil
 	})
 	return

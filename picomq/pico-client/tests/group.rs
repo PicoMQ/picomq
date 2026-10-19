@@ -131,7 +131,7 @@ async fn operations_join_commit_fetch_describe_and_leave() {
         Some(joined.assignment.as_slice())
     );
     let listed = client.list_groups().await.unwrap();
-    assert!(listed.iter().any(|g| g.group == "ops"));
+    assert!(listed.contains(&"ops".to_owned()));
     let occupied = client.delete_group("ops").await.unwrap_err();
     assert_eq!(occupied.code, "conflict");
 

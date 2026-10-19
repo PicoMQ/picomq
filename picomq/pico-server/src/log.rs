@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use bytes::{BufMut, Bytes, BytesMut};
+use picomq_metadata::MetadataState;
 
 use crate::codec::{
     expect_end, expect_version, get_i16, get_i32, get_i64, get_opt_str, get_str, get_u8,
@@ -12,6 +13,7 @@ use crate::producer::{NumericProducerEntry, PRODUCER_SPAN_WINDOW, ProducerSpan};
 use crate::types::Producer;
 
 const VERSION: u8 = 1;
+const GROUP_PREFIX: &str = "log/group/";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Log {
@@ -29,8 +31,18 @@ impl Log {
                     partition.index
                 )
             }
-            Log::Group(group_id) => format!("log/group/{}", hex::encode(group_id)),
+            Log::Group(group_id) => format!("{GROUP_PREFIX}{}", hex::encode(group_id)),
         }
+    }
+
+    /// Every group log in `state`, which names every group in the cluster.
+    pub fn groups(state: &MetadataState) -> Vec<String> {
+        state
+            .list_kv(GROUP_PREFIX)
+            .into_iter()
+            .filter_map(|(key, _)| hex::decode(&key[GROUP_PREFIX.len()..]).ok())
+            .filter_map(|group_id| String::from_utf8(group_id).ok())
+            .collect()
     }
 }
 

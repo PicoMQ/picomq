@@ -116,13 +116,14 @@ pub async fn run(args: AdminArgs) -> Result<i32, String> {
             }
             for node in body["nodes"].as_array().into_iter().flatten() {
                 println!(
-                    "node={} epoch={} address={} slots={} opening={} placed={}{}",
+                    "node={} epoch={} address={} slots={} opening={} placed={} fenced={}{}",
                     node["nodeId"],
                     node["nodeEpoch"],
                     node["advertisedAddress"].as_str().unwrap_or("-"),
                     node["slots"],
                     node["openingCount"],
                     node["placedCount"],
+                    node["fenced"],
                     if node["local"] == Value::Bool(true) {
                         " (this node)"
                     } else {

@@ -13,6 +13,7 @@ use crate::{
     ErrorKind, LogRecord, MetadataOwnershipService, OffsetToken, OwnershipService, S3StreamService,
 };
 use bytes::Bytes;
+use picomq_metadata::ViewPublisher;
 use tokio::sync::{Mutex, oneshot};
 
 pub type StreamName = Arc<str>;
@@ -192,6 +193,7 @@ pub struct GroupCoordinator {
     service: Arc<S3StreamService>,
     topics: Arc<Topics>,
     ownership: Arc<MetadataOwnershipService>,
+    views: Arc<ViewPublisher>,
     groups: StdMutex<HashMap<String, Arc<Mutex<Group>>>>,
 }
 
@@ -201,12 +203,14 @@ impl GroupCoordinator {
         service: Arc<S3StreamService>,
         topics: Arc<Topics>,
         ownership: Arc<MetadataOwnershipService>,
+        views: Arc<ViewPublisher>,
     ) -> Arc<Self> {
         Arc::new(Self {
             node_id,
             service,
             topics,
             ownership,
+            views,
             groups: StdMutex::new(HashMap::new()),
         })
     }
@@ -760,7 +764,13 @@ impl GroupCoordinator {
         })
     }
 
-    pub async fn list(&self) -> Vec<ListedGroup> {
+    /// Every group in the cluster, whichever node coordinates it.
+    pub fn list(&self) -> Vec<String> {
+        Log::groups(&self.views.load().state)
+    }
+
+    /// The groups this node coordinates that have members, with their state.
+    pub async fn coordinated(&self) -> Vec<ListedGroup> {
         let groups: Vec<(String, Arc<Mutex<Group>>)> = {
             self.groups
                 .lock()

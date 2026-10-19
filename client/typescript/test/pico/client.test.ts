@@ -237,7 +237,7 @@ describe('PicoClient groups', () => {
           ],
         }),
       )
-      .mockResolvedValueOnce(json({ groups: [{ group: 'g', state: 'Stable' }] }))
+      .mockResolvedValueOnce(json({ groups: ['g'] }))
     vi.stubGlobal('fetch', fetch)
 
     const client = new PicoClient('http://example.test', undefined, false, new RetryPolicy(3, 0, 0, 1))
@@ -252,7 +252,7 @@ describe('PicoClient groups', () => {
     })
     expect(request(fetch, 1).url).toBe('http://example.test/_groups/g')
 
-    expect(await client.listGroups()).toEqual([{ group: 'g', state: 'Stable' }])
+    expect(await client.listGroups()).toEqual(['g'])
     expect(request(fetch, 2).url).toBe('http://example.test/_groups')
     expect(fetch).toHaveBeenCalledTimes(3)
   })

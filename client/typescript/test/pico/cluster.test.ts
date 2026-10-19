@@ -144,8 +144,8 @@ describe.runIf(up)('live pico cluster', () => {
     expect((await node2.fetchOffsets(group))[stream]!.position).toBe(5)
     expect((await node2.describeGroup(group)).state).toBe('Stable')
 
-    const listed = [...(await node1.listGroups()), ...(await node2.listGroups())]
-    expect(listed.map((g) => g.group)).toContain(group)
+    expect(await node1.listGroups()).toContain(group)
+    expect(await node2.listGroups()).toContain(group)
 
     await node2.leaveGroup(group, joined.memberId)
     expect((await node1.describeGroup(group)).state).toBe('Empty')

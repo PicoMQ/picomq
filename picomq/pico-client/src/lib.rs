@@ -14,8 +14,8 @@ pub use error::{ClientError, ErrorKind, Result};
 pub use group::{Assignment, GroupConfig, GroupMember};
 pub use pico::PicoClient;
 pub use picomq_protocol::groups::{
-    CommittedOffset, GroupDescription, GroupSummary, JoinRequest, JoinResponse, MemberDescription,
-    MemberFence, Offsets,
+    CommittedOffset, GroupDescription, JoinRequest, JoinResponse, MemberDescription, MemberFence,
+    Offsets,
 };
 pub use retry::RetryPolicy;
 pub use types::{

@@ -378,25 +378,14 @@ impl ListGroupsRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupSummary {
-    pub group: String,
-    pub state: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GroupListing {
-    pub groups: Vec<GroupSummary>,
+    pub groups: Vec<String>,
 }
 
 impl GroupListing {
     pub fn encode(&self) -> Bytes {
-        let groups: Vec<Value> = self
-            .groups
-            .iter()
-            .map(|summary| json!({ "group": summary.group, "state": summary.state }))
-            .collect();
-        json_body(json!({ "groups": groups }))
+        json_body(json!({ "groups": self.groups }))
     }
 
     pub fn decode(body: &[u8]) -> Result<Self, CodecError> {
@@ -404,14 +393,11 @@ impl GroupListing {
         let groups = match node.get("groups") {
             Some(Value::Array(groups)) => groups
                 .iter()
-                .map(|summary| {
-                    let summary = summary
-                        .as_object()
-                        .ok_or_else(|| CodecError::new("groups must be objects"))?;
-                    Ok(GroupSummary {
-                        group: required_string(summary, "group")?,
-                        state: required_string(summary, "state")?,
-                    })
+                .map(|group| {
+                    group
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| CodecError::new("groups must be strings"))
                 })
                 .collect::<Result<_, _>>()?,
             _ => return Err(CodecError::new("groups must be an array")),
@@ -697,10 +683,7 @@ mod tests {
         );
 
         let listing = GroupListing {
-            groups: vec![GroupSummary {
-                group: "g".to_owned(),
-                state: "Empty".to_owned(),
-            }],
+            groups: vec!["g".to_owned()],
         };
         assert_eq!(GroupListing::decode(&listing.encode()).unwrap(), listing);
     }

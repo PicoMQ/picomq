@@ -415,7 +415,7 @@ async fn list_groups(
     let types: Vec<&str> = request.types_filter.iter().map(StrBytes::as_str).collect();
     let groups = ctx
         .groups
-        .list()
+        .coordinated()
         .await
         .into_iter()
         .filter(|group| states.is_empty() || states.contains(&group.state.as_str()))

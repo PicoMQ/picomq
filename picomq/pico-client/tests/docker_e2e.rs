@@ -431,14 +431,7 @@ async fn rust_client_groups_join_commit_describe_leave() {
     assert_eq!(described.state, "Stable");
     assert_eq!(described.members[0].client_id, "rust-e2e");
 
-    assert!(
-        client
-            .list_groups()
-            .await
-            .unwrap()
-            .iter()
-            .any(|g| g.group == group)
-    );
+    assert!(client.list_groups().await.unwrap().contains(&group));
 
     client
         .leave_group(&group, &joined.member_id, None)

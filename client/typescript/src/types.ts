@@ -154,11 +154,6 @@ export interface GroupDescription {
   members: MemberDescription[]
 }
 
-export interface GroupSummary {
-  group: string
-  state: string
-}
-
 export interface StreamApi {
   protocol(): Protocol
   beginning(): string
