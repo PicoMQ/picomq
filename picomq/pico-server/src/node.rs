@@ -52,7 +52,7 @@ pub struct NodeConfig {
     pub cluster_id: String,
     pub heartbeat_interval: Duration,
     /// How long a node may go without a heartbeat before the cluster fences
-    /// it, and before it stops serving on its own.
+    /// it.
     pub node_timeout: Duration,
     pub engine: Config,
 }
@@ -138,12 +138,7 @@ impl PicoNode {
         .map_err(|e| e.to_stream_error())?;
 
         let fenced = watch::Sender::new(false);
-        let liveness = spawn_liveness(
-            handle.clone(),
-            config.heartbeat_interval,
-            config.node_timeout,
-            fenced.clone(),
-        );
+        let liveness = spawn_liveness(handle.clone(), config.heartbeat_interval, fenced.clone());
         let engine = match Self::open_engine(&config, &handle, object_storage, wal, &fenced).await {
             Ok(engine) => Arc::new(engine),
             Err(error) => {
@@ -356,19 +351,19 @@ impl PicoNode {
 }
 
 /// Keeps this node's membership: heartbeats every interval and stops the
-/// node once its registration is fenced or replaced, or once no heartbeat
-/// landed for the node timeout, about when the cluster fences it.
+/// node once its registration is fenced or replaced. A node cut off from the
+/// metadata log keeps serving. If the cluster fences it meanwhile, taking
+/// over its WAL stops its writes, and it stops as soon as it can see the
+/// fence.
 fn spawn_liveness(
     handle: MetadataNodeHandle,
     interval: Duration,
-    timeout: Duration,
     fenced: watch::Sender<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let node = handle.proposer();
         let views = handle.views().clone();
         let mut beat = tokio::time::interval_at(Instant::now() + interval, interval);
-        let mut landed = Instant::now();
 
         loop {
             let view = views.load();
@@ -381,15 +376,9 @@ fn spawn_liveness(
             tokio::select! {
                 _ = beat.tick() => {
                     match tokio::time::timeout(interval, handle.heartbeat()).await {
-                        Ok(Ok(())) => landed = Instant::now(),
-                        Ok(Err(MetadataError::NodeEpochMismatch { .. })) => continue,
+                        Ok(Ok(())) | Ok(Err(MetadataError::NodeEpochMismatch { .. })) => {}
                         Ok(Err(error)) => tracing::warn!(%error, "heartbeat failed"),
                         Err(_) => tracing::warn!("heartbeat timed out"),
-                    }
-                    if landed.elapsed() >= timeout {
-                        tracing::error!("no heartbeat landed within the node timeout, stopping");
-                        fenced.send_replace(true);
-                        return;
                     }
                 }
                 () = views.wait_past(view.applied_index, interval) => {}

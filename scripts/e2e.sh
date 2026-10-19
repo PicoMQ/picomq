@@ -14,6 +14,9 @@
 #             ownership redirects, groups across nodes, Rust, TypeScript and Go cluster suites
 #             Kafka partitions across nodes, admin APIs, failover of a killed node
 #   pgwal     the cluster scenario with each node's WAL in Postgres
+#   chaos     two nodes under faults: paused nodes, a paused leader, a paused
+#             Postgres and a clean stop lose no acknowledged write and fence
+#             no healthy node
 #   ds        two nodes, Durable Streams HTTP + Kafka, auth off
 #             Go Durable Streams live and cluster suites
 #   extension pico inside Postgres, Pico HTTP + Kafka, auth off
@@ -24,7 +27,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCENARIOS=("$@")
 if [ ${#SCENARIOS[@]} -eq 0 ]; then
-  SCENARIOS=(single cluster pgwal ds extension)
+  SCENARIOS=(single cluster pgwal chaos ds extension)
 fi
 
 NODE1="http://127.0.0.1:4437"
@@ -42,7 +45,7 @@ log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 compose_files() {
   case "$1" in
     single) echo "-f $ROOT/harness/aio/compose.yml" ;;
-    cluster | ds) echo "-f $ROOT/harness/aio/compose.cluster.yml" ;;
+    cluster | chaos | ds) echo "-f $ROOT/harness/aio/compose.cluster.yml" ;;
     pgwal) echo "-f $ROOT/harness/aio/compose.cluster.yml -f $ROOT/harness/aio/compose.pgwal.yml" ;;
     extension) echo "-f $ROOT/harness/aio/compose.extension.yml" ;;
     *) echo "unknown scenario: $1" >&2; exit 2 ;;
@@ -74,6 +77,11 @@ rust_protocol_suite() {
 rust_cluster_suite() {
   log "$1: rust cluster e2e"
   (cd "$ROOT" && cargo test --locked -p picomq-runtime --test cluster -- --ignored --test-threads=1 --nocapture)
+}
+
+rust_chaos_suite() {
+  log "$1: rust chaos e2e"
+  (cd "$ROOT" && cargo test --locked -p picomq-runtime --test chaos -- --ignored --test-threads=1 --nocapture)
 }
 
 rust_extension_suite() {
@@ -132,6 +140,16 @@ run_pgwal() {
   run_cluster pgwal
 }
 
+run_chaos() {
+  export PICO_PROTOCOL=pico PICO_AUTH=required
+  export PICO_ENDPOINT="$NODE1" PICO_KAFKA="$KAFKA" PICO_KAFKA_2="$KAFKA2" PICO_ADMIN_2="$ADMIN2"
+  export PICOMQ_COMPOSE="docker compose $(compose_files chaos)"
+
+  wait_ready "$ADMIN1" &&
+    wait_ready "$ADMIN2" &&
+    rust_chaos_suite chaos
+}
+
 run_ds() {
   export PICO_PROTOCOL=ds PICO_AUTH=off
   export PICOMQ_DS_INTEGRATION=1 PICOMQ_DS_ENDPOINT="$NODE1" PICOMQ_DS_ENDPOINT_2="$NODE2"
@@ -162,7 +180,7 @@ run() {
 
   case "$scenario" in
     single) export PICO_PROTOCOL=pico PICO_AUTH=off ;;
-    cluster | pgwal) export PICO_PROTOCOL=pico PICO_AUTH=required PICO_HEARTBEAT_INTERVAL_SEC=1 PICO_NODE_TIMEOUT_SEC=5 ;;
+    cluster | pgwal | chaos) export PICO_PROTOCOL=pico PICO_AUTH=required PICO_HEARTBEAT_INTERVAL_SEC=1 PICO_NODE_TIMEOUT_SEC=5 ;;
     ds) export PICO_PROTOCOL=ds PICO_AUTH=off ;;
     extension) export PICO_PROTOCOL=pico PICO_AUTH=off ;;
   esac

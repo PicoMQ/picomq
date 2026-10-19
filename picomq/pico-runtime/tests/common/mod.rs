@@ -1,4 +1,7 @@
-//! Shared harness for the docker end-to-end suites.
+//! Shared harness for the docker end-to-end suites. Each suite uses a
+//! subset of it.
+
+#![allow(dead_code)]
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -58,7 +61,6 @@ impl Harness {
             .unwrap()
     }
 
-    #[allow(dead_code)]
     pub fn consumer(&self, topic: &str) -> StreamConsumer {
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", &self.bootstrap)
@@ -99,7 +101,6 @@ impl Harness {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct Consumed {
     pub offset: i64,
@@ -108,7 +109,6 @@ pub struct Consumed {
     pub headers: Vec<(String, Vec<u8>)>,
 }
 
-#[allow(dead_code)]
 pub async fn consume_n(consumer: &StreamConsumer, count: usize) -> Vec<Consumed> {
     let mut out = Vec::with_capacity(count);
     while out.len() < count {
