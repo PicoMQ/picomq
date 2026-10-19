@@ -2636,7 +2636,6 @@ dependencies = [
  "picomq-schema",
  "picomq-sql",
  "s3stream",
- "s3stream-core",
  "s3stream-wal",
  "serde_json",
  "tempfile",
@@ -3427,8 +3426,8 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s3stream"
-version = "0.1.1"
-source = "git+https://github.com/PicoMQ/s3stream?tag=v0.1.1#a3c5f7c1a023a3331594de43afc427ffbf31af10"
+version = "0.1.2"
+source = "git+https://github.com/PicoMQ/s3stream?tag=v0.1.2#6c7cc5c58dcbc2746e2548fe1adf72a274b67523"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3443,8 +3442,8 @@ dependencies = [
 
 [[package]]
 name = "s3stream-codec"
-version = "0.1.1"
-source = "git+https://github.com/PicoMQ/s3stream?tag=v0.1.1#a3c5f7c1a023a3331594de43afc427ffbf31af10"
+version = "0.1.2"
+source = "git+https://github.com/PicoMQ/s3stream?tag=v0.1.2#6c7cc5c58dcbc2746e2548fe1adf72a274b67523"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3453,8 +3452,8 @@ dependencies = [
 
 [[package]]
 name = "s3stream-core"
-version = "0.1.1"
-source = "git+https://github.com/PicoMQ/s3stream?tag=v0.1.1#a3c5f7c1a023a3331594de43afc427ffbf31af10"
+version = "0.1.2"
+source = "git+https://github.com/PicoMQ/s3stream?tag=v0.1.2#6c7cc5c58dcbc2746e2548fe1adf72a274b67523"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3471,8 +3470,8 @@ dependencies = [
 
 [[package]]
 name = "s3stream-object"
-version = "0.1.1"
-source = "git+https://github.com/PicoMQ/s3stream?tag=v0.1.1#a3c5f7c1a023a3331594de43afc427ffbf31af10"
+version = "0.1.2"
+source = "git+https://github.com/PicoMQ/s3stream?tag=v0.1.2#6c7cc5c58dcbc2746e2548fe1adf72a274b67523"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3489,8 +3488,8 @@ dependencies = [
 
 [[package]]
 name = "s3stream-wal"
-version = "0.1.1"
-source = "git+https://github.com/PicoMQ/s3stream?tag=v0.1.1#a3c5f7c1a023a3331594de43afc427ffbf31af10"
+version = "0.1.2"
+source = "git+https://github.com/PicoMQ/s3stream?tag=v0.1.2#6c7cc5c58dcbc2746e2548fe1adf72a274b67523"
 dependencies = [
  "async-trait",
  "bytes",

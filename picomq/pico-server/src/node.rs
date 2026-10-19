@@ -14,9 +14,9 @@ use picomq_metadata::{
     CommandSink, MetadataError, MetadataNodeHandle, Registration, ViewPublisher,
 };
 use s3stream::{
-    Config, Error as StreamError, ObjectStorageTrait, S3StreamBuilder, S3StreamEngine, WalError,
+    Config, Error as StreamError, ObjectStorageTrait, S3StreamBuilder, S3StreamEngine,
+    StorageFailureHandler, WalError,
 };
-use s3stream_core::StorageFailureHandler;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -221,7 +221,7 @@ impl PicoNode {
             .stream_manager(Arc::new(handle.stream_manager()))
             .object_manager(Arc::new(handle.object_manager()))
             .failover_factory(Arc::new(Factory::new(handle.clone(), wal)))
-            .storage_failure_handler(Arc::new(Fenced(fenced.clone())))
+            .storage_failure_handler(Arc::new(FenceHandler(fenced.clone())))
             .build()
             .await?)
     }
@@ -388,10 +388,10 @@ fn spawn_liveness(
 }
 
 /// Stops the node once its WAL is fenced: another node took it over.
-struct Fenced(watch::Sender<bool>);
+struct FenceHandler(watch::Sender<bool>);
 
 #[async_trait]
-impl StorageFailureHandler for Fenced {
+impl StorageFailureHandler for FenceHandler {
     async fn handle(&self, error: &StreamError) {
         if let StreamError::Wal(WalError::Fenced { .. }) = error {
             tracing::error!(%error, "this node's WAL was taken over, stopping");

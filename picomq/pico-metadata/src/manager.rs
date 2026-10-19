@@ -45,8 +45,7 @@ pub struct MetadataNodeHandle {
 }
 
 impl MetadataNodeHandle {
-    /// Registers the node and returns its handle at the epoch the log
-    /// assigned, which fences every earlier incarnation.
+    /// Returns the handle at the epoch the log assigned.
     pub async fn register(
         sink: Arc<dyn CommandSink>,
         views: Arc<ViewPublisher>,
@@ -179,8 +178,7 @@ impl MetadataNodeHandle {
         Ok(())
     }
 
-    /// Fences `node_id` if it is still at `node_epoch` with `heartbeats`. A
-    /// node that moved on is not fenced, and that is success.
+    /// A node that moved on is not fenced, and that is success.
     pub async fn fence_node(
         &self,
         node_id: i32,

@@ -144,9 +144,6 @@ fn apply_inner(
     }
 }
 
-/// Assigns the node's epoch: the requested one, or one past the stored epoch
-/// when that is not higher, so every registration fences the incarnations
-/// before it.
 fn register_node(
     state: &mut MetadataState,
     node_id: i32,
@@ -211,9 +208,8 @@ fn heartbeat(state: &mut MetadataState, node_id: i32) -> Result<MetadataResult, 
     Ok(MetadataResult::Unit)
 }
 
-/// Fences a node only while it is still exactly as the proposer saw it: same
-/// epoch, same heartbeat count, not yet fenced. A node fencing itself is
-/// leaving, and never a stale observer of its own heartbeats.
+/// A node fencing itself is leaving, never a stale observer of its own
+/// heartbeats.
 fn fence_node(
     state: &mut MetadataState,
     proposer: Proposer,

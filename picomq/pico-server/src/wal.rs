@@ -6,11 +6,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use s3stream::{
-    Error as StreamError, FailoverRequest, ObjectStorageTrait, ObjectStoreAdapter, ObjectWalConfig,
-    ObjectWalService, OpenMode, WriteAheadLogTrait,
+    Error as StreamError, FailoverRequest, ObjectReservationService, ObjectStorageTrait,
+    ObjectStoreAdapter, ObjectWalConfig, ObjectWalService, OpenMode, ReservationService as _,
+    WriteAheadLogTrait,
 };
-use s3stream_wal::ReservationService as _;
-use s3stream_wal::object::ObjectReservationService;
 
 #[async_trait]
 pub trait Wal: Send + Sync {

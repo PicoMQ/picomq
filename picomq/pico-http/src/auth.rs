@@ -22,9 +22,8 @@ pub struct Permit {
     pub stream_name: String,
 }
 
-/// Runs on the buffered request, so it classifies exactly what the handler
-/// will do. `Ok(None)`: auth off, or OPTIONS (no credential). `Ok(Some)`:
-/// allowed. A method the protocol does not serve is refused before routing.
+/// Runs on the buffered request, so it sees what the handler will do.
+/// `Ok(None)`: auth off, or OPTIONS.
 pub async fn gate(
     authorizer: Option<&Authorizer>,
     audience: Audience,

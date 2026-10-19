@@ -9,8 +9,6 @@ repository.workspace = true
 
 [dependencies]
 s3stream = { workspace = true }
-s3stream-core = { workspace = true }
-s3stream-wal = { workspace = true }
 picomq-metadata = { workspace = true }
 picomq-common = { workspace = true }
 picomq-auth = { workspace = true }
@@ -30,6 +28,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+s3stream-wal = { workspace = true }
 picomq-sql = { workspace = true }
 object_store = { workspace = true }
 tempfile = { workspace = true }

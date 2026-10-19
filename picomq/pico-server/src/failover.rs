@@ -70,10 +70,18 @@ impl Failover {
                 continue;
             }
 
-            for (node_id, epoch, heartbeats) in liveness.dead(&view.state, local) {
-                tracing::warn!(node_id, epoch, "node stopped heartbeating, fencing it");
-                if let Err(error) = self.handle.fence_node(node_id, epoch, heartbeats).await {
-                    tracing::warn!(%error, node_id, "fencing failed");
+            for row in liveness.dead(&view.state, local) {
+                tracing::warn!(
+                    node_id = row.node_id,
+                    epoch = row.epoch,
+                    "node stopped heartbeating, fencing it"
+                );
+                let fenced = self
+                    .handle
+                    .fence_node(row.node_id, row.epoch, row.heartbeats)
+                    .await;
+                if let Err(error) = fenced {
+                    tracing::warn!(%error, node_id = row.node_id, "fencing failed");
                 }
             }
 
@@ -140,7 +148,7 @@ impl Failover {
 /// it did not observe never counts against anyone.
 struct Liveness {
     beats: u64,
-    seen: HashMap<i32, ((i64, u64), u64)>,
+    since: HashMap<(i32, i64, u64), u64>,
 }
 
 impl Liveness {
@@ -150,44 +158,40 @@ impl Liveness {
             .div_ceil(heartbeat_interval.as_millis().max(1));
         Self {
             beats: u64::try_from(beats).unwrap_or(u64::MAX).max(1),
-            seen: HashMap::new(),
+            since: HashMap::new(),
         }
     }
 
     fn forget(&mut self) {
-        self.seen.clear();
+        self.since.clear();
     }
 
-    /// Nodes that stayed silent for the timeout, with the epoch and heartbeat
-    /// count a fence must still find them at.
-    fn dead(&mut self, state: &MetadataState, local: Proposer) -> Vec<(i32, i64, u64)> {
+    /// Nodes that stayed silent for the timeout, as last seen: a fence must
+    /// still find them at that epoch and heartbeat count.
+    fn dead<'a>(&mut self, state: &'a MetadataState, local: Proposer) -> Vec<&'a NodeRow> {
         let Some(clock) = state.nodes.get(&local.node_id).map(|row| row.heartbeats) else {
             return Vec::new();
         };
 
-        self.seen
-            .retain(|node_id, _| state.nodes.contains_key(node_id));
+        self.since.retain(|(node_id, epoch, heartbeats), _| {
+            state
+                .nodes
+                .get(node_id)
+                .is_some_and(|row| (row.epoch, row.heartbeats) == (*epoch, *heartbeats))
+        });
 
-        let mut dead = Vec::new();
-        for (node_id, row) in state.nodes.iter() {
-            if *node_id == local.node_id || row.fenced {
-                continue;
-            }
-
-            let beat = (row.epoch, row.heartbeats);
-            let (last, since) = self.seen.entry(*node_id).or_insert((beat, clock));
-            if *last != beat {
-                *last = beat;
-                *since = clock;
-                continue;
-            }
-
-            if clock.saturating_sub(*since) >= self.beats {
-                dead.push((*node_id, row.epoch, row.heartbeats));
-            }
-        }
-
-        dead
+        state
+            .nodes
+            .values()
+            .filter(|row| row.node_id != local.node_id && !row.fenced)
+            .filter(|row| {
+                let since = self
+                    .since
+                    .entry((row.node_id, row.epoch, row.heartbeats))
+                    .or_insert(clock);
+                clock.saturating_sub(*since) >= self.beats
+            })
+            .collect()
     }
 }
 
@@ -258,8 +262,7 @@ mod tests {
         assert!(liveness.dead(&state, LEADER).is_empty());
 
         leader_heartbeats(&mut state, 1);
-        let silent = state.nodes[&2].heartbeats;
-        assert_eq!(liveness.dead(&state, LEADER), vec![(2, 20, silent)]);
+        assert_eq!(liveness.dead(&state, LEADER), vec![&state.nodes[&2]]);
     }
 
     #[test]
@@ -294,7 +297,7 @@ mod tests {
         let dead: Vec<i32> = liveness
             .dead(&state, LEADER)
             .into_iter()
-            .map(|(node_id, _, _)| node_id)
+            .map(|row| row.node_id)
             .collect();
 
         assert_eq!(dead, vec![2]);
@@ -314,7 +317,7 @@ mod tests {
         let dead: Vec<i32> = liveness
             .dead(&state, LEADER)
             .into_iter()
-            .map(|(node_id, _, _)| node_id)
+            .map(|row| row.node_id)
             .collect();
         assert_eq!(dead, vec![3], "node 2 restarted three heartbeats ago");
     }
