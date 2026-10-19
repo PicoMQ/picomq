@@ -784,3 +784,25 @@ async fn redirected_writes_keep_the_http2_connection() {
 
     assert!(statuses.iter().all(|status| matches!(status, Ok(307))));
 }
+
+#[tokio::test]
+async fn shutdown_ends_live_reads_instead_of_waiting_on_them() {
+    let server = common::picomq_server().await;
+    let http = reqwest::Client::new();
+    let url = format!("{}/live/stopping", server.base_url);
+    http.put(&url)
+        .header("Content-Type", "text/plain")
+        .send()
+        .await
+        .unwrap();
+
+    let subscription = http.get(format!("{url}?live=sse")).send().await.unwrap();
+    let poll = tokio::spawn(http.get(format!("{url}?seq=0&live=long-poll")).send());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), server.shutdown())
+        .await
+        .expect("shutdown waited on live reads");
+    assert_eq!(poll.await.unwrap().unwrap().status(), 503);
+    assert!(subscription.bytes().await.is_ok(), "the subscription ended");
+}

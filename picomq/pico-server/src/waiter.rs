@@ -4,10 +4,12 @@
 //! A waiter is a `tokio::sync::oneshot` in a mutex-guarded map. The lock is
 //! held only for registry mutation, never across waits.
 //! `notify_append(name, next)` wakes waiters with `wait_offset < next`,
-//! `notify_closed`/`clear` wake everyone.
+//! `notify_closed` wakes a stream's waiters and `stop` wakes everyone for
+//! good.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -18,6 +20,7 @@ use crate::types::OffsetToken;
 pub struct StreamWaiterRegistry {
     waiters: Mutex<HashMap<String, Vec<Waiter>>>,
     next_token: Mutex<u64>,
+    stopped: AtomicBool,
 }
 
 struct Waiter {
@@ -40,16 +43,17 @@ impl StreamWaiterRegistry {
             *next += 1;
             *next
         };
-        self.waiters
-            .lock()
-            .unwrap()
-            .entry(name.to_owned())
-            .or_default()
-            .push(Waiter {
+        {
+            let mut map = self.waiters.lock().unwrap();
+            if self.stopped.load(Ordering::SeqCst) {
+                return true;
+            }
+            map.entry(name.to_owned()).or_default().push(Waiter {
                 token,
                 wait_offset: offset.record_offset(),
                 tx,
             });
+        }
 
         let woken = tokio::time::timeout(timeout, rx).await.is_ok();
         if !woken {
@@ -91,12 +95,19 @@ impl StreamWaiterRegistry {
         }
     }
 
-    pub fn clear(&self) {
+    /// Wakes every waiter and makes later waits return at once: the node is
+    /// stopping, so live reads end and their clients reconnect.
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
         for (_, queue) in self.waiters.lock().unwrap().drain() {
             for waiter in queue {
                 let _ = waiter.tx.send(());
             }
         }
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 }
 

@@ -24,6 +24,13 @@ pub struct TestServer {
     server: RunningServer,
 }
 
+impl TestServer {
+    #[allow(dead_code)]
+    pub async fn shutdown(self) {
+        self.server.shutdown().await;
+    }
+}
+
 pub async fn start_node() -> Arc<PicoNode> {
     start_node_inner(None).await
 }

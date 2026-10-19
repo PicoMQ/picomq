@@ -15,7 +15,7 @@ use crate::config::{self, Local};
 use crate::guc::Settings;
 
 const RESTART: Duration = Duration::from_secs(5);
-const SHUTDOWN: Duration = Duration::from_secs(10);
+const SHUTDOWN: Duration = Duration::from_secs(2);
 const TICK: Duration = Duration::from_secs(1);
 
 pub(crate) fn register() {

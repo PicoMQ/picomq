@@ -687,6 +687,7 @@ fn service_error_response(e: ServiceError) -> Response {
         }
         ErrorKind::Durability | ErrorKind::Internal => fail(500, &e.message),
         ErrorKind::Timeout => fail(504, &e.message),
+        ErrorKind::Unavailable => fail(503, &e.message),
     }
 }
 

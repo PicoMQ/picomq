@@ -67,6 +67,7 @@ pub const E_CLOSED: &str = "closed";
 pub const E_DURABILITY: &str = "durability";
 pub const E_INTERNAL: &str = "internal";
 pub const E_TIMEOUT: &str = "timeout";
+pub const E_UNAVAILABLE: &str = "unavailable";
 pub const E_UNAUTHENTICATED: &str = "unauthenticated";
 pub const E_PERMISSION_DENIED: &str = "permission_denied";
 pub const E_COORDINATOR_UNAVAILABLE: &str = "coordinator_unavailable";

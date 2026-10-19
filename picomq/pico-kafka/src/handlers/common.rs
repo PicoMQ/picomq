@@ -112,7 +112,7 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
     match error.kind {
         ErrorKind::NotFound => UNKNOWN_TOPIC_OR_PARTITION,
         ErrorKind::Conflict => TOPIC_ALREADY_EXISTS,
-        ErrorKind::Transferring => NOT_LEADER_OR_FOLLOWER,
+        ErrorKind::Transferring | ErrorKind::Unavailable => NOT_LEADER_OR_FOLLOWER,
         ErrorKind::BadRequest => INVALID_REQUEST,
         ErrorKind::CorruptBatch => CORRUPT_MESSAGE,
         ErrorKind::SchemaViolation => INVALID_RECORD,

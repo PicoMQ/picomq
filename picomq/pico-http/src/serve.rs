@@ -249,14 +249,15 @@ impl RunningServer {
         self.node.clone()
     }
 
-    /// (fail readiness, wait out the drain window), stop accepting and let
-    /// in-flight requests finish, then `node.close()`.
+    /// (fail readiness, wait out the drain window), end live reads, stop
+    /// accepting and let in-flight requests finish, then `node.close()`.
     pub async fn shutdown(self) {
         self.admin.stop_serving();
         if !self.shutdown_drain.is_zero() {
             tracing::info!(drain = ?self.shutdown_drain, "draining before shutdown");
             tokio::time::sleep(self.shutdown_drain).await;
         }
+        self.node.service().stop_live_reads();
         let _ = self.stop.send(true);
         for task in self.tasks {
             let _ = task.await;

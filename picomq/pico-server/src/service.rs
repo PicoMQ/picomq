@@ -594,7 +594,17 @@ impl S3StreamService {
             return Ok(true);
         }
 
-        Ok(self.waiters.wait(&key, from, timeout).await)
+        let woken = self.waiters.wait(&key, from, timeout).await;
+        if self.waiters.stopped() {
+            return Err(ServiceError::with_message(
+                ErrorKind::Unavailable,
+                None,
+                false,
+                "this node is stopping",
+            ));
+        }
+
+        Ok(woken)
     }
 
     pub async fn trim(&self, log: &Log, new_start_offset: u64) -> Result<u64, ServiceError> {
@@ -649,8 +659,14 @@ impl S3StreamService {
         Ok(released)
     }
 
+    /// Ends long polls and subscriptions, so in-flight requests finish and
+    /// their clients reconnect while the node stops.
+    pub fn stop_live_reads(&self) {
+        self.waiters.stop();
+    }
+
     pub async fn shutdown(&self) {
-        self.waiters.clear();
+        self.stop_live_reads();
         self.streams.shutdown().await;
     }
 

@@ -27,6 +27,9 @@ pub enum ErrorKind {
     MatchFailed,
     Durability,
     Timeout,
+    /// This node is not serving right now (it is stopping). HTTP: 503.
+    /// Kafka: `NOT_LEADER_OR_FOLLOWER`, so clients refresh metadata and retry.
+    Unavailable,
     Internal,
 }
 
