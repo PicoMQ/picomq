@@ -1,6 +1,6 @@
 # Kafka protocol
 
-A node serves the Kafka wire protocol on `--kafka-listen` unless `--no-kafka` is set. Standard Kafka clients, the Java client, librdkafka and everything built on it, connect with a bootstrap address. There is no PicoMQ client for Kafka because none is needed.
+Every node serves the Kafka wire protocol on `--kafka-listen`, next to its HTTP listeners. Standard Kafka clients, the Java client, librdkafka and everything built on it, connect with a bootstrap address. There is no PicoMQ client for Kafka because none is needed.
 
 ```bash
 pico serve \
@@ -10,7 +10,7 @@ pico serve \
     --storage=-2@s3://bucket?region=us-east-1
 ```
 
-The HTTP stream listener and the admin API keep serving next to it. A stream written over HTTP is a topic to Kafka clients, and a topic a Kafka client created is a stream to HTTP clients.
+Topics are shared across protocols. A topic written over HTTP is readable by Kafka clients, and a topic a Kafka client created is readable over HTTP.
 
 ```bash
 # Any Kafka tooling works against the listener.
@@ -21,31 +21,63 @@ kcat -b 127.0.0.1:9092 -t orders -C   # consume
 curl http://127.0.0.1:4437/orders
 ```
 
-## Topics are streams
+## Topics
 
-A topic is a stream with a single partition. A stream created over HTTP as `/orders/eu` is the topic `orders.eu` when that name is legal and free. `CreateTopics` from a Kafka client creates the stream of the same name. Topic names cannot contain `/`, and reserved streams under `/_sys`, `/_schemas` and `/_streams` have no topic. Kafka-created streams appear in the admin API like any other.
+A Kafka topic is a PicoMQ topic, with the same partitions. The HTTP name `/orders/eu` is the Kafka topic `orders.eu`, and a topic whose name has characters Kafka does not allow is reachable only over HTTP, see [Topics and streams](/docs/design/streams#names).
 
-Kafka offsets are the stream's record offsets, so `earliest` is the trim watermark and `latest` is the high watermark.
+- **Partitions.** `CreateTopics` takes any partition count, and `CreatePartitions` adds more later. Explicit replica assignments place each partition on the named node.
+- **Replication.** Each partition has one replica, its owning node, and durability comes from object storage. The replication factor must be `1` or `-1`.
+- **Leaders.** Metadata names each partition's owner as its leader. A request sent to another node answers `NOT_LEADER_OR_FOLLOWER`, and the client refreshes its metadata.
+- **Offsets.** Kafka offsets are the partition's record offsets, so `earliest` is the trim watermark and `latest` is the high watermark.
+- **Auto creation.** A metadata request creates a missing topic with one partition when the client asks for it.
 
-Produce and fetch are a copy of the stored [RecordBatch v2](/docs/design/protocols) bytes. The broker patches each produced batch's base offset, the one rewrite a Kafka broker also performs and one the batch CRC excludes. HTTP appends land in the same format. Everything below the frontend (durability, ownership, transfers, garbage collection) behaves exactly as the [design docs](/docs/design/overview) describe.
+Produce and fetch are a copy of the stored [RecordBatch v2](/docs/design/protocols#records) bytes. The broker patches each produced batch's base offset, the one rewrite a Kafka broker also performs and one the batch CRC excludes. Everything below the frontend, durability, ownership, transfers, and failover, behaves as the [design docs](/docs/design/overview) describe.
 
-## What is supported
+## Supported APIs
 
-| Area | Support |
-| --- | --- |
-| Produce | `acks` 0, 1, and all behave identically: an acknowledged record is durable on object storage. Idempotent producers get exact broker semantics with epoch fencing, sequence checking, and duplicate replay at the original offset. |
-| Fetch | Long-polling with `fetch.min.bytes` and `fetch.max.wait.ms`, served from the same event-driven waiters as HTTP long polls. |
-| Topics | `CreateTopics` and `DeleteTopics` for single-partition topics, plus metadata auto-creation when the client enables it. Requests for more than one partition are rejected. The `pico.schema` config binds a [schema](/docs/schemas), and `pico.schema.validate=true` validates produce against it. |
-| Offsets | `ListOffsets` for earliest, latest, and by timestamp. |
-| Consumer groups | The classic group protocol: `FindCoordinator`, join/sync/heartbeat/leave, offset commit and fetch, describe and list. Rebalances, generations, and fencing follow Kafka's state machine. |
-| Not supported | Transactions and control batches (rejected as invalid), multiple partitions per topic, the KIP-848 consumer protocol, and SASL (see the note on exposure below). |
+| API | Versions | Notes |
+| --- | --- | --- |
+| `ApiVersions` | 0–4 | |
+| `Metadata` | 0–12 | |
+| `Produce` | 3–10 | `acks` 0, 1, and all behave alike: an acknowledged record is durable in the WAL |
+| `Fetch` | 4–16 | Long polling with `fetch.min.bytes` and `fetch.max.wait.ms` |
+| `ListOffsets` | 1–7 | Earliest, latest, by timestamp, and max timestamp |
+| `OffsetForLeaderEpoch` | 2–4 | The leader epoch is the partition's stream epoch |
+| `InitProducerId` | 0–4 | Idempotent producers with epoch fencing and sequence checks |
+| `CreateTopics` | 2–7 | |
+| `DeleteTopics` | 1–6 | |
+| `CreatePartitions` | 0–3 | Partitions only grow |
+| `DeleteRecords` | 0–2 | Trims a partition. Waits for buffered records to reach data objects, up to the request timeout |
+| `DescribeConfigs` | 1–4 | See [Configs](#configs) |
+| `IncrementalAlterConfigs` | 0–1 | See [Configs](#configs) |
+| `DescribeCluster` | 0–2 | |
+| `FindCoordinator` | 0–3 | Group coordinators only |
+| `JoinGroup`, `SyncGroup`, `Heartbeat`, `LeaveGroup` | 0–7, 0–5, 0–4, 0–5 | The classic group protocol, see [Consumer groups](/docs/design/groups) |
+| `OffsetCommit`, `OffsetFetch` | 2–8, 1–7 | |
+| `DescribeGroups`, `ListGroups` | 0–5 | `ListGroups` answers per broker, as in Kafka |
+| `DeleteGroups` | 0–2 | Only groups without members |
+| `OffsetDelete` | 0 | Not for topics the group is subscribed to |
 
-Clients negotiate through `ApiVersions` and stay inside the advertised ranges, so a well-behaved client uses only what the broker implements.
+Clients negotiate through `ApiVersions` and stay inside the advertised ranges.
 
-## Consumer groups
+Not supported: transactions and control batches, which are rejected, the KIP-848 consumer protocol, and SASL, see [Exposure](#exposure).
 
-Group coordination is served by whichever node owns the group's internal stream, `/_sys/groups/{group}`. Only committed offsets are durable: commits append delta records, with a periodic snapshot and trim so replay after a coordinator move stays bounded. Membership, generations, and assignments are ephemeral and rebuilt from client rejoins, exactly as Kafka brokers behave. A coordinator move looks to clients like an ordinary rebalance.
+## Configs
+
+| Config | Value | Changeable |
+| --- | --- | --- |
+| `cleanup.policy` | `delete` | No |
+| `retention.ms` | `-1` | No |
+| `retention.bytes` | `-1` | No |
+| `pico.schema` | The bound [schema](/docs/schemas) | Yes |
+| `pico.schema.validate` | Whether produce is validated against it | Yes |
+
+`retention.ms` is `-1` because PicoMQ does not delete records by age. A topic's TTL expires the whole topic once nothing appends to it or reads it for that long, and `DeleteRecords` trims explicitly. The `pico.schema` configs appear only when a schema is bound, and can also be set on `CreateTopics`. Changing any other config fails with `INVALID_CONFIG`. Broker resources describe no configs.
+
+## Errors
+
+Kafka error codes for each failure are listed in [Protocols](/docs/design/protocols#errors). A node that is stopping, or that cannot reach the metadata store, answers `NOT_LEADER_OR_FOLLOWER`, so clients refresh their metadata and retry on a live node.
 
 ## Exposure
 
-The Kafka listener carries no authentication of its own, so binding it beyond loopback always requires the explicit `--insecure-allow-remote` opt-out, even with `--auth required`, which gates only the HTTP listeners. Treat it as an in-network service behind your own boundary. Token auth on the admin listener is unaffected.
+The Kafka listener has no authentication of its own, so binding it beyond loopback always requires `--insecure-allow-remote`, even with `--auth required`, which gates only the HTTP listeners. Treat it as an in-network service behind your own boundary.

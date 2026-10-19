@@ -46,7 +46,7 @@ A schema named `orders` is the object `orders.proto`, `orders.json`, or `orders.
 
 ## Register
 
-The schema routes live on the stream listener (`--listen`), in every protocol mode including Kafka. The `/_schemas/` prefix is reserved, so a stream can never collide with them.
+The schema routes live on the stream listener (`--listen`), under either HTTP protocol. The `/_schemas/` prefix is reserved, so a topic can never collide with them.
 
 | Method and path | What it does |
 | --- | --- |
@@ -68,7 +68,7 @@ curl -X PUT http://127.0.0.1:4437/_schemas/person \
   -d '{"type":"object","properties":{"value":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}}}'
 ```
 
-A `PUT` rejects a schema that does not parse in its format, and all three routes return `400` on a node running without `--schema-registry`. With `--auth required` they take a bearer token whose scope covers the operation and includes the `admin` audience, exactly like the [admin API](/docs/operations/admin).
+A `PUT` rejects a schema that does not parse in its format, and all three routes return `400` on a node running without `--schema-registry`. With `--auth required` they authenticate like the listener's topic routes: `create` to store, `head` to read, and `delete` to remove, matched against the schema name like a topic name.
 
 ## Bind
 
@@ -80,14 +80,14 @@ A stream binds a schema by name as part of its create. The name must exist in th
 | Durable Streams | `Stream-Schema: {name}` | `Stream-Schema-Validate: true` |
 | Kafka | Topic config `pico.schema={name}` on `CreateTopics` | `pico.schema.validate=true` |
 
-After create, both fields are mutable through the common stream config API on every protocol mode, including Kafka:
+After create, both fields can be changed through the topic config routes, on the stream listener of either HTTP protocol. This also covers topics created over Kafka.
 
 | Method and path | What it does |
 | --- | --- |
-| `GET /_streams/{name}` | Return `{ "schema", "schemaValidate" }`. `404` when the stream is absent. |
-| `PATCH /_streams/{name}` | Update either field. Body keys are optional. `"schema": null` clears the bind and turns validation off. |
+| `GET /_streams/{topic}` | Returns `{ "schema", "schemaValidate", "partitions", "kafkaTopic" }`. `404` when the topic is absent. Needs `head` |
+| `PATCH /_streams/{topic}` | Updates `schema`, `schemaValidate`, or both. `"schema": null` clears the bind and turns validation off. Needs `create` |
 
-Kafka topics use the stream `/{topic}`, so `PATCH /_streams/orders` updates topic `orders`. In a cluster these routes follow stream ownership: a request landing on a non-owner node returns a `307` redirect to the owner, like stream reads and writes.
+`kafkaTopic` follows from the topic name and cannot be changed. In a cluster these routes follow the ownership of partition `0`, redirecting with a `307` like topic reads and writes.
 
 Inspect returns the bound name, in `Pico-Schema` on the Pico protocol and `Stream-Schema` on Durable Streams, so a client can discover which schema to decode with.
 
