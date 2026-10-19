@@ -28,7 +28,7 @@ pg_test = []
 [dependencies]
 pgrx = "=0.16.1"
 picomq-runtime = { path = "../pico-runtime" }
-s3stream = { git = "https://github.com/PicoMQ/s3stream", tag = "v0.1.0" }
+s3stream = { git = "https://github.com/PicoMQ/s3stream", tag = "v0.1.1" }
 libc = "0.2"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "io-util"] }
 tracing = "0.1.44"
