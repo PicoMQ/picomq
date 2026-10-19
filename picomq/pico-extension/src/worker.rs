@@ -15,7 +15,7 @@ use crate::config::{self, Local};
 use crate::guc::Settings;
 
 const RESTART: Duration = Duration::from_secs(5);
-const SHUTDOWN: Duration = Duration::from_secs(2);
+const SHUTDOWN: Duration = Duration::from_secs(10);
 const TICK: Duration = Duration::from_secs(1);
 
 pub(crate) fn register() {
@@ -60,12 +60,9 @@ pub extern "C-unwind" fn pico_worker_main(_argument: pg_sys::Datum) {
     };
     log!("pico: serving on {}", server.local_addr());
     let fenced = server.fenced();
-    while BackgroundWorker::wait_latch(Some(TICK)) {
-        if *fenced.borrow() {
-            warning!("pico: this node was fenced by the cluster, stopping");
-            break;
-        }
-    }
+    while BackgroundWorker::wait_latch(Some(TICK)) && !*fenced.borrow() {}
+    let fenced = *fenced.borrow();
+
     if runtime
         .block_on(async { tokio::time::timeout(SHUTDOWN, server.shutdown()).await })
         .is_err()
@@ -73,6 +70,10 @@ pub extern "C-unwind" fn pico_worker_main(_argument: pg_sys::Datum) {
         warning!("pico: shutdown did not finish within {SHUTDOWN:?}");
     }
     runtime.shutdown_background();
+
+    if fenced {
+        error!("pico: this node left the cluster, restarting");
+    }
 }
 
 fn start(runtime: &Runtime, config: ServerConfig) -> Result<Option<PicoServer>, RuntimeError> {

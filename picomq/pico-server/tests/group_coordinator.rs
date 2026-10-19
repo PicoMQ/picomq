@@ -627,12 +627,10 @@ async fn a_newer_join_supersedes_the_pending_one() {
 
 #[tokio::test]
 async fn a_group_on_a_fenced_node_waits_for_its_log_to_be_recovered() {
-    use picomq_metadata::MetadataCommand;
-
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let node1 = start_node(1, sink.clone(), views.clone()).await;
-    let node2 = start_node(2, sink.clone(), views).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
 
     let created = node2
         .groups()
@@ -640,12 +638,12 @@ async fn a_group_on_a_fenced_node_waits_for_its_log_to_be_recovered() {
         .await;
     assert!(created.result.is_ok());
 
-    sink.propose(MetadataCommand::FenceNode {
-        node_id: 2,
-        node_epoch: 1,
-    })
-    .await
-    .unwrap();
+    let heartbeats = views.load().state.nodes[&2].heartbeats;
+    node1
+        .metadata()
+        .fence_node(2, node2.metadata().node_epoch(), heartbeats)
+        .await
+        .unwrap();
 
     let rejoined = node1
         .groups()

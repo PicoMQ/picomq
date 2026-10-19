@@ -688,7 +688,7 @@ async fn transfer_moves_partition_to_target_node() {
 
 #[tokio::test]
 async fn stale_transfer_completes_when_source_restarts() {
-    use picomq_metadata::MetadataCommand;
+    use picomq_metadata::{MetadataCommand, Proposer};
 
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
@@ -715,21 +715,21 @@ async fn stale_transfer_completes_when_source_restarts() {
     .await
     .unwrap();
     sink.propose(MetadataCommand::CreateStream {
-        node_id: 1,
-        node_epoch: 1,
+        proposer: Proposer::new(1, 1),
     })
     .await
     .unwrap();
     let stream_id = views.load().state.next_stream_id - 1;
     sink.propose(MetadataCommand::OpenStream {
-        node_id: 1,
-        node_epoch: 1,
+        proposer: Proposer::new(1, 1),
+
         stream_id,
         epoch: 5,
     })
     .await
     .unwrap();
     sink.propose(MetadataCommand::TransferStream {
+        proposer: Proposer::new(1, 1),
         stream_id,
         from_node: 1,
         to_node: 2,
@@ -1681,11 +1681,7 @@ async fn a_clean_shutdown_hands_streams_to_the_survivors() {
     let node1 = start_node(1, sink.clone(), views.clone()).await;
     let node2 = start_node(2, sink.clone(), views.clone()).await;
     let (_lease, leadership) = tokio::sync::watch::channel(true);
-    let failover = node1.spawn_failover(
-        leadership,
-        Duration::from_millis(50),
-        Duration::from_secs(30),
-    );
+    let failover = node1.spawn_failover(leadership, Duration::from_millis(50));
 
     let topic = node1
         .topics()
@@ -1725,9 +1721,10 @@ async fn a_fenced_node_notices() {
     let node2 = start_node(2, sink.clone(), views.clone()).await;
     let mut fenced = node2.fenced();
 
+    let heartbeats = views.load().state.nodes[&2].heartbeats;
     node1
         .metadata()
-        .fence_node(2, node2.config().node_epoch)
+        .fence_node(2, node2.metadata().node_epoch(), heartbeats)
         .await
         .unwrap();
 

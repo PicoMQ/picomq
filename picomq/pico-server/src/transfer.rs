@@ -85,15 +85,7 @@ async fn release_and_complete(service: &S3StreamService, view: &MetadataView, st
         StreamState::Opened if row.node_id == node.node_id() => {
             match service.release_for_transfer(stream_id).await {
                 Ok(Some(epoch)) => epoch,
-                Ok(None) => {
-                    // Opened in metadata but not held by this process, so seal
-                    // it directly at the current epoch.
-                    if let Err(error) = node.close_stream(stream_id, row.epoch).await {
-                        tracing::warn!(%error, stream_id, "transfer close failed");
-                        return;
-                    }
-                    row.epoch
-                }
+                Ok(None) => return,
                 Err(error) => {
                     tracing::warn!(%error, stream_id, "transfer release failed");
                     return;

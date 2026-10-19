@@ -199,6 +199,52 @@ async fn kill_and_fail_over(dir: &std::path::Path, wal: impl Fn(i32) -> String, 
 }
 
 #[tokio::test]
+async fn sigterm_hands_the_node_off_and_exits_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = |node_id: i32| {
+        format!(
+            "2@file://{}",
+            dir.path().join(format!("wal-{node_id}")).display()
+        )
+    };
+    let liveness = ["--heartbeat-interval-sec", "1", "--node-timeout-sec", "60"];
+    let client = reqwest::Client::new();
+    let first = start_node(dir.path(), 1, &wal(1), &liveness);
+    await_ready(&client, &first.admin_url).await;
+    let second = start_node(dir.path(), 2, &wal(2), &liveness);
+    await_ready(&client, &second.admin_url).await;
+
+    let status = second.terminate();
+
+    assert!(status.success(), "{status}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let nodes: serde_json::Value = client
+            .get(format!("{}/admin/nodes", first.admin_url))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let fenced = nodes["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["nodeId"] == 2 && node["fenced"] == true);
+        if fenced {
+            break;
+        }
+
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a clean exit hands the node off long before its timeout"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
 async fn a_killed_node_fails_over_to_the_survivor() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_owned();

@@ -21,7 +21,7 @@ use picomq_auth::{
     AccessToken, Audience, AuthError, Authorizer, Operation, TokenRecord, TokenStore as _,
     check_issue, scope_from_json, scope_to_json,
 };
-use picomq_metadata::MetadataState;
+use picomq_metadata::{MetadataState, NodeRow, Proposer};
 use picomq_server::{Log, OwnershipService, PicoNode, ServiceError, Topic, partition_log};
 use s3stream::StreamState;
 use serde_json::{Value, json};
@@ -170,21 +170,23 @@ async fn health() -> Response {
 /// with a diagnostic body of the same shape.
 ///
 /// Registration is the readiness signal: `PicoNode::start` returns only after
-/// its `RegisterNode` command applied and the engine recovered its WAL, so a
-/// node present in the applied metadata state is a node that can serve.
-/// shows an operator whether the metadata tailer is making progress.
+/// its `RegisterNode` command applied and the engine recovered its WAL. A
+/// fenced registration, or one replaced at a later epoch, is not ready.
 async fn ready(State(state): State<AdminState>) -> Response {
-    let node_id = state.node.config().node_id;
+    let config = state.node.config();
     let view = state.node.views().load();
-    let registered = view.state.get_node_address(node_id).is_some();
+    let row = registration(&view.state, state.node.metadata().proposer());
+    let registered = row.is_some();
+    let fenced = row.is_some_and(|row| row.fenced);
     let serving = state.serving.load(Ordering::Relaxed);
-    let ready = serving && registered;
+    let ready = serving && registered && !fenced;
     let body = json!({
         "ready": ready,
         "serving": serving,
         "registered": registered,
+        "fenced": fenced,
         "appliedIndex": view.applied_index,
-        "nodeId": node_id,
+        "nodeId": config.node_id,
     });
     let status = if ready {
         StatusCode::OK
@@ -207,13 +209,15 @@ async fn cluster(State(state): State<AdminState>, headers: HeaderMap) -> Respons
     }
     let config = state.node.config();
     let view = state.node.views().load();
+    let row = registration(&view.state, state.node.metadata().proposer());
     let snapshot = &state.node.metadata().sink_stats().snapshot;
     let body = json!({
         "clusterId": config.cluster_id,
         "nodeId": config.node_id,
-        "nodeEpoch": config.node_epoch,
+        "nodeEpoch": state.node.metadata().node_epoch(),
         "advertisedAddress": config.http_address,
-        "registered": view.state.get_node_address(config.node_id).is_some(),
+        "registered": row.is_some(),
+        "fenced": row.is_some_and(|row| row.fenced),
         "appliedIndex": view.applied_index,
         "streamCount": view.state.streams.len(),
         "objectCount": view.state.stream_set_objects.len() + view.state.stream_objects.len(),
@@ -425,19 +429,13 @@ async fn update_node(
     let Some(slots) = body.get("slots").and_then(Value::as_u64) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"slots\"");
     };
-    let view = state.node.views().load();
-    let Some(node) = view.state.nodes.get(&id).cloned() else {
+    if !state.node.views().load().state.nodes.contains_key(&id) {
         return error_response(
             StatusCode::NOT_FOUND,
             format!("node {id} is not registered"),
         );
-    };
-    if let Err(e) = state
-        .node
-        .metadata()
-        .update_node_slots(id, node.epoch, slots as u32)
-        .await
-    {
+    }
+    if let Err(e) = state.node.metadata().set_node_slots(id, slots as u32).await {
         return error_response(StatusCode::CONFLICT, e.to_string());
     }
     let view = state.node.views().load();
@@ -595,11 +593,7 @@ fn token_json(record: &TokenRecord) -> Value {
     })
 }
 
-fn node_json(
-    state: &MetadataState,
-    node: &picomq_metadata::state::NodeRow,
-    local_id: i32,
-) -> Value {
+fn node_json(state: &MetadataState, node: &NodeRow, local_id: i32) -> Value {
     let opening = state
         .opening_by_node
         .range((node.node_id, 0)..=(node.node_id, u64::MAX))
@@ -616,7 +610,15 @@ fn node_json(
         "local": node.node_id == local_id,
         "openingCount": opening,
         "placedCount": state.placed_count(node.node_id),
+        "fenced": node.fenced,
     })
+}
+
+fn registration(state: &MetadataState, node: Proposer) -> Option<&NodeRow> {
+    state
+        .nodes
+        .get(&node.node_id)
+        .filter(|row| row.epoch == node.node_epoch)
 }
 
 fn pending_transfers_json(state: &MetadataState) -> Vec<Value> {

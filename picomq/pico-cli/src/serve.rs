@@ -22,10 +22,6 @@ pub struct ServeArgs {
     #[arg(long, env = "PICO_NODE_ID", default_value_t = 1)]
     node_id: i32,
 
-    /// Fencing token for this incarnation. Defaults to the current time in
-    #[arg(long, env = "PICO_NODE_EPOCH")]
-    node_epoch: Option<i64>,
-
     /// `--http-port`, collapsed into one flag).
     #[arg(long, env = "PICO_LISTEN", default_value = "127.0.0.1:4437")]
     listen: SocketAddr,
@@ -205,7 +201,7 @@ impl ServeArgs {
 
         Ok(ServerConfig {
             node_id: self.node_id,
-            node_epoch: self.node_epoch.unwrap_or(defaults.node_epoch),
+            node_epoch: defaults.node_epoch,
             addr: self.listen,
             admin_addr: (!self.no_admin).then_some(self.admin_listen),
             advertised_url: self.http_address,

@@ -94,6 +94,8 @@ impl Default for KafkaConfig {
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub node_id: i32,
+    /// The requested epoch, the current time by default. Registration assigns
+    /// at least one past the node's previous epoch.
     pub node_epoch: i64,
     pub addr: SocketAddr,
     pub admin_addr: Option<SocketAddr>,

@@ -207,7 +207,7 @@ impl CommandSink for SqlSink {
                 .store
                 .last_idx()
                 .await
-                .map_err(|error| MetadataError::Unexpected {
+                .map_err(|error| MetadataError::Unavailable {
                     message: format!("metadata log is unreachable: {error}"),
                 })?;
         if self.shared.views.load().applied_index >= committed {
@@ -512,7 +512,7 @@ async fn commit_batch(
                         shared.last_seen.fetch_max(last, Ordering::SeqCst);
                     }
                     Err(error) => {
-                        fail_all(waiters, &format!("refreshing log tail failed: {error}"));
+                        unavailable(waiters, &format!("refreshing log tail failed: {error}"));
                         return;
                     }
                 }
@@ -524,10 +524,18 @@ async fn commit_batch(
                     .expect("pending lock")
                     .map
                     .remove(&next);
-                fail_all(waiters, &format!("append failed: {error}"));
+                unavailable(waiters, &format!("append failed: {error}"));
                 return;
             }
         }
+    }
+}
+
+fn unavailable(waiters: Vec<oneshot::Sender<Result<Proposed, MetadataError>>>, message: &str) {
+    for waiter in waiters {
+        let _ = waiter.send(Err(MetadataError::Unavailable {
+            message: message.to_owned(),
+        }));
     }
 }
 
@@ -543,7 +551,7 @@ fn fail_all(waiters: Vec<oneshot::Sender<Result<Proposed, MetadataError>>>, mess
 mod tests {
     use super::*;
     use crate::store::SqliteStore;
-    use picomq_metadata::LocalSink;
+    use picomq_metadata::{LocalSink, Proposer};
 
     fn fast_config() -> SqlSinkConfig {
         SqlSinkConfig {
@@ -629,8 +637,7 @@ mod tests {
         sink.propose(register(1, 10)).await.unwrap();
         for _ in 0..30 {
             sink.propose(MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             })
             .await
             .unwrap();
@@ -673,57 +680,60 @@ mod tests {
             register(1, 10),
             register(2, 20),
             MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             },
             MetadataCommand::CreateStream {
-                node_id: 2,
-                node_epoch: 20,
+                proposer: Proposer::new(2, 20),
             },
             MetadataCommand::OpenStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 stream_id: 0,
                 epoch: 1,
             },
             // Fenced: stale node epoch (fails, must change nothing).
             MetadataCommand::OpenStream {
-                node_id: 1,
-                node_epoch: 9,
+                proposer: Proposer::new(1, 9),
+
                 stream_id: 1,
                 epoch: 1,
             },
             MetadataCommand::OpenStream {
-                node_id: 2,
-                node_epoch: 20,
+                proposer: Proposer::new(2, 20),
+
                 stream_id: 1,
                 epoch: 1,
             },
             MetadataCommand::PrepareObject {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 count: 3,
                 ttl_ms: 60_000,
                 now_ms: 5,
             },
             MetadataCommand::PutKv {
+                proposer: Proposer::new(1, 10),
                 key: "a".into(),
                 value: bytes::Bytes::from_static(b"1"),
             },
             MetadataCommand::PutKvIfAbsent {
+                proposer: Proposer::new(1, 10),
                 key: "a".into(),
                 value: bytes::Bytes::from_static(b"2"),
             },
-            MetadataCommand::DeleteKv { key: "a".into() },
+            MetadataCommand::DeleteKv {
+                proposer: Proposer::new(1, 10),
+                key: "a".into(),
+            },
             MetadataCommand::CloseStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 stream_id: 0,
                 epoch: 1,
             },
             MetadataCommand::DeleteStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 stream_id: 0,
                 epoch: 1,
             },
@@ -751,8 +761,7 @@ mod tests {
         sink.propose(register(1, 10)).await.unwrap();
         let proposed = sink
             .propose(MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             })
             .await
             .unwrap();
@@ -772,12 +781,12 @@ mod tests {
             let (sink, _) = SqlSink::open(store, fast_config()).await.unwrap();
             sink.propose(register(1, 10)).await.unwrap();
             sink.propose(MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             })
             .await
             .unwrap();
             sink.propose(MetadataCommand::PutKv {
+                proposer: Proposer::new(1, 10),
                 key: "k".into(),
                 value: bytes::Bytes::from_static(b"v"),
             })
@@ -795,8 +804,7 @@ mod tests {
         // Id counter continued: the next stream gets id 1, not 0.
         let proposed = sink
             .propose(MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             })
             .await
             .unwrap();
@@ -828,8 +836,7 @@ mod tests {
             };
             handles.push(tokio::spawn(async move {
                 sink.propose(MetadataCommand::CreateStream {
-                    node_id,
-                    node_epoch,
+                    proposer: Proposer::new(node_id, node_epoch),
                 })
                 .await
                 .unwrap()
@@ -874,8 +881,7 @@ mod tests {
             let sink = sink.clone();
             handles.push(tokio::spawn(async move {
                 sink.propose(MetadataCommand::CreateStream {
-                    node_id: 1,
-                    node_epoch: 10,
+                    proposer: Proposer::new(1, 10),
                 })
                 .await
                 .unwrap()
@@ -915,8 +921,7 @@ mod tests {
             sink.propose(register(1, 10)).await.unwrap();
             for _ in 0..30 {
                 sink.propose(MetadataCommand::CreateStream {
-                    node_id: 1,
-                    node_epoch: 10,
+                    proposer: Proposer::new(1, 10),
                 })
                 .await
                 .unwrap();
@@ -949,8 +954,7 @@ mod tests {
         assert_eq!(views.load().state, final_state);
         let next = sink
             .propose(MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             })
             .await
             .unwrap();
@@ -974,8 +978,7 @@ mod tests {
         sink_a.propose(register(1, 10)).await.unwrap();
         sink_a
             .propose(MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             })
             .await
             .unwrap();
@@ -1021,8 +1024,7 @@ mod tests {
         for _ in 0..20 {
             sink_a
                 .propose(MetadataCommand::CreateStream {
-                    node_id: 1,
-                    node_epoch: 10,
+                    proposer: Proposer::new(1, 10),
                 })
                 .await
                 .unwrap();
@@ -1038,8 +1040,7 @@ mod tests {
         // One more append AFTER truncation so B's next fetch surfaces the gap.
         sink_a
             .propose(MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             })
             .await
             .unwrap();
@@ -1061,8 +1062,7 @@ mod tests {
         sink.propose(register(1, 10)).await.unwrap();
         let err = sink
             .propose(MetadataCommand::CreateStream {
-                node_id: 9,
-                node_epoch: 1,
+                proposer: Proposer::new(9, 1),
             })
             .await
             .unwrap_err();
@@ -1073,8 +1073,7 @@ mod tests {
         );
         let ok = sink
             .propose(MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             })
             .await
             .unwrap();

@@ -120,13 +120,13 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
             }
             let mut fenced = server.fenced();
             let code = tokio::select! {
-                signal = tokio::signal::ctrl_c() => {
+                signal = shutdown_signal() => {
                     signal?;
                     println!("shutting down");
                     0
                 }
                 _ = fenced.wait_for(|fenced| *fenced) => {
-                    eprintln!("this node was fenced by the cluster, shutting down");
+                    eprintln!("this node left the cluster, shutting down");
                     1
                 }
             };
@@ -134,4 +134,20 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
             Ok(code)
         }
     }
+}
+
+/// Ctrl-C, or SIGTERM from a container runtime or process manager.
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => signal,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }

@@ -8,7 +8,7 @@ use s3stream::{
     StreamMetadata, StreamObject, StreamState,
 };
 
-use crate::command::{MetadataCommand, MetadataResult};
+use crate::command::{MetadataCommand, MetadataResult, Proposer};
 
 /// Current command/result wire version. Bumped on any layout change. Decoders
 /// Pre-release: no compatibility shims for older layouts. Bump only once
@@ -160,6 +160,11 @@ pub fn decode_result(bytes: &[u8]) -> Result<MetadataResult, CodecError> {
 
 fn put_command_body(buf: &mut BytesMut, command: &MetadataCommand) {
     buf.put_u8(command.type_code());
+    if let Some(proposer) = command.proposer() {
+        buf.put_i32_le(proposer.node_id);
+        buf.put_i64_le(proposer.node_epoch);
+    }
+
     match command {
         MetadataCommand::RegisterNode {
             node_id,
@@ -176,156 +181,116 @@ fn put_command_body(buf: &mut BytesMut, command: &MetadataCommand) {
             put_str_map(buf, protocol_addresses);
             put_str(buf, wal);
         }
-        MetadataCommand::Heartbeat {
-            node_id,
-            node_epoch,
+        MetadataCommand::SetNodeSlots { node_id, slots, .. } => {
+            buf.put_i32_le(*node_id);
+            buf.put_u32_le(*slots);
         }
-        | MetadataCommand::FenceNode {
+        MetadataCommand::Heartbeat { .. } | MetadataCommand::CreateStream { .. } => {}
+        MetadataCommand::FenceNode {
             node_id,
             node_epoch,
+            heartbeats,
+            ..
         } => {
             buf.put_i32_le(*node_id);
             buf.put_i64_le(*node_epoch);
-        }
-        MetadataCommand::CreateStream {
-            node_id,
-            node_epoch,
-        } => {
-            buf.put_i32_le(*node_id);
-            buf.put_i64_le(*node_epoch);
+            buf.put_u64_le(*heartbeats);
         }
         MetadataCommand::OpenStream {
-            node_id,
-            node_epoch,
-            stream_id,
-            epoch,
+            stream_id, epoch, ..
         }
         | MetadataCommand::CloseStream {
-            node_id,
-            node_epoch,
-            stream_id,
-            epoch,
+            stream_id, epoch, ..
         }
         | MetadataCommand::DeleteStream {
-            node_id,
-            node_epoch,
-            stream_id,
-            epoch,
+            stream_id, epoch, ..
+        }
+        | MetadataCommand::CompleteTransfer {
+            stream_id, epoch, ..
         } => {
-            buf.put_i32_le(*node_id);
-            buf.put_i64_le(*node_epoch);
             buf.put_u64_le(*stream_id);
             buf.put_i64_le(*epoch);
         }
         MetadataCommand::TrimStream {
-            node_id,
-            node_epoch,
             stream_id,
             epoch,
             new_start_offset,
+            ..
         } => {
-            buf.put_i32_le(*node_id);
-            buf.put_i64_le(*node_epoch);
             buf.put_u64_le(*stream_id);
             buf.put_i64_le(*epoch);
             buf.put_u64_le(*new_start_offset);
         }
         MetadataCommand::PrepareObject {
-            node_id,
-            node_epoch,
             count,
             ttl_ms,
             now_ms,
+            ..
         } => {
-            buf.put_i32_le(*node_id);
-            buf.put_i64_le(*node_epoch);
             buf.put_u32_le(*count);
             buf.put_i64_le(*ttl_ms);
             buf.put_i64_le(*now_ms);
         }
         MetadataCommand::CommitStreamSetObject {
-            node_id,
-            node_epoch,
-            request,
-            now_ms,
+            request, now_ms, ..
         } => {
-            buf.put_i32_le(*node_id);
-            buf.put_i64_le(*node_epoch);
             buf.put_i64_le(*now_ms);
             put_commit_request(buf, request);
         }
         MetadataCommand::CompactStreamObject {
-            node_id,
-            node_epoch,
-            request,
-            now_ms,
+            request, now_ms, ..
         } => {
-            buf.put_i32_le(*node_id);
-            buf.put_i64_le(*node_epoch);
             buf.put_i64_le(*now_ms);
             put_compact_request(buf, request);
         }
-        MetadataCommand::ExpirePreparedObjects { now_ms } => {
+        MetadataCommand::ExpirePreparedObjects { now_ms, .. } => {
             buf.put_i64_le(*now_ms);
         }
-        MetadataCommand::CleanDestroyedObjects { object_ids } => {
+        MetadataCommand::CleanDestroyedObjects { object_ids, .. } => {
             buf.put_u32_le(object_ids.len() as u32);
             for id in object_ids {
                 buf.put_u64_le(*id);
             }
         }
-        MetadataCommand::PutKv { key, value } | MetadataCommand::PutKvIfAbsent { key, value } => {
+        MetadataCommand::PutKv { key, value, .. }
+        | MetadataCommand::PutKvIfAbsent { key, value, .. } => {
             put_str(buf, key);
-            buf.put_u32_le(value.len() as u32);
-            buf.put_slice(value);
+            put_blob(buf, value);
         }
-        MetadataCommand::DeleteKv { key } => {
+        MetadataCommand::DeleteKv { key, .. } => {
             put_str(buf, key);
         }
-        MetadataCommand::DeleteKvIfMatches { key, expected } => {
+        MetadataCommand::DeleteKvIfMatches { key, expected, .. } => {
             put_str(buf, key);
-            buf.put_u32_le(expected.len() as u32);
-            buf.put_slice(expected);
+            put_blob(buf, expected);
         }
         MetadataCommand::PutKvIfMatches {
             key,
             expected,
             value,
+            ..
         } => {
             put_str(buf, key);
-            buf.put_u32_le(expected.len() as u32);
-            buf.put_slice(expected);
-            buf.put_u32_le(value.len() as u32);
-            buf.put_slice(value);
+            put_blob(buf, expected);
+            put_blob(buf, value);
         }
         MetadataCommand::TransferStream {
             stream_id,
             from_node,
             to_node,
+            ..
         } => {
             buf.put_u64_le(*stream_id);
             buf.put_i32_le(*from_node);
             buf.put_i32_le(*to_node);
         }
-        MetadataCommand::CompleteTransfer { stream_id, epoch } => {
-            buf.put_u64_le(*stream_id);
-            buf.put_i64_le(*epoch);
-        }
-        MetadataCommand::CreateStreams {
-            node_id,
-            node_epoch,
-            count,
-        }
-        | MetadataCommand::AllocateProducerIds {
-            node_id,
-            node_epoch,
-            count,
-        } => {
-            buf.put_i32_le(*node_id);
-            buf.put_i64_le(*node_epoch);
+        MetadataCommand::CreateStreams { count, .. }
+        | MetadataCommand::AllocateProducerIds { count, .. } => {
             buf.put_u32_le(*count);
         }
-        MetadataCommand::PlaceStream { stream_id, node_id } => {
+        MetadataCommand::PlaceStream {
+            stream_id, node_id, ..
+        } => {
             buf.put_u64_le(*stream_id);
             match node_id {
                 Some(node_id) => {
@@ -340,118 +305,113 @@ fn put_command_body(buf: &mut BytesMut, command: &MetadataCommand) {
 
 fn get_command_body(buf: &mut &[u8]) -> Result<MetadataCommand, CodecError> {
     let type_code = get_u8(buf)?;
+    if type_code == 10 {
+        return Ok(MetadataCommand::RegisterNode {
+            node_id: get_i32(buf)?,
+            node_epoch: get_i64(buf)?,
+            http_address: get_str(buf)?,
+            slots: get_u32(buf)?,
+            protocol_addresses: get_str_map(buf)?,
+            wal: get_str(buf)?,
+        });
+    }
+
     Ok(match type_code {
         1 => MetadataCommand::CreateStream {
-            node_id: get_i32(buf)?,
-            node_epoch: get_i64(buf)?,
+            proposer: get_proposer(buf)?,
         },
         2 => MetadataCommand::OpenStream {
-            node_id: get_i32(buf)?,
-            node_epoch: get_i64(buf)?,
+            proposer: get_proposer(buf)?,
             stream_id: get_u64(buf)?,
             epoch: get_i64(buf)?,
         },
         3 => MetadataCommand::TrimStream {
-            node_id: get_i32(buf)?,
-            node_epoch: get_i64(buf)?,
+            proposer: get_proposer(buf)?,
             stream_id: get_u64(buf)?,
             epoch: get_i64(buf)?,
             new_start_offset: get_u64(buf)?,
         },
         4 => MetadataCommand::CloseStream {
-            node_id: get_i32(buf)?,
-            node_epoch: get_i64(buf)?,
+            proposer: get_proposer(buf)?,
             stream_id: get_u64(buf)?,
             epoch: get_i64(buf)?,
         },
         5 => MetadataCommand::DeleteStream {
-            node_id: get_i32(buf)?,
-            node_epoch: get_i64(buf)?,
+            proposer: get_proposer(buf)?,
             stream_id: get_u64(buf)?,
             epoch: get_i64(buf)?,
         },
         6 => MetadataCommand::PrepareObject {
-            node_id: get_i32(buf)?,
-            node_epoch: get_i64(buf)?,
+            proposer: get_proposer(buf)?,
             count: get_u32(buf)?,
             ttl_ms: get_i64(buf)?,
             now_ms: get_i64(buf)?,
         },
         7 => {
-            let node_id = get_i32(buf)?;
-            let node_epoch = get_i64(buf)?;
+            let proposer = get_proposer(buf)?;
             let now_ms = get_i64(buf)?;
-            let request = get_commit_request(buf)?;
             MetadataCommand::CommitStreamSetObject {
-                node_id,
-                node_epoch,
-                request,
+                proposer,
+                request: get_commit_request(buf)?,
                 now_ms,
             }
         }
         8 => {
-            let node_id = get_i32(buf)?;
-            let node_epoch = get_i64(buf)?;
+            let proposer = get_proposer(buf)?;
             let now_ms = get_i64(buf)?;
-            let request = get_compact_request(buf)?;
             MetadataCommand::CompactStreamObject {
-                node_id,
-                node_epoch,
-                request,
+                proposer,
+                request: get_compact_request(buf)?,
                 now_ms,
             }
         }
         9 => MetadataCommand::ExpirePreparedObjects {
+            proposer: get_proposer(buf)?,
             now_ms: get_i64(buf)?,
         },
-        10 => {
-            let node_id = get_i32(buf)?;
-            let node_epoch = get_i64(buf)?;
-            let http_address = get_str(buf)?;
-            let slots = get_u32(buf)?;
-            let protocol_addresses = get_str_map(buf)?;
-            let wal = get_str(buf)?;
-            MetadataCommand::RegisterNode {
-                node_id,
-                node_epoch,
-                http_address,
-                slots,
-                protocol_addresses,
-                wal,
-            }
-        }
         11 => {
+            let proposer = get_proposer(buf)?;
             let count = get_u32(buf)? as usize;
             let mut object_ids = Vec::with_capacity(count.min(4096));
             for _ in 0..count {
                 object_ids.push(get_u64(buf)?);
             }
-            MetadataCommand::CleanDestroyedObjects { object_ids }
+            MetadataCommand::CleanDestroyedObjects {
+                proposer,
+                object_ids,
+            }
         }
         12 => MetadataCommand::PutKv {
+            proposer: get_proposer(buf)?,
             key: get_str(buf)?,
             value: get_blob(buf)?,
         },
         13 => MetadataCommand::PutKvIfAbsent {
+            proposer: get_proposer(buf)?,
             key: get_str(buf)?,
             value: get_blob(buf)?,
         },
-        14 => MetadataCommand::DeleteKv { key: get_str(buf)? },
+        14 => MetadataCommand::DeleteKv {
+            proposer: get_proposer(buf)?,
+            key: get_str(buf)?,
+        },
         15 => MetadataCommand::TransferStream {
+            proposer: get_proposer(buf)?,
             stream_id: get_u64(buf)?,
             from_node: get_i32(buf)?,
             to_node: get_i32(buf)?,
         },
         16 => MetadataCommand::CompleteTransfer {
+            proposer: get_proposer(buf)?,
             stream_id: get_u64(buf)?,
             epoch: get_i64(buf)?,
         },
         17 => MetadataCommand::CreateStreams {
-            node_id: get_i32(buf)?,
-            node_epoch: get_i64(buf)?,
+            proposer: get_proposer(buf)?,
             count: get_u32(buf)?,
         },
         18 => MetadataCommand::PlaceStream {
+            proposer: get_proposer(buf)?,
             stream_id: get_u64(buf)?,
             node_id: match get_u8(buf)? {
                 0 => None,
@@ -459,26 +419,33 @@ fn get_command_body(buf: &mut &[u8]) -> Result<MetadataCommand, CodecError> {
             },
         },
         19 => MetadataCommand::DeleteKvIfMatches {
+            proposer: get_proposer(buf)?,
             key: get_str(buf)?,
             expected: get_blob(buf)?,
         },
         20 => MetadataCommand::AllocateProducerIds {
-            node_id: get_i32(buf)?,
-            node_epoch: get_i64(buf)?,
+            proposer: get_proposer(buf)?,
             count: get_u32(buf)?,
         },
         21 => MetadataCommand::PutKvIfMatches {
+            proposer: get_proposer(buf)?,
             key: get_str(buf)?,
             expected: get_blob(buf)?,
             value: get_blob(buf)?,
         },
         22 => MetadataCommand::Heartbeat {
-            node_id: get_i32(buf)?,
-            node_epoch: get_i64(buf)?,
+            proposer: get_proposer(buf)?,
         },
         23 => MetadataCommand::FenceNode {
+            proposer: get_proposer(buf)?,
             node_id: get_i32(buf)?,
             node_epoch: get_i64(buf)?,
+            heartbeats: get_u64(buf)?,
+        },
+        24 => MetadataCommand::SetNodeSlots {
+            proposer: get_proposer(buf)?,
+            node_id: get_i32(buf)?,
+            slots: get_u32(buf)?,
         },
         other => return Err(CodecError::UnknownCommand(other)),
     })
@@ -666,6 +633,15 @@ fn get_str(buf: &mut &[u8]) -> Result<String, CodecError> {
     Ok(s)
 }
 
+fn get_proposer(buf: &mut &[u8]) -> Result<Proposer, CodecError> {
+    Ok(Proposer::new(get_i32(buf)?, get_i64(buf)?))
+}
+
+fn put_blob(buf: &mut BytesMut, value: &[u8]) {
+    buf.put_u32_le(value.len() as u32);
+    buf.put_slice(value);
+}
+
 fn get_blob(buf: &mut &[u8]) -> Result<Bytes, CodecError> {
     let len = get_u32(buf)? as usize;
     if buf.remaining() < len {
@@ -703,44 +679,43 @@ mod tests {
     fn all_commands() -> Vec<MetadataCommand> {
         vec![
             MetadataCommand::CreateStream {
-                node_id: 7,
-                node_epoch: 100,
+                proposer: Proposer::new(7, 100),
             },
             MetadataCommand::OpenStream {
-                node_id: 7,
-                node_epoch: 100,
+                proposer: Proposer::new(7, 100),
+
                 stream_id: 3,
                 epoch: 9,
             },
             MetadataCommand::TrimStream {
-                node_id: 7,
-                node_epoch: 100,
+                proposer: Proposer::new(7, 100),
+
                 stream_id: 3,
                 epoch: 9,
                 new_start_offset: 4,
             },
             MetadataCommand::CloseStream {
-                node_id: 7,
-                node_epoch: 100,
+                proposer: Proposer::new(7, 100),
+
                 stream_id: 3,
                 epoch: 9,
             },
             MetadataCommand::DeleteStream {
-                node_id: 7,
-                node_epoch: 100,
+                proposer: Proposer::new(7, 100),
+
                 stream_id: 3,
                 epoch: 9,
             },
             MetadataCommand::PrepareObject {
-                node_id: 7,
-                node_epoch: 100,
+                proposer: Proposer::new(7, 100),
+
                 count: 2,
                 ttl_ms: 1000,
                 now_ms: 50,
             },
             MetadataCommand::CommitStreamSetObject {
-                node_id: 7,
-                node_epoch: 100,
+                proposer: Proposer::new(7, 100),
+
                 request: CommitStreamSetObjectRequest {
                     object_id: 11,
                     object_size: 128,
@@ -765,8 +740,8 @@ mod tests {
                 now_ms: 123,
             },
             MetadataCommand::CompactStreamObject {
-                node_id: 7,
-                node_epoch: 100,
+                proposer: Proposer::new(7, 100),
+
                 request: CompactStreamObjectRequest {
                     object_id: 20,
                     object_size: 64,
@@ -784,7 +759,10 @@ mod tests {
                 },
                 now_ms: 456,
             },
-            MetadataCommand::ExpirePreparedObjects { now_ms: 99 },
+            MetadataCommand::ExpirePreparedObjects {
+                proposer: Proposer::new(1, 10),
+                now_ms: 99,
+            },
             MetadataCommand::RegisterNode {
                 wal: "2@s3://wal/node-7".into(),
                 node_id: 7,
@@ -805,59 +783,75 @@ mod tests {
                 protocol_addresses: Default::default(),
             },
             MetadataCommand::PlaceStream {
+                proposer: Proposer::new(1, 10),
                 stream_id: 42,
                 node_id: None,
             },
             MetadataCommand::PlaceStream {
+                proposer: Proposer::new(1, 10),
                 stream_id: 43,
                 node_id: Some(2),
             },
             MetadataCommand::Heartbeat {
-                node_id: 7,
-                node_epoch: 100,
+                proposer: Proposer::new(7, 100),
             },
             MetadataCommand::FenceNode {
+                proposer: Proposer::new(1, 10),
                 node_id: 8,
                 node_epoch: 200,
+                heartbeats: 7,
+            },
+            MetadataCommand::SetNodeSlots {
+                proposer: Proposer::new(1, 10),
+                node_id: 8,
+                slots: 3,
             },
             MetadataCommand::TransferStream {
+                proposer: Proposer::new(1, 10),
                 stream_id: 3,
                 from_node: 7,
                 to_node: 8,
             },
             MetadataCommand::CompleteTransfer {
+                proposer: Proposer::new(1, 10),
                 stream_id: 3,
                 epoch: 9,
             },
             MetadataCommand::CreateStreams {
-                node_id: 7,
-                node_epoch: 100,
+                proposer: Proposer::new(7, 100),
+
                 count: 16,
             },
             MetadataCommand::AllocateProducerIds {
-                node_id: 7,
-                node_epoch: 100,
+                proposer: Proposer::new(7, 100),
+
                 count: 8,
             },
             MetadataCommand::CleanDestroyedObjects {
+                proposer: Proposer::new(1, 10),
                 object_ids: vec![1, 2, 3],
             },
             MetadataCommand::PutKv {
+                proposer: Proposer::new(1, 10),
                 key: "path/a".into(),
                 value: Bytes::from_static(&[1, 2, 3]),
             },
             MetadataCommand::PutKvIfAbsent {
+                proposer: Proposer::new(1, 10),
                 key: "path/b".into(),
                 value: Bytes::from_static(&[4, 5]),
             },
             MetadataCommand::DeleteKv {
+                proposer: Proposer::new(1, 10),
                 key: "path/c".into(),
             },
             MetadataCommand::DeleteKvIfMatches {
+                proposer: Proposer::new(1, 10),
                 key: "path/d".into(),
                 expected: Bytes::from_static(&[6, 7, 8]),
             },
             MetadataCommand::PutKvIfMatches {
+                proposer: Proposer::new(1, 10),
                 key: "path/e".into(),
                 expected: Bytes::from_static(&[9]),
                 value: Bytes::from_static(&[10, 11]),
@@ -923,7 +917,7 @@ mod tests {
         ));
 
         // Unknown codes must be rejected, never misparsed.
-        for type_code in [0u8, 24, 200] {
+        for type_code in [0u8, 25, 200] {
             let bytes = [CODEC_VERSION, type_code];
             assert!(matches!(
                 decode_command(&bytes),
@@ -964,14 +958,13 @@ mod tests {
         prop_oneof![
             (any::<i32>(), any::<i64>()).prop_map(|(node_id, node_epoch)| {
                 MetadataCommand::CreateStream {
-                    node_id,
-                    node_epoch,
+                    proposer: Proposer::new(node_id, node_epoch),
                 }
             }),
             (any::<i32>(), any::<i64>(), any::<u64>(), any::<i64>()).prop_map(
                 |(node_id, node_epoch, stream_id, epoch)| MetadataCommand::OpenStream {
-                    node_id,
-                    node_epoch,
+                    proposer: Proposer::new(node_id, node_epoch),
+
                     stream_id,
                     epoch
                 }
@@ -986,8 +979,8 @@ mod tests {
                 .prop_map(
                     |(node_id, node_epoch, stream_id, epoch, new_start_offset)| {
                         MetadataCommand::TrimStream {
-                            node_id,
-                            node_epoch,
+                            proposer: Proposer::new(node_id, node_epoch),
+
                             stream_id,
                             epoch,
                             new_start_offset,
@@ -1015,51 +1008,80 @@ mod tests {
                     }
                 ),
             (any::<u64>(), any::<Option<i32>>()).prop_map(|(stream_id, node_id)| {
-                MetadataCommand::PlaceStream { stream_id, node_id }
+                MetadataCommand::PlaceStream {
+                    proposer: Proposer::new(1, 10),
+                    stream_id,
+                    node_id,
+                }
             }),
             (any::<i32>(), any::<i64>()).prop_map(|(node_id, node_epoch)| {
                 MetadataCommand::Heartbeat {
-                    node_id,
-                    node_epoch,
+                    proposer: Proposer::new(node_id, node_epoch),
                 }
             }),
-            (any::<i32>(), any::<i64>()).prop_map(|(node_id, node_epoch)| {
-                MetadataCommand::FenceNode {
+            (
+                any::<i32>(),
+                any::<i64>(),
+                any::<i32>(),
+                any::<i64>(),
+                any::<u64>()
+            )
+                .prop_map(|(by, by_epoch, node_id, node_epoch, heartbeats)| {
+                    MetadataCommand::FenceNode {
+                        proposer: Proposer::new(by, by_epoch),
+                        node_id,
+                        node_epoch,
+                        heartbeats,
+                    }
+                }),
+            (any::<i32>(), any::<i64>(), any::<i32>(), any::<u32>()).prop_map(
+                |(by, by_epoch, node_id, slots)| MetadataCommand::SetNodeSlots {
+                    proposer: Proposer::new(by, by_epoch),
                     node_id,
-                    node_epoch,
+                    slots,
                 }
-            }),
+            ),
             (any::<u64>(), any::<i32>(), any::<i32>()).prop_map(
                 |(stream_id, from_node, to_node)| MetadataCommand::TransferStream {
+                    proposer: Proposer::new(1, 10),
                     stream_id,
                     from_node,
                     to_node,
                 }
             ),
             (any::<u64>(), any::<i64>()).prop_map(|(stream_id, epoch)| {
-                MetadataCommand::CompleteTransfer { stream_id, epoch }
+                MetadataCommand::CompleteTransfer {
+                    proposer: Proposer::new(1, 10),
+                    stream_id,
+                    epoch,
+                }
             }),
             (any::<i32>(), any::<i64>(), any::<u32>()).prop_map(|(node_id, node_epoch, count)| {
                 MetadataCommand::CreateStreams {
-                    node_id,
-                    node_epoch,
+                    proposer: Proposer::new(node_id, node_epoch),
+
                     count,
                 }
             }),
             (any::<i32>(), any::<i64>(), any::<u32>()).prop_map(|(node_id, node_epoch, count)| {
                 MetadataCommand::AllocateProducerIds {
-                    node_id,
-                    node_epoch,
+                    proposer: Proposer::new(node_id, node_epoch),
+
                     count,
                 }
             }),
-            proptest::collection::vec(any::<u64>(), 0..64)
-                .prop_map(|object_ids| MetadataCommand::CleanDestroyedObjects { object_ids }),
+            proptest::collection::vec(any::<u64>(), 0..64).prop_map(|object_ids| {
+                MetadataCommand::CleanDestroyedObjects {
+                    proposer: Proposer::new(1, 10),
+                    object_ids,
+                }
+            }),
             (
                 "[a-z/]{0,32}",
                 proptest::collection::vec(any::<u8>(), 0..64)
             )
                 .prop_map(|(key, value)| MetadataCommand::PutKv {
+                    proposer: Proposer::new(1, 10),
                     key,
                     value: Bytes::from(value)
                 }),
@@ -1068,6 +1090,7 @@ mod tests {
                 proptest::collection::vec(any::<u8>(), 0..64)
             )
                 .prop_map(|(key, expected)| MetadataCommand::DeleteKvIfMatches {
+                    proposer: Proposer::new(1, 10),
                     key,
                     expected: Bytes::from(expected)
                 }),
@@ -1077,6 +1100,7 @@ mod tests {
                 proptest::collection::vec(any::<u8>(), 0..64)
             )
                 .prop_map(|(key, expected, value)| MetadataCommand::PutKvIfMatches {
+                    proposer: Proposer::new(1, 10),
                     key,
                     expected: Bytes::from(expected),
                     value: Bytes::from(value)

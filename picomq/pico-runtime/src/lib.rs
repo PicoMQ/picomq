@@ -9,7 +9,7 @@ use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore, Verifier};
 use picomq_http::{RunningServer, ServeOptions};
 use picomq_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
 use picomq_pgwal::PgWal;
-use picomq_server::failover::{ObjectWalTakeover, WalTakeover};
+use picomq_server::wal::Wal;
 use picomq_server::{KvTokenStore, NodeConfig, PicoNode};
 use picomq_sql::{
     LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig, SqliteStore,
@@ -155,7 +155,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         picomq_kafka::PROTOCOL_NAME.to_owned(),
         kafka_advertise,
     )]);
-    let mut node_config = NodeConfig {
+    let node_config = NodeConfig {
         node_id: config.node_id,
         node_epoch: config.node_epoch,
         http_address: config.advertised_url(http_bound),
@@ -163,20 +163,18 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         protocol_addresses,
         cluster_id: config.cluster_id.clone(),
         heartbeat_interval: config.heartbeat_interval,
+        node_timeout: config.node_timeout,
         engine,
     };
     let wal_uri = config.wal_uri();
     let node = if picomq_pgwal::Config::accepts(&wal_uri) {
-        let wal = postgres_wal(&wal_uri, &node_config)?;
-        let takeover = Arc::new(PostgresWalTakeover::new(&wal_uri, &node_config.cluster_id)?);
-        node_config.engine.wal_config = wal.uri().to_owned();
+        let wal = PostgresWal::new(&wal_uri, &node_config.cluster_id)?;
         PicoNode::start_with_wal(
             node_config,
             sink.clone() as Arc<dyn CommandSink>,
             views,
             object_storage.clone(),
-            wal,
-            takeover,
+            Arc::new(wal),
             schema_registry.clone(),
         )
         .await?
@@ -203,10 +201,9 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         LeaseConfig::default(),
     );
     let lifecycle = Arc::new(MetadataLifecycle::new(
-        sink.clone() as Arc<dyn CommandSink>,
+        node.metadata().clone(),
         Arc::new(ObjectCleaner::new(
-            sink.clone() as Arc<dyn CommandSink>,
-            node.views(),
+            node.metadata().clone(),
             Some(object_storage),
         )),
         LIFECYCLE_TICK,
@@ -218,7 +215,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     let ttl_sweep = node
         .topics()
         .spawn_ttl_sweep(lease.leadership(), LIFECYCLE_TICK);
-    let failover = node.spawn_failover(lease.leadership(), LIFECYCLE_TICK, config.node_timeout);
+    let failover = node.spawn_failover(lease.leadership(), LIFECYCLE_TICK);
     let compaction_check = node
         .service()
         .streams()
@@ -342,52 +339,64 @@ fn open_bucket(uri: &str) -> Result<Arc<dyn ObjectStorageTrait>, RuntimeError> {
     Ok(Arc::new(open_adapter(uri)?))
 }
 
-fn postgres_wal(uri: &str, node: &NodeConfig) -> Result<Arc<dyn WriteAheadLogTrait>, RuntimeError> {
-    let config = picomq_pgwal::Config::parse(uri)?.identity(
-        node.cluster_id.clone(),
-        u32::try_from(node.node_id).unwrap_or_default(),
-        u64::try_from(node.node_epoch).unwrap_or_default(),
-    );
-    Ok(Arc::new(PgWal::new(config)?))
-}
-
-struct PostgresWalTakeover {
+/// A WAL in the cluster's Postgres, fenced by its claim row. It takes over
+/// only nodes whose WAL lives in the same database.
+struct PostgresWal {
+    cluster_id: String,
     config: picomq_pgwal::Config,
-    objects: ObjectWalTakeover,
 }
 
-impl PostgresWalTakeover {
+impl PostgresWal {
     fn new(uri: &str, cluster_id: &str) -> Result<Self, RuntimeError> {
-        let config = picomq_pgwal::Config::parse(uri)?.identity(cluster_id, 0, 0);
-
         Ok(Self {
-            config,
-            objects: ObjectWalTakeover::new(cluster_id),
+            cluster_id: cluster_id.to_owned(),
+            config: picomq_pgwal::Config::parse(uri)?,
         })
     }
 }
 
 #[async_trait::async_trait]
-impl WalTakeover for PostgresWalTakeover {
+impl Wal for PostgresWal {
+    fn location(&self) -> String {
+        self.config.redacted().to_owned()
+    }
+
     async fn open(
+        &self,
+        node_id: i32,
+        epoch: i64,
+    ) -> Result<Arc<dyn WriteAheadLogTrait>, s3stream::Error> {
+        let config = self.config.clone().identity(
+            self.cluster_id.clone(),
+            u32::try_from(node_id).unwrap_or_default(),
+            u64::try_from(epoch).unwrap_or_default(),
+        );
+        let wal =
+            PgWal::new(config).map_err(|error| s3stream::Error::from(WalError::from(error)))?;
+        Ok(Arc::new(wal))
+    }
+
+    async fn take_over(
         &self,
         request: &FailoverRequest,
     ) -> Result<Arc<dyn WriteAheadLogTrait>, s3stream::Error> {
-        if !picomq_pgwal::Config::accepts(&request.wal_config) {
-            return self.objects.open(request).await;
-        }
-
         let wal_error = |error: picomq_pgwal::Error| s3stream::Error::from(WalError::from(error));
+        let elsewhere = || {
+            s3stream::Error::Unexpected(format!(
+                "node {} keeps its WAL in {}, not in this node's database",
+                request.node_id, request.wal_config
+            ))
+        };
+        if !picomq_pgwal::Config::accepts(&request.wal_config) {
+            return Err(elsewhere());
+        }
         let theirs = picomq_pgwal::Config::parse(&request.wal_config).map_err(wal_error)?;
         if theirs.location() != self.config.location() {
-            return Err(s3stream::Error::Unexpected(format!(
-                "node {} keeps its WAL in {}, not in this node's database",
-                request.node_id,
-                theirs.redacted()
-            )));
+            return Err(elsewhere());
         }
 
-        let wal = PgWal::recovering(self.config.clone(), request.node_id, request.node_epoch)
+        let config = self.config.clone().identity(self.cluster_id.clone(), 0, 0);
+        let wal = PgWal::recovering(config, request.node_id, request.node_epoch)
             .await
             .map_err(wal_error)?;
         Ok(Arc::new(wal))
@@ -459,20 +468,23 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn postgres_takeover_refuses_a_wal_in_another_database() {
-        let takeover =
-            PostgresWalTakeover::new("postgres://wal:secret@db-a:5432/pico", "cluster").unwrap();
-        let request = FailoverRequest {
-            node_id: 2,
-            node_epoch: 1,
-            wal_config: "postgres://wal:***@db-b:5432/pico".to_owned(),
-        };
+    async fn a_postgres_wal_only_takes_over_wals_in_its_database() {
+        let wal = PostgresWal::new("postgres://wal:secret@db-a:5432/pico", "cluster").unwrap();
 
-        let error = takeover.open(&request).await.err().unwrap();
-
-        assert!(
-            error.to_string().contains("not in this node's database"),
-            "{error}"
-        );
+        for elsewhere in [
+            "postgres://wal:***@db-b:5432/pico",
+            "0@s3://bucket?region=us-east-1",
+        ] {
+            let request = FailoverRequest {
+                node_id: 2,
+                node_epoch: 1,
+                wal_config: elsewhere.to_owned(),
+            };
+            let error = wal.take_over(&request).await.err().unwrap();
+            assert!(
+                error.to_string().contains("not in this node's database"),
+                "{error}"
+            );
+        }
     }
 }

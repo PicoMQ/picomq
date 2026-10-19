@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use picomq_metadata::lifecycle::{MetadataLifecycle, ObjectCleaner};
-use picomq_metadata::{CommandSink, MetadataCommand, MetadataNodeHandle};
+use picomq_metadata::{CommandSink, MetadataCommand, MetadataNodeHandle, Proposer, Registration};
 use picomq_sql::{LeaseConfig, LeaseKeeper, MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
 use s3stream::{
     AppendContext, Config, CreateStreamOptions, FetchContext, MemoryObjectStorage,
@@ -37,6 +37,16 @@ fn sink_config() -> SqlSinkConfig {
     }
 }
 
+fn registration() -> Registration {
+    Registration {
+        node_id: NODE_ID,
+        node_epoch: NODE_EPOCH,
+        http_address: "http://node-1:9090".into(),
+        slots: 1,
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn engine_end_to_end_on_sql_metadata_plane() {
     let dir = tempfile::tempdir().unwrap();
@@ -45,8 +55,9 @@ async fn engine_end_to_end_on_sql_metadata_plane() {
     let store: Arc<dyn MetaStore> = Arc::new(SqliteStore::open(&db_path).await.unwrap());
     let (sink, views) = SqlSink::open(store.clone(), sink_config()).await.unwrap();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
-    let handle = MetadataNodeHandle::new(NODE_ID, NODE_EPOCH, sink.clone(), views.clone());
-    handle.register("http://node-1:9090").await.unwrap();
+    let handle = MetadataNodeHandle::register(sink.clone(), views.clone(), registration())
+        .await
+        .unwrap();
 
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
@@ -154,8 +165,8 @@ async fn engine_end_to_end_on_sql_metadata_plane() {
 
     // Lease-driven lifecycle: win the election, expire a lapsed prepare.
     sink.propose(MetadataCommand::PrepareObject {
-        node_id: NODE_ID,
-        node_epoch: NODE_EPOCH,
+        proposer: Proposer::new(NODE_ID, NODE_EPOCH),
+
         count: 1,
         ttl_ms: 1, // long lapsed against wall-clock now
         now_ms: 0,
@@ -172,13 +183,9 @@ async fn engine_end_to_end_on_sql_metadata_plane() {
             check_interval: Duration::from_millis(20),
         },
     );
-    let cleaner = Arc::new(ObjectCleaner::new(
-        sink.clone(),
-        views.clone(),
-        Some(object_storage),
-    ));
+    let cleaner = Arc::new(ObjectCleaner::new(handle.clone(), Some(object_storage)));
     let lifecycle = Arc::new(MetadataLifecycle::new(
-        sink.clone(),
+        handle.clone(),
         cleaner,
         Duration::from_millis(5),
     ));
@@ -215,7 +222,9 @@ async fn engine_end_to_end_on_sql_metadata_plane() {
     );
 
     // The restored plane is live: stale epochs still fenced.
-    let handle = MetadataNodeHandle::new(NODE_ID, NODE_EPOCH, Arc::new(sink), views);
+    let handle = MetadataNodeHandle::register(Arc::new(sink), views, registration())
+        .await
+        .unwrap();
     use s3stream::StreamManagerTrait as _;
     handle
         .stream_manager()

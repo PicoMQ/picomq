@@ -2383,6 +2383,7 @@ dependencies = [
  "picomq-protocol",
  "picomq-schema",
  "s3stream",
+ "s3stream-core",
  "s3stream-wal",
  "serde_json",
  "thiserror 2.0.20",

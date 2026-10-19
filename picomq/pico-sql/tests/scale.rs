@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use picomq_metadata::{CommandSink, MetadataCommand, MetadataResult};
+use picomq_metadata::{CommandSink, MetadataCommand, MetadataResult, Proposer};
 use picomq_sql::{MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
 
 const NODE: i32 = 1;
@@ -57,8 +57,7 @@ async fn run_gate(total: u64) {
             let sink = sink.clone();
             inflight.spawn(async move {
                 sink.propose(MetadataCommand::CreateStream {
-                    node_id: NODE,
-                    node_epoch: EPOCH,
+                    proposer: Proposer::new(NODE, EPOCH),
                 })
                 .await
                 .unwrap()
@@ -124,8 +123,7 @@ async fn run_gate(total: u64) {
     assert_eq!(views.load().state.streams.len() as u64, total);
     let next = sink
         .propose(MetadataCommand::CreateStream {
-            node_id: NODE,
-            node_epoch: EPOCH,
+            proposer: Proposer::new(NODE, EPOCH),
         })
         .await
         .unwrap();

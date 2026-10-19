@@ -42,6 +42,11 @@ pub enum MetadataError {
     #[error("no live node: {message}")]
     NoLiveNode { message: String },
 
+    /// The metadata store could not be reached. The command may or may not
+    /// have landed.
+    #[error("metadata store unavailable: {message}")]
+    Unavailable { message: String },
+
     #[error("unexpected: {message}")]
     Unexpected { message: String },
 }
@@ -56,6 +61,7 @@ impl MetadataError {
             MetadataError::NodeEpochMismatch { .. } => 5,
             MetadataError::Redundant { .. } => 6,
             MetadataError::NoLiveNode { .. } => 7,
+            MetadataError::Unavailable { .. } => 8,
             MetadataError::Unexpected { .. } => 99,
         }
     }

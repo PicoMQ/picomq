@@ -7,7 +7,7 @@ on:
         description: Which scenario to run
         type: choice
         default: all
-        options: [all, single, cluster, ds, extension]
+        options: [all, single, cluster, pgwal, ds, extension]
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: ${{ inputs.scenario == 'all' && fromJSON('["single", "cluster", "ds", "extension"]') || fromJSON(format('["{0}"]', inputs.scenario)) }}
+        scenario: ${{ inputs.scenario == 'all' && fromJSON('["single", "cluster", "pgwal", "ds", "extension"]') || fromJSON(format('["{0}"]', inputs.scenario)) }}
     steps:
       - uses: actions/checkout@v7
 

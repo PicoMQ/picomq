@@ -152,11 +152,20 @@ impl TokenService {
 mod tests {
     use super::*;
     use picomq_auth::{AccessToken, Scope};
-    use picomq_metadata::{LocalSink, MetadataNodeHandle};
+    use picomq_metadata::{LocalSink, MetadataNodeHandle, Registration};
 
-    fn kv() -> MetadataKvClient {
+    async fn kv() -> MetadataKvClient {
         let (sink, views) = LocalSink::new();
-        MetadataNodeHandle::new(1, 1, Arc::new(sink), views).kv_client()
+        let registration = Registration {
+            node_id: 1,
+            node_epoch: 1,
+            slots: 1,
+            ..Default::default()
+        };
+        MetadataNodeHandle::register(Arc::new(sink), views, registration)
+            .await
+            .unwrap()
+            .kv_client()
     }
 
     fn record(id: &str) -> TokenRecord {
@@ -172,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_get_duplicate_and_delete_if() {
-        let store = KvTokenStore::new(kv());
+        let store = KvTokenStore::new(kv().await);
         let first = record("a/one");
         assert!(store.put_if_absent(first.clone()).await.unwrap());
         assert_eq!(store.get("a/one").await.unwrap().as_ref(), Some(&first));
@@ -191,7 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_prefix_ordered() {
-        let store = KvTokenStore::new(kv());
+        let store = KvTokenStore::new(kv().await);
         for id in ["t/b", "t/a", "u/x"] {
             assert!(store.put_if_absent(record(id)).await.unwrap());
         }
@@ -220,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_expired_only_removes_expired() {
-        let kv = kv();
+        let kv = kv().await;
         let store = KvTokenStore::new(kv.clone());
         let service = TokenService::new(kv);
         store
@@ -242,7 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn expiry_loop_gated_on_leadership() {
-        let kv = kv();
+        let kv = kv().await;
         let store = KvTokenStore::new(kv.clone());
         let service = Arc::new(TokenService::new(kv));
         store
@@ -272,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_id_rejected_on_put() {
-        let store = KvTokenStore::new(kv());
+        let store = KvTokenStore::new(kv().await);
         let mut rec = record("ok");
         rec.id.clear();
         assert!(matches!(

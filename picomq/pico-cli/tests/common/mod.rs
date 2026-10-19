@@ -28,6 +28,18 @@ pub struct Server {
     pub kafka_addr: String,
 }
 
+impl Server {
+    /// Sends SIGTERM, as a container runtime does, and waits for the exit.
+    #[allow(dead_code)]
+    pub fn terminate(mut self) -> std::process::ExitStatus {
+        Command::new("kill")
+            .args(["-TERM", &self.child.id().to_string()])
+            .status()
+            .unwrap();
+        self.child.wait().unwrap()
+    }
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();

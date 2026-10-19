@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use picomq_metadata::{CommandSink, MetadataCommand, MetadataResult};
+use picomq_metadata::{CommandSink, MetadataCommand, MetadataResult, Proposer};
 use picomq_sql::{LeaseConfig, LeaseKeeper, MetaStore, PgStore, SqlSink, SqlSinkConfig};
 
 fn config() -> SqlSinkConfig {
@@ -74,8 +74,7 @@ async fn postgres_sink_multi_writer_snapshot_and_lease() {
         };
         handles.push(tokio::spawn(async move {
             sink.propose(MetadataCommand::CreateStream {
-                node_id,
-                node_epoch,
+                proposer: Proposer::new(node_id, node_epoch),
             })
             .await
             .unwrap()
@@ -142,8 +141,7 @@ async fn postgres_sink_multi_writer_snapshot_and_lease() {
     assert_eq!(views.load().state.streams.len(), 60);
     let next = sink
         .propose(MetadataCommand::CreateStream {
-            node_id: 1,
-            node_epoch: 10,
+            proposer: Proposer::new(1, 10),
         })
         .await
         .unwrap();

@@ -368,7 +368,7 @@ checked_get!(get_i64, i64, get_i64_le, 8);
 mod tests {
     use super::*;
     use crate::apply::apply;
-    use crate::command::MetadataCommand;
+    use crate::command::{MetadataCommand, Proposer};
     use s3stream::{CommitStreamSetObjectRequest, CompactStreamObjectRequest, ObjectStreamRange};
 
     /// A state exercising every section: streams (opened + closed), nodes with
@@ -379,6 +379,7 @@ mod tests {
         for (node_id, node_epoch, addr, kafka) in [
             (1, 10i64, "http://n1:9090", Some("n1:9092")),
             (2, 20, "", None),
+            (3, 30, "http://n3:9090", None),
         ] {
             apply(
                 &mut state,
@@ -403,8 +404,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::AllocateProducerIds {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 count: 5,
             },
         )
@@ -412,8 +413,10 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::FenceNode {
+                proposer: Proposer::new(1, 10),
                 node_id: 2,
                 node_epoch: 20,
+                heartbeats: 0,
             },
         )
         .unwrap();
@@ -421,8 +424,7 @@ mod tests {
             apply(
                 &mut state,
                 &MetadataCommand::CreateStream {
-                    node_id: 1,
-                    node_epoch: 10,
+                    proposer: Proposer::new(1, 10),
                 },
             )
             .unwrap();
@@ -430,8 +432,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::OpenStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 stream_id: 0,
                 epoch: 1,
             },
@@ -440,8 +442,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::PrepareObject {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 count: 4,
                 ttl_ms: 60_000,
                 now_ms: 7,
@@ -451,8 +453,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::CommitStreamSetObject {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 request: CommitStreamSetObjectRequest {
                     object_id: 0,
                     object_size: 64,
@@ -475,8 +477,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::CompactStreamObject {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 request: CompactStreamObjectRequest {
                     object_id: 1,
                     object_size: 32,
@@ -501,6 +503,7 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::CleanDestroyedObjects {
+                proposer: Proposer::new(1, 10),
                 object_ids: vec![100],
             },
         )
@@ -509,6 +512,7 @@ mod tests {
             apply(
                 &mut state,
                 &MetadataCommand::PutKv {
+                    proposer: Proposer::new(1, 10),
                     key: key.into(),
                     value: Bytes::from(value),
                 },
@@ -518,9 +522,10 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::TransferStream {
+                proposer: Proposer::new(1, 10),
                 stream_id: 0,
                 from_node: 1,
-                to_node: 2,
+                to_node: 3,
             },
         )
         .unwrap();

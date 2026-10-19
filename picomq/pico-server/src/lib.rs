@@ -20,6 +20,7 @@ pub mod topics;
 pub mod transfer;
 pub mod types;
 pub mod waiter;
+pub mod wal;
 
 pub use auth::{KvTokenStore, TOKEN_KEY_PREFIX, TokenService};
 pub use error::{ErrorKind, ServiceError};

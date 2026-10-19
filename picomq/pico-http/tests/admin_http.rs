@@ -30,11 +30,46 @@ async fn health_and_ready() {
     let body: serde_json::Value = ready.json().await.unwrap();
     assert_eq!(body["ready"], true);
     assert_eq!(body["registered"], true);
+    assert_eq!(body["fenced"], false);
     assert_eq!(body["nodeId"], 1);
     assert!(
         body["appliedIndex"].as_u64().unwrap() > 0,
         "registration applied: {body}"
     );
+}
+
+#[tokio::test]
+async fn a_fenced_node_is_not_ready() {
+    let server = common::picomq_server().await;
+    let node = server.node.metadata().proposer();
+    let heartbeats = server.node.views().load().state.nodes[&node.node_id].heartbeats;
+    server
+        .node
+        .metadata()
+        .fence_node(node.node_id, node.node_epoch, heartbeats)
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let ready = client
+        .get(format!("{}/ready", server.admin_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), 503);
+    let body: serde_json::Value = ready.json().await.unwrap();
+    assert_eq!(body["registered"], true);
+    assert_eq!(body["fenced"], true);
+
+    let nodes: serde_json::Value = client
+        .get(format!("{}/admin/nodes", server.admin_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(nodes["nodes"][0]["fenced"], true);
 }
 
 #[tokio::test]

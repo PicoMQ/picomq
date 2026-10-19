@@ -135,6 +135,7 @@ impl CommandSink for LocalSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::Proposer;
 
     fn register(node_id: i32, node_epoch: i64) -> MetadataCommand {
         MetadataCommand::RegisterNode {
@@ -154,8 +155,7 @@ mod tests {
         assert_eq!(first.applied_index, 1);
         let second = sink
             .propose(MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             })
             .await
             .unwrap();
@@ -175,8 +175,7 @@ mod tests {
         sink.propose(register(1, 10)).await.unwrap();
         let err = sink
             .propose(MetadataCommand::CreateStream {
-                node_id: 9,
-                node_epoch: 1,
+                proposer: Proposer::new(9, 1),
             })
             .await
             .unwrap_err();
@@ -184,8 +183,7 @@ mod tests {
         assert_eq!(views.load().applied_index, 1);
         let next = sink
             .propose(MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             })
             .await
             .unwrap();
@@ -197,8 +195,7 @@ mod tests {
         let (sink, _) = LocalSink::new();
         sink.propose(register(1, 10)).await.unwrap();
         sink.propose(MetadataCommand::CreateStream {
-            node_id: 1,
-            node_epoch: 10,
+            proposer: Proposer::new(1, 10),
         })
         .await
         .unwrap();
@@ -211,8 +208,7 @@ mod tests {
         assert_eq!(views.load().applied_index, 2);
         let next = restored
             .propose(MetadataCommand::CreateStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
             })
             .await
             .unwrap();

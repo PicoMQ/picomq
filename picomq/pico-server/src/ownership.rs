@@ -5,9 +5,9 @@
 //! view. The decision table:
 //!
 //! 1. log not registered → local (create lands here).
-//! 2. pending transfer → the transfer target.
-//! 3. opened, or placed but never opened → the owning node.
-//! 4. closed → local (any node can revive it).
+//! 2. pending transfer to a live node → the transfer target.
+//! 3. opened, or placed on a live node → the owning node.
+//! 4. owner fenced or never placed → local.
 
 use std::sync::Arc;
 
@@ -64,7 +64,17 @@ impl OwnershipService for MetadataOwnershipService {
             .map(|row| row.epoch)
             .unwrap_or(-1);
 
-        if let Some(pending) = view.state.pending_transfers.get(&stream_id) {
+        let pending = view
+            .state
+            .pending_transfers
+            .get(&stream_id)
+            .filter(|pending| {
+                view.state
+                    .nodes
+                    .get(&pending.to_node)
+                    .is_some_and(|node| !node.fenced)
+            });
+        if let Some(pending) = pending {
             if pending.to_node == self.node_id {
                 return Ok(Owner::local(Some(stream_id), epoch));
             }

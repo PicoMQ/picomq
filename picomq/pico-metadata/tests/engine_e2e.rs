@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use picomq_metadata::{LocalSink, MetadataNodeHandle};
+use picomq_metadata::{LocalSink, MetadataNodeHandle, Registration};
 use s3stream::{
     AppendContext, Config, CreateStreamOptions, FetchContext, MemoryObjectStorage,
     ObjectStorageTrait, ObjectWalConfig, ObjectWalService, OpenStreamOptions, RecordBatch,
@@ -21,10 +21,19 @@ const NODE_EPOCH: i64 = 1;
 #[tokio::test]
 async fn engine_end_to_end_on_real_metadata_plane() {
     let (sink, views) = LocalSink::new();
-    let handle = MetadataNodeHandle::new(NODE_ID, NODE_EPOCH, Arc::new(sink), views.clone());
-    // MetadataLifecycle registers the node before serving. Every write
-    // command below is fenced on this registration.
-    handle.register("http://node-1:9090").await.unwrap();
+    let handle = MetadataNodeHandle::register(
+        Arc::new(sink),
+        views.clone(),
+        Registration {
+            node_id: NODE_ID,
+            node_epoch: NODE_EPOCH,
+            http_address: "http://node-1:9090".into(),
+            slots: 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
 
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
