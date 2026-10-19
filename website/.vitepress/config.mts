@@ -21,7 +21,6 @@ const docsSidebar = [
     collapsed: true,
     items: [
       { text: 'Overview', link: '/docs/design/overview' },
-      { text: 'Interactive cluster', link: '/docs/design/simulator' },
       { text: 'Metadata', link: '/docs/design/metadata' },
       { text: 'Streams', link: '/docs/design/streams' },
       { text: 'Writes', link: '/docs/design/writes' },
