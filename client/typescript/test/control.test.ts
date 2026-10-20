@@ -66,6 +66,17 @@ describe('topic settings', () => {
     })
   })
 
+  it('escapes schema names per path segment', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetch)
+
+    await new PicoClient('http://example.test').deleteSchema('team/orders#v2 final.json')
+
+    expect(fetch.mock.calls[0]![0]).toBe(
+      'http://example.test/_schemas/team/orders%23v2%20final.json',
+    )
+  })
+
   it('decodes control errors and missing topics and schemas', async () => {
     const fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) =>
       init.method === 'PATCH'

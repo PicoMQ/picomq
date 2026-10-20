@@ -4,7 +4,7 @@ use serde_json::{Map, Value, json};
 
 use crate::error::CodecError;
 use crate::json::{json_body, json_request, object, string};
-use crate::wire::{WireRequest, stream_path};
+use crate::wire::{WireRequest, control_path};
 
 pub const STREAMS_PATH_PREFIX: &str = "/_streams";
 
@@ -34,7 +34,10 @@ impl TopicConfig {
         let node = object(body)?;
         Ok(Self {
             schema: string(&node, "schema")?,
-            schema_validate: node["schemaValidate"].as_bool().unwrap_or(false),
+            schema_validate: node
+                .get("schemaValidate")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             kafka_topic: string(&node, "kafkaTopic")?,
             partitions: partitions(&node)?.unwrap_or(1),
             retention_ms: limit(&node, "retentionMs")?.flatten(),
@@ -50,7 +53,11 @@ pub struct ConfigRequest<'a> {
 
 impl ConfigRequest<'_> {
     pub fn encode(&self) -> WireRequest {
-        WireRequest::new(Method::GET, config_path(self.stream), &[200, 404])
+        WireRequest::new(
+            Method::GET,
+            control_path(STREAMS_PATH_PREFIX, self.stream),
+            &[200, 404],
+        )
     }
 }
 
@@ -84,7 +91,12 @@ impl ConfigUpdate {
         if let Some(partitions) = self.partitions {
             body.insert("partitions".into(), json!(partitions));
         }
-        json_request(Method::PATCH, config_path(&self.stream), body, &[200])
+        json_request(
+            Method::PATCH,
+            control_path(STREAMS_PATH_PREFIX, &self.stream),
+            body,
+            &[200],
+        )
     }
 
     pub fn decode(stream: String, body: &[u8]) -> Result<Self, CodecError> {
@@ -118,10 +130,6 @@ impl ConfigUpdate {
             partitions: partitions(&node)?,
         })
     }
-}
-
-fn config_path(stream: &str) -> String {
-    format!("{STREAMS_PATH_PREFIX}{}", stream_path(stream))
 }
 
 fn limit(node: &Map<String, Value>, key: &str) -> Result<Option<Option<u64>>, CodecError> {
@@ -180,6 +188,17 @@ mod tests {
         assert_eq!(
             ConfigUpdate::decode("/orders".to_owned(), &wire.body).unwrap(),
             update
+        );
+    }
+
+    #[test]
+    fn config_defaults_missing_fields() {
+        assert_eq!(
+            TopicConfig::decode(b"{}").unwrap(),
+            TopicConfig {
+                partitions: 1,
+                ..Default::default()
+            }
         );
     }
 

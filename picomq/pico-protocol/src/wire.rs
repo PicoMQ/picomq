@@ -65,6 +65,15 @@ pub(crate) fn stream_path(name: &str) -> String {
     }
 }
 
+pub(crate) fn control_path(root: &str, name: &str) -> String {
+    let segments: Vec<String> = name
+        .trim_start_matches('/')
+        .split('/')
+        .map(urlencode)
+        .collect();
+    format!("{root}/{}", segments.join("/"))
+}
+
 pub const Q_PARTITION: &str = "partition";
 
 pub(crate) fn partition_path(name: &str, partition: Option<u32>) -> String {

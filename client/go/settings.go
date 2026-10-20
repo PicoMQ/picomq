@@ -19,7 +19,7 @@ func (o CreateOptions) headers(prefix string) http.Header {
 		headers.Set(prefix+"-Expires-At", o.ExpiresAt)
 	}
 	if o.Retention > 0 {
-		headers.Set(prefix+"-Retention-Ms", strconv.FormatInt(o.Retention.Milliseconds(), 10))
+		headers.Set(prefix+"-Retention-Ms", strconv.FormatInt(millisAwayFromZero(o.Retention), 10))
 	}
 	if o.RetentionBytes > 0 {
 		headers.Set(prefix+"-Retention-Bytes", strconv.FormatUint(o.RetentionBytes, 10))

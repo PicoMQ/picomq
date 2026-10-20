@@ -95,7 +95,7 @@ paths:
           schema: { type: integer, minimum: 1 }
         - name: Pico-Retention-Bytes
           in: header
-          description: Keep at most this many bytes of each partition, the newest.
+          description: Keep at least the newest this many bytes of each partition, dropping whole objects only while the rest still meets the limit.
           schema: { type: integer, minimum: 1 }
         - name: Pico-Closed
           in: header

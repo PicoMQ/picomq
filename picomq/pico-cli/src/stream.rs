@@ -119,7 +119,7 @@ pub enum StreamCommand {
         /// Keep data written within this many milliseconds.
         #[arg(long)]
         retention_ms: Option<u64>,
-        /// Keep at most this many bytes per partition, the newest.
+        /// Keep at least the newest this many bytes per partition.
         #[arg(long)]
         retention_bytes: Option<u64>,
         /// Bind this registered schema.

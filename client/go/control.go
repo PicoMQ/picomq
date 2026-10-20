@@ -171,7 +171,7 @@ func (u ConfigUpdate) body() map[string]any {
 		body["schemaValidate"] = *u.SchemaValidate
 	}
 	if u.Retention != nil {
-		body["retentionMs"] = nullIfZero(u.Retention.Milliseconds(), 0)
+		body["retentionMs"] = nullIfZero(millisAwayFromZero(*u.Retention), 0)
 	}
 	if u.RetentionBytes != nil {
 		body["retentionBytes"] = nullIfZero(*u.RetentionBytes, 0)

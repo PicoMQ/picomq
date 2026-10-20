@@ -65,6 +65,53 @@ var _ = ginkgo.Describe("topic settings", func() {
 		Expect(config).To(Equal(TopicConfig{KafkaTopic: "orders", Partitions: 4, RetentionBytes: 4096}))
 	})
 
+	ginkgo.It("never rounds a nonzero retention to unlimited", func() {
+		var bodies []map[string]any
+		var headers []http.Header
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut {
+				headers = append(headers, r.Header.Clone())
+				w.WriteHeader(http.StatusCreated)
+				return
+			}
+			var body map[string]any
+			data, _ := io.ReadAll(r.Body)
+			Expect(json.Unmarshal(data, &body)).To(Succeed())
+			bodies = append(bodies, body)
+			_, _ = w.Write([]byte(`{"partitions":1}`))
+		}))
+		defer server.Close()
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = client.Create(context.Background(), "/orders", CreateOptions{Retention: 500 * time.Microsecond})
+		Expect(err).NotTo(HaveOccurred())
+		for _, retention := range []time.Duration{500 * time.Microsecond, -500 * time.Microsecond, 0} {
+			_, err = client.UpdateConfig(context.Background(), "/orders", ConfigUpdate{Retention: &retention})
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		Expect(headers[0].Get("Pico-Retention-Ms")).To(Equal("1"))
+		Expect(bodies[0]["retentionMs"]).To(Equal(float64(1)))
+		Expect(bodies[1]["retentionMs"]).To(Equal(float64(-1)))
+		Expect(bodies[2]).To(HaveKeyWithValue("retentionMs", BeNil()))
+	})
+
+	ginkgo.It("escapes schema names in the path", func() {
+		paths := make(chan string, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths <- r.URL.EscapedPath()
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = client.DeleteSchema(context.Background(), "team/orders#v2 final.json")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(<-paths).To(Equal("/_schemas/team/orders%23v2%20final.json"))
+	})
+
 	ginkgo.It("decodes control route errors and missing topics and schemas", func() {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {

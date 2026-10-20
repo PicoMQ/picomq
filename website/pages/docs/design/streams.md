@@ -91,10 +91,10 @@ A topic can limit how much each partition keeps, by age, by size, or both. Unset
 | Limit | Keeps |
 | --- | --- |
 | `retention.ms` | Data written within that many milliseconds |
-| `retention.bytes` | At most that many bytes, the newest |
+| `retention.bytes` | At least the newest that many bytes |
 
 - **By write time.** Age is when PicoMQ wrote the data, not the timestamps producers put on records. Backfilled data is kept for the full period after it arrives.
-- **Whole objects, oldest first.** Retention drops committed objects, as Kafka drops segments, and stops at the first one it keeps. An object expires once the latest write it holds is older than the limit. Data still in the WAL never counts.
+- **Whole objects, oldest first.** Retention drops committed objects, as Kafka drops segments, and stops at the first one it keeps. By age, an object expires once the latest write it holds is older than the limit. By size, the oldest object goes only while the rest still holds at least the limit, so a partition settles between the limit and the limit plus one object. Data still in the WAL never counts.
 - **Enforced by each owner.** Every node sweeps the topics that set retention and trims the partitions it owns. It decides from object metadata alone, never reading data, and trims a closed partition without opening it.
 - **Reclaimed at once.** A trim marks the stream objects below the new start for [garbage collection](/docs/design/gc). Consumers behind the start get `OFFSET_OUT_OF_RANGE` over Kafka.
 

@@ -1,6 +1,6 @@
 import { ClientError, type ErrorKind } from './error'
 import { RetryPolicy } from './retry'
-import { header, type Http } from './transport/http'
+import { header, urlencode, type Http } from './transport/http'
 import { retryableError } from './util'
 import type { CallOptions, ConfigUpdate, PutSchemaOptions, Schema, TopicConfig } from './types'
 
@@ -86,7 +86,8 @@ export class Control {
   }
 
   private url(root: string, name: string): string {
-    return `${this.baseUrl}${root}/${name.replace(/^\/+/, '')}`
+    const path = name.replace(/^\/+/, '').split('/').map(urlencode).join('/')
+    return `${this.baseUrl}${root}/${path}`
   }
 }
 

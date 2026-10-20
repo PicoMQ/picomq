@@ -168,13 +168,17 @@ async fn settings(protocol: Protocol) {
 
     client
         .put_schema(
-            "order.json",
+            "team/order#v2.json",
             None,
             Bytes::from_static(br#"{"type": "object"}"#),
         )
         .await
         .unwrap();
-    let schema = client.get_schema("order.json").await.unwrap().unwrap();
+    let schema = client
+        .get_schema("team/order#v2.json")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         schema.content_type.as_deref(),
         Some("application/schema+json")
@@ -182,7 +186,7 @@ async fn settings(protocol: Protocol) {
 
     let update = ConfigUpdate {
         stream: name.to_owned(),
-        schema: Some(Some("order.json".to_owned())),
+        schema: Some(Some("team/order#v2.json".to_owned())),
         retention_ms: Some(None),
         retention_bytes: Some(Some(4096)),
         partitions: Some(3),
@@ -190,7 +194,7 @@ async fn settings(protocol: Protocol) {
     };
     let config = client.update_config(&update).await.unwrap();
     assert_eq!(config.partitions, 3);
-    assert_eq!(config.schema.as_deref(), Some("order.json"));
+    assert_eq!(config.schema.as_deref(), Some("team/order#v2.json"));
     assert_eq!(config.retention_ms, None);
     assert_eq!(config.retention_bytes, Some(4096));
     assert_eq!(client.config(name).await.unwrap(), Some(config));
@@ -205,9 +209,15 @@ async fn settings(protocol: Protocol) {
     assert_eq!(refused.kind, ErrorKind::BadRequest);
     assert!(refused.message.is_some());
 
-    assert!(client.delete_schema("order.json").await.unwrap());
-    assert!(!client.delete_schema("order.json").await.unwrap());
-    assert!(client.get_schema("order.json").await.unwrap().is_none());
+    assert!(client.delete_schema("team/order#v2.json").await.unwrap());
+    assert!(!client.delete_schema("team/order#v2.json").await.unwrap());
+    assert!(
+        client
+            .get_schema("team/order#v2.json")
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     server.server.shutdown().await;
 }
