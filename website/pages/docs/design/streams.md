@@ -56,7 +56,7 @@ Everything about a topic lives in the metadata KV, part of the replicated state 
 
 Creating a name that exists with the same settings returns the existing topic. Different settings are a conflict. Two nodes racing to create one name settle on the third step, and the loser removes the partitions it made.
 
-Partitions can be added later, never removed, up to `10000` in one step.
+Partitions can be added later, never removed, up to `10000` in one step, through Kafka's `CreatePartitions` or the HTTP [topic config](/docs/api#topic-config). Each new partition gets its log as in step 2, and the topic record is updated last, so a failed grow leaves the topic as it was.
 
 ## Epochs
 

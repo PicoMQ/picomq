@@ -39,18 +39,45 @@ pico ls
 The verbs mirror the protocol. `create` is idempotent, `append` reads newline-delimited records from stdin, `read` catches up and returns, `tail` starts at the tail and `-f` keeps following.
 
 ```bash
-pico create /streams/orders --content-type text/plain --ttl 86400
-seq 1 1000 | pico append /streams/orders --batch 100
-pico read /streams/orders
-pico tail /streams/orders -f
+pico create /streams/orders --content-type text/plain --partitions 3
+seq 1 1000 | pico append /streams/orders --partition 0 --batch 100
+pico read /streams/orders --partition 0
+pico tail /streams/orders --partition 0 -f
 pico head /streams/orders
 pico ls --prefix /streams/
-pico trim /streams/orders --seq 500
+pico trim /streams/orders --partition 0 --seq 500
 pico close /streams/orders
 pico delete /streams/orders
 ```
 
 `ls` and `trim` exist on the Pico protocol only, and the Durable Streams protocol appends one record per request, so `--batch` only applies to `pico`. On a topic with several partitions, `head`, `append`, `read`, `tail`, and `trim` take `--partition`.
+
+## Topic settings
+
+`create` takes a flag for every [topic setting](/docs/api#topic-settings), `describe` prints them, and `alter` changes the ones that can change, with `none` removing a setting.
+
+```bash
+pico create /streams/orders --partitions 3 --retention-ms 86400000 --schema orders.json --schema-validate
+pico describe /streams/orders
+pico alter /streams/orders --partitions 6 --retention-ms none --retention-bytes 1073741824
+```
+
+| `create` flag | `alter` flag |
+| --- | --- |
+| `--content-type` | |
+| `--partitions` | `--partitions`, grow only |
+| `--ttl` or `--expires-at` | |
+| `--retention-ms`, `--retention-bytes` | The same, or `none` |
+| `--schema`, `--schema-validate` | `--schema` or `none`, `--schema-validate true\|false` |
+| `--closed` | |
+
+[Schemas](/docs/schemas) are registered from a file or stdin, printed to stdout, and removed by name.
+
+```bash
+pico schema put orders.json --file orders.schema.json
+pico schema get orders.json
+pico schema rm orders.json
+```
 
 ## Admin commands
 

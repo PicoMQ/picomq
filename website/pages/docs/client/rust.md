@@ -14,13 +14,15 @@ picomq-client = "0.1"
 ## Usage
 
 ```rust
-use picomq_client::{connect, Live, Protocol, ReadLimits};
+use picomq_client::{connect, CreateOptions, Live, Protocol, ReadLimits};
 
 #[tokio::main]
 async fn main() -> picomq_client::Result<()> {
     let client = connect(Protocol::Pico, "http://127.0.0.1:4437")?;
 
-    client.create("/orders/1042", "application/json", None).await?;
+    client
+        .create("/orders/1042", &CreateOptions::new("application/json"))
+        .await?;
     let ack = client
         .append("/orders/1042", None, &[r#"{"item":"widget"}"#.into()], "application/json")
         .await?;
@@ -40,7 +42,32 @@ async fn main() -> picomq_client::Result<()> {
 
 ## Partitions
 
-`head`, `append`, and `read` take a partition as their second argument. `None` addresses a topic with one partition. A topic created over Kafka can have several, and each call names one with `Some(index)`.
+`head`, `append`, and `read` take a partition as their second argument. `None` addresses a topic with one partition. On a topic with several, each call names one with `Some(index)`.
+
+## Topic settings
+
+`CreateOptions` carries every [topic setting](/docs/api#topic-settings), and unset fields take the server's defaults. `config` reads the settings back and `update_config` changes them. In a `ConfigUpdate`, `None` leaves a field alone and `Some(None)` removes the setting.
+
+```rust
+use picomq_client::{ConfigUpdate, CreateOptions};
+
+let options = CreateOptions {
+    partitions: Some(3),
+    retention_ms: Some(86_400_000),
+    ..CreateOptions::new("application/json")
+};
+client.create("/orders", &options).await?;
+
+let update = ConfigUpdate {
+    stream: "/orders".into(),
+    partitions: Some(6),
+    retention_ms: Some(None),
+    ..Default::default()
+};
+let config = client.update_config(&update).await?;
+```
+
+`put_schema`, `get_schema`, and `delete_schema` manage the [schema registry](/docs/schemas). All of these work on both protocols.
 
 ## Producers
 

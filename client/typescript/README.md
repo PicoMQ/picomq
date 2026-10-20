@@ -14,7 +14,7 @@ import { connect } from '@picomq/client'
 const pico = connect('pico', 'http://127.0.0.1:4437')
 const stream = pico.stream('/demo')
 
-await stream.create('application/octet-stream')
+await stream.create()
 await stream.append(['hi', { body: 'with metadata', headers: { kind: 'greeting' } }])
 
 for await (const record of stream.records()) {
