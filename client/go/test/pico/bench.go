@@ -50,7 +50,7 @@ func main() {
 
 func sequentialAppends(ctx context.Context, client *picomq.PicoClient, name string, count, size int) (result, error) {
 	stream := client.Stream(name)
-	if _, err := stream.Create(ctx, contentType, 0); err != nil {
+	if _, err := stream.Create(ctx, picomq.CreateOptions{ContentType: contentType}); err != nil {
 		return result{}, err
 	}
 	body := payload(size, "seq")
@@ -65,7 +65,7 @@ func sequentialAppends(ctx context.Context, client *picomq.PicoClient, name stri
 
 func producerRun(ctx context.Context, client *picomq.PicoClient, name, label string, count, size int) (result, error) {
 	stream := client.Stream(name)
-	if _, err := stream.Create(ctx, contentType, 0); err != nil {
+	if _, err := stream.Create(ctx, picomq.CreateOptions{ContentType: contentType}); err != nil {
 		return result{}, err
 	}
 	config := picomq.DefaultProducerConfig()

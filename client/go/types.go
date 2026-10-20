@@ -25,6 +25,26 @@ type StreamInfo struct {
 	Closed      bool
 	TTL         time.Duration
 	ExpiresAt   string
+	// Retention and RetentionBytes are zero when unlimited.
+	Retention      time.Duration
+	RetentionBytes uint64
+	Schema         string
+	KafkaTopic     string
+}
+
+// CreateOptions are a new topic's settings. Zero values take the server's
+// defaults: one partition, application/octet-stream, no expiry, unlimited
+// retention, and no schema.
+type CreateOptions struct {
+	ContentType    string
+	Partitions     uint32
+	TTL            time.Duration
+	ExpiresAt      string
+	Retention      time.Duration
+	RetentionBytes uint64
+	Schema         string
+	SchemaValidate bool
+	Closed         bool
 }
 
 type AppendRecord struct {

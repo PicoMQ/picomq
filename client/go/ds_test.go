@@ -112,7 +112,7 @@ var _ = ginkgo.Describe("Durable Streams client", func() {
 		defer server.Close()
 		client, err := NewDurableStreams(server.URL)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = client.Create(context.Background(), "events", "application/octet-stream", time.Nanosecond)
+		_, err = client.Create(context.Background(), "events", CreateOptions{ContentType: "application/octet-stream", TTL: time.Nanosecond})
 		Expect(err).NotTo(HaveOccurred())
 	})
 

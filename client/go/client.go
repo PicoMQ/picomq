@@ -43,7 +43,7 @@ type Client interface {
 	Protocol() Protocol
 	Beginning() string
 	Now() (string, error)
-	Create(context.Context, string, string, time.Duration) (bool, error)
+	Create(context.Context, string, CreateOptions) (bool, error)
 	Head(context.Context, string) (*StreamInfo, error)
 	Append(context.Context, string, []AppendRecord) (AppendAck, error)
 	Read(context.Context, string, string, ReadOptions) (ReadPage, error)
@@ -51,6 +51,11 @@ type Client interface {
 	List(context.Context, string, uint64) (StreamListing, error)
 	Close(context.Context, string) (string, error)
 	Delete(context.Context, string) (bool, error)
+	Config(context.Context, string) (*TopicConfig, error)
+	UpdateConfig(context.Context, string, ConfigUpdate) (TopicConfig, error)
+	PutSchema(context.Context, string, string, []byte) error
+	GetSchema(context.Context, string) (*Schema, error)
+	DeleteSchema(context.Context, string) (bool, error)
 }
 
 var (
