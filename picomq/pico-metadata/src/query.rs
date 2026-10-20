@@ -4,7 +4,7 @@
 use s3stream::{CompactOperations, S3ObjectMetadata, StreamMetadata};
 
 use crate::command::Proposer;
-use crate::state::MetadataState;
+use crate::state::{MetadataState, ObjectSpan};
 
 impl MetadataState {
     /// Whether `node` is still that node's current, unfenced incarnation.
@@ -74,6 +74,37 @@ impl MetadataState {
             .filter(|a| !a.is_empty())
     }
 
+    /// The committed objects still holding data of `stream_id`, in offset
+    /// order. Reads only that stream's index entries.
+    pub fn object_spans(&self, stream_id: u64) -> Vec<ObjectSpan> {
+        let Some(stream) = self.streams.get(&stream_id) else {
+            return Vec::new();
+        };
+        let keys = (stream_id, 0, 0)..=(stream_id, u64::MAX, u64::MAX);
+
+        let slices = self.sso_ranges.range(keys.clone()).map(
+            |(&(_, start_offset, object_id), &(end_offset, bytes))| ObjectSpan {
+                start_offset,
+                end_offset,
+                bytes,
+                last_write_ms: self.stream_set_objects[&object_id].last_write_ms,
+            },
+        );
+        let objects = self.stream_objects.range(keys).map(|(_, row)| ObjectSpan {
+            start_offset: row.object.offset_ranges[0].start_offset,
+            end_offset: row.object.offset_ranges[0].end_offset,
+            bytes: row.object.object_size,
+            last_write_ms: row.last_write_ms,
+        });
+
+        let mut spans: Vec<ObjectSpan> = slices
+            .chain(objects)
+            .filter(|span| span.end_offset > stream.start_offset)
+            .collect();
+        spans.sort_by_key(|span| span.start_offset);
+        spans
+    }
+
     /// All objects (stream-set slices + stream objects) of `stream_id`
     /// overlapping `[start_offset, end_offset)`, sorted by range start and
     /// capped at `limit`. This is the fetch path's metadata query.
@@ -94,7 +125,7 @@ impl MetadataState {
             .sso_ranges
             .range((stream_id, 0, 0)..=(stream_id, u64::MAX, u64::MAX))
             .take_while(|&(&(_, range_start, _), _)| range_start < end_offset)
-            .filter(|&(&(_, range_start, _), &range_end)| overlaps(range_start, range_end))
+            .filter(|&(&(_, range_start, _), &(range_end, _))| overlaps(range_start, range_end))
             .map(|(&(_, range_start, object_id), _)| (range_start, object_id))
             .peekable();
         let mut stream_objs = self

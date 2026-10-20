@@ -65,11 +65,16 @@ pub fn encode(state: &MetadataState) -> Bytes {
     for (_, row) in state.stream_set_objects.iter() {
         buf.put_i32_le(row.node_id);
         put_object(&mut buf, &row.object);
+        for size in &row.range_sizes {
+            buf.put_u64_le(*size);
+        }
+        buf.put_i64_le(row.last_write_ms);
     }
 
     buf.put_u64_le(state.stream_objects.len() as u64);
     for (_, row) in state.stream_objects.iter() {
         put_object(&mut buf, &row.object);
+        buf.put_i64_le(row.last_write_ms);
     }
 
     // Sequences are stored verbatim (they may be sparse after cleans) so the
@@ -179,16 +184,28 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
     for _ in 0..get_u64(&mut buf)? {
         let node_id = get_i32(&mut buf)?;
         let object = get_object(&mut buf)?;
-        for range in &object.offset_ranges {
+        let range_sizes = object
+            .offset_ranges
+            .iter()
+            .map(|_| get_u64(&mut buf))
+            .collect::<Result<Vec<_>, _>>()?;
+        let last_write_ms = get_i64(&mut buf)?;
+        for (range, size) in object.offset_ranges.iter().zip(&range_sizes) {
             state.sso_ranges.insert(
                 (range.stream_id, range.start_offset, object.object_id),
-                range.end_offset,
+                (range.end_offset, *size),
             );
         }
         state.sso_by_node.insert((node_id, object.object_id), ());
-        state
-            .stream_set_objects
-            .insert(object.object_id, StreamSetObjectRow { node_id, object });
+        state.stream_set_objects.insert(
+            object.object_id,
+            StreamSetObjectRow {
+                node_id,
+                object,
+                range_sizes,
+                last_write_ms,
+            },
+        );
     }
 
     for _ in 0..get_u64(&mut buf)? {
@@ -199,8 +216,15 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
             ));
         };
         let key = (range.stream_id, range.start_offset, object.object_id);
+        let last_write_ms = get_i64(&mut buf)?;
         state.stream_object_ids.insert(object.object_id, key);
-        state.stream_objects.insert(key, StreamObjectRow { object });
+        state.stream_objects.insert(
+            key,
+            StreamObjectRow {
+                object,
+                last_write_ms,
+            },
+        );
     }
 
     for _ in 0..get_u64(&mut buf)? {

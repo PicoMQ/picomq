@@ -9,7 +9,7 @@
 
 use s3stream::{
     CommitStreamSetObjectRequest, CompactOperations, CompactStreamObjectRequest, NOOP_OBJECT_ID,
-    S3ObjectMetadata, S3ObjectType, StreamOffsetRange, StreamState,
+    S3ObjectMetadata, S3ObjectType, StreamObject, StreamOffsetRange, StreamState,
 };
 
 use crate::command::{MetadataCommand, MetadataResult, Proposer};
@@ -454,17 +454,14 @@ fn open_stream(
     Ok(MetadataResult::Stream(opened.to_stream_metadata()))
 }
 
-fn require_opened_stream(
-    state: &MetadataState,
+fn trim_stream(
+    state: &mut MetadataState,
+    node_id: i32,
     stream_id: u64,
     epoch: i64,
-) -> Result<StreamRow, MetadataError> {
+    new_start_offset: u64,
+) -> Result<MetadataResult, MetadataError> {
     let stream = require_stream(state, stream_id)?;
-    if stream.state != StreamState::Opened {
-        return Err(MetadataError::Unexpected {
-            message: format!("stream {stream_id} is not opened"),
-        });
-    }
     if stream.epoch != epoch {
         return Err(MetadataError::ExpiredEpoch {
             stream_id,
@@ -475,17 +472,6 @@ fn require_opened_stream(
             ),
         });
     }
-    Ok(stream)
-}
-
-fn trim_stream(
-    state: &mut MetadataState,
-    node_id: i32,
-    stream_id: u64,
-    epoch: i64,
-    new_start_offset: u64,
-) -> Result<MetadataResult, MetadataError> {
-    let stream = require_opened_stream(state, stream_id, epoch)?;
     check_owner(state, &stream, node_id)?;
     if new_start_offset < stream.start_offset {
         return Err(MetadataError::Unexpected {
@@ -518,6 +504,18 @@ fn trim_stream(
         for epoch in older {
             state.epochs.remove(&(stream_id, *epoch));
         }
+    }
+
+    let dead: Vec<_> = state
+        .stream_objects
+        .range((stream_id, 0, 0)..=(stream_id, u64::MAX, u64::MAX))
+        .filter(|(_, row)| row.object.offset_ranges[0].end_offset <= new_start_offset)
+        .map(|(key, _)| *key)
+        .collect();
+    for key in dead {
+        state.stream_objects.remove(&key);
+        state.stream_object_ids.remove(&key.2);
+        mark_destroyed(state, key.2, CompactOperations::Delete);
     }
     Ok(MetadataResult::Unit)
 }
@@ -903,6 +901,7 @@ fn commit_stream_set_object(
 
     let compact = !request.compacted_object_ids.is_empty();
     let mut data_time_ms = now_ms;
+    let mut last_write_ms = if compact { i64::MIN } else { now_ms };
     if compact {
         for &id in &request.compacted_object_ids {
             let owned =
@@ -913,6 +912,7 @@ fn commit_stream_set_object(
                         message: format!("compacted stream-set object {id} not found"),
                     })?;
             data_time_ms = data_time_ms.min(owned.object.data_timestamp_ms);
+            last_write_ms = last_write_ms.max(owned.last_write_ms);
         }
         for &id in &request.compacted_object_ids {
             remove_stream_set_object(state, id);
@@ -952,13 +952,19 @@ fn commit_stream_set_object(
         for range in &request.stream_ranges {
             state.sso_ranges.insert(
                 (range.stream_id, range.start_offset, request.object_id),
-                range.end_offset,
+                (range.end_offset, range.size),
             );
         }
         state.sso_by_node.insert((node_id, request.object_id), ());
-        state
-            .stream_set_objects
-            .insert(request.object_id, StreamSetObjectRow { node_id, object });
+        state.stream_set_objects.insert(
+            request.object_id,
+            StreamSetObjectRow {
+                node_id,
+                object,
+                range_sizes: request.stream_ranges.iter().map(|r| r.size).collect(),
+                last_write_ms,
+            },
+        );
     }
 
     for stream_object in &request.stream_objects {
@@ -979,17 +985,7 @@ fn commit_stream_set_object(
             stream_object.end_offset,
             compact,
         )?;
-        insert_stream_object(
-            state,
-            stream_object.stream_id,
-            stream_object.object_id,
-            stream_object.start_offset,
-            stream_object.end_offset,
-            stream_object.object_size,
-            stream_object.attributes,
-            data_time_ms,
-            now_ms,
-        );
+        insert_stream_object(state, stream_object, data_time_ms, now_ms, last_write_ms);
     }
     Ok(MetadataResult::Unit)
 }
@@ -1049,17 +1045,23 @@ fn compact_stream_object(
     }
     commit_prepared(state, request.object_id);
     if request.object_id != NOOP_OBJECT_ID {
-        insert_stream_object(
-            state,
+        let last_write_ms = request
+            .source_object_ids
+            .iter()
+            .filter_map(|id| state.stream_object_ids.get(id))
+            .filter_map(|key| state.stream_objects.get(key))
+            .map(|row| row.last_write_ms)
+            .max()
+            .unwrap_or(now_ms);
+        let object = StreamObject {
+            object_id: request.object_id,
+            object_size: request.object_size,
             stream_id,
-            request.object_id,
-            request.start_offset,
-            request.end_offset,
-            request.object_size,
-            request.attributes,
-            now_ms,
-            now_ms,
-        );
+            start_offset: request.start_offset,
+            end_offset: request.end_offset,
+            attributes: request.attributes,
+        };
+        insert_stream_object(state, &object, now_ms, now_ms, last_write_ms);
     }
     for &source_id in &request.source_object_ids {
         if let Some(key) = state.stream_object_ids.get(&source_id).copied()
@@ -1073,38 +1075,38 @@ fn compact_stream_object(
     Ok(MetadataResult::Unit)
 }
 
-#[allow(clippy::too_many_arguments)] // flat commit fields
 fn insert_stream_object(
     state: &mut MetadataState,
-    stream_id: u64,
-    object_id: u64,
-    start_offset: u64,
-    end_offset: u64,
-    object_size: u64,
-    attributes: u32,
+    stream_object: &StreamObject,
     data_time_ms: i64,
     now_ms: i64,
+    last_write_ms: i64,
 ) {
-    let key = (stream_id, start_offset, object_id);
+    let key = (
+        stream_object.stream_id,
+        stream_object.start_offset,
+        stream_object.object_id,
+    );
     state.stream_objects.insert(
         key,
         StreamObjectRow {
             object: S3ObjectMetadata {
-                object_id,
+                object_id: stream_object.object_id,
                 object_type: S3ObjectType::Stream,
                 offset_ranges: vec![StreamOffsetRange {
-                    stream_id,
-                    start_offset,
-                    end_offset,
+                    stream_id: stream_object.stream_id,
+                    start_offset: stream_object.start_offset,
+                    end_offset: stream_object.end_offset,
                 }],
-                object_size,
-                attributes: s3stream::ObjectAttributes(attributes),
+                object_size: stream_object.object_size,
+                attributes: s3stream::ObjectAttributes(stream_object.attributes),
                 committed_timestamp_ms: now_ms,
                 data_timestamp_ms: data_time_ms,
             },
+            last_write_ms,
         },
     );
-    state.stream_object_ids.insert(object_id, key);
+    state.stream_object_ids.insert(stream_object.object_id, key);
 }
 
 fn remove_stream_set_object(state: &mut MetadataState, object_id: u64) {
@@ -1218,6 +1220,8 @@ mod tests {
     use bytes::Bytes;
     use im::OrdMap;
     use s3stream::ObjectStreamRange;
+
+    use crate::state::ObjectSpan;
 
     const NODE_1: i32 = 1;
     const NODE_2: i32 = 2;
@@ -1638,6 +1642,18 @@ mod tests {
     }
 
     fn commit(state: &mut MetadataState, stream_id: u64, epoch: u64, start: u64, end: u64) {
+        commit_at(state, stream_id, epoch, start, end, 1);
+    }
+
+    /// Commits one stream-set object holding `[start, end)` at `now_ms`.
+    fn commit_at(
+        state: &mut MetadataState,
+        stream_id: u64,
+        epoch: u64,
+        start: u64,
+        end: u64,
+        now_ms: i64,
+    ) -> u64 {
         let object_id = prepare(state, 1, 60_000, 0);
         apply(
             state,
@@ -1658,10 +1674,188 @@ mod tests {
                     stream_objects: vec![],
                     compacted_object_ids: vec![],
                 },
-                now_ms: 1,
+                now_ms,
             },
         )
         .unwrap();
+        object_id
+    }
+
+    /// Commits one 32-byte stream object per range at `now_ms`.
+    fn commit_split(
+        state: &mut MetadataState,
+        stream_id: u64,
+        ranges: &[(u64, u64)],
+        now_ms: i64,
+    ) -> Vec<u64> {
+        let first = prepare(state, ranges.len() as u32, 60_000, 0);
+        let stream_objects: Vec<StreamObject> = ranges
+            .iter()
+            .zip(first..)
+            .map(|(&(start_offset, end_offset), object_id)| StreamObject {
+                object_id,
+                object_size: 32,
+                stream_id,
+                start_offset,
+                end_offset,
+                attributes: 0,
+            })
+            .collect();
+        apply(
+            state,
+            &MetadataCommand::CommitStreamSetObject {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                request: CommitStreamSetObjectRequest {
+                    object_id: NOOP_OBJECT_ID,
+                    object_size: 0,
+                    attributes: 0,
+                    stream_ranges: vec![],
+                    stream_objects: stream_objects.clone(),
+                    compacted_object_ids: vec![],
+                },
+                now_ms,
+            },
+        )
+        .unwrap();
+        stream_objects.iter().map(|o| o.object_id).collect()
+    }
+
+    fn trim(
+        state: &mut MetadataState,
+        node_id: i32,
+        node_epoch: i64,
+        stream_id: u64,
+        epoch: i64,
+        new_start_offset: u64,
+    ) -> Result<MetadataResult, MetadataError> {
+        apply(
+            state,
+            &MetadataCommand::TrimStream {
+                proposer: Proposer::new(node_id, node_epoch),
+                stream_id,
+                epoch,
+                new_start_offset,
+            },
+        )
+    }
+
+    #[test]
+    fn the_owner_trims_a_closed_stream_at_its_epoch() {
+        let mut state = setup();
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
+        commit(&mut state, stream_id, 1, 0, 8);
+        close(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
+
+        assert!(trim(&mut state, NODE_2, EPOCH_2, stream_id, 1, 4).is_err());
+        assert!(trim(&mut state, NODE_1, EPOCH_1, stream_id, 0, 4).is_err());
+        trim(&mut state, NODE_1, EPOCH_1, stream_id, 1, 4).unwrap();
+
+        let row = state.streams[&stream_id];
+        assert_eq!((row.start_offset, row.state), (4, StreamState::Closed));
+    }
+
+    #[test]
+    fn a_trim_destroys_stream_objects_wholly_below_the_start() {
+        let mut state = setup();
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
+        let objects = commit_split(&mut state, stream_id, &[(0, 4), (4, 8)], 5);
+
+        trim(&mut state, NODE_1, EPOCH_1, stream_id, 1, 6).unwrap();
+
+        let destroyed: Vec<_> = state.mark_destroyed.values().cloned().collect();
+        assert_eq!(destroyed, vec![(objects[0], CompactOperations::Delete)]);
+        assert_eq!(
+            state.stream_object_ids.keys().copied().collect::<Vec<_>>(),
+            [objects[1]]
+        );
+        assert_indexes_consistent(&state);
+    }
+
+    #[test]
+    fn compaction_keeps_the_latest_write_of_its_sources() {
+        let mut state = setup();
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
+        let older = commit_at(&mut state, stream_id, 1, 0, 4, 10);
+        let newer = commit_at(&mut state, stream_id, 1, 4, 8, 20);
+
+        let merged = prepare(&mut state, 1, 60_000, 0);
+        apply(
+            &mut state,
+            &MetadataCommand::CommitStreamSetObject {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                request: CommitStreamSetObjectRequest {
+                    object_id: merged,
+                    object_size: 128,
+                    attributes: 0,
+                    stream_ranges: vec![ObjectStreamRange {
+                        stream_id,
+                        epoch: 1,
+                        start_offset: 0,
+                        end_offset: 8,
+                        size: 128,
+                    }],
+                    stream_objects: vec![],
+                    compacted_object_ids: vec![older, newer],
+                },
+                now_ms: 99,
+            },
+        )
+        .unwrap();
+        let row = &state.stream_set_objects[&merged];
+        assert_eq!(
+            (row.last_write_ms, row.range_sizes.clone()),
+            (20, vec![128])
+        );
+
+        let sources = commit_split(&mut state, stream_id, &[(8, 12), (12, 16)], 30);
+        let compacted = prepare(&mut state, 1, 60_000, 0);
+        apply(
+            &mut state,
+            &MetadataCommand::CompactStreamObject {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                request: CompactStreamObjectRequest {
+                    object_id: compacted,
+                    object_size: 64,
+                    stream_id,
+                    stream_epoch: 1,
+                    start_offset: 8,
+                    end_offset: 16,
+                    source_object_ids: sources,
+                    operations: vec![],
+                    attributes: 0,
+                },
+                now_ms: 99,
+            },
+        )
+        .unwrap();
+        let key = state.stream_object_ids[&compacted];
+        assert_eq!(state.stream_objects[&key].last_write_ms, 30);
+    }
+
+    #[test]
+    fn object_spans_list_live_objects_in_offset_order() {
+        let mut state = setup();
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
+        commit_at(&mut state, stream_id, 1, 0, 4, 10);
+        commit_split(&mut state, stream_id, &[(4, 8)], 20);
+
+        let span = |start_offset, end_offset, bytes, last_write_ms| ObjectSpan {
+            start_offset,
+            end_offset,
+            bytes,
+            last_write_ms,
+        };
+        assert_eq!(
+            state.object_spans(stream_id),
+            [span(0, 4, 64, 10), span(4, 8, 32, 20)]
+        );
+
+        trim(&mut state, NODE_1, EPOCH_1, stream_id, 1, 4).unwrap();
+        assert_eq!(state.object_spans(stream_id), [span(4, 8, 32, 20)]);
     }
 
     #[test]
@@ -1780,8 +1974,14 @@ mod tests {
             state.stream_set_objects.len() + state.stream_objects.len(),
             1
         );
-        // Index entry exists: (stream, start, object) -> end.
-        assert_eq!(state.sso_ranges.get(&(stream_id, 0, object_id)), Some(&8));
+        // Index entry exists: (stream, start, object) -> (end, bytes).
+        assert_eq!(
+            state
+                .sso_ranges
+                .get(&(stream_id, 0, object_id))
+                .map(|(end, _)| *end),
+            Some(8)
+        );
         assert!(state.sso_by_node.contains_key(&(NODE_1, object_id)));
     }
 
@@ -2196,13 +2396,18 @@ mod tests {
                 state.sso_by_node.contains_key(&(row.node_id, *object_id)),
                 "sso_by_node"
             );
-            for range in &row.object.offset_ranges {
+            assert_eq!(
+                row.range_sizes.len(),
+                row.object.offset_ranges.len(),
+                "range_sizes"
+            );
+            for (range, size) in row.object.offset_ranges.iter().zip(&row.range_sizes) {
                 derived_ranges += 1;
                 assert_eq!(
                     state
                         .sso_ranges
                         .get(&(range.stream_id, range.start_offset, *object_id)),
-                    Some(&range.end_offset),
+                    Some(&(range.end_offset, *size)),
                     "sso_ranges"
                 );
             }
