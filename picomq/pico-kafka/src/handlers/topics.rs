@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    EXCESSIVE_PARTITIONS, Failure, INVALID_PARTITIONS, INVALID_REPLICA_ASSIGNMENT,
+    EXCESSIVE_PARTITIONS, Failure, INVALID_CONFIG, INVALID_PARTITIONS, INVALID_REPLICA_ASSIGNMENT,
     INVALID_REPLICATION_FACTOR, INVALID_REQUEST, NO_ERROR, POLICY_VIOLATION, TOPIC_ALREADY_EXISTS,
     UNKNOWN_TOPIC_OR_PARTITION, assigned_broker, encode_response, resolve_topic,
     service_error_code, service_failure, topic_name, topic_uuid,
@@ -80,6 +80,7 @@ async fn create_topic(
 
     let (partitions, owners) = partitions(ctx, topic)?;
     let (schema_name, schema_validate) = schema_configs(&topic.configs)?;
+    cleanup_policy(&topic.configs)?;
 
     let mut command = CreateCommand {
         partitions,
@@ -293,6 +294,24 @@ fn schema_configs(configs: &[CreatableTopicConfig]) -> Result<(Option<String>, b
         }
     }
     Ok((schema_name, schema_validate))
+}
+
+/// PicoMQ never compacts, so a topic that asks for compaction is refused
+/// rather than created without it.
+fn cleanup_policy(configs: &[CreatableTopicConfig]) -> Result<(), Failure> {
+    let compacted = configs
+        .iter()
+        .filter(|config| config.name.as_str() == "cleanup.policy")
+        .filter_map(|config| config.value.as_ref())
+        .any(|value| value.as_str() != "delete");
+    if compacted {
+        return Err((
+            INVALID_CONFIG,
+            Some("PicoMQ does not compact topics, cleanup.policy must be delete".to_owned()),
+        ));
+    }
+
+    Ok(())
 }
 
 fn invalid_config(name: &str) -> Failure {

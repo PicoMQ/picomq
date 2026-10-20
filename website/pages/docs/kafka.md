@@ -72,7 +72,9 @@ Not supported: transactions and control batches, which are rejected, the KIP-848
 | `pico.schema` | The bound [schema](/docs/schemas) | Yes |
 | `pico.schema.validate` | Whether produce is validated against it | Yes |
 
-`retention.ms` is `-1` because PicoMQ does not delete records by age. A topic's TTL expires the whole topic once nothing appends to it or reads it for that long, and `DeleteRecords` trims explicitly. The `pico.schema` configs appear only when a schema is bound, and can also be set on `CreateTopics`. Changing any other config fails with `INVALID_CONFIG`. Broker resources describe no configs.
+`retention.ms` is `-1` because PicoMQ does not delete records by age. A topic's TTL expires the whole topic once nothing appends to it or reads it for that long, and `DeleteRecords` trims explicitly. The `pico.schema` configs appear only when a schema is bound, and can also be set on `CreateTopics`. Changing any other config fails with `INVALID_CONFIG`.
+
+PicoMQ does not compact topics, so `CreateTopics` refuses `cleanup.policy=compact` with `INVALID_CONFIG` instead of creating a topic that would never compact. This rules out Kafka Connect and Kafka Streams state stores, which need compacted topics. Broker resources describe no configs.
 
 ## Errors
 

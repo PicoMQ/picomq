@@ -2261,3 +2261,42 @@ async fn leader_epochs_are_reported_and_fence_stale_requests() {
         );
     }
 }
+
+#[tokio::test]
+async fn create_topics_refuses_compaction() {
+    use kafka_protocol::messages::create_topics_request::{CreatableTopic, CreatableTopicConfig};
+    use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse};
+
+    let broker = broker_with(None).await;
+    let create = |name: &'static str, policy: &'static str| {
+        encode_request(
+            ApiKey::CreateTopics,
+            5,
+            1,
+            &CreateTopicsRequest::default()
+                .with_timeout_ms(5_000)
+                .with_topics(vec![
+                    CreatableTopic::default()
+                        .with_name(tn(name))
+                        .with_num_partitions(1)
+                        .with_replication_factor(1)
+                        .with_configs(vec![
+                            CreatableTopicConfig::default()
+                                .with_name(StrBytes::from_static_str("cleanup.policy"))
+                                .with_value(Some(StrBytes::from_static_str(policy))),
+                        ]),
+                ]),
+        )
+    };
+
+    let mut buf = response_body(&broker, &create("state", "compact")).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let refused = CreateTopicsResponse::decode(&mut buf, 5).unwrap();
+    assert_eq!(refused.topics[0].error_code, 40);
+    assert!(broker.topics.get("/state").await.unwrap().is_none());
+
+    let mut buf = response_body(&broker, &create("events", "delete")).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let created = CreateTopicsResponse::decode(&mut buf, 5).unwrap();
+    assert_eq!(created.topics[0].error_code, 0);
+}
