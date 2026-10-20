@@ -40,18 +40,14 @@ impl Transport {
     }
 
     pub(crate) async fn get_schema(&self, name: &str) -> Result<Option<Schema>> {
-        let response = self
-            .control(GetSchemaRequest { name }.encode())
-            .await?;
+        let response = self.control(GetSchemaRequest { name }.encode()).await?;
         let status = response.status().as_u16();
         let headers = response.headers().clone();
         Ok(Schema::decode(status, &headers, response.bytes().await?))
     }
 
     pub(crate) async fn delete_schema(&self, name: &str) -> Result<bool> {
-        let response = self
-            .control(DeleteSchemaRequest { name }.encode())
-            .await?;
+        let response = self.control(DeleteSchemaRequest { name }.encode()).await?;
         Ok(response.status() == 204)
     }
 
