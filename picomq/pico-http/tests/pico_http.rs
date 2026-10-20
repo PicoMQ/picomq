@@ -856,3 +856,61 @@ async fn retention_is_set_on_create_and_changed_through_stream_config() {
         .unwrap();
     assert_eq!(negative.status(), 400);
 }
+
+#[tokio::test]
+async fn partitions_are_set_on_create_and_grown_through_stream_config() {
+    let server = picomq_server().await;
+    let client = reqwest::Client::new();
+    let base = &server.base_url;
+
+    let created = client
+        .put(format!("{base}/spread"))
+        .header("Pico-Partitions", "2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let head = client.head(format!("{base}/spread")).send().await.unwrap();
+    assert_eq!(head.headers()["Pico-Partitions"], "2");
+
+    let grown: Value = client
+        .patch(format!("{base}/_streams/spread"))
+        .json(&serde_json::json!({"partitions": 4}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(grown["partitions"], 4);
+    let appended = client
+        .post(format!("{base}/spread?partition=3"))
+        .header("Content-Type", "text/plain")
+        .body("new")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(appended.status(), 200);
+
+    for partitions in [
+        serde_json::json!(4),
+        serde_json::json!(3),
+        serde_json::json!(-1),
+    ] {
+        let refused = client
+            .patch(format!("{base}/_streams/spread"))
+            .json(&serde_json::json!({ "partitions": partitions }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 400, "partitions {partitions}");
+    }
+
+    let zero = client
+        .put(format!("{base}/empty"))
+        .header("Pico-Partitions", "0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(zero.status(), 400);
+}

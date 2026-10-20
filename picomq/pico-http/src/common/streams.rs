@@ -107,6 +107,13 @@ async fn patch_config(
         Ok(limit) => limit,
         Err(()) => return bad_request("retentionBytes must be a positive integer or null"),
     };
+    let partitions = match obj.get("partitions") {
+        None => None,
+        Some(value) => match value.as_u64().and_then(|count| u32::try_from(count).ok()) {
+            Some(count) => Some(count),
+            None => return bad_request("partitions must be a positive integer"),
+        },
+    };
     match state
         .topics
         .update(UpdateTopicCommand {
@@ -115,6 +122,8 @@ async fn patch_config(
             schema_validate,
             retention_ms,
             retention_bytes,
+            partitions,
+            ..Default::default()
         })
         .await
     {

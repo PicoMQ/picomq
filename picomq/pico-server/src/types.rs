@@ -233,6 +233,10 @@ pub struct UpdateTopicCommand {
     /// `Some(None)` removes the limit.
     pub retention_ms: Option<Option<u64>>,
     pub retention_bytes: Option<Option<u64>>,
+    /// Grows the topic to this many partitions. Partitions are never removed.
+    pub partitions: Option<u32>,
+    /// A node for each added partition. Empty lets placement choose.
+    pub owners: Vec<i32>,
 }
 
 impl UpdateTopicCommand {
@@ -242,6 +246,7 @@ impl UpdateTopicCommand {
             && self.schema_validate.is_none()
             && self.retention_ms.is_none()
             && self.retention_bytes.is_none()
+            && self.partitions.is_none()
     }
 
     pub fn validate(&self) -> Result<(), ServiceError> {

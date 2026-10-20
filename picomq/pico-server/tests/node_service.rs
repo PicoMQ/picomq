@@ -1471,14 +1471,14 @@ async fn partitions_grow_and_stay_independent() {
     assert!(first.records.is_empty());
     assert_eq!(&second.records[0].record.value[..], b"one");
 
-    let grown = topics.grow("/parts", 4, &[]).await.unwrap();
+    let grown = grow(&topics, "/parts", 4, &[]).await.unwrap();
     assert_eq!(grown.partitions, 4);
     topics
         .append("/parts", 3, append(&[b"three"], "text/plain"))
         .await
         .unwrap();
     assert_eq!(
-        topics.grow("/parts", 3, &[]).await.unwrap_err().kind,
+        grow(&topics, "/parts", 3, &[]).await.unwrap_err().kind,
         ErrorKind::BadRequest
     );
 
@@ -1505,7 +1505,7 @@ async fn closed_topics_do_not_grow() {
         .unwrap();
     topics.close("/sealed").await.unwrap();
 
-    let grown = topics.grow("/sealed", 2, &[]).await.unwrap_err();
+    let grown = grow(&topics, "/sealed", 2, &[]).await.unwrap_err();
     assert_eq!(grown.kind, ErrorKind::Closed);
     assert_eq!(topics.get("/sealed").await.unwrap().unwrap().partitions, 1);
 
@@ -1529,7 +1529,11 @@ async fn partition_counts_are_capped() {
 
     topics.create(create("/small", "text/plain")).await.unwrap();
     let grown = topics
-        .grow("/small", MAX_NEW_PARTITIONS + 2, &[])
+        .update(picomq_server::UpdateTopicCommand {
+            name: "/small".into(),
+            partitions: Some(MAX_NEW_PARTITIONS + 2),
+            ..Default::default()
+        })
         .await
         .unwrap_err();
     assert_eq!(grown.kind, ErrorKind::BadRequest);
@@ -1590,7 +1594,7 @@ async fn partitions_are_placed_across_nodes() {
         );
     }
 
-    let grown = node2.topics().grow("/spread", 6, &[]).await.unwrap();
+    let grown = grow(&node2.topics(), "/spread", 6, &[]).await.unwrap();
     let added = &placements(&node1, &grown)[4..];
     for node_id in [1, 2] {
         assert!(
@@ -1972,10 +1976,10 @@ async fn partitions_go_to_the_requested_owners() {
     let topic = topics.get("/assigned").await.unwrap().unwrap();
     assert_eq!(owners_of(&topic), [2, 1, 2, 1]);
 
-    let grown = topics.grow("/assigned", 6, &[1, 2]).await.unwrap();
+    let grown = grow(&topics, "/assigned", 6, &[1, 2]).await.unwrap();
     assert_eq!(owners_of(&grown), [2, 1, 2, 1, 1, 2]);
 
-    let missing = topics.grow("/assigned", 8, &[1]).await.unwrap_err();
+    let missing = grow(&topics, "/assigned", 8, &[1]).await.unwrap_err();
     assert_eq!(missing.kind, ErrorKind::BadRequest);
 
     node1.close().await;
@@ -2556,4 +2560,20 @@ async fn retention_bytes_keeps_the_newest_object_of_an_open_partition() {
     assert_eq!(row.start_offset, spans[0].end_offset);
 
     node.close().await;
+}
+
+async fn grow(
+    topics: &Topics,
+    name: &str,
+    partitions: u32,
+    owners: &[i32],
+) -> Result<Topic, ServiceError> {
+    topics
+        .update(picomq_server::UpdateTopicCommand {
+            name: name.to_owned(),
+            partitions: Some(partitions),
+            owners: owners.to_vec(),
+            ..Default::default()
+        })
+        .await
 }

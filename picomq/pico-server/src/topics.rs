@@ -306,89 +306,50 @@ impl Topics {
         let _exclusive = lock.write().await;
         let topic = self.require_live(name.canonical()).await?;
 
-        self.modify(&topic, |mut topic| {
-            match &command.schema_name {
-                Some(Some(schema_name)) => topic.schema_name = Some(schema_name.clone()),
-                Some(None) => {
-                    topic.schema_name = None;
+        let added = match command.partitions {
+            Some(partitions) => Some(added_partitions(&topic, partitions, &command.owners)?),
+            None => None,
+        };
+        if let Some(added) = &added {
+            self.provision(topic.id, added.clone(), &command.owners, None)
+                .await?;
+        }
+
+        let updated = self
+            .modify(&topic, |mut topic| {
+                match &command.schema_name {
+                    Some(Some(schema_name)) => topic.schema_name = Some(schema_name.clone()),
+                    Some(None) => {
+                        topic.schema_name = None;
+                        topic.schema_validate = false;
+                    }
+                    None => {}
+                }
+                if let Some(validate) = command.schema_validate {
+                    topic.schema_validate = validate;
+                }
+                if topic.schema_name.is_none() {
                     topic.schema_validate = false;
                 }
-                None => {}
-            }
-            if let Some(validate) = command.schema_validate {
-                topic.schema_validate = validate;
-            }
-            if topic.schema_name.is_none() {
-                topic.schema_validate = false;
-            }
-            if let Some(ms) = command.retention_ms {
-                topic.retention.ms = ms;
-            }
-            if let Some(bytes) = command.retention_bytes {
-                topic.retention.bytes = bytes;
-            }
-            topic
-        })
-        .await
-    }
-
-    pub async fn grow(
-        &self,
-        name: &str,
-        partitions: u32,
-        owners: &[i32],
-    ) -> Result<Topic, ServiceError> {
-        let name = TopicName::parse(name)?;
-        let lock = self.lock(name.canonical());
-        let _exclusive = lock.write().await;
-
-        let topic = self.require_live(name.canonical()).await?;
-        if topic.closed {
-            return Err(ServiceError::kind(ErrorKind::Closed));
-        }
-        if partitions <= topic.partitions {
-            return Err(ServiceError::with_message(
-                ErrorKind::BadRequest,
-                None,
-                false,
-                format!(
-                    "topic already has {} partitions, it can only grow",
-                    topic.partitions
-                ),
-            ));
-        }
-        if partitions - topic.partitions > MAX_NEW_PARTITIONS {
-            return Err(ServiceError::with_message(
-                ErrorKind::BadRequest,
-                None,
-                false,
-                format!("at most {MAX_NEW_PARTITIONS} partitions can be added at once"),
-            ));
-        }
-
-        let added = topic.partitions..partitions;
-        if !owners.is_empty() && owners.len() != added.len() {
-            return Err(ServiceError::with_message(
-                ErrorKind::BadRequest,
-                None,
-                false,
-                "owners must name a node for every added partition",
-            ));
-        }
-        self.provision(topic.id, added.clone(), owners, None)
-            .await?;
-
-        let grown = self
-            .modify(&topic, |mut topic| {
-                topic.partitions = topic.partitions.max(partitions);
+                if let Some(ms) = command.retention_ms {
+                    topic.retention.ms = ms;
+                }
+                if let Some(bytes) = command.retention_bytes {
+                    topic.retention.bytes = bytes;
+                }
+                if let Some(partitions) = command.partitions {
+                    topic.partitions = topic.partitions.max(partitions);
+                }
                 topic
             })
             .await;
-        if grown.is_err() {
+        if updated.is_err()
+            && let Some(added) = added
+        {
             self.unprovision(topic.id, added).await;
         }
 
-        grown
+        updated
     }
 
     pub async fn delete(&self, name: &str) -> Result<bool, ServiceError> {
@@ -1183,4 +1144,38 @@ fn schema_batch(records: &[LogRecord]) -> picomq_schema::Batch {
 
 fn schema_error(message: impl Into<String>) -> ServiceError {
     ServiceError::with_message(ErrorKind::BadRequest, None, false, message.into())
+}
+
+/// The partitions growing `topic` to `partitions` adds. A topic only grows,
+/// and a sealed one does not.
+fn added_partitions(
+    topic: &Topic,
+    partitions: u32,
+    owners: &[i32],
+) -> Result<Range<u32>, ServiceError> {
+    let bad =
+        |message: String| ServiceError::with_message(ErrorKind::BadRequest, None, false, message);
+    if topic.closed {
+        return Err(ServiceError::kind(ErrorKind::Closed));
+    }
+    if partitions <= topic.partitions {
+        return Err(bad(format!(
+            "topic already has {} partitions, it can only grow",
+            topic.partitions
+        )));
+    }
+    if partitions - topic.partitions > MAX_NEW_PARTITIONS {
+        return Err(bad(format!(
+            "at most {MAX_NEW_PARTITIONS} partitions can be added at once"
+        )));
+    }
+
+    let added = topic.partitions..partitions;
+    if !owners.is_empty() && owners.len() != added.len() {
+        return Err(bad(
+            "owners must name a node for every added partition".to_owned()
+        ));
+    }
+
+    Ok(added)
 }

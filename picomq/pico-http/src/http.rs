@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use base64::Engine as _;
 
-use picomq_server::{ErrorKind, OffsetToken, ServiceError};
+use picomq_server::{ErrorKind, OffsetToken, Retention, ServiceError};
 
 pub(crate) fn bad_request(message: impl Into<String>) -> ServiceError {
     ServiceError::with_message(ErrorKind::BadRequest, None, false, message)
@@ -117,6 +117,27 @@ pub(crate) fn parse_strict_u64_header(
     message: &str,
 ) -> Result<Option<u64>, ServiceError> {
     parse_strict_u64(header_str(headers, name), message)
+}
+
+/// A partition count on create. Absent means one.
+pub(crate) fn partitions_header(headers: &HeaderMap, name: &str) -> Result<u32, ServiceError> {
+    let message = format!("invalid {name}");
+    match parse_strict_u64_header(headers, name, &message)? {
+        None => Ok(1),
+        Some(count) => u32::try_from(count).map_err(|_| bad_request(&message)),
+    }
+}
+
+/// Retention limits on create, from the protocol's two headers.
+pub(crate) fn retention_headers(
+    headers: &HeaderMap,
+    ms: &str,
+    bytes: &str,
+) -> Result<Retention, ServiceError> {
+    Ok(Retention {
+        ms: parse_strict_u64_header(headers, ms, &format!("invalid {ms}"))?,
+        bytes: parse_strict_u64_header(headers, bytes, &format!("invalid {bytes}"))?,
+    })
 }
 
 /// RFC3339 to epoch ms.

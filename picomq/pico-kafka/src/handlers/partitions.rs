@@ -4,7 +4,7 @@ use kafka_protocol::messages::create_partitions_response::{
     CreatePartitionsResponse, CreatePartitionsTopicResult,
 };
 use kafka_protocol::protocol::{Decodable, StrBytes};
-use picomq_server::MAX_NEW_PARTITIONS;
+use picomq_server::{MAX_NEW_PARTITIONS, UpdateTopicCommand};
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
@@ -90,7 +90,12 @@ async fn grow(
     }
 
     ctx.topics
-        .grow(topic.name.spelling(), count, &owners)
+        .update(UpdateTopicCommand {
+            name: topic.name.spelling().to_owned(),
+            partitions: Some(count),
+            owners,
+            ..Default::default()
+        })
         .await
         .map(|_| ())
         .map_err(service_failure)
