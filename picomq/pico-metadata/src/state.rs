@@ -93,9 +93,13 @@ pub struct MetadataState {
     pub streams: OrdMap<u64, StreamRow>,
     pub nodes: OrdMap<i32, NodeRow>,
     /// `get_opening_streams(node)` is a prefix range scan, not a full scan.
-    /// Maintained by open/close/delete in `apply`.
+    /// The three node indexes are derived from `streams` and maintained only
+    /// by [`MetadataState::put_stream`] and [`MetadataState::remove_stream`].
     pub opening_by_node: OrdMap<(i32, u64), ()>,
     pub placed_by_node: OrdMap<(i32, u64), ()>,
+    /// Streams opened or placed on each node, so placement reads a node's
+    /// load without walking its streams.
+    pub streams_by_node: OrdMap<i32, u64>,
     /// In-flight ownership transfers keyed by stream id.
     pub pending_transfers: OrdMap<u64, PendingTransfer>,
     /// `(stream_id, epoch) → first offset written at that epoch`, recorded on
@@ -138,5 +142,55 @@ pub struct MetadataState {
 impl MetadataState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn put_stream(&mut self, row: StreamRow) {
+        let previous = self.streams.insert(row.stream_id, row);
+        if previous
+            .is_some_and(|previous| (previous.state, previous.node_id) == (row.state, row.node_id))
+        {
+            return;
+        }
+
+        if let Some(previous) = previous {
+            self.unindex(&previous);
+        }
+        self.index(&row);
+    }
+
+    pub fn remove_stream(&mut self, stream_id: u64) {
+        if let Some(previous) = self.streams.remove(&stream_id) {
+            self.unindex(&previous);
+        }
+    }
+
+    fn index(&mut self, row: &StreamRow) {
+        let key = (row.node_id, row.stream_id);
+        match row.state {
+            StreamState::Opened => self.opening_by_node.insert(key, ()),
+            StreamState::Closed if row.node_id != -1 => self.placed_by_node.insert(key, ()),
+            StreamState::Closed => return,
+        };
+
+        let count = self.streams_by_node.get(&row.node_id).copied().unwrap_or(0);
+        self.streams_by_node.insert(row.node_id, count + 1);
+    }
+
+    fn unindex(&mut self, row: &StreamRow) {
+        let key = (row.node_id, row.stream_id);
+        let opened = self.opening_by_node.remove(&key).is_some();
+        let placed = self.placed_by_node.remove(&key).is_some();
+        if !opened && !placed {
+            return;
+        }
+
+        match self.streams_by_node.get(&row.node_id).copied() {
+            Some(count) if count > 1 => {
+                self.streams_by_node.insert(row.node_id, count - 1);
+            }
+            _ => {
+                self.streams_by_node.remove(&row.node_id);
+            }
+        }
     }
 }

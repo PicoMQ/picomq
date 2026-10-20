@@ -301,17 +301,14 @@ fn check_owner(
 fn create_stream(state: &mut MetadataState) -> Result<MetadataResult, MetadataError> {
     let stream_id = state.next_stream_id;
     state.next_stream_id += 1;
-    state.streams.insert(
+    state.put_stream(StreamRow {
         stream_id,
-        StreamRow {
-            stream_id,
-            epoch: -1,
-            start_offset: 0,
-            end_offset: 0,
-            state: StreamState::Closed,
-            node_id: -1,
-        },
-    );
+        epoch: -1,
+        start_offset: 0,
+        end_offset: 0,
+        state: StreamState::Closed,
+        node_id: -1,
+    });
     Ok(MetadataResult::Id(stream_id))
 }
 
@@ -332,17 +329,14 @@ fn create_streams(state: &mut MetadataState, count: u32) -> Result<MetadataResul
     }
     let first = state.next_stream_id;
     for stream_id in first..first + count as u64 {
-        state.streams.insert(
+        state.put_stream(StreamRow {
             stream_id,
-            StreamRow {
-                stream_id,
-                epoch: -1,
-                start_offset: 0,
-                end_offset: 0,
-                state: StreamState::Closed,
-                node_id: -1,
-            },
-        );
+            epoch: -1,
+            start_offset: 0,
+            end_offset: 0,
+            state: StreamState::Closed,
+            node_id: -1,
+        });
     }
     state.next_stream_id = first + count as u64;
     Ok(MetadataResult::Id(first))
@@ -379,16 +373,10 @@ fn place_stream(
         });
     };
 
-    state.placed_by_node.remove(&(stream.node_id, stream_id));
-
-    state.streams.insert(
-        stream_id,
-        StreamRow {
-            node_id: winner,
-            ..stream
-        },
-    );
-    state.placed_by_node.insert((winner, stream_id), ());
+    state.put_stream(StreamRow {
+        node_id: winner,
+        ..stream
+    });
     Ok(MetadataResult::Id(winner as u64))
 }
 
@@ -400,12 +388,8 @@ fn least_loaded(state: &MetadataState) -> Option<i32> {
         if node.slots < 1 || node.fenced {
             continue;
         }
-        let opening_count = state
-            .opening_by_node
-            .range((*node_id, 0)..=(*node_id, u64::MAX))
-            .count() as u64;
-        let placed_count = state.placed_count(*node_id) as u64;
-        let score = (opening_count + placed_count) * 1000 / node.slots as u64;
+        let streams = state.streams_by_node.get(node_id).copied().unwrap_or(0);
+        let score = streams * 1000 / node.slots as u64;
         match winner {
             None => winner = Some((*node_id, score)),
             Some((best_id, best_score))
@@ -465,9 +449,7 @@ fn open_stream(
         node_id,
         ..stream
     };
-    state.streams.insert(stream_id, opened);
-    state.placed_by_node.remove(&(stream.node_id, stream_id));
-    state.opening_by_node.insert((node_id, stream_id), ());
+    state.put_stream(opened);
     state.epochs.insert((stream_id, epoch), stream.end_offset);
     Ok(MetadataResult::Stream(opened.to_stream_metadata()))
 }
@@ -521,13 +503,10 @@ fn trim_stream(
             ),
         });
     }
-    state.streams.insert(
-        stream_id,
-        StreamRow {
-            start_offset: new_start_offset,
-            ..stream
-        },
-    );
+    state.put_stream(StreamRow {
+        start_offset: new_start_offset,
+        ..stream
+    });
 
     let covered: Vec<i64> = state
         .stream_epochs(stream_id)
@@ -574,15 +553,10 @@ fn close_stream(
         });
     }
 
-    state.streams.insert(
-        stream_id,
-        StreamRow {
-            state: StreamState::Closed,
-            ..stream
-        },
-    );
-    state.opening_by_node.remove(&(stream.node_id, stream_id));
-    state.placed_by_node.insert((stream.node_id, stream_id), ());
+    state.put_stream(StreamRow {
+        state: StreamState::Closed,
+        ..stream
+    });
     Ok(MetadataResult::Unit)
 }
 
@@ -665,17 +639,10 @@ fn complete_transfer(
         });
     }
 
-    state.streams.insert(
-        stream_id,
-        StreamRow {
-            node_id: pending.to_node,
-            ..stream
-        },
-    );
-    state.placed_by_node.remove(&(stream.node_id, stream_id));
-    state
-        .placed_by_node
-        .insert((pending.to_node, stream_id), ());
+    state.put_stream(StreamRow {
+        node_id: pending.to_node,
+        ..stream
+    });
     state.pending_transfers.remove(&stream_id);
     Ok(MetadataResult::Unit)
 }
@@ -708,8 +675,7 @@ fn delete_stream(
         });
     }
 
-    state.streams.remove(&stream_id);
-    state.placed_by_node.remove(&(stream.node_id, stream_id));
+    state.remove_stream(stream_id);
     state.pending_transfers.remove(&stream_id);
     for (epoch, _) in state.stream_epochs(stream_id) {
         state.epochs.remove(&(stream_id, epoch));
@@ -814,13 +780,10 @@ fn advance_end_offset(
             ),
         });
     }
-    state.streams.insert(
-        stream_id,
-        StreamRow {
-            end_offset,
-            ..stream
-        },
-    );
+    state.put_stream(StreamRow {
+        end_offset,
+        ..stream
+    });
     Ok(())
 }
 
@@ -1253,6 +1216,7 @@ fn delete_kv_if_matches(
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use im::OrdMap;
     use s3stream::ObjectStreamRange;
 
     const NODE_1: i32 = 1;
@@ -2192,6 +2156,12 @@ mod tests {
         derived_placed.sort_unstable();
         assert_eq!(indexed_placed, derived_placed, "placed_by_node");
 
+        let mut derived_counts: OrdMap<i32, u64> = OrdMap::new();
+        for (node_id, _) in derived_opening.iter().chain(&derived_placed) {
+            *derived_counts.entry(*node_id).or_default() += 1;
+        }
+        assert_eq!(state.streams_by_node, derived_counts, "streams_by_node");
+
         for (stream_id, _) in state.epochs.keys() {
             assert!(
                 state.streams.contains_key(stream_id),
@@ -2733,6 +2703,46 @@ mod tests {
 
         assert_eq!(state.nodes[&NODE_2].heartbeats, 1);
         assert_eq!(state.nodes[&NODE_2].slots, 3);
+    }
+
+    #[test]
+    fn node_loads_follow_their_streams_and_drive_placement() {
+        let mut state = setup();
+        let streams: Vec<u64> = (0..3)
+            .map(|_| create(&mut state, NODE_1, EPOCH_1))
+            .collect();
+
+        let placed: Vec<i32> = streams.iter().map(|id| place(&mut state, *id)).collect();
+        assert_eq!(placed, [NODE_1, NODE_2, NODE_1]);
+        assert_eq!(
+            state.streams_by_node,
+            OrdMap::from(vec![(NODE_1, 2u64), (NODE_2, 1)])
+        );
+
+        open(&mut state, NODE_1, EPOCH_1, streams[0], 0).unwrap();
+        close(&mut state, NODE_1, EPOCH_1, streams[0], 0).unwrap();
+        assert_eq!(
+            state.streams_by_node,
+            OrdMap::from(vec![(NODE_1, 2u64), (NODE_2, 1)])
+        );
+
+        apply(
+            &mut state,
+            &MetadataCommand::DeleteStream {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                stream_id: streams[0],
+                epoch: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.streams_by_node,
+            OrdMap::from(vec![(NODE_1, 1u64), (NODE_2, 1)])
+        );
+
+        let next = create(&mut state, NODE_1, EPOCH_1);
+        assert_eq!(place(&mut state, next), NODE_1);
+        assert_indexes_consistent(&state);
     }
 
     #[test]

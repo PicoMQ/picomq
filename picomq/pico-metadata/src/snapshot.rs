@@ -135,12 +135,7 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
             state: stream_state,
             node_id,
         };
-        state.streams.insert(stream_id, row);
-        if stream_state == StreamState::Opened {
-            state.opening_by_node.insert((node_id, stream_id), ());
-        } else if node_id != -1 {
-            state.placed_by_node.insert((node_id, stream_id), ());
-        }
+        state.put_stream(row);
     }
 
     for _ in 0..get_u64(&mut buf)? {

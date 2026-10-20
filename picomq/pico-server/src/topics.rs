@@ -72,7 +72,7 @@ impl Topics {
         let lock = self.lock(name.canonical());
         let _exclusive = lock.write().await;
 
-        if let Some((existing, stored)) = self.load(name.canonical()).await? {
+        if let Some((existing, stored)) = self.record(name.canonical())? {
             if !existing.expired(now_ms()) {
                 return self.existing(existing, &command);
             }
