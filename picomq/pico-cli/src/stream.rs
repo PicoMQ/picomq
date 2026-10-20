@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use clap::{Args, Subcommand, ValueEnum};
-use picomq_client::{ClientConfig, ClientError, ErrorKind, Live, PicoClient, Protocol, ReadLimits};
+use picomq_client::{
+    ClientConfig, ClientError, CreateOptions, ErrorKind, Live, PicoClient, Protocol, ReadLimits,
+};
 
 use crate::io::{note, print_record, stdin_records};
 
@@ -178,7 +180,11 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
             content_type,
             ttl,
         } => {
-            let created = client.create(&stream, &content_type, ttl).await?;
+            let options = CreateOptions {
+                ttl_seconds: ttl,
+                ..CreateOptions::new(content_type)
+            };
+            let created = client.create(&stream, &options).await?;
             note(format!("created={created}"));
         }
         StreamCommand::Head { stream, partition } => {

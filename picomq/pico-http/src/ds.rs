@@ -23,7 +23,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use picomq_auth::{Audience, Authorizer};
 use picomq_protocol::ds::{
-    H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ,
+    DEFAULT_CT, H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ,
     H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR, H_STREAM_EXPIRES_AT, H_STREAM_NEXT_OFFSET,
     H_STREAM_PARTITIONS, H_STREAM_RETENTION_BYTES, H_STREAM_RETENTION_MS, H_STREAM_SCHEMA,
     H_STREAM_SCHEMA_VALIDATE, H_STREAM_SEQ, H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL,
@@ -47,7 +47,6 @@ use crate::route::{RoutingMode, route, stream_name};
 
 const CT_EVENT_STREAM: &str = "text/event-stream";
 const CT_TEXT: &str = "text/plain; charset=utf-8";
-const DEFAULT_CT: &str = "application/octet-stream";
 const CACHE_CATCH_UP: &str = "public, max-age=60, stale-while-revalidate=300";
 const DEFAULT_MAX_CHUNK_SIZE: usize = 64 * 1024;
 const DEFAULT_MAX_REQUEST_SIZE: usize = 32 * 1024 * 1024;

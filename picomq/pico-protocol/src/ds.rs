@@ -12,6 +12,7 @@ use crate::wire::{
 
 pub use crate::wire::Producer;
 
+pub const DEFAULT_CT: &str = "application/octet-stream";
 pub const H_STREAM_NEXT_OFFSET: &str = "Stream-Next-Offset";
 pub const H_STREAM_UP_TO_DATE: &str = "Stream-Up-To-Date";
 pub const H_STREAM_TTL: &str = "Stream-TTL";
@@ -175,6 +176,9 @@ pub struct CreateRequest<'a> {
     pub closed: bool,
     pub schema: Option<&'a str>,
     pub schema_validate: bool,
+    pub partitions: Option<u32>,
+    pub retention_ms: Option<u64>,
+    pub retention_bytes: Option<u64>,
     pub initial_body: Bytes,
 }
 
@@ -188,6 +192,9 @@ impl<'a> CreateRequest<'a> {
             closed: false,
             schema: None,
             schema_validate: false,
+            partitions: None,
+            retention_ms: None,
+            retention_bytes: None,
             initial_body: Bytes::new(),
         }
     }
@@ -200,6 +207,9 @@ impl<'a> CreateRequest<'a> {
             .flag(H_STREAM_CLOSED, self.closed)
             .header_opt(H_STREAM_SCHEMA, self.schema)
             .flag(H_STREAM_SCHEMA_VALIDATE, self.schema_validate)
+            .header_opt(H_STREAM_PARTITIONS, self.partitions)
+            .header_opt(H_STREAM_RETENTION_MS, self.retention_ms)
+            .header_opt(H_STREAM_RETENTION_BYTES, self.retention_bytes)
             .body(self.initial_body.clone())
     }
 }
@@ -304,6 +314,8 @@ pub struct HeadResponse {
     pub closed: bool,
     pub ttl_seconds: Option<u64>,
     pub expires_at: Option<String>,
+    pub retention_ms: Option<u64>,
+    pub retention_bytes: Option<u64>,
     pub schema: Option<String>,
 }
 
@@ -319,6 +331,8 @@ impl HeadResponse {
             closed: truthy(headers, H_STREAM_CLOSED),
             ttl_seconds: header_u64(headers, H_STREAM_TTL),
             expires_at: header_string(headers, H_STREAM_EXPIRES_AT),
+            retention_ms: header_u64(headers, H_STREAM_RETENTION_MS),
+            retention_bytes: header_u64(headers, H_STREAM_RETENTION_BYTES),
             schema: header_string(headers, H_STREAM_SCHEMA),
         })
     }

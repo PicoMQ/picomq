@@ -12,7 +12,7 @@ use bytes::Bytes;
 use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
-use picomq_client::{ClientConfig, ErrorKind, PicoClient, RetryPolicy, StreamApi};
+use picomq_client::{ClientConfig, CreateOptions, ErrorKind, PicoClient, RetryPolicy, StreamApi};
 use picomq_http::HttpProtocol as ServeProtocol;
 use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, PicoServer, ServerConfig};
 
@@ -55,7 +55,7 @@ async fn error_kinds_distinguish_auth_from_fencing() {
 
     let anonymous = with_token(&endpoint, None);
     let err = anonymous
-        .create("/orders", "text/plain", None)
+        .create("/orders", &CreateOptions::new("text/plain"))
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::Unauthenticated);
@@ -86,14 +86,19 @@ async fn error_kinds_distinguish_auth_from_fencing() {
 
     let read_only = with_token(&endpoint, Some(reader.render()));
     let err = read_only
-        .create("/orders", "text/plain", None)
+        .create("/orders", &CreateOptions::new("text/plain"))
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::PermissionDenied);
     assert_eq!(err.status, 403);
 
     let rooted = with_token(&endpoint, Some(root.render()));
-    assert!(rooted.create("/orders", "text/plain", None).await.unwrap());
+    assert!(
+        rooted
+            .create("/orders", &CreateOptions::new("text/plain"))
+            .await
+            .unwrap()
+    );
 
     // A fencing 403 through the same client keeps its own kind.
     let producer = picomq_client::pico::ProducerRef {

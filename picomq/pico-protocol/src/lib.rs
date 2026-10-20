@@ -1,11 +1,14 @@
 //! PicoMQ wire protocol: the Pico and Durable Streams contracts.
 
+pub mod config;
 pub mod ds;
 pub mod error;
 pub mod groups;
+mod json;
 pub mod mime;
 pub mod pico;
 pub mod record;
+pub mod schemas;
 mod sse;
 mod wire;
 

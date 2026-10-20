@@ -243,6 +243,9 @@ pub struct CreateRequest<'a> {
     pub closed: bool,
     pub schema: Option<&'a str>,
     pub schema_validate: bool,
+    pub partitions: Option<u32>,
+    pub retention_ms: Option<u64>,
+    pub retention_bytes: Option<u64>,
 }
 
 impl<'a> CreateRequest<'a> {
@@ -255,6 +258,9 @@ impl<'a> CreateRequest<'a> {
             closed: false,
             schema: None,
             schema_validate: false,
+            partitions: None,
+            retention_ms: None,
+            retention_bytes: None,
         }
     }
 
@@ -266,6 +272,9 @@ impl<'a> CreateRequest<'a> {
             .flag(H_CLOSED, self.closed)
             .header_opt(H_SCHEMA, self.schema)
             .flag(H_SCHEMA_VALIDATE, self.schema_validate)
+            .header_opt(H_PARTITIONS, self.partitions)
+            .header_opt(H_RETENTION_MS, self.retention_ms)
+            .header_opt(H_RETENTION_BYTES, self.retention_bytes)
     }
 }
 
@@ -402,6 +411,8 @@ pub struct HeadResponse {
     pub closed: bool,
     pub ttl_seconds: Option<u64>,
     pub expires_at: Option<String>,
+    pub retention_ms: Option<u64>,
+    pub retention_bytes: Option<u64>,
     pub schema: Option<String>,
     pub kafka_topic: Option<String>,
 }
@@ -419,6 +430,8 @@ impl HeadResponse {
             closed: truthy(headers, H_CLOSED),
             ttl_seconds: header_u64(headers, H_TTL),
             expires_at: header_string(headers, H_EXPIRES_AT),
+            retention_ms: header_u64(headers, H_RETENTION_MS),
+            retention_bytes: header_u64(headers, H_RETENTION_BYTES),
             schema: header_string(headers, H_SCHEMA),
             kafka_topic: header_string(headers, H_KAFKA_TOPIC),
         })

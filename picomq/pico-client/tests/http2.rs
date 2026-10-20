@@ -9,7 +9,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use picomq_client::{ClientConfig, Live, PicoClient, Protocol, ReadLimits, StreamApi};
+use picomq_client::{
+    ClientConfig, CreateOptions, Live, PicoClient, Protocol, ReadLimits, StreamApi,
+};
 use picomq_http::HttpProtocol as ServeProtocol;
 use picomq_runtime::{KafkaConfig, MetaBackend, ServerConfig};
 
@@ -53,7 +55,7 @@ async fn appends_over_h2c_negotiate_http2() {
     let client = PicoClient::with_http(&endpoint, http, Default::default());
     assert!(
         client
-            .create("/streams/h2", "text/plain", None)
+            .create("/streams/h2", &CreateOptions::new("text/plain"))
             .await
             .unwrap()
     );
@@ -98,7 +100,7 @@ async fn one_connection_carries_many_concurrent_appends() {
     )
     .unwrap();
     client
-        .create("/streams/fanout", "text/plain", None)
+        .create("/streams/fanout", &CreateOptions::new("text/plain"))
         .await
         .unwrap();
 

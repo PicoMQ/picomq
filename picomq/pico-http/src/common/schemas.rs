@@ -10,8 +10,6 @@ use serde_json::json;
 
 use super::CommonState;
 
-pub const SCHEMA_PATH_PREFIX: &str = "/_schemas";
-
 pub fn router() -> Router<CommonState> {
     Router::new().route(
         "/_schemas/{*name}",
