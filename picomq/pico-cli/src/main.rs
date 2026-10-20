@@ -6,6 +6,7 @@ mod auth;
 mod bench;
 mod config;
 mod io;
+mod schema;
 mod serve;
 mod stream;
 
