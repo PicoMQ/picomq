@@ -6,42 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 )
-
-type TopicConfig struct {
-	Schema         string
-	SchemaValidate bool
-	KafkaTopic     string
-	Partitions     uint32
-	Retention      time.Duration
-	RetentionBytes uint64
-}
-
-// ConfigUpdate changes a topic's settings. A nil field is left alone and a
-// pointer to the zero value removes the setting. Partitions grows the topic
-// when non-zero and can never shrink it.
-type ConfigUpdate struct {
-	Schema         *string
-	SchemaValidate *bool
-	Retention      *time.Duration
-	RetentionBytes *uint64
-	Partitions     uint32
-}
-
-type Schema struct {
-	ContentType string
-	Body        []byte
-}
-
-type configBody struct {
-	Schema         *string `json:"schema"`
-	SchemaValidate bool    `json:"schemaValidate"`
-	KafkaTopic     *string `json:"kafkaTopic"`
-	Partitions     uint32  `json:"partitions"`
-	RetentionMs    *uint64 `json:"retentionMs"`
-	RetentionBytes *uint64 `json:"retentionBytes"`
-}
 
 func (c *PicoClient) Config(ctx context.Context, name string) (*TopicConfig, error) {
 	return c.core.config(ctx, name)
@@ -160,54 +125,6 @@ func (c *coreClient) deleteSchema(ctx context.Context, name string) (bool, error
 
 func (c *coreClient) controlURL(root, name string) string {
 	return c.streamURL(root+"/"+strings.TrimLeft(name, "/"), nil)
-}
-
-func (u ConfigUpdate) body() map[string]any {
-	body := map[string]any{}
-	if u.Schema != nil {
-		body["schema"] = nullIfZero(*u.Schema, "")
-	}
-	if u.SchemaValidate != nil {
-		body["schemaValidate"] = *u.SchemaValidate
-	}
-	if u.Retention != nil {
-		body["retentionMs"] = nullIfZero(millisAwayFromZero(*u.Retention), 0)
-	}
-	if u.RetentionBytes != nil {
-		body["retentionBytes"] = nullIfZero(*u.RetentionBytes, 0)
-	}
-	if u.Partitions > 0 {
-		body["partitions"] = u.Partitions
-	}
-	return body
-}
-
-func nullIfZero[T comparable](value, zero T) any {
-	if value == zero {
-		return nil
-	}
-	return value
-}
-
-func decodeConfig(data []byte) (TopicConfig, error) {
-	var body configBody
-	if err := json.Unmarshal(data, &body); err != nil {
-		return TopicConfig{}, invalidResponse(err)
-	}
-	config := TopicConfig{SchemaValidate: body.SchemaValidate, Partitions: partitionCount(uint64(body.Partitions))}
-	if body.Schema != nil {
-		config.Schema = *body.Schema
-	}
-	if body.KafkaTopic != nil {
-		config.KafkaTopic = *body.KafkaTopic
-	}
-	if body.RetentionMs != nil {
-		config.Retention = time.Duration(*body.RetentionMs) * time.Millisecond
-	}
-	if body.RetentionBytes != nil {
-		config.RetentionBytes = *body.RetentionBytes
-	}
-	return config, nil
 }
 
 func expectControl(response *http.Response, expected ...int) ([]byte, error) {

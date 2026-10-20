@@ -1,6 +1,6 @@
 import { header } from './transport/http'
 import { parseOptionalUint } from './util'
-import type { CreateOptions, StreamInfo } from './types'
+import type { CreateOptions, StreamInfo, TopicConfig } from './types'
 
 const DEFAULT_CONTENT_TYPE = 'application/octet-stream'
 
@@ -31,4 +31,17 @@ export function readSettings(response: Response, prefix: 'Pico' | 'Stream', info
   if (retentionBytes !== undefined) info.retentionBytes = retentionBytes
   const schema = header(response, `${prefix}-Schema`)
   if (schema !== undefined) info.schema = schema
+}
+
+export function decodeConfig(body: unknown): TopicConfig {
+  const node = (body ?? {}) as { [key: string]: unknown }
+  const config: TopicConfig = {
+    schemaValidate: node.schemaValidate === true,
+    partitions: typeof node.partitions === 'number' ? node.partitions : 1,
+  }
+  if (typeof node.schema === 'string') config.schema = node.schema
+  if (typeof node.kafkaTopic === 'string') config.kafkaTopic = node.kafkaTopic
+  if (typeof node.retentionMs === 'number') config.retentionMs = node.retentionMs
+  if (typeof node.retentionBytes === 'number') config.retentionBytes = node.retentionBytes
+  return config
 }

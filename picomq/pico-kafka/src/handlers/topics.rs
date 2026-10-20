@@ -83,7 +83,7 @@ async fn create_topic(
     let (partitions, owners) = partitions(ctx, topic)?;
     let (schema_name, schema_validate) = schema_configs(&topic.configs)?;
     cleanup_policy(&topic.configs)?;
-    let retention = retention_configs(&topic.configs)?;
+    let retention = parse_retention(&topic.configs)?;
 
     let mut command = CreateCommand {
         partitions,
@@ -300,7 +300,7 @@ fn schema_configs(configs: &[CreatableTopicConfig]) -> Result<(Option<String>, b
     Ok((schema_name, schema_validate))
 }
 
-fn retention_configs(configs: &[CreatableTopicConfig]) -> Result<Retention, Failure> {
+fn parse_retention(configs: &[CreatableTopicConfig]) -> Result<Retention, Failure> {
     let mut retention = Retention::default();
     for config in configs {
         let Some(value) = config.value.as_ref().map(|value| value.as_str()) else {

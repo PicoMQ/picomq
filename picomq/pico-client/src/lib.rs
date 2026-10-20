@@ -1,5 +1,6 @@
 //! PicoMQ client: the Pico and Durable Streams protocols over HTTP.
 
+mod control;
 pub mod ds;
 pub mod error;
 pub mod group;

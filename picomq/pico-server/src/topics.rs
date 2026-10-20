@@ -615,7 +615,7 @@ impl Topics {
                 }
 
                 let now = now_ms();
-                for (topic, value) in topics.page(&mut cursor) {
+                for (topic, value) in topics.next_page(&mut cursor) {
                     if topic.expired(now) {
                         topics.expire(&topic, &value).await;
                     }
@@ -633,7 +633,7 @@ impl Topics {
                 tokio::time::sleep(tick).await;
 
                 let now = now_ms();
-                for (topic, _) in topics.page(&mut cursor) {
+                for (topic, _) in topics.next_page(&mut cursor) {
                     if topic.retention.is_unlimited() {
                         continue;
                     }
@@ -654,7 +654,7 @@ impl Topics {
         })
     }
 
-    fn page(&self, cursor: &mut Option<String>) -> Vec<(Topic, Bytes)> {
+    fn next_page(&self, cursor: &mut Option<String>) -> Vec<(Topic, Bytes)> {
         const PAGE: usize = 256;
 
         let page = self

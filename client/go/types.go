@@ -43,6 +43,31 @@ type CreateOptions struct {
 	Closed         bool
 }
 
+type TopicConfig struct {
+	Schema         string
+	SchemaValidate bool
+	KafkaTopic     string
+	Partitions     uint32
+	Retention      time.Duration
+	RetentionBytes uint64
+}
+
+// ConfigUpdate changes a topic's settings. A nil field is left alone, and a
+// pointer to a zero or negative value removes the setting. Partitions grows
+// the topic when non-zero and can never shrink it.
+type ConfigUpdate struct {
+	Schema         *string
+	SchemaValidate *bool
+	Retention      *time.Duration
+	RetentionBytes *uint64
+	Partitions     uint32
+}
+
+type Schema struct {
+	ContentType string
+	Body        []byte
+}
+
 type AppendRecord struct {
 	Body        []byte
 	Key         []byte

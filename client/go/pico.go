@@ -54,8 +54,7 @@ func (c *PicoClient) head(ctx context.Context, name string, partition *uint32) (
 			TTL:         time.Duration(headerUint(response.Header, "Pico-TTL")) * time.Second,
 			ExpiresAt:   response.Header.Get("Pico-Expires-At"),
 		}
-		info.Retention, info.RetentionBytes = retentionHeaders(response.Header, "Pico")
-		info.Schema = response.Header.Get("Pico-Schema")
+		readSettings(response.Header, "Pico", info)
 		info.KafkaTopic = response.Header.Get("Pico-Kafka-Topic")
 		return nil
 	})

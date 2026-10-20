@@ -40,7 +40,8 @@ use picomq_server::{
 
 use crate::http::{
     bad_request, base_response, cursor, etag, format_instant, header_str, parse_instant_header,
-    parse_strict_u64_header, partitions_header, query_param, retention_headers, set_header, truthy,
+    parse_partitions_header, parse_retention_headers, parse_strict_u64_header, query_param,
+    set_header, truthy,
 };
 use crate::partition;
 use crate::route::{RoutingMode, route, stream_name};
@@ -216,9 +217,9 @@ impl DsFrontend {
             return Err(bad_request("Stream-TTL and Stream-Expires-At both set"));
         }
 
-        let partitions = partitions_header(headers, H_STREAM_PARTITIONS)?;
+        let partitions = parse_partitions_header(headers, H_STREAM_PARTITIONS)?;
         let retention =
-            retention_headers(headers, H_STREAM_RETENTION_MS, H_STREAM_RETENTION_BYTES)?;
+            parse_retention_headers(headers, H_STREAM_RETENTION_MS, H_STREAM_RETENTION_BYTES)?;
 
         let content_type = header_str(headers, header::CONTENT_TYPE.as_str())
             .filter(|v| !v.is_empty())

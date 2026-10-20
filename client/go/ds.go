@@ -59,8 +59,7 @@ func (c *DurableStreamsClient) head(ctx context.Context, name string, partition 
 			TTL:         time.Duration(headerUint(response.Header, "Stream-TTL")) * time.Second,
 			ExpiresAt:   response.Header.Get("Stream-Expires-At"),
 		}
-		info.Retention, info.RetentionBytes = retentionHeaders(response.Header, "Stream")
-		info.Schema = response.Header.Get("Stream-Schema")
+		readSettings(response.Header, "Stream", info)
 		return nil
 	})
 	return

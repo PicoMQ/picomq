@@ -65,7 +65,7 @@ var _ = ginkgo.Describe("topic settings", func() {
 		Expect(config).To(Equal(TopicConfig{KafkaTopic: "orders", Partitions: 4, RetentionBytes: 4096}))
 	})
 
-	ginkgo.It("never rounds a nonzero retention to unlimited", func() {
+	ginkgo.It("rounds retention up to milliseconds and treats zero or less as unlimited", func() {
 		var bodies []map[string]any
 		var headers []http.Header
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -93,7 +93,7 @@ var _ = ginkgo.Describe("topic settings", func() {
 
 		Expect(headers[0].Get("Pico-Retention-Ms")).To(Equal("1"))
 		Expect(bodies[0]["retentionMs"]).To(Equal(float64(1)))
-		Expect(bodies[1]["retentionMs"]).To(Equal(float64(-1)))
+		Expect(bodies[1]).To(HaveKeyWithValue("retentionMs", BeNil()))
 		Expect(bodies[2]).To(HaveKeyWithValue("retentionMs", BeNil()))
 	})
 

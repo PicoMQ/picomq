@@ -272,10 +272,10 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
         } => {
             let update = ConfigUpdate {
                 stream,
-                schema: setting(schema, "--schema")?,
+                schema: alter_value(schema, "--schema")?,
                 schema_validate,
-                retention_ms: setting(retention_ms, "--retention-ms")?,
-                retention_bytes: setting(retention_bytes, "--retention-bytes")?,
+                retention_ms: alter_value(retention_ms, "--retention-ms")?,
+                retention_bytes: alter_value(retention_bytes, "--retention-bytes")?,
                 partitions,
             };
             print_config(&client.update_config(&update).await?);
@@ -448,8 +448,7 @@ fn or_dash(value: Option<u64>) -> String {
     value.map_or_else(|| "-".to_owned(), |value| value.to_string())
 }
 
-/// An `alter` value: absent leaves the setting, `none` removes it.
-fn setting<T: FromStr>(
+fn alter_value<T: FromStr>(
     value: Option<String>,
     flag: &str,
 ) -> Result<Option<Option<T>>, ClientError> {

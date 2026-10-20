@@ -119,7 +119,10 @@ pub(crate) fn parse_strict_u64_header(
     parse_strict_u64(header_str(headers, name), message)
 }
 
-pub(crate) fn partitions_header(headers: &HeaderMap, name: &str) -> Result<u32, ServiceError> {
+pub(crate) fn parse_partitions_header(
+    headers: &HeaderMap,
+    name: &str,
+) -> Result<u32, ServiceError> {
     let message = format!("invalid {name}");
     match parse_strict_u64_header(headers, name, &message)? {
         None => Ok(1),
@@ -127,7 +130,7 @@ pub(crate) fn partitions_header(headers: &HeaderMap, name: &str) -> Result<u32, 
     }
 }
 
-pub(crate) fn retention_headers(
+pub(crate) fn parse_retention_headers(
     headers: &HeaderMap,
     ms: &str,
     bytes: &str,

@@ -7,21 +7,6 @@ import (
 	"time"
 )
 
-func durationSecondsCeil(value time.Duration) int64 {
-	return int64((value-1)/time.Second) + 1
-}
-
-func millisAwayFromZero(value time.Duration) int64 {
-	millis := value.Milliseconds()
-	switch remainder := value % time.Millisecond; {
-	case remainder > 0:
-		millis++
-	case remainder < 0:
-		millis--
-	}
-	return millis
-}
-
 type RetryPolicy struct {
 	MaxAttempts    int
 	InitialBackoff time.Duration

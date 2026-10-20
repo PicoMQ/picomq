@@ -39,9 +39,9 @@ impl TopicConfig {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             kafka_topic: string(&node, "kafkaTopic")?,
-            partitions: partitions(&node)?.unwrap_or(1),
-            retention_ms: limit(&node, "retentionMs")?.flatten(),
-            retention_bytes: limit(&node, "retentionBytes")?.flatten(),
+            partitions: partitions_of(&node)?.unwrap_or(1),
+            retention_ms: limit_of(&node, "retentionMs")?.flatten(),
+            retention_bytes: limit_of(&node, "retentionBytes")?.flatten(),
         })
     }
 }
@@ -125,14 +125,14 @@ impl ConfigUpdate {
             stream,
             schema,
             schema_validate,
-            retention_ms: limit(&node, "retentionMs")?,
-            retention_bytes: limit(&node, "retentionBytes")?,
-            partitions: partitions(&node)?,
+            retention_ms: limit_of(&node, "retentionMs")?,
+            retention_bytes: limit_of(&node, "retentionBytes")?,
+            partitions: partitions_of(&node)?,
         })
     }
 }
 
-fn limit(node: &Map<String, Value>, key: &str) -> Result<Option<Option<u64>>, CodecError> {
+fn limit_of(node: &Map<String, Value>, key: &str) -> Result<Option<Option<u64>>, CodecError> {
     match node.get(key) {
         None => Ok(None),
         Some(Value::Null) => Ok(Some(None)),
@@ -143,7 +143,7 @@ fn limit(node: &Map<String, Value>, key: &str) -> Result<Option<Option<u64>>, Co
     }
 }
 
-fn partitions(node: &Map<String, Value>) -> Result<Option<u32>, CodecError> {
+fn partitions_of(node: &Map<String, Value>) -> Result<Option<u32>, CodecError> {
     match node.get("partitions") {
         None => Ok(None),
         Some(value) => value

@@ -1,5 +1,6 @@
 import { ClientError, type ErrorKind } from './error'
 import { RetryPolicy } from './retry'
+import { decodeConfig } from './settings'
 import { header, urlencode, type Http } from './transport/http'
 import { retryableError } from './util'
 import type { CallOptions, ConfigUpdate, PutSchemaOptions, Schema, TopicConfig } from './types'
@@ -89,19 +90,6 @@ export class Control {
     const path = name.replace(/^\/+/, '').split('/').map(urlencode).join('/')
     return `${this.baseUrl}${root}/${path}`
   }
-}
-
-function decodeConfig(body: unknown): TopicConfig {
-  const node = (body ?? {}) as { [key: string]: unknown }
-  const config: TopicConfig = {
-    schemaValidate: node.schemaValidate === true,
-    partitions: typeof node.partitions === 'number' ? node.partitions : 1,
-  }
-  if (typeof node.schema === 'string') config.schema = node.schema
-  if (typeof node.kafkaTopic === 'string') config.kafkaTopic = node.kafkaTopic
-  if (typeof node.retentionMs === 'number') config.retentionMs = node.retentionMs
-  if (typeof node.retentionBytes === 'number') config.retentionBytes = node.retentionBytes
-  return config
 }
 
 async function expectControl(response: Response, expected: number[]): Promise<Response> {
