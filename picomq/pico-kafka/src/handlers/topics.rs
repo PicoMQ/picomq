@@ -318,7 +318,6 @@ fn retention_configs(configs: &[CreatableTopicConfig]) -> Result<Retention, Fail
     Ok(retention)
 }
 
-/// A Kafka retention value: `-1` is unlimited, anything else must be positive.
 pub fn retention_limit(name: &str, value: &str) -> Result<Option<u64>, Failure> {
     match value.parse::<i64>() {
         Ok(-1) => Ok(None),

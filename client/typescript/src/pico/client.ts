@@ -1,7 +1,8 @@
 import { ClientError, type ErrorKind } from '../error'
 import { base64Decode, parseOptionalUint, retryableError } from '../util'
 import { toEnvelopes, type RecordEnvelope } from '../record'
-import { Control, createHeaders, readSettings } from '../control'
+import { Control } from '../control'
+import { createHeaders, readSettings } from '../settings'
 import { RetryPolicy } from '../retry'
 import { PicoStream } from '../stream'
 import {

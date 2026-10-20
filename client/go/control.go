@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-// TopicConfig is a topic's settings as /_streams reports them. Retention and
-// RetentionBytes are zero when unlimited.
 type TopicConfig struct {
 	Schema         string
 	SchemaValidate bool
@@ -31,7 +29,6 @@ type ConfigUpdate struct {
 	Partitions     uint32
 }
 
-// Schema is a registered schema and its format's content type.
 type Schema struct {
 	ContentType string
 	Body        []byte
@@ -115,8 +112,6 @@ func (c *coreClient) updateConfig(ctx context.Context, name string, update Confi
 	return decodeConfig(data)
 }
 
-// putSchema registers a schema. An empty content type lets the server take
-// the format from the name's extension.
 func (c *coreClient) putSchema(ctx context.Context, name, contentType string, body []byte) error {
 	headers := make(http.Header)
 	if contentType != "" {
@@ -167,40 +162,6 @@ func (c *coreClient) controlURL(root, name string) string {
 	return c.streamURL(root+"/"+strings.TrimLeft(name, "/"), nil)
 }
 
-func (o CreateOptions) headers(prefix string) http.Header {
-	headers := make(http.Header)
-	headers.Set("Content-Type", defaultString(o.ContentType, "application/octet-stream"))
-	if o.Partitions > 0 {
-		headers.Set(prefix+"-Partitions", strconv.FormatUint(uint64(o.Partitions), 10))
-	}
-	if o.TTL > 0 {
-		headers.Set(prefix+"-TTL", strconv.FormatInt(durationSecondsCeil(o.TTL), 10))
-	}
-	if o.ExpiresAt != "" {
-		headers.Set(prefix+"-Expires-At", o.ExpiresAt)
-	}
-	if o.Retention > 0 {
-		headers.Set(prefix+"-Retention-Ms", strconv.FormatInt(o.Retention.Milliseconds(), 10))
-	}
-	if o.RetentionBytes > 0 {
-		headers.Set(prefix+"-Retention-Bytes", strconv.FormatUint(o.RetentionBytes, 10))
-	}
-	if o.Schema != "" {
-		headers.Set(prefix+"-Schema", o.Schema)
-	}
-	if o.SchemaValidate {
-		headers.Set(prefix+"-Schema-Validate", "true")
-	}
-	if o.Closed {
-		headers.Set(prefix+"-Closed", "true")
-	}
-	return headers
-}
-
-func retentionHeaders(header http.Header, prefix string) (time.Duration, uint64) {
-	return time.Duration(headerUint(header, prefix+"-Retention-Ms")) * time.Millisecond, headerUint(header, prefix+"-Retention-Bytes")
-}
-
 func (u ConfigUpdate) body() map[string]any {
 	body := map[string]any{}
 	if u.Schema != nil {
@@ -249,8 +210,6 @@ func decodeConfig(data []byte) (TopicConfig, error) {
 	return config, nil
 }
 
-// expectControl decodes the control routes' errors, {"error": "<message>"}
-// on either protocol.
 func expectControl(response *http.Response, expected ...int) ([]byte, error) {
 	for _, status := range expected {
 		if response.StatusCode == status {

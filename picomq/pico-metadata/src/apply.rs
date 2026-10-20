@@ -900,24 +900,30 @@ fn commit_stream_set_object(
     redundant_commit_check(state, request)?;
 
     let compact = !request.compacted_object_ids.is_empty();
-    let mut data_time_ms = now_ms;
-    let mut last_write_ms = if compact { i64::MIN } else { now_ms };
-    if compact {
-        for &id in &request.compacted_object_ids {
-            let owned =
-                state
-                    .stream_set_objects
-                    .get(&id)
-                    .ok_or_else(|| MetadataError::Unexpected {
-                        message: format!("compacted stream-set object {id} not found"),
-                    })?;
-            data_time_ms = data_time_ms.min(owned.object.data_timestamp_ms);
-            last_write_ms = last_write_ms.max(owned.last_write_ms);
-        }
-        for &id in &request.compacted_object_ids {
-            remove_stream_set_object(state, id);
-            mark_destroyed(state, id, CompactOperations::Delete);
-        }
+    let sources = request
+        .compacted_object_ids
+        .iter()
+        .map(|id| {
+            state
+                .stream_set_objects
+                .get(id)
+                .ok_or_else(|| MetadataError::Unexpected {
+                    message: format!("compacted stream-set object {id} not found"),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let data_time_ms = sources
+        .iter()
+        .map(|owned| owned.object.data_timestamp_ms)
+        .fold(now_ms, i64::min);
+    let last_write_ms = sources
+        .iter()
+        .map(|owned| owned.last_write_ms)
+        .max()
+        .unwrap_or(now_ms);
+    for &id in &request.compacted_object_ids {
+        remove_stream_set_object(state, id);
+        mark_destroyed(state, id, CompactOperations::Delete);
     }
 
     if request.object_id != NOOP_OBJECT_ID {
@@ -1645,7 +1651,6 @@ mod tests {
         commit_at(state, stream_id, epoch, start, end, 1);
     }
 
-    /// Commits one stream-set object holding `[start, end)` at `now_ms`.
     fn commit_at(
         state: &mut MetadataState,
         stream_id: u64,
@@ -1681,7 +1686,6 @@ mod tests {
         object_id
     }
 
-    /// Commits one 32-byte stream object per range at `now_ms`.
     fn commit_split(
         state: &mut MetadataState,
         stream_id: u64,
@@ -1974,7 +1978,6 @@ mod tests {
             state.stream_set_objects.len() + state.stream_objects.len(),
             1
         );
-        // Index entry exists: (stream, start, object) -> (end, bytes).
         assert_eq!(
             state
                 .sso_ranges

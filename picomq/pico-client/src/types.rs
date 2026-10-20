@@ -37,9 +37,6 @@ pub struct StreamInfo {
     pub kafka_topic: Option<String>,
 }
 
-/// Settings for a new topic. Unset fields take the server's defaults: one
-/// partition, the protocol's default content type, no expiry, unlimited
-/// retention, and no schema.
 #[derive(Debug, Clone, Default)]
 pub struct CreateOptions {
     pub content_type: Option<String>,

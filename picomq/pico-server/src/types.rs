@@ -230,17 +230,13 @@ pub struct UpdateTopicCommand {
     pub name: String,
     pub schema_name: Option<Option<String>>,
     pub schema_validate: Option<bool>,
-    /// `Some(None)` removes the limit.
     pub retention_ms: Option<Option<u64>>,
     pub retention_bytes: Option<Option<u64>>,
-    /// Grows the topic to this many partitions. Partitions are never removed.
     pub partitions: Option<u32>,
-    /// A node for each added partition. Empty lets placement choose.
     pub owners: Vec<i32>,
 }
 
 impl UpdateTopicCommand {
-    /// Whether the command changes nothing.
     pub fn is_empty(&self) -> bool {
         self.schema_name.is_none()
             && self.schema_validate.is_none()
@@ -264,6 +260,30 @@ impl UpdateTopicCommand {
             ));
         }
         Ok(())
+    }
+
+    pub fn apply(&self, mut topic: Topic) -> Topic {
+        match &self.schema_name {
+            Some(Some(schema_name)) => topic.schema_name = Some(schema_name.clone()),
+            Some(None) => topic.schema_name = None,
+            None => {}
+        }
+        if let Some(validate) = self.schema_validate {
+            topic.schema_validate = validate;
+        }
+        topic.schema_validate &= topic.schema_name.is_some();
+
+        if let Some(ms) = self.retention_ms {
+            topic.retention.ms = ms;
+        }
+        if let Some(bytes) = self.retention_bytes {
+            topic.retention.bytes = bytes;
+        }
+        if let Some(partitions) = self.partitions {
+            topic.partitions = topic.partitions.max(partitions);
+        }
+
+        topic
     }
 }
 

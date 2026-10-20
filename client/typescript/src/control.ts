@@ -1,23 +1,9 @@
 import { ClientError, type ErrorKind } from './error'
 import { RetryPolicy } from './retry'
 import { header, type Http } from './transport/http'
-import { parseOptionalUint, retryableError } from './util'
-import type {
-  CallOptions,
-  ConfigUpdate,
-  CreateOptions,
-  PutSchemaOptions,
-  Schema,
-  StreamInfo,
-  TopicConfig,
-} from './types'
+import { retryableError } from './util'
+import type { CallOptions, ConfigUpdate, PutSchemaOptions, Schema, TopicConfig } from './types'
 
-const DEFAULT_CONTENT_TYPE = 'application/octet-stream'
-
-/**
- * The control routes, `/_streams` and `/_schemas`, which are the same on
- * either protocol.
- */
 export class Control {
   constructor(
     private readonly http: Http,
@@ -104,37 +90,6 @@ export class Control {
   }
 }
 
-/** A create's settings as headers, named with the protocol's prefix. */
-export function createHeaders(prefix: 'Pico' | 'Stream', options?: CreateOptions): {
-  [key: string]: string
-} {
-  const headers: { [key: string]: string } = {
-    'Content-Type': options?.contentType ?? DEFAULT_CONTENT_TYPE,
-  }
-  const set = (name: string, value: number | string | undefined) => {
-    if (value !== undefined) headers[`${prefix}-${name}`] = String(value)
-  }
-  set('Partitions', options?.partitions)
-  set('TTL', options?.ttlSeconds)
-  set('Expires-At', options?.expiresAt)
-  set('Retention-Ms', options?.retentionMs)
-  set('Retention-Bytes', options?.retentionBytes)
-  set('Schema', options?.schema)
-  if (options?.schemaValidate) set('Schema-Validate', 'true')
-  if (options?.closed) set('Closed', 'true')
-  return headers
-}
-
-/** Fills the settings a head reports into `info`. */
-export function readSettings(response: Response, prefix: 'Pico' | 'Stream', info: StreamInfo): void {
-  const retentionMs = parseOptionalUint(header(response, `${prefix}-Retention-Ms`))
-  if (retentionMs !== undefined) info.retentionMs = retentionMs
-  const retentionBytes = parseOptionalUint(header(response, `${prefix}-Retention-Bytes`))
-  if (retentionBytes !== undefined) info.retentionBytes = retentionBytes
-  const schema = header(response, `${prefix}-Schema`)
-  if (schema !== undefined) info.schema = schema
-}
-
 function decodeConfig(body: unknown): TopicConfig {
   const node = (body ?? {}) as { [key: string]: unknown }
   const config: TopicConfig = {
@@ -148,7 +103,6 @@ function decodeConfig(body: unknown): TopicConfig {
   return config
 }
 
-/** Control route errors are `{"error": "<message>"}` on either protocol. */
 async function expectControl(response: Response, expected: number[]): Promise<Response> {
   if (expected.includes(response.status)) return response
 

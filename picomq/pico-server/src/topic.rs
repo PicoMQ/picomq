@@ -4,8 +4,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use picomq_common::now_ms;
 
 use crate::codec::{
-    expect_end, expect_version, get_bytes, get_i64, get_opt_i64, get_opt_str, get_str, get_u8,
-    get_u32, put_opt_i64, put_opt_str, put_str,
+    expect_end, expect_version, get_bytes, get_i64, get_opt_i64, get_opt_str, get_opt_u64, get_str,
+    get_u8, get_u32, put_opt_i64, put_opt_str, put_opt_u64, put_str,
 };
 use crate::error::{ErrorKind, ServiceError};
 use crate::retention::Retention;
@@ -156,8 +156,8 @@ impl Topic {
         }
         put_opt_str(&mut buf, self.schema_name.as_deref());
         buf.put_u8(self.schema_validate as u8);
-        put_opt_i64(&mut buf, self.retention.ms.map(|ms| ms as i64));
-        put_opt_i64(&mut buf, self.retention.bytes.map(|bytes| bytes as i64));
+        put_opt_u64(&mut buf, self.retention.ms);
+        put_opt_u64(&mut buf, self.retention.bytes);
         buf.freeze()
     }
 
@@ -184,8 +184,8 @@ impl Topic {
         let schema_name = get_opt_str(&mut buf)?;
         let schema_validate = get_u8(&mut buf)? == 1;
         let retention = Retention {
-            ms: get_opt_i64(&mut buf)?.map(|ms| ms as u64),
-            bytes: get_opt_i64(&mut buf)?.map(|bytes| bytes as u64),
+            ms: get_opt_u64(&mut buf)?,
+            bytes: get_opt_u64(&mut buf)?,
         };
         expect_end(buf, "topic")?;
 

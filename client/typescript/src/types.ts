@@ -62,11 +62,6 @@ export interface StreamInfo {
   kafkaTopic?: string
 }
 
-/**
- * A new topic's settings. Unset fields take the server's defaults: one
- * partition, application/octet-stream, no expiry, unlimited retention, and
- * no schema.
- */
 export interface CreateOptions extends CallOptions {
   contentType?: string
   partitions?: number
@@ -79,7 +74,6 @@ export interface CreateOptions extends CallOptions {
   closed?: boolean
 }
 
-/** A topic's settings as `/_streams` reports them. */
 export interface TopicConfig {
   schema?: string
   schemaValidate: boolean
@@ -102,7 +96,6 @@ export interface ConfigUpdate {
 }
 
 export interface PutSchemaOptions extends CallOptions {
-  /** Without one, the server takes the format from the name's extension. */
   contentType?: string
 }
 

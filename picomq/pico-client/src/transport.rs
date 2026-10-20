@@ -1,7 +1,3 @@
-//! The HTTP plumbing both protocol clients share: building wire requests,
-//! following ownership redirects, and the control routes, `/_streams` and
-//! `/_schemas`, which are the same on either protocol.
-
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -14,7 +10,6 @@ use reqwest::header::HeaderMap;
 use crate::error::{ClientError, ErrorKind, Result};
 use crate::routes::Routes;
 
-/// Turns a refused response into the protocol's error.
 pub(crate) type Decode = fn(u16, &HeaderMap, &str) -> WireError;
 
 #[derive(Clone)]

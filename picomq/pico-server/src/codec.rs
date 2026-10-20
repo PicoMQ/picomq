@@ -19,6 +19,11 @@ pub(crate) fn put_opt_i64(buf: &mut BytesMut, value: Option<i64>) {
     buf.put_i64(value.unwrap_or(0));
 }
 
+pub(crate) fn put_opt_u64(buf: &mut BytesMut, value: Option<u64>) {
+    buf.put_u8(value.is_some() as u8);
+    buf.put_u64(value.unwrap_or(0));
+}
+
 pub(crate) fn get_u8(buf: &mut &[u8]) -> Result<u8, ServiceError> {
     ensure(buf, 1)?;
     Ok(buf.get_u8())
@@ -42,6 +47,11 @@ pub(crate) fn get_u32(buf: &mut &[u8]) -> Result<u32, ServiceError> {
 pub(crate) fn get_i64(buf: &mut &[u8]) -> Result<i64, ServiceError> {
     ensure(buf, 8)?;
     Ok(buf.get_i64())
+}
+
+pub(crate) fn get_u64(buf: &mut &[u8]) -> Result<u64, ServiceError> {
+    ensure(buf, 8)?;
+    Ok(buf.get_u64())
 }
 
 pub(crate) fn get_bytes<const N: usize>(buf: &mut &[u8]) -> Result<[u8; N], ServiceError> {
@@ -76,6 +86,13 @@ pub(crate) fn get_opt_str(buf: &mut &[u8]) -> Result<Option<String>, ServiceErro
 pub(crate) fn get_opt_i64(buf: &mut &[u8]) -> Result<Option<i64>, ServiceError> {
     let present = get_u8(buf)? == 1;
     let value = get_i64(buf)?;
+
+    Ok(present.then_some(value))
+}
+
+pub(crate) fn get_opt_u64(buf: &mut &[u8]) -> Result<Option<u64>, ServiceError> {
+    let present = get_u8(buf)? == 1;
+    let value = get_u64(buf)?;
 
     Ok(present.then_some(value))
 }

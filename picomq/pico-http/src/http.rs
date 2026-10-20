@@ -119,7 +119,6 @@ pub(crate) fn parse_strict_u64_header(
     parse_strict_u64(header_str(headers, name), message)
 }
 
-/// A partition count on create. Absent means one.
 pub(crate) fn partitions_header(headers: &HeaderMap, name: &str) -> Result<u32, ServiceError> {
     let message = format!("invalid {name}");
     match parse_strict_u64_header(headers, name, &message)? {
@@ -128,7 +127,6 @@ pub(crate) fn partitions_header(headers: &HeaderMap, name: &str) -> Result<u32, 
     }
 }
 
-/// Retention limits on create, from the protocol's two headers.
 pub(crate) fn retention_headers(
     headers: &HeaderMap,
     ms: &str,

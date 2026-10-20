@@ -2472,7 +2472,6 @@ async fn timestamp_lookups_skip_records_trimmed_inside_a_batch() {
     node.close().await;
 }
 
-/// A node that uploads its WAL every 100 ms, so appends reach objects quickly.
 async fn uploading_node() -> PicoNode {
     let (sink, views) = LocalSink::new();
     let engine = s3stream::Config {
@@ -2482,7 +2481,6 @@ async fn uploading_node() -> PicoNode {
     start_engine(1, Arc::new(sink), views, engine).await
 }
 
-/// Appends `value`, then waits until the stream holds `objects` objects.
 async fn append_object(node: &PicoNode, name: &str, value: &[u8], objects: usize) -> u64 {
     let topics = node.topics();
     topics

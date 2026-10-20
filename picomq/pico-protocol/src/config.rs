@@ -8,7 +8,6 @@ use crate::wire::{WireRequest, stream_path};
 
 pub const STREAMS_PATH_PREFIX: &str = "/_streams";
 
-/// A topic's settings, as `/_streams` reports them.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicConfig {
     pub schema: Option<String>,
@@ -64,7 +63,6 @@ pub struct ConfigUpdate {
     pub schema_validate: Option<bool>,
     pub retention_ms: Option<Option<u64>>,
     pub retention_bytes: Option<Option<u64>>,
-    /// Grows the topic to this many partitions.
     pub partitions: Option<u32>,
 }
 
@@ -126,7 +124,6 @@ fn config_path(stream: &str) -> String {
     format!("{STREAMS_PATH_PREFIX}{}", stream_path(stream))
 }
 
-/// A retention limit: absent is `None`, `null` is `Some(None)`.
 fn limit(node: &Map<String, Value>, key: &str) -> Result<Option<Option<u64>>, CodecError> {
     match node.get(key) {
         None => Ok(None),

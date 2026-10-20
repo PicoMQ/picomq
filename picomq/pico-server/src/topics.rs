@@ -306,46 +306,16 @@ impl Topics {
         let _exclusive = lock.write().await;
         let topic = self.require_live(name.canonical()).await?;
 
-        let added = match command.partitions {
-            Some(partitions) => Some(added_partitions(&topic, partitions, &command.owners)?),
-            None => None,
-        };
-        if let Some(added) = &added {
-            self.provision(topic.id, added.clone(), &command.owners, None)
-                .await?;
-        }
+        let added = command
+            .partitions
+            .map(|partitions| added_partitions(&topic, partitions, &command.owners))
+            .transpose()?
+            .unwrap_or_default();
+        self.provision(topic.id, added.clone(), &command.owners, None)
+            .await?;
 
-        let updated = self
-            .modify(&topic, |mut topic| {
-                match &command.schema_name {
-                    Some(Some(schema_name)) => topic.schema_name = Some(schema_name.clone()),
-                    Some(None) => {
-                        topic.schema_name = None;
-                        topic.schema_validate = false;
-                    }
-                    None => {}
-                }
-                if let Some(validate) = command.schema_validate {
-                    topic.schema_validate = validate;
-                }
-                if topic.schema_name.is_none() {
-                    topic.schema_validate = false;
-                }
-                if let Some(ms) = command.retention_ms {
-                    topic.retention.ms = ms;
-                }
-                if let Some(bytes) = command.retention_bytes {
-                    topic.retention.bytes = bytes;
-                }
-                if let Some(partitions) = command.partitions {
-                    topic.partitions = topic.partitions.max(partitions);
-                }
-                topic
-            })
-            .await;
-        if updated.is_err()
-            && let Some(added) = added
-        {
+        let updated = self.modify(&topic, |topic| command.apply(topic)).await;
+        if updated.is_err() {
             self.unprovision(topic.id, added).await;
         }
 
@@ -635,7 +605,6 @@ impl Topics {
         mut leadership: tokio::sync::watch::Receiver<bool>,
         tick: Duration,
     ) -> tokio::task::JoinHandle<()> {
-        const PAGE: usize = 256;
         let topics = self.clone();
 
         tokio::spawn(async move {
@@ -645,19 +614,8 @@ impl Topics {
                     continue;
                 }
 
-                let page =
-                    topics
-                        .views
-                        .load()
-                        .state
-                        .list_kv_page(TOPIC_PREFIX, cursor.as_deref(), PAGE);
-                cursor = page.last().map(|(key, _)| key.clone());
-
                 let now = now_ms();
-                for (_, value) in page {
-                    let Ok(topic) = Topic::decode(&value) else {
-                        continue;
-                    };
+                for (topic, value) in topics.page(&mut cursor) {
                     if topic.expired(now) {
                         topics.expire(&topic, &value).await;
                     }
@@ -666,10 +624,7 @@ impl Topics {
         })
     }
 
-    /// Runs on every node: trims the partitions this node owns down to their
-    /// topic's retention. Topics without retention are skipped.
     pub fn spawn_retention_sweep(self: &Arc<Self>, tick: Duration) -> tokio::task::JoinHandle<()> {
-        const PAGE: usize = 256;
         let topics = self.clone();
 
         tokio::spawn(async move {
@@ -677,19 +632,8 @@ impl Topics {
             loop {
                 tokio::time::sleep(tick).await;
 
-                let page =
-                    topics
-                        .views
-                        .load()
-                        .state
-                        .list_kv_page(TOPIC_PREFIX, cursor.as_deref(), PAGE);
-                cursor = page.last().map(|(key, _)| key.clone());
-
                 let now = now_ms();
-                for (_, value) in page {
-                    let Ok(topic) = Topic::decode(&value) else {
-                        continue;
-                    };
+                for (topic, _) in topics.page(&mut cursor) {
                     if topic.retention.is_unlimited() {
                         continue;
                     }
@@ -708,6 +652,21 @@ impl Topics {
                 }
             }
         })
+    }
+
+    fn page(&self, cursor: &mut Option<String>) -> Vec<(Topic, Bytes)> {
+        const PAGE: usize = 256;
+
+        let page = self
+            .views
+            .load()
+            .state
+            .list_kv_page(TOPIC_PREFIX, cursor.as_deref(), PAGE);
+        *cursor = page.last().map(|(key, _)| key.clone());
+
+        page.into_iter()
+            .filter_map(|(_, value)| Some((Topic::decode(&value).ok()?, value)))
+            .collect()
     }
 
     fn existing(
@@ -975,9 +934,9 @@ impl Topics {
             .schema_registry_required()?
             .schema(name)
             .await
-            .map_err(|e| schema_error(e.to_string()))?
+            .map_err(|e| bad_request(e.to_string()))?
             .ok_or_else(|| {
-                schema_error(format!("bound schema {name} is missing from the registry"))
+                bad_request(format!("bound schema {name} is missing from the registry"))
             })?;
 
         schema.validate(batch).map_err(|e| {
@@ -989,9 +948,9 @@ impl Topics {
         self.schema_registry_required()?
             .schema(schema_name)
             .await
-            .map_err(|e| schema_error(e.to_string()))?
+            .map_err(|e| bad_request(e.to_string()))?
             .map(|_| ())
-            .ok_or_else(|| schema_error(format!("unknown schema {schema_name}")))
+            .ok_or_else(|| bad_request(format!("unknown schema {schema_name}")))
     }
 
     fn schema_registry_required(
@@ -999,7 +958,7 @@ impl Topics {
     ) -> Result<&Arc<dyn picomq_schema::SchemaStore>, ServiceError> {
         self.schemas
             .as_ref()
-            .ok_or_else(|| schema_error("schema registry is not configured"))
+            .ok_or_else(|| bad_request("schema registry is not configured"))
     }
 }
 
@@ -1142,38 +1101,34 @@ fn schema_batch(records: &[LogRecord]) -> picomq_schema::Batch {
     }
 }
 
-fn schema_error(message: impl Into<String>) -> ServiceError {
-    ServiceError::with_message(ErrorKind::BadRequest, None, false, message.into())
+fn bad_request(message: impl Into<String>) -> ServiceError {
+    ServiceError::with_message(ErrorKind::BadRequest, None, false, message)
 }
 
-/// The partitions growing `topic` to `partitions` adds. A topic only grows,
-/// and a sealed one does not.
 fn added_partitions(
     topic: &Topic,
     partitions: u32,
     owners: &[i32],
 ) -> Result<Range<u32>, ServiceError> {
-    let bad =
-        |message: String| ServiceError::with_message(ErrorKind::BadRequest, None, false, message);
     if topic.closed {
         return Err(ServiceError::kind(ErrorKind::Closed));
     }
     if partitions <= topic.partitions {
-        return Err(bad(format!(
+        return Err(bad_request(format!(
             "topic already has {} partitions, it can only grow",
             topic.partitions
         )));
     }
     if partitions - topic.partitions > MAX_NEW_PARTITIONS {
-        return Err(bad(format!(
+        return Err(bad_request(format!(
             "at most {MAX_NEW_PARTITIONS} partitions can be added at once"
         )));
     }
 
     let added = topic.partitions..partitions;
     if !owners.is_empty() && owners.len() != added.len() {
-        return Err(bad(
-            "owners must name a node for every added partition".to_owned()
+        return Err(bad_request(
+            "owners must name a node for every added partition",
         ));
     }
 

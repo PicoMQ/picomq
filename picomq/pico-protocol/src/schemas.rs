@@ -4,12 +4,7 @@ use http::{HeaderMap, Method};
 use crate::wire::{WireRequest, header_string, stream_path};
 
 pub const SCHEMAS_PATH_PREFIX: &str = "/_schemas";
-pub const CT_JSON_SCHEMA: &str = "application/schema+json";
-pub const CT_AVRO: &str = "application/avro";
-pub const CT_PROTOBUF: &str = "application/x-protobuf";
 
-/// Registers a schema. Without a content type the server takes the format
-/// from the name's extension.
 #[derive(Debug, Clone)]
 pub struct PutSchemaRequest<'a> {
     pub name: &'a str,

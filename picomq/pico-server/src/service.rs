@@ -634,8 +634,6 @@ impl S3StreamService {
         Ok(live_start_offset(stream.as_ref()))
     }
 
-    /// Trims a log this node owns down to what `retention` keeps. An open
-    /// stream is trimmed through the engine, a closed one through metadata.
     pub async fn apply_retention(
         &self,
         log: &Log,
@@ -661,13 +659,12 @@ impl S3StreamService {
             return Ok(());
         }
 
-        match row.state {
-            StreamState::Opened => self.trim(log, start).await.map(|_| ()),
-            StreamState::Closed => {
-                self.streams
-                    .trim_closed(row.stream_id, row.epoch, start)
-                    .await
+        match (row.state, u64::try_from(row.epoch)) {
+            (StreamState::Opened, _) => self.trim(log, start).await.map(|_| ()),
+            (StreamState::Closed, Ok(epoch)) => {
+                self.streams.trim_closed(row.stream_id, epoch, start).await
             }
+            (StreamState::Closed, Err(_)) => Ok(()),
         }
     }
 

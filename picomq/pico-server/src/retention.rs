@@ -1,8 +1,3 @@
-//! How much of a partition a topic keeps: data written within `ms`, and at
-//! most `bytes` of it. Either limit may be unset. Retention removes whole
-//! committed objects, oldest first, and never touches records still only in
-//! the WAL.
-
 use picomq_metadata::ObjectSpan;
 
 use crate::error::{ErrorKind, ServiceError};
@@ -31,8 +26,6 @@ impl Retention {
         Ok(())
     }
 
-    /// The start offset that drops every expired object, given a partition's
-    /// committed objects in offset order. `None` when nothing has expired.
     pub fn start_offset(&self, spans: &[ObjectSpan], now_ms: i64) -> Option<u64> {
         let mut kept = spans;
 
