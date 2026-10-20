@@ -1,4 +1,5 @@
 export const H_STREAM_NEXT_OFFSET = 'Stream-Next-Offset'
+export const H_STREAM_PARTITIONS = 'Stream-Partitions'
 export const H_STREAM_UP_TO_DATE = 'Stream-Up-To-Date'
 export const H_STREAM_TTL = 'Stream-TTL'
 export const H_STREAM_EXPIRES_AT = 'Stream-Expires-At'

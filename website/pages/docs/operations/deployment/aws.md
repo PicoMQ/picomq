@@ -117,6 +117,10 @@ curl -H "Authorization: Bearer <bootstrap-token>" \
 
 Admin API and dashboard listen on `9090` on the tasks. They are not published on either load balancer. Reach them with a tunnel, sidecar, or security-group path into the task ENIs, same idea as keeping Fly's admin listener private.
 
+## Deploys
+
+Each node is its own ECS service with one task, deployed with a minimum healthy percent of `0` and a maximum of `100`, so a deploy stops the old task before starting the new one and two tasks never share a node id. ECS stops a task with `SIGTERM` and waits `30` seconds by default, more than the `5` second drain, so the node hands its streams off before it exits. See [Docker](/docs/operations/deployment/docker#restarts-and-upgrades) for what clients see.
+
 ## Existing VPC
 
 Set both `vpc_id` and at least two `private_subnet_ids`. Those subnets need a path to the internet for image pulls (NAT or equivalent) unless you mirror the image privately. Set `create_s3_endpoint = true` if you want a gateway endpoint attached to the private route tables.

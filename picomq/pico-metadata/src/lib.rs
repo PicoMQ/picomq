@@ -17,12 +17,13 @@ pub mod state;
 pub mod view;
 
 pub use apply::apply;
-pub use command::{MetadataCommand, MetadataResult};
+pub use command::{MetadataCommand, MetadataResult, Proposer};
 pub use error::MetadataError;
 pub use lifecycle::{MetadataLifecycle, ObjectCleaner};
 pub use manager::{
     MetadataKvClient, MetadataNodeHandle, MetadataObjectManager, MetadataStreamManager,
+    Registration,
 };
 pub use sink::{CommandSink, LocalSink, SinkStats, SnapshotStats};
-pub use state::{MetadataState, StreamOffsetKey};
+pub use state::{MetadataState, NodeRow, StreamOffsetKey};
 pub use view::{MetadataView, ViewPublisher};

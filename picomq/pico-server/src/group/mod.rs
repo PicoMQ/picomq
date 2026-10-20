@@ -6,11 +6,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
+use crate::log::Log;
+use crate::partition::Partition;
+use crate::topics::Topics;
 use crate::{
-    AppendCommand, CreateCommand, ErrorKind, LogRecord, MetadataOwnershipService, OffsetToken,
-    OwnershipService, S3StreamService,
+    ErrorKind, LogRecord, MetadataOwnershipService, OffsetToken, OwnershipService, S3StreamService,
 };
 use bytes::Bytes;
+use picomq_metadata::ViewPublisher;
 use tokio::sync::{Mutex, oneshot};
 
 pub type StreamName = Arc<str>;
@@ -35,26 +38,29 @@ pub enum GroupError {
     Storage,
     #[error("group was not found")]
     GroupNotFound,
+    #[error("group still has members")]
+    NonEmpty,
     #[error("the member ID assigned by the coordinator is required")]
     MemberIdRequired,
     #[error("group capacity was exceeded")]
     CapacityExceeded,
     #[error("static group member was fenced")]
     FencedInstance,
+    #[error("a newer join from the same member replaced this one")]
+    Superseded,
 }
 
 pub use offsets::{CommittedOffset, OffsetCommit};
 pub use state::GroupState;
 
-use offsets::{OffsetTable, decode_into, encode_commits, encode_snapshot};
+use offsets::{OffsetTable, decode_into, encode_commits, encode_deletes, encode_snapshot};
 use state::{
-    Group, MAX_MEMBERS_PER_GROUP, MAX_STREAMS_PER_GROUP, MAX_SUBSCRIPTION_ENTRIES_PER_GROUP, Mode,
-    Names, Rebalance, Role, compatible, complete_rebalance, evict_idle_groups, group_stream_name,
-    member_from_input, mode_of, new_member_id, remove_member, send_join_completions,
-    validate_group_id, validate_join, validate_stream_name,
+    Group, MAX_MEMBERS_PER_GROUP, MAX_PARTITIONS_PER_GROUP, MAX_STREAMS_PER_GROUP,
+    MAX_SUBSCRIPTION_ENTRIES_PER_GROUP, Mode, Rebalance, Role, compatible, depart,
+    evict_idle_groups, member_from_input, mode_of, new_member_id, settle, validate_group_id,
+    validate_join,
 };
 
-const GROUP_CONTENT_TYPE: &str = "application/vnd.picomq.group-state";
 const OFFSET_SNAPSHOT_INTERVAL: u64 = 64;
 
 #[derive(Debug, Clone)]
@@ -185,8 +191,9 @@ pub struct ListedGroup {
 pub struct GroupCoordinator {
     node_id: i32,
     service: Arc<S3StreamService>,
+    topics: Arc<Topics>,
     ownership: Arc<MetadataOwnershipService>,
-    views: Arc<picomq_metadata::ViewPublisher>,
+    views: Arc<ViewPublisher>,
     groups: StdMutex<HashMap<String, Arc<Mutex<Group>>>>,
 }
 
@@ -194,28 +201,29 @@ impl GroupCoordinator {
     pub fn new(
         node_id: i32,
         service: Arc<S3StreamService>,
+        topics: Arc<Topics>,
         ownership: Arc<MetadataOwnershipService>,
-        views: Arc<picomq_metadata::ViewPublisher>,
+        views: Arc<ViewPublisher>,
     ) -> Arc<Self> {
         Arc::new(Self {
             node_id,
             service,
+            topics,
             ownership,
             views,
             groups: StdMutex::new(HashMap::new()),
         })
     }
 
-    pub fn stream_name(group_id: &str) -> String {
-        group_stream_name(group_id)
+    pub fn log(group_id: &str) -> Log {
+        Log::Group(group_id.to_owned())
     }
 
     pub async fn find_coordinator(&self, group_id: &str) -> Result<i32, GroupError> {
         validate_group_id(group_id)?;
-        let stream = group_stream_name(group_id);
         let owner = self
             .ownership
-            .owner_of(&stream)
+            .owner_of(&Self::log(group_id))
             .await
             .map_err(|_| GroupError::CoordinatorNotAvailable)?;
         if owner.local {
@@ -235,7 +243,7 @@ impl GroupCoordinator {
             Err(code) => return JoinOutcome::error(code, input.member_id),
         };
 
-        let (receiver, completion, schedule) = {
+        let (receiver, schedule) = {
             let mut state = group.lock().await;
             let now = Instant::now();
             state.expire_members(now);
@@ -303,7 +311,7 @@ impl GroupCoordinator {
                     .map(|(id, _)| id.clone())
                     .collect();
                 for id in stale {
-                    remove_member(&mut state, &id);
+                    depart(&mut state, &id, GroupError::FencedInstance);
                 }
             }
 
@@ -342,13 +350,13 @@ impl GroupCoordinator {
             let rebalance = state.rebalance.as_mut().expect("rebalance initialized");
             rebalance.expected.insert(member_id.clone());
             rebalance.joined.insert(member_id.clone());
-            rebalance.waiters.insert(member_id, sender);
-            let ready = rebalance.joined == rebalance.expected;
-            let completion = ready.then(|| complete_rebalance(&mut state, false));
-            (receiver, completion, schedule)
+            if let Some(previous) = rebalance.waiters.insert(member_id.clone(), sender) {
+                let _ = previous.send(JoinOutcome::error(GroupError::Superseded, member_id));
+            }
+            settle(&mut state);
+            (receiver, schedule)
         };
 
-        send_join_completions(completion);
         if let Some((id, deadline)) = schedule {
             let coordinator = Arc::clone(self);
             let group_id = input.group_id.clone();
@@ -356,9 +364,7 @@ impl GroupCoordinator {
                 coordinator.watch_rebalance(&group_id, id, deadline).await;
             });
         }
-        receiver.await.unwrap_or_else(|_| {
-            JoinOutcome::error(GroupError::RebalanceInProgress, input.member_id)
-        })
+        receiver.await.expect("a pending join is always answered")
     }
 
     /// Completes a rebalance as soon as every surviving member has joined,
@@ -373,38 +379,38 @@ impl GroupCoordinator {
             return;
         };
         loop {
-            let (completion, next_wake) = {
+            let wake = {
                 let mut state = group.lock().await;
-                if state.rebalance.as_ref().map(|r| r.id) != Some(rebalance_id) {
-                    return;
-                }
                 let now = Instant::now();
                 state.expire_members(now);
-                let Some(rebalance) = state.rebalance.as_ref() else {
+                let Some(rebalance) = state.rebalance.as_ref().filter(|r| r.id == rebalance_id)
+                else {
                     return;
                 };
-                if rebalance.joined == rebalance.expected {
-                    (Some(complete_rebalance(&mut state, false)), None)
-                } else if now >= deadline {
-                    (Some(complete_rebalance(&mut state, true)), None)
-                } else {
-                    let next_expiry = rebalance
+
+                if now >= deadline {
+                    let missing: Vec<String> = rebalance
                         .expected
                         .difference(&rebalance.joined)
-                        .filter_map(|id| state.members.get(id))
-                        .map(|member| member.last_heartbeat + member.session_timeout)
-                        .min()
-                        .unwrap_or(deadline);
-                    (None, Some(next_expiry.min(deadline)))
+                        .cloned()
+                        .collect();
+                    for id in missing {
+                        depart(&mut state, &id, GroupError::UnknownMember);
+                    }
+                    settle(&mut state);
+                    return;
                 }
+
+                rebalance
+                    .expected
+                    .difference(&rebalance.joined)
+                    .filter_map(|id| state.members.get(id))
+                    .map(|member| member.last_heartbeat + member.session_timeout)
+                    .min()
+                    .unwrap_or(deadline)
+                    .min(deadline)
             };
-            if let Some(completion) = completion {
-                send_join_completions(Some(completion));
-                return;
-            }
-            if let Some(wake) = next_wake {
-                tokio::time::sleep_until(tokio::time::Instant::from_std(wake)).await;
-            }
+            tokio::time::sleep_until(tokio::time::Instant::from_std(wake)).await;
         }
     }
 
@@ -448,7 +454,7 @@ impl GroupCoordinator {
                 state.phase = GroupState::Stable;
                 let waiters = std::mem::take(&mut state.sync_waiters);
                 for (id, sender) in waiters {
-                    let _ = sender.send(sync_outcome(&state, &id));
+                    let _ = sender.send(Ok(sync_outcome(&state, &id)));
                 }
                 return Ok(sync_outcome(&state, &input.member_id));
             }
@@ -458,8 +464,8 @@ impl GroupCoordinator {
             (receiver, timeout)
         };
         match tokio::time::timeout(timeout, receiver).await {
-            Ok(Ok(outcome)) => Ok(outcome),
-            _ => Err(GroupError::RebalanceInProgress),
+            Ok(answer) => answer.expect("a pending sync is always answered"),
+            Err(_) => Err(GroupError::RebalanceInProgress),
         }
     }
 
@@ -546,7 +552,7 @@ impl GroupCoordinator {
                     Err(GroupError::FencedInstance)
                 }
                 Some(_) => {
-                    remove_member(&mut state, member_id);
+                    depart(&mut state, member_id, GroupError::UnknownMember);
                     removed_any = true;
                     Ok(())
                 }
@@ -554,20 +560,7 @@ impl GroupCoordinator {
             results.push(result);
         }
         if removed_any {
-            if let Some(rebalance) = state.rebalance.take() {
-                for (_, sender) in rebalance.waiters {
-                    let _ = sender.send(JoinOutcome::error(
-                        GroupError::RebalanceInProgress,
-                        String::new(),
-                    ));
-                }
-            }
-            if state.members.is_empty() {
-                state.reset_empty();
-            } else {
-                state.phase = GroupState::PreparingRebalance;
-                state.names.sweep();
-            }
+            settle(&mut state);
         }
         results
     }
@@ -578,11 +571,8 @@ impl GroupCoordinator {
         fence: Option<MemberFence<'_>>,
         commits: &[OffsetCommit],
     ) -> Result<(), GroupError> {
-        commits
-            .iter()
-            .try_for_each(|commit| validate_stream_name(&commit.stream))?;
         let group = self.local_group(group_id, true).await?;
-        let stream = group_stream_name(group_id);
+        let log = Self::log(group_id);
         let mut state = group.lock().await;
         let now = Instant::now();
         state.expire_members(now);
@@ -596,51 +586,102 @@ impl GroupCoordinator {
         if commits.is_empty() {
             return Ok(());
         }
-        let new_names = commits
+        let new_partitions = commits
             .iter()
-            .filter(|commit| !state.names.contains(&commit.stream))
-            .map(|commit| commit.stream.as_str())
+            .filter(|commit| !state.offsets.contains_key(&commit.partition))
+            .map(|commit| commit.partition)
             .collect::<BTreeSet<_>>()
             .len();
-        if state.names.len() + new_names > MAX_STREAMS_PER_GROUP {
+        if state.offsets.len() + new_partitions > MAX_PARTITIONS_PER_GROUP {
             return Err(GroupError::CapacityExceeded);
         }
-        if let Err(error) = self
-            .service
-            .append(AppendCommand {
-                name: stream.clone(),
-                records: vec![LogRecord::value(encode_commits(commits))],
-                content_type: Some(GROUP_CONTENT_TYPE.to_owned()),
-                ..Default::default()
-            })
-            .await
-        {
-            return Err(match error.kind {
-                ErrorKind::NotFound | ErrorKind::Fenced => GroupError::NotCoordinator,
-                ErrorKind::Durability => GroupError::Storage,
-                _ => GroupError::InvalidRequest,
-            });
-        }
+
+        self.record(&log, encode_commits(commits)).await?;
         for commit in commits {
-            let name = state.names.intern(&commit.stream);
-            state.offsets.insert(name, commit.value.clone());
+            state.offsets.insert(commit.partition, commit.value.clone());
         }
-        state.appends_since_snapshot += 1;
-        if state.appends_since_snapshot >= OFFSET_SNAPSHOT_INTERVAL {
-            self.snapshot_and_trim(&stream, &mut state).await;
-        }
+        self.recorded(&log, &mut state).await;
+
         Ok(())
     }
 
-    async fn snapshot_and_trim(&self, stream: &str, state: &mut Group) {
+    pub async fn delete_offsets(
+        &self,
+        group_id: &str,
+        partitions: &[Partition],
+    ) -> Result<(), GroupError> {
+        let group = self.local_group(group_id, false).await?;
+        let log = Self::log(group_id);
+        let mut state = group.lock().await;
+        state.last_activity = Instant::now();
+
+        let committed: Vec<Partition> = partitions
+            .iter()
+            .filter(|partition| state.offsets.contains_key(partition))
+            .copied()
+            .collect();
+        if committed.is_empty() {
+            return Ok(());
+        }
+
+        self.record(&log, encode_deletes(&committed)).await?;
+        for partition in &committed {
+            state.offsets.remove(partition);
+        }
+        self.recorded(&log, &mut state).await;
+
+        Ok(())
+    }
+
+    pub async fn delete(&self, group_id: &str) -> Result<(), GroupError> {
+        let group = self.local_group(group_id, false).await?;
+        let mut state = group.lock().await;
+        state.expire_members(Instant::now());
+        if !state.members.is_empty() {
+            return Err(GroupError::NonEmpty);
+        }
+
+        self.service.destroy_log(&Self::log(group_id)).await;
+        self.groups.lock().expect("group map lock").remove(group_id);
+
+        Ok(())
+    }
+
+    async fn record(&self, log: &Log, payload: Bytes) -> Result<(), GroupError> {
+        self.service
+            .append_records(log, vec![LogRecord::value(payload)])
+            .await
+            .map(|_| ())
+            .map_err(|error| match error.kind {
+                ErrorKind::NotFound | ErrorKind::Fenced => GroupError::NotCoordinator,
+                ErrorKind::Durability => GroupError::Storage,
+                _ => GroupError::InvalidRequest,
+            })
+    }
+
+    async fn recorded(&self, log: &Log, state: &mut Group) {
+        state.appends_since_snapshot += 1;
+        if state.appends_since_snapshot >= OFFSET_SNAPSHOT_INTERVAL {
+            self.snapshot_and_trim(log, state).await;
+        }
+    }
+
+    async fn snapshot_and_trim(&self, log: &Log, state: &mut Group) {
+        let mut deleted = BTreeSet::new();
+        for partition in state.offsets.keys() {
+            if !deleted.contains(&partition.topic)
+                && matches!(self.topics.exists(&partition.topic).await, Ok(false))
+            {
+                deleted.insert(partition.topic);
+            }
+        }
+        state
+            .offsets
+            .retain(|partition, _| !deleted.contains(&partition.topic));
+
         let Ok(appended) = self
             .service
-            .append(AppendCommand {
-                name: stream.to_owned(),
-                records: vec![LogRecord::value(encode_snapshot(&state.offsets))],
-                content_type: Some(GROUP_CONTENT_TYPE.to_owned()),
-                ..Default::default()
-            })
+            .append_records(log, vec![LogRecord::value(encode_snapshot(&state.offsets))])
             .await
         else {
             // Best effort: the delta already committed and the next commit
@@ -648,7 +689,7 @@ impl GroupCoordinator {
             return;
         };
         let newest = appended.next_offset.record_offset().saturating_sub(1);
-        if self.service.trim(stream, newest).await.is_ok() {
+        if self.service.trim(log, newest).await.is_ok() {
             state.appends_since_snapshot = 0;
         }
     }
@@ -656,8 +697,8 @@ impl GroupCoordinator {
     pub async fn fetch_offsets(
         &self,
         group_id: &str,
-        streams: Option<&[String]>,
-    ) -> Result<BTreeMap<String, CommittedOffset>, GroupError> {
+        partitions: Option<&[Partition]>,
+    ) -> Result<BTreeMap<Partition, CommittedOffset>, GroupError> {
         let group = match self.local_group(group_id, false).await {
             Ok(group) => group,
             Err(GroupError::GroupNotFound) => return Ok(BTreeMap::new()),
@@ -665,21 +706,17 @@ impl GroupCoordinator {
         };
         let mut state = group.lock().await;
         state.last_activity = Instant::now();
-        Ok(match streams {
-            Some(streams) => streams
+        Ok(match partitions {
+            Some(partitions) => partitions
                 .iter()
-                .filter_map(|name| {
+                .filter_map(|partition| {
                     state
                         .offsets
-                        .get(name.as_str())
-                        .map(|value| (name.clone(), value.clone()))
+                        .get(partition)
+                        .map(|value| (*partition, value.clone()))
                 })
                 .collect(),
-            None => state
-                .offsets
-                .iter()
-                .map(|(name, value)| (name.to_string(), value.clone()))
-                .collect(),
+            None => state.offsets.clone(),
         })
     }
 
@@ -727,7 +764,13 @@ impl GroupCoordinator {
         })
     }
 
-    pub async fn list(&self) -> Vec<ListedGroup> {
+    /// Every group in the cluster, whichever node coordinates it.
+    pub fn list(&self) -> Vec<String> {
+        Log::groups(&self.views.load().state)
+    }
+
+    /// The groups this node coordinates that have members, with their state.
+    pub async fn coordinated(&self) -> Vec<ListedGroup> {
         let groups: Vec<(String, Arc<Mutex<Group>>)> = {
             self.groups
                 .lock()
@@ -758,13 +801,15 @@ impl GroupCoordinator {
         create: bool,
     ) -> Result<Arc<Mutex<Group>>, GroupError> {
         validate_group_id(group_id)?;
-        let stream = group_stream_name(group_id);
+        let log = Self::log(group_id);
         if create {
-            self.ensure_stream(&stream).await?;
+            self.service
+                .create_local_log(&log)
+                .await
+                .map_err(|_| GroupError::CoordinatorNotAvailable)?;
         } else if self
             .service
-            .lookup_stream_id(&stream)
-            .await
+            .stream_id(&log)
             .map_err(|_| GroupError::NotCoordinator)?
             .is_none()
         {
@@ -772,26 +817,21 @@ impl GroupCoordinator {
         }
         let owner = self
             .ownership
-            .owner_of(&stream)
+            .owner_of(&log)
             .await
             .map_err(|_| GroupError::NotCoordinator)?;
-        if !owner.local {
+        if !owner.local || owner.stream_id.is_none() {
             return Err(GroupError::NotCoordinator);
         }
-        let stream_id = self
-            .service
-            .lookup_stream_id(&stream)
-            .await
-            .map_err(|_| GroupError::NotCoordinator)?
-            .ok_or(GroupError::NotCoordinator)?;
         let epoch = self
-            .views
-            .load()
-            .state
-            .streams
-            .get(&stream_id)
-            .map(|row| row.epoch)
-            .unwrap_or(-1);
+            .service
+            .watermarks(&log)
+            .await
+            .map_err(|error| {
+                tracing::warn!(group = group_id, %error, "group log could not be opened");
+                GroupError::CoordinatorNotAvailable
+            })?
+            .epoch as i64;
 
         let group = {
             let mut groups = self.groups.lock().expect("group map lock");
@@ -802,51 +842,44 @@ impl GroupCoordinator {
                 if groups.len() >= state::MAX_GROUPS {
                     return Err(GroupError::CapacityExceeded);
                 }
-                let group = Arc::new(Mutex::new(Group::loaded(
-                    i64::MIN,
-                    Names::default(),
-                    OffsetTable::new(),
-                    0,
-                )));
+                let group = Arc::new(Mutex::new(Group::loaded(i64::MIN, OffsetTable::new(), 0)));
                 groups.insert(group_id.to_owned(), Arc::clone(&group));
                 group
             }
         };
         let mut state = group.lock().await;
         if state.loaded_epoch != epoch {
-            let (names, offsets, replayed) = self.replay_offsets(&stream).await?;
-            *state = Group::loaded(epoch, names, offsets, replayed);
+            if state.loaded_epoch != i64::MIN {
+                tracing::info!(
+                    group = group_id,
+                    from = state.loaded_epoch,
+                    to = epoch,
+                    members = state.members.len(),
+                    "group log moved to a new epoch, reloading the group"
+                );
+            }
+            let (offsets, replayed) = self.replay_offsets(&log).await?;
+            state.unload();
+            *state = Group::loaded(epoch, offsets, replayed);
         }
         drop(state);
         Ok(group)
     }
 
-    async fn ensure_stream(&self, stream: &str) -> Result<(), GroupError> {
-        self.service
-            .create(CreateCommand {
-                internal: true,
-                ..CreateCommand::new(stream, GROUP_CONTENT_TYPE)
-            })
-            .await
-            .map(|_| ())
-            .map_err(|_| GroupError::CoordinatorNotAvailable)
-    }
-
-    async fn replay_offsets(&self, stream: &str) -> Result<(Names, OffsetTable, u64), GroupError> {
+    async fn replay_offsets(&self, log: &Log) -> Result<(OffsetTable, u64), GroupError> {
         let watermarks = self
             .service
-            .watermarks(stream)
+            .watermarks(log)
             .await
             .map_err(|_| GroupError::NotCoordinator)?;
         let mut cursor = watermarks.log_start_offset;
-        let mut names = Names::default();
         let mut offsets = OffsetTable::new();
         let mut replayed = 0u64;
         while cursor < watermarks.high_watermark {
             let read = self
                 .service
                 .read(
-                    stream,
+                    log,
                     OffsetToken::of_record_offset(cursor),
                     8 * 1024 * 1024,
                     1024,
@@ -857,14 +890,13 @@ impl GroupCoordinator {
                 break;
             }
             for record in read.records {
-                decode_into(&record.record.value, &mut offsets, &mut names)
+                decode_into(&record.record.value, &mut offsets)
                     .map_err(|_| GroupError::NotCoordinator)?;
                 replayed += 1;
             }
             cursor = read.next_offset.record_offset();
         }
-        names.sweep();
-        Ok((names, offsets, replayed))
+        Ok((offsets, replayed))
     }
 }
 

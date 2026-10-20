@@ -7,14 +7,14 @@ use picomq_client::{
     PicoClient, StreamApi,
 };
 use picomq_http::HttpProtocol as ServeProtocol;
-use picomq_runtime::{MetaBackend, ServerConfig};
+use picomq_runtime::{KafkaConfig, MetaBackend, ServerConfig};
 
 async fn start(dir: &std::path::Path) -> (picomq_runtime::PicoServer, Arc<PicoClient>) {
     let server = picomq_runtime::start(ServerConfig {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
         http_protocol: ServeProtocol::Pico,
-        kafka: None,
+        kafka: KafkaConfig::new(SocketAddr::from(([127, 0, 0, 1], 0))),
         meta_backend: MetaBackend::parse("sqlite::memory:").unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
         wal_uri: Some(format!(
@@ -131,7 +131,9 @@ async fn operations_join_commit_fetch_describe_and_leave() {
         Some(joined.assignment.as_slice())
     );
     let listed = client.list_groups().await.unwrap();
-    assert!(listed.iter().any(|g| g.group == "ops"));
+    assert!(listed.contains(&"ops".to_owned()));
+    let occupied = client.delete_group("ops").await.unwrap_err();
+    assert_eq!(occupied.code, "conflict");
 
     client
         .leave_group("ops", &joined.member_id, None)
@@ -140,6 +142,10 @@ async fn operations_join_commit_fetch_describe_and_leave() {
     assert_eq!(client.describe_group("ops").await.unwrap().state, "Empty");
     let gone = client.heartbeat("ops", &fence).await.unwrap_err();
     assert_eq!(gone.code, "unknown_member");
+
+    client.delete_group("ops").await.unwrap();
+    let deleted = client.describe_group("ops").await.unwrap_err();
+    assert_eq!(deleted.code, "not_found");
 
     server.shutdown().await;
 }

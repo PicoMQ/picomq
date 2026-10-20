@@ -40,7 +40,8 @@ pub(super) async fn run(endpoint: &Target, args: BenchArgs) -> Result<i32, Clien
     let topics: Vec<String> = (0..streams)
         .map(|i| format!("bench-{run_id}-{i}"))
         .collect();
-    create_topics(bootstrap, &topics).await?;
+    let partitions = args.partitions.max(1);
+    create_topics(bootstrap, &topics, partitions).await?;
     note(format!(
         "created {} topic{} for kafka bench",
         topics.len(),
@@ -70,6 +71,7 @@ pub(super) async fn run(endpoint: &Target, args: BenchArgs) -> Result<i32, Clien
                 Ok(tokio::spawn(reader(
                     consumer,
                     topic.clone(),
+                    partitions,
                     read.clone(),
                     stop.clone(),
                 )))
@@ -178,14 +180,18 @@ fn consumer(bootstrap: &str, group: &str) -> Result<StreamConsumer, ClientError>
         .map_err(kafka_err)
 }
 
-async fn create_topics(bootstrap: &str, topics: &[String]) -> Result<(), ClientError> {
+async fn create_topics(
+    bootstrap: &str,
+    topics: &[String],
+    partitions: i32,
+) -> Result<(), ClientError> {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", bootstrap)
         .create()
         .map_err(kafka_err)?;
     let new_topics: Vec<NewTopic> = topics
         .iter()
-        .map(|name| NewTopic::new(name, 1, TopicReplication::Fixed(1)))
+        .map(|name| NewTopic::new(name, partitions, TopicReplication::Fixed(1)))
         .collect();
     let results = admin
         .create_topics(new_topics.iter(), &AdminOptions::new())
@@ -302,15 +308,18 @@ async fn writer(
 async fn reader(
     consumer: StreamConsumer,
     topic: String,
+    partitions: i32,
     read: Arc<Counters>,
     stop: Arc<AtomicBool>,
 ) {
     let mut assignment = rdkafka::TopicPartitionList::new();
-    if assignment
-        .add_partition_offset(&topic, 0, rdkafka::Offset::Beginning)
-        .is_err()
-    {
-        return;
+    for partition in 0..partitions {
+        if assignment
+            .add_partition_offset(&topic, partition, rdkafka::Offset::Beginning)
+            .is_err()
+        {
+            return;
+        }
     }
     if consumer.assign(&assignment).is_err() {
         return;

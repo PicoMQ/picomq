@@ -21,6 +21,7 @@ type StreamInfo struct {
 	ContentType string
 	Start       string
 	Next        string
+	Partitions  uint32
 	Closed      bool
 	TTL         time.Duration
 	ExpiresAt   string
@@ -107,11 +108,6 @@ type GroupDescription struct {
 	Generation   int32
 	ProtocolType string
 	Members      []MemberDescription
-}
-
-type GroupSummary struct {
-	Group string
-	State string
 }
 
 type ReadLimits struct {

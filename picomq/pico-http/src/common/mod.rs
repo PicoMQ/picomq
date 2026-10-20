@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
 use picomq_server::ownership::OwnershipService;
-use picomq_server::{ErrorKind, S3StreamService, ServiceError};
+use picomq_server::{ErrorKind, ServiceError, Topics};
 use serde_json::json;
 
 use crate::RoutingMode;
@@ -16,31 +16,69 @@ use crate::RoutingMode;
 pub use schemas::SCHEMA_PATH_PREFIX;
 pub use streams::STREAM_CONFIG_PATH_PREFIX;
 
+/// The stream config and schema routes beside a protocol listener. They
+/// authenticate like that listener's stream routes.
 #[derive(Clone)]
 pub struct CommonState {
-    pub service: Arc<S3StreamService>,
+    pub topics: Arc<Topics>,
     pub ownership: Arc<dyn OwnershipService>,
     pub mode: RoutingMode,
     pub authorizer: Option<Arc<Authorizer>>,
+    pub audience: Audience,
 }
 
 pub fn router(
-    service: Arc<S3StreamService>,
+    topics: Arc<Topics>,
     ownership: Arc<dyn OwnershipService>,
     mode: RoutingMode,
     authorizer: Option<Arc<Authorizer>>,
+    audience: Audience,
     max_request_size: usize,
 ) -> Router {
     let state = CommonState {
-        service,
+        topics,
         ownership,
         mode,
         authorizer,
+        audience,
     };
     schemas::router()
         .merge(streams::router())
         .layer(axum::extract::DefaultBodyLimit::max(max_request_size))
         .with_state(state)
+}
+
+impl CommonState {
+    /// Authorizes `op` on a stream, resolving the caller's name prefix.
+    /// Returns the stored name. Auth off passes the name through.
+    pub(crate) async fn admit_stream(
+        &self,
+        headers: &HeaderMap,
+        op: Operation,
+        name: &str,
+    ) -> Result<String, Box<Response>> {
+        let Some(authorizer) = self.authorizer.as_deref() else {
+            return Ok(name.to_owned());
+        };
+        let caller = crate::auth::authenticate(authorizer, self.audience, headers).await?;
+        let name = caller.resolve(authorizer, name)?;
+        caller.authorize(authorizer, op, Some(&name))?;
+        Ok(name)
+    }
+
+    /// Authorizes `op` on a schema, matched like a stream name.
+    pub(crate) async fn admit_schema(
+        &self,
+        headers: &HeaderMap,
+        op: Operation,
+        name: &str,
+    ) -> Result<(), Box<Response>> {
+        let Some(authorizer) = self.authorizer.as_deref() else {
+            return Ok(());
+        };
+        let caller = crate::auth::authenticate(authorizer, self.audience, headers).await?;
+        caller.authorize(authorizer, op, Some(name))
+    }
 }
 
 /// Bearer-token gate for admin-audience routes. `Ok(None)`: auth off.
@@ -100,8 +138,16 @@ pub(crate) fn auth_error(err: &AuthError) -> Response {
 pub(crate) fn service_error(error: ServiceError) -> Response {
     let status = match error.kind {
         ErrorKind::NotFound => StatusCode::NOT_FOUND,
-        ErrorKind::Conflict => StatusCode::CONFLICT,
-        _ => StatusCode::BAD_REQUEST,
+        ErrorKind::Conflict | ErrorKind::Transferring | ErrorKind::Closed => StatusCode::CONFLICT,
+        ErrorKind::Durability | ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorKind::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        ErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ErrorKind::BadRequest
+        | ErrorKind::CorruptBatch
+        | ErrorKind::SchemaViolation
+        | ErrorKind::Fenced
+        | ErrorKind::SequenceGap
+        | ErrorKind::MatchFailed => StatusCode::BAD_REQUEST,
     };
     (status, Json(json!({"error": error.message}))).into_response()
 }

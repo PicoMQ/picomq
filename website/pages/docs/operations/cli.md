@@ -12,9 +12,15 @@ pico --protocol ds read /streams/orders
 pico --http2 append /streams/orders
 ```
 
-`--endpoint` (`PICO_ENDPOINT`) is the server base URL, defaulting to `http://127.0.0.1:4437`. `--protocol` (`PICO_PROTOCOL`) selects `pico` or `ds`, since the two protocols differ on the wire. `--http2` (`PICO_HTTP2`) speaks HTTP/2 over cleartext, which multiplexes many concurrent appends over one connection.
+| Flag | Variable | Purpose |
+| --- | --- | --- |
+| `--endpoint` | `PICO_ENDPOINT` | The server base URL. Defaults to `http://127.0.0.1:4437` |
+| `--protocol` | `PICO_PROTOCOL` | `pico` or `ds`, since the two differ on the wire. `bench` also takes `kafka` |
+| `--http2` | `PICO_HTTP2` | Speaks HTTP/2 over cleartext, which multiplexes many concurrent appends over one connection |
+| `--profile` | `PICO_PROFILE` | A saved profile to take the defaults from, see [Profiles](#profiles) |
+| `--token` | `PICO_TOKEN` | The bearer credential |
 
-`--token` (`PICO_TOKEN`) is the bearer credential for a server running with auth required, and it rarely belongs on the command line. `pico auth login` stores it instead, in the OS keyring or a private `credentials.toml` next to the config when no keyring is available (`PICO_NO_KEYRING=1` forces the file, the right setting for CI), and every command attaches the stored credential automatically. An explicit flag or variable wins over storage. `pico auth status` shows where the credential lives, its id, and whether the endpoint accepts it, and `pico auth logout` removes it. Getting a token in the first place is covered in [Authentication](/docs/operations/auth).
+The token rarely belongs on the command line. `pico auth login` stores it instead, in the OS keyring or a private `credentials.toml` next to the config when no keyring is available (`PICO_NO_KEYRING=1` forces the file, the right setting for CI), and every command attaches the stored credential automatically. An explicit flag or variable wins over storage. `pico auth status` shows where the credential lives, its id, and whether the endpoint accepts it, and `pico auth logout` removes it. Getting a token in the first place is covered in [Authentication](/docs/operations/auth).
 
 ## Profiles
 
@@ -26,7 +32,7 @@ pico config use prod
 pico ls
 ```
 
-`set` stores the global flags under a name, `get` and `ls` inspect them, `rm` deletes one, `use` picks the default, and `path` prints the file location. Flags always win over the profile, so a saved default can be overridden per invocation. Stored credentials are filed under the profile name too, so `pico auth login` against two clusters keeps their tokens apart.
+`set` stores the global flags under a name, `get` and `ls` inspect them, `rm` deletes one, `use` picks the default, and `path` prints the file location, which `PICO_CONFIG` overrides. Flags always win over the profile, so a saved default can be overridden per invocation. Stored credentials are filed under the profile name too, so `pico auth login` against two clusters keeps their tokens apart.
 
 ## Stream commands
 
@@ -44,11 +50,11 @@ pico close /streams/orders
 pico delete /streams/orders
 ```
 
-`ls` and `trim` exist on the Pico protocol only, and the Durable Streams protocol appends one record per request, so `--batch` only applies to `pico`.
+`ls` and `trim` exist on the Pico protocol only, and the Durable Streams protocol appends one record per request, so `--batch` only applies to `pico`. On a topic with several partitions, `head`, `append`, `read`, `tail`, and `trim` take `--partition`.
 
 ## Admin commands
 
-Admin commands talk to a node's admin listener, not the stream endpoint. The target comes from `--admin-endpoint` or `PICO_ADMIN_ENDPOINT`, defaulting to `http://127.0.0.1:9090`, and `--json` switches any command from formatted lines to raw JSON.
+Admin commands talk to a node's admin listener, not the stream endpoint. The target comes from `--admin-endpoint` or `PICO_ADMIN_ENDPOINT`, defaulting to `http://127.0.0.1:9090`. The credential comes from `--token` or `PICO_ADMIN_TOKEN`, then `PICO_TOKEN`, then the stored one. `--json` switches any command from formatted lines to raw JSON.
 
 ```bash
 pico admin cluster
@@ -58,7 +64,7 @@ pico admin transfer /streams/orders --to-node 2 --wait
 pico admin set-slots 2 --slots 4
 ```
 
-`cluster` prints the node's identity, counts, the applied index, the lease holder, and any pending transfers. `nodes` lists every registered node with its slots and stream counts. `stream` shows one stream's owner, state, epoch, and offsets. `transfer` starts a move and with `--wait` polls until the stream settles on the target. `set-slots` changes a node's placement weight.
+`cluster` prints the node's identity, counts, the applied index, the lease holder, and any pending transfers. `nodes` lists every registered node with its epoch, slots, stream counts, and whether it is fenced. `stream` shows one partition's owner, state, epoch, and offsets. `transfer` starts a move and with `--wait` polls until the partition settles on the target. Both take `--partition` for topics with several partitions. `set-slots` changes a node's placement weight.
 
 ## Benchmarking
 
@@ -68,8 +74,15 @@ pico admin set-slots 2 --slots 4
 pico bench --record-size 1024 --duration 15
 ```
 
-It exercises the same client path as `append` and `read`, so the numbers reflect what an application would see, including protocol and redirect behavior.
+It exercises the same client path as `append` and `read`, so the numbers reflect what an application would see, including protocol and redirect behavior. `--protocol kafka` benchmarks the Kafka listener instead. `--help` lists the load shape flags: in-flight requests, batch size, streams, partitions, connections, and a target rate.
 
 ## Serving
 
 `pico serve` runs a node. Its flags configure the listeners, the metadata database, and the object store, and every one has a `PICO_*` environment variable. The flags are covered in [Configuration](/docs/operations/configuration) and full deployment layouts in [Deployment](/docs/operations/deployment/docker).
+
+| The node stops because | It prints | Exit code |
+| --- | --- | --- |
+| `SIGTERM` or `Ctrl-C` | `shutting down` | `0` |
+| It was fenced, or its WAL was taken over | `this node left the cluster, shutting down` | `1` |
+
+A stopped node's streams move to live nodes either way, see [Failover](/docs/design/failover#when-a-node-stops). A supervisor should restart a node that exits with `1`: it rejoins at a new epoch.

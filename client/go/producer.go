@@ -58,6 +58,7 @@ func (p *Pending) Await(ctx context.Context) (uint64, error) {
 type Producer struct {
 	client           *PicoClient
 	name, id         string
+	partition        *uint32
 	config           ProducerConfig
 	queue            chan *producerItem
 	budgetMu         sync.Mutex
@@ -72,6 +73,14 @@ type Producer struct {
 }
 
 func (s *PicoStream) NewProducer(id string, config *ProducerConfig) *Producer {
+	return newProducer(s.client, s.name, nil, id, config)
+}
+
+func (p *PicoPartition) NewProducer(id string, config *ProducerConfig) *Producer {
+	return newProducer(p.client, p.name, &p.index, id, config)
+}
+
+func newProducer(client *PicoClient, name string, partition *uint32, id string, config *ProducerConfig) *Producer {
 	cfg := DefaultProducerConfig()
 	if config != nil {
 		cfg = *config
@@ -88,7 +97,18 @@ func (s *PicoStream) NewProducer(id string, config *ProducerConfig) *Producer {
 			cfg.Retry = DefaultProducerConfig().Retry
 		}
 	}
-	p := &Producer{client: s.client, name: s.name, id: id, config: cfg, queue: make(chan *producerItem), budgetChanged: make(chan struct{}), done: make(chan struct{}), closeReq: make(chan struct{})}
+
+	p := &Producer{
+		client:        client,
+		name:          name,
+		id:            id,
+		partition:     partition,
+		config:        cfg,
+		queue:         make(chan *producerItem),
+		budgetChanged: make(chan struct{}),
+		done:          make(chan struct{}),
+		closeReq:      make(chan struct{}),
+	}
 	go p.run()
 	return p
 }
@@ -251,7 +271,7 @@ func (p *Producer) run() {
 
 func (p *Producer) sendBatch(records []AppendRecord, seq uint64) (uint64, error) {
 	for attempt := 0; ; attempt++ {
-		ack, err := p.client.AppendAs(context.Background(), p.name, records, ProducerRef{ID: p.id, Epoch: p.config.Epoch, Seq: seq})
+		ack, err := p.client.appendAs(context.Background(), p.name, p.partition, records, ProducerRef{ID: p.id, Epoch: p.config.Epoch, Seq: seq})
 		if err == nil {
 			if ack.Duplicate {
 				next, nerr := strconv.ParseUint(ack.Ack.Next, 10, 64)

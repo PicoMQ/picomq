@@ -8,6 +8,7 @@ description = "PicoMQ runtime assembly: a ServerConfig to a running node + HTTP 
 repository.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 s3stream = { workspace = true }
 picomq-auth = { workspace = true }
 picomq-metadata = { workspace = true }
@@ -26,6 +27,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 bytes = { workspace = true }
 humantime = { workspace = true }
+picomq-client = { workspace = true }
 picomq-protocol = { workspace = true }
 rdkafka = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }

@@ -4,6 +4,9 @@
 //! companions (`next_offset`, `closed`, producer epoch and expected/received
 //! seq) so handlers never parse messages.
 
+use picomq_metadata::MetadataError;
+
+use crate::record::RecordError;
 use crate::types::OffsetToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +28,12 @@ pub enum ErrorKind {
     SequenceGap,
     MatchFailed,
     Durability,
+    Timeout,
+    /// This node is stopping, or the metadata store is unreachable. HTTP:
+    /// 503. Kafka: `NOT_LEADER_OR_FOLLOWER`, so clients refresh metadata and
+    /// retry.
+    Unavailable,
+    Internal,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -99,8 +108,34 @@ impl ServiceError {
     }
 }
 
+impl From<RecordError> for ServiceError {
+    fn from(error: RecordError) -> Self {
+        Self::with_message(ErrorKind::CorruptBatch, None, false, error.to_string())
+    }
+}
+
+impl From<MetadataError> for ServiceError {
+    fn from(error: MetadataError) -> Self {
+        match error {
+            MetadataError::Unavailable { .. } => {
+                Self::with_message(ErrorKind::Unavailable, None, false, error.to_string())
+            }
+            other => other.to_stream_error().into(),
+        }
+    }
+}
+
 impl From<s3stream::Error> for ServiceError {
     fn from(e: s3stream::Error) -> Self {
-        Self::with_message(ErrorKind::BadRequest, None, false, e.to_string())
+        let kind = match e {
+            s3stream::Error::Fenced { .. } | s3stream::Error::Closed { .. } => {
+                ErrorKind::Transferring
+            }
+            s3stream::Error::NotExist { .. } => ErrorKind::NotFound,
+            s3stream::Error::OffsetOutOfRange { .. } => ErrorKind::BadRequest,
+            _ => ErrorKind::Internal,
+        };
+
+        Self::with_message(kind, None, false, e.to_string())
     }
 }

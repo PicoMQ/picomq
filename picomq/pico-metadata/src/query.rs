@@ -3,9 +3,17 @@
 
 use s3stream::{CompactOperations, S3ObjectMetadata, StreamMetadata};
 
+use crate::command::Proposer;
 use crate::state::MetadataState;
 
 impl MetadataState {
+    /// Whether `node` is still that node's current, unfenced incarnation.
+    pub fn is_live(&self, node: Proposer) -> bool {
+        self.nodes
+            .get(&node.node_id)
+            .is_some_and(|row| row.epoch == node.node_epoch && !row.fenced)
+    }
+
     pub fn get_stream(&self, stream_id: u64) -> Option<StreamMetadata> {
         self.streams
             .get(&stream_id)
@@ -19,10 +27,25 @@ impl MetadataState {
             .collect()
     }
 
+    /// `(epoch, first offset)` per recorded epoch of the stream, oldest first.
+    pub fn stream_epochs(&self, stream_id: u64) -> Vec<(i64, u64)> {
+        self.epochs
+            .range((stream_id, i64::MIN)..=(stream_id, i64::MAX))
+            .map(|((_, epoch), start_offset)| (*epoch, *start_offset))
+            .collect()
+    }
+
     pub fn get_opening_streams(&self, node_id: i32) -> Vec<StreamMetadata> {
         self.opening_by_node
             .range((node_id, 0)..=(node_id, u64::MAX))
             .filter_map(|(&(_, stream_id), ())| self.get_stream(stream_id))
+            .collect()
+    }
+
+    pub fn placed_on(&self, node_id: i32) -> Vec<u64> {
+        self.placed_by_node
+            .range((node_id, 0)..=(node_id, u64::MAX))
+            .map(|((_, stream_id), ())| *stream_id)
             .collect()
     }
 
@@ -217,7 +240,7 @@ mod tests {
     };
 
     use crate::apply::apply;
-    use crate::command::{MetadataCommand, MetadataResult};
+    use crate::command::{MetadataCommand, MetadataResult, Proposer};
     use crate::state::MetadataState;
 
     const NODE_1: i32 = 1;
@@ -245,6 +268,7 @@ mod tests {
             apply(
                 &mut state,
                 &MetadataCommand::RegisterNode {
+                    wal: String::new(),
                     node_id,
                     node_epoch,
                     http_address: addr.into(),
@@ -261,8 +285,7 @@ mod tests {
         let MetadataResult::Id(stream_id) = apply(
             &mut state,
             &MetadataCommand::CreateStream {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
             },
         )
         .unwrap() else {
@@ -271,8 +294,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::OpenStream {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 stream_id,
                 epoch: 1,
             },
@@ -281,8 +304,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::PrepareObject {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 count: 4,
                 ttl_ms: 60_000,
                 now_ms: 0,
@@ -294,8 +317,8 @@ mod tests {
             apply(
                 &mut state,
                 &MetadataCommand::CommitStreamSetObject {
-                    node_id: NODE_1,
-                    node_epoch: EPOCH_1,
+                    proposer: Proposer::new(NODE_1, EPOCH_1),
+
                     request: CommitStreamSetObjectRequest {
                         object_id,
                         object_size: 64,
@@ -318,8 +341,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::CompactStreamObject {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 request: CompactStreamObjectRequest {
                     object_id: 1,
                     object_size: 32,
@@ -438,11 +461,12 @@ mod tests {
 
     #[test]
     fn kv_get_and_prefix_list() {
-        let mut state = MetadataState::new();
+        let (mut state, _) = populated();
         for (key, value) in [("a", "1"), ("ab", "2"), ("b", "3")] {
             apply(
                 &mut state,
                 &MetadataCommand::PutKv {
+                    proposer: Proposer::new(NODE_1, EPOCH_1),
                     key: key.into(),
                     value: Bytes::from(value),
                 },

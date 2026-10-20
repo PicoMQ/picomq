@@ -4,7 +4,9 @@ How to turn auth on and run the token lifecycle. The model is in [Authorization]
 
 ## Modes
 
-`--auth` (`PICO_AUTH`) is `off` or `required`. With `required`, every request on both listeners needs a bearer token, except the health probes and CORS preflights. With `off`, nothing is checked and the node refuses to bind anything but loopback. Binding `0.0.0.0` means running with auth required, or opting out explicitly with `--insecure-allow-remote` (`PICO_INSECURE_ALLOW_REMOTE`) when something else guards the network, e.g. a private network or a proxy that authenticates.
+`--auth` (`PICO_AUTH`) is `off` or `required`. With `required`, every request on the stream and admin listeners needs a bearer token, except the health probes and CORS preflights. With `off`, nothing is checked and the node refuses to bind anything but loopback. Binding `0.0.0.0` means running with auth required, or opting out explicitly with `--insecure-allow-remote` (`PICO_INSECURE_ALLOW_REMOTE`) when something else guards the network, e.g. a private network or a proxy that authenticates.
+
+The Kafka listener never authenticates, so binding it beyond loopback always takes `--insecure-allow-remote`, whatever `--auth` says. See [Kafka protocol](/docs/kafka#exposure).
 
 ## Bootstrap
 
@@ -45,7 +47,7 @@ curl -s -X POST http://127.0.0.1:9090/admin/tokens \
 
 The response contains the wire token once. Only its hash is stored, so a lost secret means issuing a replacement.
 
-In the scope JSON, `streams` and `tokens` are arrays of `{"exact": name}` or `{"prefix": p}` matchers, `groups` holds the three read/write pairs, `ops` names fine operations, `audiences` is any of `pico`, `durable_streams`, and `admin`, `autoPrefixStreams` turns on tenant prefixing, and `expiresAtMs` is unix milliseconds. Missing keys deny. Unknown keys are rejected.
+In the scope JSON, `streams` and `tokens` are arrays of `{"exact": name}` or `{"prefix": p}` matchers, `groups` holds the three read/write pairs, `ops` names fine operations from the table in [Authorization](/docs/design/auth#scopes), `audiences` is any of `pico`, `durable_streams`, and `admin`, `autoPrefixStreams` turns on tenant prefixing, and `expiresAtMs` is unix milliseconds. Missing keys deny. Unknown keys are rejected.
 
 The reserved id `anonymous` applies its scope to requests with no credential. Issue it read-only under `/public/` and those streams are readable by anyone while everything else stays closed. Revoke it and all access needs a token again. It cannot be given the `admin` audience.
 
@@ -57,7 +59,7 @@ Programs using `picomq-client` set the token on the client config. The client fo
 
 ## Errors
 
-`401` means no valid credential: absent, malformed, unknown, expired, or revoked. `403` means the credential is valid and the scope is insufficient. A `403` on appends can also be producer fencing, which is distinguishable by its `Producer-Epoch` header.
+`401` means no valid credential: absent, malformed, unknown, expired, or revoked. `403` means the credential is valid and the scope is insufficient. A `403` on appends can also be producer fencing, which carries the code `fenced` and `Pico-Producer-Epoch` on Pico, or `Producer-Epoch` on Durable Streams.
 
 ## Deployment notes
 

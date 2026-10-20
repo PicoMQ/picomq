@@ -66,8 +66,8 @@ pub enum AuthMode {
     Required,
 }
 
-/// The Kafka listener. Every stream is reachable over Kafka regardless of
-/// which HTTP protocol wrote it; this only decides whether the socket exists.
+/// The Kafka listener every node runs. Every stream is reachable over Kafka
+/// regardless of which HTTP protocol wrote it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KafkaConfig {
     pub listen: SocketAddr,
@@ -76,26 +76,33 @@ pub struct KafkaConfig {
     pub advertise: Option<String>,
 }
 
-impl Default for KafkaConfig {
-    fn default() -> Self {
+impl KafkaConfig {
+    pub fn new(listen: SocketAddr) -> Self {
         Self {
-            listen: SocketAddr::from(([127, 0, 0, 1], 9092)),
+            listen,
             advertise: None,
         }
+    }
+}
+
+impl Default for KafkaConfig {
+    fn default() -> Self {
+        Self::new(SocketAddr::from(([127, 0, 0, 1], 9092)))
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub node_id: i32,
+    /// The requested epoch, the current time by default. Registration assigns
+    /// at least one past the node's previous epoch.
     pub node_epoch: i64,
     pub addr: SocketAddr,
     pub admin_addr: Option<SocketAddr>,
     pub advertised_url: Option<String>,
     /// Which HTTP protocol the data listener speaks.
     pub http_protocol: HttpProtocol,
-    /// `None` disables the Kafka listener.
-    pub kafka: Option<KafkaConfig>,
+    pub kafka: KafkaConfig,
     pub meta_backend: MetaBackend,
     pub storage_uri: String,
     /// WAL bucket URI. Defaults to the data bucket (with the next bucket id)
@@ -104,6 +111,8 @@ pub struct ServerConfig {
     pub cluster_id: String,
     pub routing_mode: RoutingMode,
     pub slots: u32,
+    pub heartbeat_interval: Duration,
+    pub node_timeout: Duration,
     pub long_poll_timeout: Duration,
     pub sse_max_duration: Duration,
     pub max_chunk_size: usize,
@@ -135,13 +144,15 @@ impl Default for ServerConfig {
             admin_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9090))),
             advertised_url: None,
             http_protocol: HttpProtocol::Pico,
-            kafka: Some(KafkaConfig::default()),
+            kafka: KafkaConfig::default(),
             meta_backend: MetaBackend::Sqlite(Some(PathBuf::from("./data/meta.db"))),
             storage_uri: "-2@file://./objects".to_owned(),
             wal_uri: None,
             cluster_id: "picomq".to_owned(),
             routing_mode: RoutingMode::Redirect,
             slots: 1,
+            heartbeat_interval: Duration::from_secs(5),
+            node_timeout: Duration::from_secs(30),
             long_poll_timeout: Duration::from_secs(25),
             sse_max_duration: Duration::from_secs(55),
             max_chunk_size: 64 * 1024,
@@ -158,10 +169,10 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn advertised_url(&self) -> String {
+    pub fn advertised_url(&self, bound: SocketAddr) -> String {
         self.advertised_url
             .clone()
-            .unwrap_or_else(|| format!("http://{}", self.addr))
+            .unwrap_or_else(|| format!("http://{bound}"))
     }
 
     /// WAL when `--wal` is absent. The bucket id is the engine's per-bucket
@@ -218,7 +229,16 @@ mod tests {
 
     #[test]
     fn advertised_url_defaults_to_the_bound_address() {
-        let config = ServerConfig::default();
-        assert_eq!(config.advertised_url(), "http://127.0.0.1:4437");
+        let bound = SocketAddr::from(([127, 0, 0, 1], 50_123));
+        assert_eq!(
+            ServerConfig::default().advertised_url(bound),
+            "http://127.0.0.1:50123"
+        );
+
+        let configured = ServerConfig {
+            advertised_url: Some("http://pico.example".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(configured.advertised_url(bound), "http://pico.example");
     }
 }

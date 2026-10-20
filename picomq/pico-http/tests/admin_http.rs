@@ -6,7 +6,7 @@ mod common;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use picomq_http::{HttpProtocol, ServeOptions, serve};
+use picomq_http::{HttpProtocol, ServeOptions, bind, serve};
 
 #[tokio::test]
 async fn health_and_ready() {
@@ -30,6 +30,7 @@ async fn health_and_ready() {
     let body: serde_json::Value = ready.json().await.unwrap();
     assert_eq!(body["ready"], true);
     assert_eq!(body["registered"], true);
+    assert_eq!(body["fenced"], false);
     assert_eq!(body["nodeId"], 1);
     assert!(
         body["appliedIndex"].as_u64().unwrap() > 0,
@@ -38,14 +39,48 @@ async fn health_and_ready() {
 }
 
 #[tokio::test]
+async fn a_fenced_node_is_not_ready() {
+    let server = common::picomq_server().await;
+    let node = server.node.metadata().proposer();
+    let heartbeats = server.node.views().load().state.nodes[&node.node_id].heartbeats;
+    server
+        .node
+        .metadata()
+        .fence_node(node.node_id, node.node_epoch, heartbeats)
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let ready = client
+        .get(format!("{}/ready", server.admin_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), 503);
+    let body: serde_json::Value = ready.json().await.unwrap();
+    assert_eq!(body["registered"], true);
+    assert_eq!(body["fenced"], true);
+
+    let nodes: serde_json::Value = client
+        .get(format!("{}/admin/nodes", server.admin_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(nodes["nodes"][0]["fenced"], true);
+}
+
+#[tokio::test]
 async fn ready_fails_while_draining() {
     let node = common::start_node().await;
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node,
+        bind(loopback, 1024).unwrap(),
         ServeOptions {
             protocol: HttpProtocol::Pico,
-            addr: loopback,
             admin_addr: Some(loopback),
             shutdown_drain: Duration::from_secs(2),
             ..Default::default()
@@ -232,11 +267,7 @@ async fn transfer_validation() {
         .send()
         .await
         .unwrap();
-    assert!(
-        bad_target.status() == 400 || bad_target.status() == 409,
-        "unregistered target rejected: {}",
-        bad_target.status()
-    );
+    assert_eq!(bad_target.status(), 400);
 
     let malformed = client
         .post(format!("{}/admin/transfer", server.admin_url))
@@ -296,8 +327,8 @@ async fn admin_listener_can_be_disabled() {
     let node = common::start_node().await;
     let server = serve(
         node,
+        bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024).unwrap(),
         ServeOptions {
-            addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             admin_addr: None,
             ..Default::default()
         },

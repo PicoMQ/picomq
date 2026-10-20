@@ -35,12 +35,28 @@ pub struct PgWal {
 
 impl PgWal {
     pub fn new(config: Config) -> Result<Self, Error> {
-        let options = PgConnectOptions::from_str(config.connection())?
-            .application_name("picomq-wal")
-            .options([("synchronous_commit", config.synchronous_commit.as_str())]);
-        let pool = PgPoolOptions::new()
-            .max_connections(config.max_inflight as u32 + 2)
-            .connect_lazy_with(options);
+        let pool = connect(&config)?;
+        Ok(Self::build(config, pool))
+    }
+
+    pub async fn recovering(mut config: Config, node_id: u32, epoch: u64) -> Result<Self, Error> {
+        config.node_id = node_id;
+        config.epoch = epoch;
+        config.failover = true;
+
+        let pool = connect(&config)?;
+        let stored = Node::new(pool.clone(), config.cluster_id.clone())
+            .load(node_id)
+            .await?;
+        if let Some(state) = stored.filter(|state| state.segments > 0) {
+            config.segments = state.segments;
+            config.segment_bytes = state.segment_bytes;
+        }
+
+        Ok(Self::build(config, pool))
+    }
+
+    fn build(config: Config, pool: PgPool) -> Self {
         let schema = Arc::new(Schema::new(
             &config.cluster_id,
             config.node_id,
@@ -50,7 +66,7 @@ impl PgWal {
             config.segment_bytes,
             config.segments as usize,
         )));
-        Ok(Self {
+        Self {
             node: Node::new(pool.clone(), config.cluster_id.clone()),
             writer: Writer::new(
                 pool.clone(),
@@ -65,17 +81,24 @@ impl PgWal {
             pool,
             schema,
             ring,
-        })
+        }
     }
 
     async fn open(&self) -> Result<(), Error> {
         let config = &self.config;
         let health = Health::probe(&self.pool, config.allow_unsafe).await?;
         self.schema.migrate(&self.pool).await?;
-        self.node.claim(config.node_id, config.epoch).await?;
-        let state = self.node.load(config.node_id).await?;
+        self.node.claim(config.claim()).await?;
+        let state = self
+            .node
+            .load(config.node_id)
+            .await?
+            .ok_or_else(|| Error::Corrupt(format!("node {} lost its claim", config.node_id)))?;
         health.compare(state.timeline);
-        self.reshape(&state).await?;
+        if !config.failover {
+            self.reshape(&state).await?;
+        }
+
         let mut frontier = state.trim;
         for index in 0..self.schema.slots().len() {
             let Some((start, end)) = self.reader.extent(index).await? else {
@@ -94,15 +117,16 @@ impl PgWal {
             }
             frontier = frontier.max(end);
         }
-        self.node
-            .stamp(
-                config.node_id,
-                config.epoch,
-                health.timeline,
-                config.segments,
-                config.segment_bytes,
-            )
-            .await?;
+        if !config.failover {
+            self.node
+                .stamp(
+                    config.claim(),
+                    health.timeline,
+                    config.segments,
+                    config.segment_bytes,
+                )
+                .await?;
+        }
         self.watermark.store(state.trim, Ordering::SeqCst);
         self.reclaimer.run(state.trim, frontier).await?;
         self.writer.start(frontier);
@@ -133,9 +157,7 @@ impl PgWal {
         if watermark <= self.watermark.load(Ordering::SeqCst) {
             return Ok(());
         }
-        self.node
-            .trim(self.config.node_id, self.config.epoch, watermark)
-            .await?;
+        self.node.trim(self.config.claim(), watermark).await?;
         self.watermark.fetch_max(watermark, Ordering::SeqCst);
         if let Err(error) = self.reclaimer.run(watermark, self.writer.frontier()).await {
             tracing::warn!(%error, "wal reclaim failed, retrying on the next trim");
@@ -208,4 +230,14 @@ impl WriteAheadLog for PgWal {
         let watermark = (offset.offset + 1).min(self.writer.confirmed());
         Ok(self.advance(watermark).await?)
     }
+}
+
+fn connect(config: &Config) -> Result<PgPool, Error> {
+    let options = PgConnectOptions::from_str(config.connection())?
+        .application_name("picomq-wal")
+        .options([("synchronous_commit", config.synchronous_commit.as_str())]);
+
+    Ok(PgPoolOptions::new()
+        .max_connections(config.max_inflight as u32 + 2)
+        .connect_lazy_with(options))
 }

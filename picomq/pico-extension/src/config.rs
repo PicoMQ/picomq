@@ -33,16 +33,10 @@ pub(crate) fn server(settings: &Settings, local: &Local) -> Result<ServerConfig,
             .map(|value| address("pico.admin_listen", value))
             .transpose()?,
         advertised_url: settings.advertised_url.clone(),
-        kafka: settings
-            .kafka_listen
-            .as_deref()
-            .map(|value| {
-                Ok::<_, String>(KafkaConfig {
-                    listen: address("pico.kafka_listen", value)?,
-                    advertise: settings.kafka_advertise.clone(),
-                })
-            })
-            .transpose()?,
+        kafka: KafkaConfig {
+            listen: address("pico.kafka_listen", &settings.kafka_listen)?,
+            advertise: settings.kafka_advertise.clone(),
+        },
         meta_backend: MetaBackend::parse(&database).map_err(|e| e.to_string())?,
         storage_uri: storage,
         wal_uri: Some(settings.wal.clone().unwrap_or(database)),

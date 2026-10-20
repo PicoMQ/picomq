@@ -6,7 +6,7 @@ PicoMQ speaks three client protocols.
 - **Durable Streams.** An open HTTP protocol implemented on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers.
 - **[Kafka wire protocol](/docs/kafka).** Serves standard Kafka clients over TCP.
 
-A node serves one of the two HTTP protocols on its stream listener, chosen in its configuration, and Kafka on a second listener unless that listener is off. Each frontend is a thin translation over the same stream service, documented in [Protocol facades](/docs/extending). Nothing in the storage or metadata layers knows which protocol a record arrived through.
+A node serves one of the two HTTP protocols on its stream listener, chosen in its configuration, and Kafka on a second listener that is always on. Each frontend is a thin translation over the same topic layer, documented in [Protocol facades](/docs/extending). Nothing in the storage or metadata layers knows which protocol a record arrived through.
 
 This page covers the resource model and the stored record format. The Kafka frontend's own surface has [its own page](/docs/kafka).
 
@@ -41,14 +41,37 @@ Appends over Pico come in three shapes: a single body, optionally keyed through 
 
 ## Topic names
 
-Stream names are paths. Kafka topic names cannot contain `/`. Each stream may carry one topic alias, unique across the cluster. Create over HTTP derives one by turning slashes into dots when that name is legal and free. Otherwise set `Pico-Kafka-Topic` on create or `kafkaTopic` on `PATCH /_streams/{name}`. A Kafka `CreateTopics` call creates the stream of the same name with that alias. Reserved streams under `/_sys`, `/_schemas` and `/_streams` never carry a topic.
+All three protocols address the same topics. HTTP names are paths, Kafka names use dots, and the two are one name: `/orders/eu` over HTTP is `orders.eu` over Kafka. A topic whose name has characters Kafka does not allow is reachable only over HTTP. The rules are in [Topics and streams](/docs/design/streams#names).
 
 ## Producers
 
-Exactly-once appends over HTTP need the server to remember, because a client that times out cannot know whether its write landed. Both HTTP protocols solve this the same way: a producer identifies itself with an id, an epoch, and a per-record sequence number, the server accepts each sequence once, acknowledges repeats without writing, and rejects stale epochs. A mismatch response includes what the server expected next to what it received, so a producer can tell a lost acknowledgement from a real gap. Kafka's idempotent producer is the same mechanism, keyed by the producer id, epoch and base sequence in the batch header. The state behind both is in the stream's registry entry, described in [Streams](/docs/design/streams), and survives restarts and transfers.
+Exactly-once appends over HTTP need the server to remember, because a client that times out cannot know whether its write landed. Both HTTP protocols solve this the same way: a producer identifies itself with an id, an epoch, and a per-record sequence number, the server accepts each sequence once, acknowledges repeats without writing, and rejects stale epochs. A mismatch response includes what the server expected next to what it received, so a producer can tell a lost acknowledgement from a real gap. Kafka's idempotent producer is the same mechanism, keyed by the producer id, epoch and base sequence in the batch header. The state behind both is in each partition's log entry, described in [Topics and streams](/docs/design/streams#producers), and survives restarts, transfers, and failover.
 
 ## Routing at the edge
 
-All frontends share one routing step in front of every handler, so the protocol code never thinks about ownership. Creates are always served locally, since create is what places a stream in the first place, and everything else follows the decision table in [Ownership and routing](/docs/design/ownership), redirecting to the owner when the stream is served elsewhere. A routing failure returns an error rather than a guess.
+All frontends share one routing step in front of every handler, so the protocol code never thinks about ownership. A create is handled by the node that receives it, which places the new partitions, and everything else follows the decision table in [Ownership and routing](/docs/design/ownership), redirecting to the owner when the partition is served elsewhere. A routing failure returns an error rather than a guess.
 
 SSE connections are capped at `55` seconds and long polls at `25` by default, both below common proxy idle timeouts, so intermediaries see regular traffic instead of connections worth killing. Clients resume from their last offset or cursor and lose nothing across reconnects.
+
+## Errors
+
+Every frontend maps the same internal error kinds onto its own vocabulary. Pico answers with a JSON body carrying a code, Durable Streams with a plain text body as its specification requires, and Kafka with an error code.
+
+| Kind | Pico | Durable Streams | Kafka |
+| --- | --- | --- | --- |
+| Not found | `404 not_found` | `404` | `UNKNOWN_TOPIC_OR_PARTITION` |
+| Bad request, corrupt batch | `400 bad_request` | `400` | `INVALID_REQUEST`, `CORRUPT_MESSAGE` |
+| Schema violation | `400 schema_violation` | `400` | `INVALID_RECORD` |
+| Producer fenced | `403 fenced` | `403` | `INVALID_PRODUCER_EPOCH` |
+| Sequence gap | `409 sequence_gap` | `409` | `OUT_OF_ORDER_SEQUENCE_NUMBER` |
+| Match failed | `412 match_failed` | `400` | `INVALID_REQUEST` |
+| Conflict | `409 conflict` | `409` | `TOPIC_ALREADY_EXISTS` |
+| Transferring | `409 conflict` | `409` | `NOT_LEADER_OR_FOLLOWER` |
+| Closed | `409 closed` | `409` | `POLICY_VIOLATION` |
+| Unavailable, the node is stopping or metadata is unreachable | `503 unavailable` | `503` | `NOT_LEADER_OR_FOLLOWER` |
+| Timeout | `504 timeout` | `504` | `REQUEST_TIMED_OUT` |
+| Durability, the WAL write failed | `500 durability` | `500` | `KAFKA_STORAGE_ERROR` |
+| Internal | `500 internal` | `500` | `UNKNOWN_SERVER_ERROR` |
+
+The retryable kinds, transferring, unavailable, and timeout, all resolve once routing or the cluster settles, and the clients retry them.
+

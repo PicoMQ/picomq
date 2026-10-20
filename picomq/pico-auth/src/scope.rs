@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 
+use picomq_common::name::{canonical, strip_canonical_prefix};
+
 /// Fine-grained operations. Hosts map HTTP methods onto these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Operation {
@@ -21,11 +23,12 @@ pub enum Operation {
     StreamInspect,
     TransferStream,
     UpdateNodeSlots,
+    DeleteGroup,
 }
 
 impl Operation {
     /// Every operation. Keep in declaration order when adding variants.
-    pub const ALL: [Operation; 16] = [
+    pub const ALL: [Operation; 17] = [
         Operation::Read,
         Operation::Head,
         Operation::List,
@@ -42,6 +45,7 @@ impl Operation {
         Operation::StreamInspect,
         Operation::TransferStream,
         Operation::UpdateNodeSlots,
+        Operation::DeleteGroup,
     ];
 
     pub fn is_stream_read(self) -> bool {
@@ -71,7 +75,10 @@ impl Operation {
     }
 
     pub fn is_admin_write(self) -> bool {
-        matches!(self, Self::TransferStream | Self::UpdateNodeSlots)
+        matches!(
+            self,
+            Self::TransferStream | Self::UpdateNodeSlots | Self::DeleteGroup
+        )
     }
 }
 
@@ -289,7 +296,24 @@ impl Scope {
     }
 
     pub fn allows_stream(&self, name: &str) -> bool {
-        self.streams.matches(name)
+        let name = canonical(name);
+        self.streams.matchers().iter().any(|matcher| match matcher {
+            ResourceMatcher::Exact(exact) => canonical(exact) == name,
+            ResourceMatcher::Prefix(prefix) => name.starts_with(&canonical(prefix)),
+        })
+    }
+
+    /// True when every stream `child` allows is allowed here, comparing the
+    /// canonical names stream access is checked on.
+    pub fn contains_streams(&self, child: &ResourceSet) -> bool {
+        let canonical_set = |set: &ResourceSet| {
+            ResourceSet::any_of(set.matchers().iter().map(|matcher| match matcher {
+                ResourceMatcher::Exact(exact) => ResourceMatcher::Exact(canonical(exact)),
+                ResourceMatcher::Prefix(prefix) => ResourceMatcher::Prefix(canonical(prefix)),
+            }))
+        };
+
+        canonical_set(&self.streams).contains_set(&canonical_set(child))
     }
 
     pub fn allows_token_id(&self, id: &str) -> bool {
@@ -308,7 +332,7 @@ impl Scope {
         let Some(prefix) = self.streams.sole_prefix() else {
             return Err(crate::AuthError::Denied);
         };
-        if client_name.starts_with(prefix) {
+        if strip_canonical_prefix(client_name, prefix).is_some() {
             return Ok(client_name.to_owned());
         }
         let name = client_name.trim_start_matches('/');
@@ -329,7 +353,7 @@ impl Scope {
         let Some(prefix) = self.streams.sole_prefix() else {
             return stored_name;
         };
-        stored_name.strip_prefix(prefix).unwrap_or(stored_name)
+        strip_canonical_prefix(stored_name, prefix).unwrap_or(stored_name)
     }
 }
 
@@ -380,6 +404,29 @@ mod tests {
             "/acct/orders"
         );
         assert_eq!(scope.strip_stream_name("/acct/orders"), "orders");
+    }
+
+    #[test]
+    fn stream_scopes_match_either_spelling() {
+        let scope = Scope {
+            streams: ResourceSet::prefix("/acct/"),
+            auto_prefix_streams: true,
+            ..Scope::default()
+        };
+        assert!(scope.allows_stream("/acct/orders"));
+        assert!(scope.allows_stream("/acct.orders"));
+        assert!(!scope.allows_stream("/other/orders"));
+        assert_eq!(
+            scope.resolve_stream_name("/acct.orders").unwrap(),
+            "/acct.orders"
+        );
+        assert_eq!(scope.strip_stream_name("/acct.orders"), "orders");
+
+        let exact = Scope {
+            streams: ResourceSet::exact("/a/b"),
+            ..Scope::default()
+        };
+        assert!(exact.allows_stream("/a.b"));
     }
 
     #[test]

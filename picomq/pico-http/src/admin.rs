@@ -17,18 +17,19 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use bytes::Bytes;
 use picomq_auth::{
     AccessToken, Audience, AuthError, Authorizer, Operation, TokenRecord, TokenStore as _,
     check_issue, scope_from_json, scope_to_json,
 };
-use picomq_metadata::MetadataState;
-use picomq_server::registry::RegistryEntry;
-use picomq_server::{OwnershipService, PicoNode};
+use picomq_metadata::{MetadataState, NodeRow, Proposer};
+use picomq_server::{Log, OwnershipService, PicoNode, ServiceError, Topic, partition_log};
 use s3stream::StreamState;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::common::{auth_error, authenticate, gate, service_error};
+use crate::partition;
 
 /// What `/ready` reports on.
 ///
@@ -170,21 +171,23 @@ async fn health() -> Response {
 /// with a diagnostic body of the same shape.
 ///
 /// Registration is the readiness signal: `PicoNode::start` returns only after
-/// its `RegisterNode` command applied and the engine recovered its WAL, so a
-/// node present in the applied metadata state is a node that can serve.
-/// shows an operator whether the metadata tailer is making progress.
+/// its `RegisterNode` command applied and the engine recovered its WAL. A
+/// fenced registration, or one replaced at a later epoch, is not ready.
 async fn ready(State(state): State<AdminState>) -> Response {
-    let node_id = state.node.config().node_id;
+    let config = state.node.config();
     let view = state.node.views().load();
-    let registered = view.state.get_node_address(node_id).is_some();
+    let row = registration(&view.state, state.node.metadata().proposer());
+    let registered = row.is_some();
+    let fenced = row.is_some_and(|row| row.fenced);
     let serving = state.serving.load(Ordering::Relaxed);
-    let ready = serving && registered;
+    let ready = serving && registered && !fenced;
     let body = json!({
         "ready": ready,
         "serving": serving,
         "registered": registered,
+        "fenced": fenced,
         "appliedIndex": view.applied_index,
-        "nodeId": node_id,
+        "nodeId": config.node_id,
     });
     let status = if ready {
         StatusCode::OK
@@ -207,13 +210,15 @@ async fn cluster(State(state): State<AdminState>, headers: HeaderMap) -> Respons
     }
     let config = state.node.config();
     let view = state.node.views().load();
+    let row = registration(&view.state, state.node.metadata().proposer());
     let snapshot = &state.node.metadata().sink_stats().snapshot;
     let body = json!({
         "clusterId": config.cluster_id,
         "nodeId": config.node_id,
-        "nodeEpoch": config.node_epoch,
+        "nodeEpoch": state.node.metadata().node_epoch(),
         "advertisedAddress": config.http_address,
-        "registered": view.state.get_node_address(config.node_id).is_some(),
+        "registered": row.is_some(),
+        "fenced": row.is_some_and(|row| row.fenced),
         "appliedIndex": view.applied_index,
         "streamCount": view.state.streams.len(),
         "objectCount": view.state.stream_set_objects.len() + view.state.stream_objects.len(),
@@ -269,6 +274,7 @@ async fn nodes(State(state): State<AdminState>, headers: HeaderMap) -> Response 
 async fn stream(
     State(state): State<AdminState>,
     Path(name): Path<String>,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
     if let Err(response) = gate(
@@ -282,15 +288,27 @@ async fn stream(
         return *response;
     }
     let name = format!("/{name}");
+    let requested = match partition::requested(&uri) {
+        Ok(requested) => requested,
+        Err(e) => return service_error(e),
+    };
+    let topic = match state.node.topics().get(&name).await {
+        Ok(Some(topic)) => topic,
+        Ok(None) => return not_found(&name),
+        Err(e) => return service_error(e),
+    };
+    let (index, log) = match partition_of(&topic, requested) {
+        Ok(chosen) => chosen,
+        Err(e) => return service_error(e),
+    };
+    let stream_id = match state.node.service().stream_id(&log) {
+        Ok(Some(stream_id)) => stream_id,
+        Ok(None) => return not_found(&name),
+        Err(e) => return service_error(e),
+    };
     let view = state.node.views().load();
-    let Some(value) = view.state.get_kv(&name) else {
-        return not_found(&name);
-    };
-    let Ok(entry) = RegistryEntry::decode(&value) else {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "corrupt registry entry");
-    };
-    let row = view.state.streams.get(&entry.stream_id).copied();
-    let owner = match state.node.ownership().owner_of(&name).await {
+    let row = view.state.streams.get(&stream_id).copied();
+    let owner = match state.node.ownership().owner_of(&log).await {
         Ok(owner) => owner,
         Err(e) => return service_error(e),
     };
@@ -306,20 +324,23 @@ async fn stream(
     let pending = view
         .state
         .pending_transfers
-        .get(&entry.stream_id)
+        .get(&stream_id)
         .map(|p| json!({ "fromNode": p.from_node, "toNode": p.to_node }));
 
     let body = json!({
-        "name": name,
-        "streamId": entry.stream_id,
+        "name": topic.name.spelling(),
+        "topicId": topic.id.hex(),
+        "partitions": topic.partitions,
+        "partition": index,
+        "streamId": stream_id,
         "ownerNodeId": owner_node_id,
         "ownerAdvertisedAddress": owner_address,
         "ownerLocal": owner.local,
-        "contentType": entry.content_type,
-        "kafkaTopic": entry.kafka_topic,
-        "ttlSeconds": entry.ttl_seconds,
-        "expiresAtMs": entry.expires_at_ms,
-        "closed": entry.closed,
+        "contentType": topic.content_type,
+        "kafkaTopic": topic.name.kafka(),
+        "ttlSeconds": topic.ttl_seconds,
+        "expiresAtMs": topic.expires_at_ms,
+        "closed": topic.closed,
         "state": row.map(|r| match r.state {
             StreamState::Opened => "opened",
             StreamState::Closed => "closed",
@@ -335,11 +356,7 @@ async fn stream(
 
 /// Requests a live ownership move. Returns 202: the move completes
 /// asynchronously via the transfer watcher on the owning node.
-async fn transfer(
-    State(state): State<AdminState>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Response {
+async fn transfer(State(state): State<AdminState>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(response) = gate(
         state.authorizer.as_deref(),
         &headers,
@@ -350,17 +367,38 @@ async fn transfer(
     {
         return *response;
     }
+    let body = match json_body(&body) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     let Some(name) = body.get("stream").and_then(Value::as_str) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"stream\"");
     };
     let Some(to_node) = body.get("toNode").and_then(Value::as_i64) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"toNode\"");
     };
-    match state.node.transfer_stream(name, to_node as i32).await {
+    let requested = match body.get("partition") {
+        None => None,
+        Some(value) => match value.as_u64().and_then(|index| u32::try_from(index).ok()) {
+            Some(index) => Some(index),
+            None => return error_response(StatusCode::BAD_REQUEST, "invalid \"partition\""),
+        },
+    };
+    let topic = match state.node.topics().get(name).await {
+        Ok(Some(topic)) => topic,
+        Ok(None) => return not_found(name),
+        Err(e) => return service_error(e),
+    };
+    let (index, log) = match partition_of(&topic, requested) {
+        Ok(chosen) => chosen,
+        Err(e) => return service_error(e),
+    };
+    match state.node.transfer(&log, to_node as i32).await {
         Ok(stream_id) => (
             StatusCode::ACCEPTED,
             Json(json!({
                 "stream": name,
+                "partition": index,
                 "streamId": stream_id,
                 "toNode": to_node,
                 "pending": true,
@@ -377,7 +415,7 @@ async fn update_node(
     State(state): State<AdminState>,
     Path(id): Path<i32>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Bytes,
 ) -> Response {
     if let Err(response) = gate(
         state.authorizer.as_deref(),
@@ -389,22 +427,20 @@ async fn update_node(
     {
         return *response;
     }
+    let body = match json_body(&body) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     let Some(slots) = body.get("slots").and_then(Value::as_u64) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"slots\"");
     };
-    let view = state.node.views().load();
-    let Some(node) = view.state.nodes.get(&id).cloned() else {
+    if !state.node.views().load().state.nodes.contains_key(&id) {
         return error_response(
             StatusCode::NOT_FOUND,
             format!("node {id} is not registered"),
         );
-    };
-    if let Err(e) = state
-        .node
-        .metadata()
-        .update_node_slots(id, node.epoch, slots as u32)
-        .await
-    {
+    }
+    if let Err(e) = state.node.metadata().set_node_slots(id, slots as u32).await {
         return error_response(StatusCode::CONFLICT, e.to_string());
     }
     let view = state.node.views().load();
@@ -450,13 +486,13 @@ async fn list_tokens(State(state): State<AdminState>, headers: HeaderMap) -> Res
 
 /// Issues a token narrowed from the caller's scope. With auth off the issuer
 /// is the root scope. The secret is in the response once and never stored.
-async fn issue_token(
-    State(state): State<AdminState>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Response {
+async fn issue_token(State(state): State<AdminState>, headers: HeaderMap, body: Bytes) -> Response {
     let principal = match authenticate(state.authorizer.as_deref(), &headers).await {
         Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let body = match json_body(&body) {
+        Ok(body) => body,
         Err(response) => return *response,
     };
     let Some(id) = body.get("id").and_then(Value::as_str) else {
@@ -562,11 +598,7 @@ fn token_json(record: &TokenRecord) -> Value {
     })
 }
 
-fn node_json(
-    state: &MetadataState,
-    node: &picomq_metadata::state::NodeRow,
-    local_id: i32,
-) -> Value {
+fn node_json(state: &MetadataState, node: &NodeRow, local_id: i32) -> Value {
     let opening = state
         .opening_by_node
         .range((node.node_id, 0)..=(node.node_id, u64::MAX))
@@ -583,7 +615,25 @@ fn node_json(
         "local": node.node_id == local_id,
         "openingCount": opening,
         "placedCount": state.placed_count(node.node_id),
+        "fenced": node.fenced,
     })
+}
+
+/// Request bodies are parsed only once the caller is authorized.
+fn json_body(body: &Bytes) -> Result<Value, Box<Response>> {
+    serde_json::from_slice(body).map_err(|_| {
+        Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            "expected a JSON body",
+        ))
+    })
+}
+
+fn registration(state: &MetadataState, node: Proposer) -> Option<&NodeRow> {
+    state
+        .nodes
+        .get(&node.node_id)
+        .filter(|row| row.epoch == node.node_epoch)
 }
 
 fn pending_transfers_json(state: &MetadataState) -> Vec<Value> {
@@ -606,4 +656,11 @@ fn not_found(name: &str) -> Response {
 
 fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
+}
+
+fn partition_of(topic: &Topic, requested: Option<u32>) -> Result<(u32, Log), ServiceError> {
+    let index = partition::choose(topic, requested)?;
+    let log = partition_log(topic, index)?;
+
+    Ok((index, log))
 }

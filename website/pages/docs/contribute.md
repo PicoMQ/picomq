@@ -24,7 +24,7 @@ The docs are at `website/` (`VitePress`). And the deployment harnesses live in `
 
 ## Build and test
 
-Rust 1.80+ (`rust-toolchain.toml` pins the exact version). The default test suite has no external dependencies. SQLite and `file://` object storage stand in for Postgres and S3:
+Rust 1.98 or newer (`rust-toolchain.toml` pins the exact version). The default test suite has no external dependencies. SQLite and `file://` object storage stand in for Postgres and S3:
 
 ```bash
 cargo build --workspace
@@ -38,10 +38,39 @@ PICOMQ_PG_URL=postgres://user:pass@localhost:5432/picomq \
     cargo test -p picomq-sql --test pg_contract --test pg_e2e
 
 PICO_TEST_PG_URL=postgres://user:pass@localhost:5432/picomq \
-    cargo test -p picomq-pgwal -- --ignored
+    cargo test -p picomq-pgwal -p picomq-runtime -- --ignored
 ```
 
-The extension is built and tested through Docker. `scripts/e2e.sh extension` builds the image, starts `harness/aio/compose.extension.yml`, and runs the extension and protocol suites against it. Building it on a host needs `cargo-pgrx` and a Postgres server, see [Postgres extension](/docs/operations/deployment/postgres#build-from-source).
+### End to end
+
+`scripts/e2e.sh` builds the images and runs scenarios against Postgres, RustFS, and pico in Docker Compose. It needs Docker, Go, and Node. With no arguments it runs all of them.
+
+| Scenario | Runs |
+| --- | --- |
+| `single` | One node, Pico and Kafka: protocol cross tests, and the Rust, TypeScript, and Go client suites |
+| `cluster` | Two nodes with auth: redirects, groups and Kafka partitions across nodes, admin APIs, failover of a killed node |
+| `pgwal` | The cluster scenario with each node's WAL in Postgres |
+| `chaos` | Two nodes under faults: paused nodes, a paused lease holder, a paused Postgres, and a clean stop. No acknowledged write may be lost and no healthy node fenced |
+| `ds` | Two nodes on Durable Streams: the Go live and cluster suites |
+| `extension` | Pico inside Postgres: crash, restart, and standby tests, then the protocol cross tests |
+
+```bash
+scripts/e2e.sh                     # every scenario
+scripts/e2e.sh single cluster      # a subset
+KEEP=1 scripts/e2e.sh single       # leave the stack running
+SKIP_BUILD=1 PICO_IMAGE=... PICO_PG_IMAGE=... scripts/e2e.sh   # use images already built
+```
+
+The `e2e` workflow runs the same scenarios on demand from GitHub Actions. Building the extension on a host needs `cargo-pgrx` and a Postgres server, see [Postgres extension](/docs/operations/deployment/postgres#build-from-source).
+
+### Conformance
+
+`picomq-conformance` checks the protocols against outside references. The `ds` suite runs the official Durable Streams client tests. The `kafka` suite runs the same scenarios with the Kafka Java tools and kcat against PicoMQ and against Apache Kafka in Docker, and compares the results. It needs Docker, and runs locally or from the `conformance` workflow on demand.
+
+```bash
+cargo run -p picomq-conformance -- ds
+cargo run -p picomq-conformance -- kafka
+```
 
 For an end-to-end environment, the compose stacks in `harness/aio` bring up a node with Postgres and RustFS (or SQLite and local files with `compose.lite.yml`). See [Quick start](/docs/quick-start).
 
@@ -49,7 +78,6 @@ A few things the toolchain enforces:
 
 - `unsafe_code` is denied workspace-wide.
 - Wire formats in `s3stream`'s `specification/` are pinned by golden fixtures in its `conformance/`. A change to a format needs a spec update and new fixtures in the same PR. Never regenerate fixtures to make a failing test pass.
-- The Durable Streams frontend is additionally exercised through the official `durable-streams` client in e2e tests, as an independent conformance check.
 
 ## Docs
 
@@ -64,7 +92,7 @@ Pages are markdown under `website/pages/docs/`, and the sidebar is defined in `w
 
 ## Pull requests
 
-Small, focused PRs against `main`. A good PR description says *why* the change exists, not just what it touches. If it changes a wire format, a protocol behavior, or an operational default, call that out explicitly. Run `cargo fmt` and `cargo clippy --workspace` before pushing.
+Small, focused PRs against `main`. A good PR description says *why* the change exists, not just what it touches. If it changes a wire format, a protocol behavior, or an operational default, call that out explicitly. Run `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings` before pushing, as CI does.
 
 AI-generated (or largely generated) pull requests are welcome, provided that you:
 

@@ -11,14 +11,14 @@ use std::time::Duration;
 use bytes::Bytes;
 use picomq_client::{ClientConfig, Live, PicoClient, Protocol, ReadLimits, StreamApi};
 use picomq_http::HttpProtocol as ServeProtocol;
-use picomq_runtime::{MetaBackend, ServerConfig};
+use picomq_runtime::{KafkaConfig, MetaBackend, ServerConfig};
 
 async fn start(dir: &std::path::Path) -> (picomq_runtime::PicoServer, String) {
     let server = picomq_runtime::start(ServerConfig {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
         http_protocol: ServeProtocol::Pico,
-        kafka: None,
+        kafka: KafkaConfig::new(SocketAddr::from(([127, 0, 0, 1], 0))),
         meta_backend: MetaBackend::parse("sqlite::memory:").unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
         wal_uri: Some(format!(
@@ -60,6 +60,7 @@ async fn appends_over_h2c_negotiate_http2() {
     let ack = client
         .append(
             "/streams/h2",
+            None,
             &[Bytes::from_static(b"over h2c")],
             "text/plain",
         )
@@ -68,6 +69,7 @@ async fn appends_over_h2c_negotiate_http2() {
     let page = client
         .read(
             "/streams/h2",
+            None,
             &client.beginning(),
             Live::Off,
             ReadLimits::server_default(),
@@ -109,6 +111,7 @@ async fn one_connection_carries_many_concurrent_appends() {
             client
                 .append(
                     "/streams/fanout",
+                    None,
                     &[Bytes::from(format!("record-{i}"))],
                     "text/plain",
                 )
@@ -119,8 +122,12 @@ async fn one_connection_carries_many_concurrent_appends() {
         task.await.unwrap().expect("append");
     }
 
-    let head = client.head("/streams/fanout").await.unwrap().unwrap();
-    assert_eq!(head.next, appends.to_string(), "every append landed once");
+    let head = client.head("/streams/fanout", None).await.unwrap().unwrap();
+    assert_eq!(
+        head.next,
+        Some(appends.to_string()),
+        "every append landed once"
+    );
 
     server.shutdown().await;
 }

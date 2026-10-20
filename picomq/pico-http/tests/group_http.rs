@@ -5,7 +5,8 @@ use std::net::SocketAddr;
 use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
-use picomq_http::{HttpProtocol, RoutingMode, ServeOptions, serve};
+use picomq_http::{HttpProtocol, RoutingMode, ServeOptions, bind, serve};
+use picomq_server::{CommittedOffset, CreateCommand, OffsetCommit, Partition};
 use reqwest::Client;
 use serde_json::{Value, json};
 
@@ -203,7 +204,7 @@ async fn members_join_heartbeat_commit_and_leave() {
         .json()
         .await
         .unwrap();
-    assert_eq!(listed["groups"][0]["group"], "workers");
+    assert_eq!(listed["groups"], serde_json::json!(["workers"]));
 
     let left = client
         .delete(format!("{base}/_groups/workers/members/{member2}"))
@@ -308,7 +309,7 @@ async fn gated(scope: Scope) -> (picomq_http::RunningServer, String) {
         })
         .await
         .unwrap();
-    node.service()
+    node.topics()
         .create(picomq_server::CreateCommand::new(
             "/acct/orders",
             "text/plain",
@@ -317,9 +318,9 @@ async fn gated(scope: Scope) -> (picomq_http::RunningServer, String) {
         .unwrap();
     let server = serve(
         node.clone(),
+        bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024).unwrap(),
         ServeOptions {
             protocol: HttpProtocol::Pico,
-            addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             admin_addr: None,
             routing_mode: RoutingMode::LocalAlways,
             authorizer: Some(node.authorizer()),
@@ -441,14 +442,159 @@ async fn auto_prefix_scopes_see_relative_names() {
         fetched["offsets"],
         json!({ "orders": { "position": 11, "metadata": null } })
     );
+    let topic = server
+        .node()
+        .topics()
+        .get("/acct/orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let stored = server
+        .node()
+        .groups()
+        .fetch_offsets("g", None)
+        .await
+        .unwrap();
     assert_eq!(
-        server
-            .node()
-            .groups()
-            .fetch_offsets("g", None)
-            .await
-            .unwrap()["/acct/orders"]
-            .position,
+        stored[&picomq_server::Partition::new(topic.id, 0)].position,
         11
     );
+}
+
+#[tokio::test]
+async fn groups_over_http_refuse_multi_partition_topics() {
+    let server = common::picomq_server().await;
+    let base = server.base_url.clone();
+    let client = Client::new();
+    create(&client, &base, "/single").await;
+    let spread = server
+        .node
+        .topics()
+        .create(CreateCommand {
+            partitions: 2,
+            ..CreateCommand::new("/spread", "text/plain")
+        })
+        .await
+        .unwrap()
+        .meta
+        .topic;
+
+    let (status, _) = join(
+        &client,
+        &base,
+        "readers",
+        json!({ "subscription": ["/spread"] }),
+    )
+    .await;
+    assert_eq!(status, 400);
+
+    let commit = client
+        .put(format!("{base}/_groups/readers/offsets"))
+        .json(&json!({ "offsets": { "/spread": { "position": 1 } } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(commit.status(), 400);
+
+    let fetch = client
+        .get(format!("{base}/_groups/readers/offsets?stream=/spread"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fetch.status(), 400);
+
+    let commit = client
+        .put(format!("{base}/_groups/readers/offsets"))
+        .json(&json!({ "offsets": { "/single": { "position": 4 } } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(commit.status(), 204);
+    server
+        .node
+        .groups()
+        .commit_offsets(
+            "readers",
+            None,
+            &[0, 1].map(|index| OffsetCommit {
+                partition: Partition::new(spread.id, index),
+                value: CommittedOffset {
+                    position: 9,
+                    leader_epoch: None,
+                    metadata: None,
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    let all: Value = client
+        .get(format!("{base}/_groups/readers/offsets"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        all["offsets"],
+        json!({ "/single": { "position": 4, "metadata": null } })
+    );
+}
+
+#[tokio::test]
+async fn groups_are_deleted_only_when_empty() {
+    let server = common::picomq_server().await;
+    let base = server.base_url.clone();
+    let client = Client::new();
+    create(&client, &base, "/jobs").await;
+    let remove = || client.delete(format!("{base}/_groups/workers")).send();
+
+    assert_eq!(remove().await.unwrap().status(), 404);
+
+    let (status, joined) = join(
+        &client,
+        &base,
+        "workers",
+        json!({ "clientId": "w1", "subscription": ["/jobs"] }),
+    )
+    .await;
+    assert_eq!(status, 200, "{joined}");
+    let member = joined["memberId"].as_str().unwrap();
+
+    assert_eq!(remove().await.unwrap().status(), 409);
+
+    let left = client
+        .delete(format!("{base}/_groups/workers/members/{member}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(left.status(), 204);
+
+    assert_eq!(remove().await.unwrap().status(), 204);
+    let described = client
+        .get(format!("{base}/_groups/workers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(described.status(), 404);
+}
+
+#[tokio::test]
+async fn both_spellings_of_a_stream_are_one_subscription() {
+    let server = common::picomq_server().await;
+    let base = server.base_url.clone();
+    let client = Client::new();
+    create(&client, &base, "/s/a").await;
+
+    let (status, joined) = join(
+        &client,
+        &base,
+        "spellings",
+        json!({ "subscription": ["/s/a", "/s.a"] }),
+    )
+    .await;
+
+    assert_eq!(status, 200, "{joined}");
+    assert_eq!(sorted(&joined["assignment"]), ["/s/a"]);
 }

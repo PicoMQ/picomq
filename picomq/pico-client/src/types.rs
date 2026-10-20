@@ -23,8 +23,9 @@ impl Protocol {
 pub struct StreamInfo {
     pub name: String,
     pub content_type: Option<String>,
-    pub start: String,
-    pub next: String,
+    pub partitions: u32,
+    pub start: Option<String>,
+    pub next: Option<String>,
     pub closed: bool,
     pub ttl_seconds: Option<u64>,
     pub expires_at: Option<String>,
@@ -99,13 +100,20 @@ pub trait StreamApi: Send + Sync {
         ttl_seconds: Option<u64>,
     ) -> Result<bool>;
 
-    async fn head(&self, name: &str) -> Result<Option<StreamInfo>>;
+    async fn head(&self, name: &str, partition: Option<u32>) -> Result<Option<StreamInfo>>;
 
-    async fn append(&self, name: &str, records: &[Bytes], content_type: &str) -> Result<AppendAck>;
+    async fn append(
+        &self,
+        name: &str,
+        partition: Option<u32>,
+        records: &[Bytes],
+        content_type: &str,
+    ) -> Result<AppendAck>;
 
     async fn read(
         &self,
         name: &str,
+        partition: Option<u32>,
         from: &str,
         live: Live,
         limits: ReadLimits,

@@ -19,7 +19,7 @@ Records use the same frame in both backends: a header with the offset, length, a
 | --- | --- | --- |
 | Unit of write | One object per bulk | One row per batch |
 | Location | `{prefix}{epoch}/wal/{start}-{end}` | Slot table `pico_wal_{cluster}_{node}_{slot}` |
-| Fence | Epoch in the key | Epoch on the node row, checked per insert |
+| Fence | Reservation object, re-read before each acknowledgement | Claim on the node row, checked by every insert |
 | Trim | Delete covered objects | Truncate the slot table |
 | Append latency | Tens of ms on S3, single digits on S3 Express | One commit |
 
@@ -38,7 +38,7 @@ Records use the same frame in both backends: a header with the offset, length, a
   <rect x="40" y="160" width="260" height="56" class="box-accent"/>
   <text x="170" y="184" text-anchor="middle" class="label">PUT</text>
   <text x="170" y="202" text-anchor="middle" class="sub">{prefix}{epoch}/wal/{start}-{end}</text>
-  <text x="170" y="250" text-anchor="middle" class="sub">epoch in the key, prefix deleted on trim</text>
+  <text x="170" y="250" text-anchor="middle" class="sub">fenced by its reservation, deleted on trim</text>
   <rect x="400" y="130" width="300" height="140" class="edge-soft"/>
   <text x="410" y="148" class="sub">postgres</text>
   <rect x="420" y="160" width="260" height="56" class="box-accent"/>
@@ -54,10 +54,9 @@ Records use the same frame in both backends: a header with the offset, length, a
 
 The WAL is a sequence of small objects written by one node under its own key prefix.
 
-- Incoming records accumulate into a bulk. Each bulk is one `PUT`.
-- Uploads are pipelined. Acknowledgements are delivered in submission order, once a bulk and every bulk before it are stored.
-- One upload contains every record that arrived while the previous upload was in flight, so per-record cost drops as concurrency rises.
-- The object key carries the node's epoch. A node that lost its registration cannot extend its WAL past a takeover, see [Streams](/docs/design/streams).
+- Each bulk of records is one `PUT`, pipelined and acknowledged in order, see [Writes](/docs/design/writes#the-wal).
+- A reservation object, `reservation/_kafka_{cluster}/{node}`, names the node and epoch that may write. Starting the WAL writes it.
+- After each completed bulk, and before acknowledging it, the writer reads the reservation back. If it names anyone else, or cannot be read, the writer is fenced and every later append fails.
 - Trim deletes the covered objects.
 
 ## Postgres
@@ -68,7 +67,7 @@ The WAL is a set of tables in a Postgres database. `--wal` with a `postgres://` 
 
 | Table | Rows | Columns |
 | --- | --- | --- |
-| `pico_wal_node` | One per node, keyed by cluster and node id | `epoch`, `trim_offset`, `segments`, `segment_bytes`, `timeline` |
+| `pico_wal_node` | One per node, keyed by cluster and node id | `epoch`, `failover`, `trim_offset`, `segments`, `segment_bytes`, `timeline` |
 | `pico_wal_{cluster}_{node}_{slot}` | One per batch | `start_offset`, `end_offset`, `epoch`, `body` |
 
 The cluster part of a slot table name is a CRC32 of the cluster id. `body` is stored `EXTERNAL`, so a row read is one TOAST fetch with no decompression.
@@ -130,10 +129,10 @@ A change to `segments` or `segmentBytes` is applied at the first start where the
 
 ### Fencing
 
-- Every batch insert runs as `INSERT ... SELECT ... FROM pico_wal_node WHERE epoch = $epoch FOR SHARE`.
-- If a newer process has claimed the node row with a higher epoch, the select returns no row, the insert writes nothing, and the writer reports itself fenced.
-- Claiming the node row is an upsert that succeeds only when the new epoch is at least the stored one.
-- Trim is guarded by the same epoch predicate.
+- The writer claims the node row with its epoch and a `failover` flag, false for the node itself and true for a takeover.
+- A claim succeeds on a higher epoch, or on the same epoch when it is a takeover or the row holds no takeover. A takeover therefore supersedes the node at the same epoch, and the node can never claim the row back.
+- Every batch insert runs as `INSERT ... SELECT ... FROM pico_wal_node WHERE` the row still holds the writer's claim, `FOR SHARE`. If the claim was superseded, the insert writes nothing and the writer reports itself fenced.
+- Trim and the start stamp are guarded by the same claim.
 
 ### Commit path
 
@@ -147,13 +146,25 @@ A change to `segments` or `segmentBytes` is applied at the first start where the
 
 Acknowledgements are released in order as commits return. A failed insert is retried against the same table. If a row already exists at that offset it is compared with the batch: a match is success, a mismatch is corruption.
 
+## Takeover
+
+Each node registers where its WAL lives. When a node is fenced, the lease holder opens that WAL as the dead node, in recovery mode, see [Failover](/docs/design/failover#taking-over). The takeover claim fences the dead node's writer before anything is read.
+
+| The dead node's WAL is in | The lease holder can take it over if |
+| --- | --- |
+| An object store bucket | It can reach the bucket and sees the dead node's reservation at that epoch. The bucket may differ from its own |
+| Postgres | Its own WAL is in the same Postgres database |
+| `file://` | It runs on the same host, which makes `file://` a single host setup |
+
+Nodes with different WAL backends cannot take over each other's WAL, so every node in a cluster uses the same kind. A takeover that is refused is retried on each failover tick, and the dead node's open streams stay where they are until it succeeds or the node restarts.
+
 ## Recovery
 
-When a stream is opened after a crash the engine reads the WAL past the last committed offset and replays it. Acknowledged records are recovered because acknowledgement required the write to complete. Records in flight but never acknowledged may be absent.
+A node recovers its own WAL when it starts, and the lease holder recovers a fenced node's WAL by taking it over. Recovery reads the WAL past the last committed offset, uploads those records to data objects, and closes the streams they belong to. Acknowledged records are recovered because acknowledgement required the write to complete. Records in flight but never acknowledged may be absent.
 
 | | Object store | Postgres |
 | --- | --- | --- |
-| Read | List under the previous session's prefix | Scan from the trim offset forward across slot tables, stop at the first gap |
+| Read | List the node's WAL objects | Scan from the trim offset forward across slot tables, stop at the first gap |
 | Integrity | Body CRC per record | Body CRC per record, row epoch must match the epoch in its offset |
 
 The Postgres backend also compares the database timeline with the one recorded at the last start.

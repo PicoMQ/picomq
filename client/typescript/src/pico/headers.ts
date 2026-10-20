@@ -1,5 +1,6 @@
 export const H_START_SEQ = 'Pico-Start-Seq'
 export const H_NEXT_SEQ = 'Pico-Next-Seq'
+export const H_PARTITIONS = 'Pico-Partitions'
 export const H_TIMESTAMP = 'Pico-Timestamp'
 export const H_TRIM_SEQ = 'Pico-Trim-Seq'
 export const H_TTL = 'Pico-TTL'

@@ -13,6 +13,7 @@
 
 app = "picomq"
 primary_region = "iad"
+kill_timeout = 30
 
 [build]
   dockerfile = "../../Dockerfile"

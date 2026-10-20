@@ -19,6 +19,7 @@ import {
   H_CLOSED,
   H_EXPIRES_AT,
   H_NEXT_SEQ,
+  H_PARTITIONS,
   H_PRODUCER_EPOCH,
   H_PRODUCER_ID,
   H_PRODUCER_SEQ,
@@ -36,13 +37,13 @@ import type {
   GroupAssignment,
   GroupDescription,
   GroupMembership,
-  GroupSummary,
   HeaderValue,
   JoinOptions,
   Live,
   MemberDescription,
   MemberFence,
   Offsets,
+  PartitionOptions,
   ProducerAck,
   ProducerRef,
   Protocol,
@@ -68,7 +69,7 @@ export class PicoClient implements StreamApi {
     retry: RetryPolicy = RetryPolicy.none(),
   ) {
     this.baseUrl = endpoint.replace(/\/+$/, '')
-    this.http = new Http(token, http2)
+    this.http = new Http(this.baseUrl, token, http2)
     this.retry = retry
   }
 
@@ -107,16 +108,22 @@ export class PicoClient implements StreamApi {
     )
   }
 
-  async head(name: string, options?: CallOptions): Promise<StreamInfo | null> {
+  async head(name: string, options?: PartitionOptions): Promise<StreamInfo | null> {
     return this.retry.run(
-      () => this.headOnce(name, options?.signal),
+      () => this.headOnce(name, options?.partition, options?.signal),
       retryableError,
       options?.signal,
     )
   }
 
   async append(name: string, records: AppendInput[], options?: AppendOptions): Promise<AppendAck> {
-    const response = await this.postBatch(name, toEnvelopes(records), {}, options?.signal)
+    const response = await this.postBatch(
+      name,
+      toEnvelopes(records),
+      {},
+      options?.partition,
+      options?.signal,
+    )
     return parseAck(response)
   }
 
@@ -124,7 +131,7 @@ export class PicoClient implements StreamApi {
     name: string,
     records: AppendInput[],
     producer: ProducerRef,
-    options?: CallOptions,
+    options?: PartitionOptions,
   ): Promise<ProducerAck> {
     const response = await this.postBatch(
       name,
@@ -134,6 +141,7 @@ export class PicoClient implements StreamApi {
         [H_PRODUCER_EPOCH]: String(producer.epoch),
         [H_PRODUCER_SEQ]: String(producer.seq),
       },
+      options?.partition,
       options?.signal,
     )
     const applied = header(response, H_START_SEQ) !== undefined
@@ -144,9 +152,9 @@ export class PicoClient implements StreamApi {
     }
   }
 
-  async trim(name: string, seq: number, options?: CallOptions): Promise<string> {
+  async trim(name: string, seq: number, options?: PartitionOptions): Promise<string> {
     return this.retry.run(
-      () => this.trimOnce(name, seq, options?.signal),
+      () => this.trimOnce(name, seq, options?.partition, options?.signal),
       retryableError,
       options?.signal,
     )
@@ -157,10 +165,10 @@ export class PicoClient implements StreamApi {
     from: string,
     live: Live,
     limits: ReadLimits = {},
-    options?: CallOptions,
+    options?: PartitionOptions,
   ): Promise<ReadPage> {
     return this.retry.run(
-      () => this.readOnce(name, from, live, limits, options?.signal),
+      () => this.readOnce(name, from, live, limits, options?.partition, options?.signal),
       retryableError,
       options?.signal,
     )
@@ -168,7 +176,8 @@ export class PicoClient implements StreamApi {
 
   subscribe(name: string, from: string, options: SubscribeOptions = {}): AsyncIterable<SseEvent> {
     const http = this.http
-    const streamUrl = (offset: string) => this.url(name, `?seq=${urlencode(offset)}&live=sse`)
+    const streamUrl = (offset: string) =>
+      this.url(name, `?seq=${urlencode(offset)}&live=sse`, options.partition)
     return subscribeLoop(from, options, {
       open: async (offset, lastEventId, signal) => {
         const headers: { [key: string]: string } = { Accept: 'text/event-stream' }
@@ -363,7 +372,11 @@ export class PicoClient implements StreamApi {
     )
   }
 
-  async listGroups(options?: CallOptions): Promise<GroupSummary[]> {
+  async deleteGroup(group: string, options?: CallOptions): Promise<void> {
+    await this.call('DELETE', groupPath(group), '', undefined, [204], options?.signal)
+  }
+
+  async listGroups(options?: CallOptions): Promise<string[]> {
     return this.retry.run(
       () => this.listGroupsOnce(options?.signal),
       retryableError,
@@ -375,13 +388,14 @@ export class PicoClient implements StreamApi {
     name: string,
     envelopes: RecordEnvelope[],
     extraHeaders: { [key: string]: string },
+    partition: number | undefined,
     signal?: AbortSignal,
   ): Promise<Response> {
     const payload = encodeBatchAppend(envelopes)
     return expectPico(
       await this.http.send({
         method: 'POST',
-        url: this.url(name),
+        url: this.url(name, '', partition),
         headers: { 'Content-Type': CT_BATCH_BINARY, ...extraHeaders },
         body: toArrayBuffer(payload),
         signal,
@@ -407,18 +421,29 @@ export class PicoClient implements StreamApi {
     return response.status === 201
   }
 
-  private async headOnce(name: string, signal?: AbortSignal): Promise<StreamInfo | null> {
-    const response = await this.http.send({ method: 'HEAD', url: this.url(name), signal })
+  private async headOnce(
+    name: string,
+    partition: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<StreamInfo | null> {
+    const response = await this.http.send({
+      method: 'HEAD',
+      url: this.url(name, '', partition),
+      signal,
+    })
     if (response.status === 404) {
       return null
     }
     await expectPico(response, [200])
     const info: StreamInfo = {
       name,
-      start: header(response, H_START_SEQ) ?? '0',
-      next: header(response, H_NEXT_SEQ) ?? '0',
+      partitions: parseOptionalUint(header(response, H_PARTITIONS)) ?? 1,
       closed: truthy(response, H_CLOSED),
     }
+    const start = header(response, H_START_SEQ)
+    if (start !== undefined) info.start = start
+    const next = header(response, H_NEXT_SEQ)
+    if (next !== undefined) info.next = next
     const contentType = header(response, 'content-type')
     if (contentType !== undefined) info.contentType = contentType
     const ttlSeconds = parseOptionalUint(header(response, H_TTL))
@@ -428,11 +453,16 @@ export class PicoClient implements StreamApi {
     return info
   }
 
-  private async trimOnce(name: string, seq: number, signal?: AbortSignal): Promise<string> {
+  private async trimOnce(
+    name: string,
+    seq: number,
+    partition: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const response = await expectPico(
       await this.http.send({
         method: 'POST',
-        url: this.url(name),
+        url: this.url(name, '', partition),
         headers: { [H_TRIM_SEQ]: String(seq) },
         signal,
       }),
@@ -468,6 +498,7 @@ export class PicoClient implements StreamApi {
     from: string,
     live: Live,
     limits: ReadLimits,
+    partition: number | undefined,
     signal?: AbortSignal,
   ): Promise<ReadPage> {
     let query = `?format=binary&seq=${urlencode(from)}`
@@ -481,7 +512,11 @@ export class PicoClient implements StreamApi {
       query += '&live=long-poll'
     }
 
-    const response = await this.http.send({ method: 'GET', url: this.url(name, query), signal })
+    const response = await this.http.send({
+      method: 'GET',
+      url: this.url(name, query, partition),
+      signal,
+    })
     await expectPico(response, live === 'off' ? [200] : [200, 204])
 
     const next = header(response, H_NEXT_SEQ) ?? from
@@ -537,6 +572,7 @@ export class PicoClient implements StreamApi {
       streams?: Array<{
         name?: string
         content_type?: string
+        partitions?: number
         start_seq?: number
         next_seq?: number
         closed?: boolean
@@ -550,10 +586,11 @@ export class PicoClient implements StreamApi {
       streams: (body.streams ?? []).map((node) => {
         const info: StreamInfo = {
           name: node.name ?? '',
-          start: String(node.start_seq ?? 0),
-          next: String(node.next_seq ?? 0),
+          partitions: node.partitions ?? 1,
           closed: node.closed ?? false,
         }
+        if (node.start_seq !== undefined) info.start = String(node.start_seq)
+        if (node.next_seq !== undefined) info.next = String(node.next_seq)
         if (node.content_type !== undefined) info.contentType = node.content_type
         if (node.ttl !== undefined) info.ttlSeconds = node.ttl
         if (node.expires_at !== undefined) info.expiresAt = node.expires_at
@@ -629,10 +666,10 @@ export class PicoClient implements StreamApi {
     return described
   }
 
-  private async listGroupsOnce(signal?: AbortSignal): Promise<GroupSummary[]> {
+  private async listGroupsOnce(signal?: AbortSignal): Promise<string[]> {
     const response = await this.call('GET', GROUPS_PATH, '', undefined, [200], signal)
 
-    const body = (await response.json()) as { groups?: GroupSummary[] }
+    const body = (await response.json()) as { groups?: string[] }
     return body.groups ?? []
   }
 
@@ -653,8 +690,12 @@ export class PicoClient implements StreamApi {
     return expectPico(await this.http.send(request), expected)
   }
 
-  private url(name: string, query = ''): string {
+  private url(name: string, query = '', partition?: number): string {
     const path = name.startsWith('/') ? name : `/${name}`
+    if (partition !== undefined) {
+      query += `${query === '' ? '?' : '&'}partition=${partition}`
+    }
+
     return `${this.baseUrl}${path}${query}`
   }
 }

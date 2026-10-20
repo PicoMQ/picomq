@@ -59,7 +59,10 @@ pub extern "C-unwind" fn pico_worker_main(_argument: pg_sys::Datum) {
         Err(e) => error!("pico: {e}"),
     };
     log!("pico: serving on {}", server.local_addr());
-    while BackgroundWorker::wait_latch(Some(TICK)) {}
+    let fenced = server.fenced();
+    while BackgroundWorker::wait_latch(Some(TICK)) && !*fenced.borrow() {}
+    let fenced = *fenced.borrow();
+
     if runtime
         .block_on(async { tokio::time::timeout(SHUTDOWN, server.shutdown()).await })
         .is_err()
@@ -67,6 +70,10 @@ pub extern "C-unwind" fn pico_worker_main(_argument: pg_sys::Datum) {
         warning!("pico: shutdown did not finish within {SHUTDOWN:?}");
     }
     runtime.shutdown_background();
+
+    if fenced {
+        error!("pico: this node left the cluster, restarting");
+    }
 }
 
 fn start(runtime: &Runtime, config: ServerConfig) -> Result<Option<PicoServer>, RuntimeError> {

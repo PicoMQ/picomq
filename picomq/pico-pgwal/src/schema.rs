@@ -62,6 +62,7 @@ impl Schema {
                  epoch BIGINT NOT NULL DEFAULT 0, trim_offset BIGINT NOT NULL DEFAULT 0, \
                  timeline BIGINT NOT NULL DEFAULT 0, segments BIGINT NOT NULL DEFAULT 0, \
                  segment_bytes BIGINT NOT NULL DEFAULT 0, \
+                 failover BOOLEAN NOT NULL DEFAULT false, \
                  PRIMARY KEY (cluster_id, node_id))"
         )))
         .execute(&mut *tx)

@@ -1,9 +1,8 @@
 //! Ownership routing shared by both protocols: serve locally or 307 to the
-//! stream's owner.
+//! owner of the topic's log.
 //!
-//! One copy for both protocols: PUT and OPTIONS are
-//! always local (create places the stream, redirects start once an owner is
-//! opened elsewhere), the list root `/` is local, everything else redirects
+//! OPTIONS and the list root `/` are local, a request for a topic that does
+//! not exist yet is local (PUT creates it here), everything else redirects
 //! when the owner is a different node with a known address. Routing failures
 //! degrade to 503 with an `X-Error` header rather than guessing.
 
@@ -11,6 +10,9 @@ use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
 
 use picomq_server::ownership::OwnershipService;
+use picomq_server::{ErrorKind, Log, Topics, partition_log};
+
+use crate::partition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RoutingMode {
@@ -19,32 +21,44 @@ pub enum RoutingMode {
     LocalAlways,
 }
 
-/// Decide whether this request is served here. `Some(response)` short-circuits
-/// (redirect or routing error).`None` means handle locally. Ownership is by
-/// the stored `name`. The redirect location is from the original URI.
 pub async fn route(
     ownership: &dyn OwnershipService,
+    topics: &Topics,
     mode: RoutingMode,
     method: &Method,
     uri: &Uri,
     name: &str,
+    requested: Option<u32>,
 ) -> Option<Response> {
-    if stream_name(uri) == "/" || *method == Method::PUT || *method == Method::OPTIONS {
+    if stream_name(uri) == "/" || *method == Method::OPTIONS {
         return None;
     }
-    owner_redirect(ownership, mode, uri, name).await
+
+    let topic = match topics.get(name).await {
+        Ok(Some(topic)) => topic,
+        Ok(None) => return None,
+        Err(error) if error.kind == ErrorKind::BadRequest => return None,
+        Err(error) => return Some(routing_error(&error.message)),
+    };
+    let Ok(log) =
+        partition::choose(&topic, requested).and_then(|index| partition_log(&topic, index))
+    else {
+        return None;
+    };
+
+    owner_redirect(ownership, mode, uri, &log).await
 }
 
 pub async fn owner_redirect(
     ownership: &dyn OwnershipService,
     mode: RoutingMode,
     uri: &Uri,
-    name: &str,
+    log: &Log,
 ) -> Option<Response> {
     if mode == RoutingMode::LocalAlways {
         return None;
     }
-    let owner = match ownership.owner_of(name).await {
+    let owner = match ownership.owner_of(log).await {
         Ok(owner) => owner,
         Err(e) => return Some(routing_error(&e.message)),
     };

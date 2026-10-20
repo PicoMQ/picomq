@@ -1,6 +1,15 @@
 # Metadata
 
-Every change to cluster state is a command: register a node, create a stream, open it at a new epoch, commit an object, record a transfer, delete a key. Commands are small binary values with a versioned encoding. Nothing writes cluster state any other way, so the command set is the complete list of things that can happen to a cluster.
+Every change to cluster state is a command. Commands are small binary values with a versioned encoding. Nothing writes cluster state any other way, so the command set is the complete list of things that can happen to a cluster.
+
+| Area | Commands |
+| --- | --- |
+| Nodes | `RegisterNode`, `Heartbeat`, `FenceNode`, `SetNodeSlots` |
+| Streams | `CreateStream`, `CreateStreams`, `PlaceStream`, `OpenStream`, `TrimStream`, `CloseStream`, `DeleteStream` |
+| Transfers | `TransferStream`, `CompleteTransfer` |
+| Objects | `PrepareObject`, `CommitStreamSetObject`, `CompactStreamObject`, `ExpirePreparedObjects`, `CleanDestroyedObjects` |
+| KV | `PutKv`, `PutKvIfAbsent`, `PutKvIfMatches`, `DeleteKv`, `DeleteKvIfMatches` |
+| Producers | `AllocateProducerIds` |
 
 ## The log
 
@@ -49,7 +58,13 @@ A proposal returns only after the local tailer has applied its row. The view is 
 
 A tailer task on every node fetches rows past its applied index and applies each command to an in-memory state. Apply is a pure function: the same log always produces the same state on every node, with no clocks and no node-local input.
 
-Apply is also where the rules are enforced. Each command validates against the current state and either mutates it or returns an error to the proposer. Duplicate work is answered with a distinct redundant result, which makes retries safe. Commands that include a node identity are checked against the node's registered epoch, so a restarted node at a higher epoch invalidates everything still in flight from its predecessor.
+Apply is also where the rules are enforced. Each command validates against the current state and either mutates it or returns an error to the proposer. Duplicate work is answered with a distinct redundant result, which makes retries safe.
+
+Every command except `RegisterNode` names its proposer, the node id and epoch that sent it. Apply checks the proposer before anything else:
+
+- An unregistered node, a fenced node, or a node at an old epoch changes nothing. A restarted node's new epoch therefore invalidates everything still in flight from its predecessor.
+- Only a stream's owner may close, trim, or delete it, unless the owner is fenced, which is how [failover](/docs/design/failover) recovers a dead node's streams.
+- `RegisterNode` is never rejected. It assigns the epoch, see [Ownership and routing](/docs/design/ownership).
 
 The state is built from persistent maps. Cloning it for a published view is cheap structural sharing, not a copy, so publishing a new view per applied row costs little even with large state.
 
@@ -57,7 +72,7 @@ The state is built from persistent maps. Cloning it for a published view is chea
 
 Readers never query SQL. Each node holds one immutable view, swapped atomically by the tailer, holding the state and the applied index. Anything answering requests loads the current view without locks. Code that needs to observe a future write waits for the applied index to reach a target instead of polling the database.
 
-This is what makes a slow metadata database tolerable. Reads keep their latency regardless of the database, and only new commands wait.
+This is what makes a slow metadata database tolerable. Reads keep their latency regardless of the database, and only new commands wait. When the database is unreachable, a proposal fails as unavailable, and what each caller does about it is in [Failover](/docs/design/failover#metadata-outages).
 
 ## Snapshots
 

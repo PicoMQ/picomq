@@ -4,11 +4,17 @@ PicoMQ authenticates requests with opaque bearer tokens and authorizes them with
 
 ## Tokens
 
-On the wire a token is `BASE64URL(id).BASE64URL(secret)`. The id is public. The secret appears once in the issuing response and is never stored. Records live in the replicated metadata KV under the reserved `auth/token/` prefix. Stream registry keys always start with `/` and the auth prefix does not, so the two can never collide. Issuance and revocation replicate like any other metadata command.
+On the wire a token is `BASE64URL(id).BASE64URL(secret)`. The id is public. The secret appears once in the issuing response and is never stored. Records live in the replicated metadata KV under the reserved `auth/token/` prefix, apart from the topic keys described in [Topics and streams](/docs/design/streams#what-is-stored). Issuance and revocation replicate like any other metadata command.
 
 ## Scopes
 
-A scope answers three independent questions. Which resources: matcher sets of exact names and prefixes, one set for streams and one for token ids. Which operations: three coarse read/write groups (`stream`, `tokens`, `admin`) and sixteen fine operations for tokens that need a single verb, such as an append-only producer. Which listeners: the audiences `pico`, `durable_streams`, and `admin`. A scope may also have an absolute expiry. An expired token fails on its next use, and a sweep on the maintenance-lease holder deletes the record.
+A scope answers three independent questions. Which resources: matcher sets of exact names and prefixes, one set for streams and one for token ids. Which operations: three coarse read/write groups and seventeen fine operations, for tokens that need a single verb, such as an append-only producer. Which listeners: the audiences `pico`, `durable_streams`, and `admin`. A scope may also have an absolute expiry. An expired token fails on its next use, and a sweep on the maintenance-lease holder deletes the record.
+
+| Group | Read | Write |
+| --- | --- | --- |
+| `stream` | `read`, `head`, `list` | `create`, `append`, `trim`, `close`, `delete` |
+| `tokens` | `list_tokens` | `issue_token`, `revoke_token` |
+| `admin` | `cluster_read`, `node_read`, `stream_inspect` | `transfer_stream`, `update_node_slots`, `delete_group` |
 
 ## Narrowing
 
@@ -20,9 +26,19 @@ A scope with `autoPrefixStreams` holds exactly one stream prefix, and client str
 
 ## The gate
 
-Enforcement runs at the top of dispatch, before routing and body buffering. A streaming read that fails auth gets an immediate plain response, never a held connection. CORS preflights pass without a credential. A request with no credential gets the scope of the reserved `anonymous` token when one is stored, which makes public access a replicated grant instead of a server mode. Denials against the anonymous scope return `401`, because the fix is to present a credential.
+Enforcement runs once the request body is read and before routing. The gate works out what the request will do from the parsed request, the same way the handler will:
+
+- A `POST` with a `Pico-Trim-Seq` header needs `trim`. A `POST` that closes the stream needs `close`, and `append` too when it carries records.
+- A Durable Streams `PUT` with a body needs `create` and `append`.
+- A list needs `list` on the requested prefix, and returns only the topics the token may read.
+- Consumer group routes need `read` on every topic the request names, `stream_inspect` to list or describe groups, and `delete_group` to delete one.
+- A method the protocol does not serve is refused with `405` before any of this.
+
+A streaming read that fails auth gets an immediate plain response, never a held connection. CORS preflights pass without a credential. A request with no credential gets the scope of the reserved `anonymous` token when one is stored, which makes public access a replicated grant instead of a server mode. Denials against the anonymous scope return `401`, because the fix is to present a credential.
 
 Rejections use each protocol's own error format, JSON on Pico and plain text on Durable Streams, with no new headers. `401` means no valid credential and `403` means insufficient scope. Producer fencing also uses `403` and stays distinguishable by its `Producer-Epoch` header.
+
+The Kafka listener does not authenticate. It binds to loopback unless `--insecure-allow-remote` is set, see [Kafka](/docs/kafka).
 
 ## Revocation
 

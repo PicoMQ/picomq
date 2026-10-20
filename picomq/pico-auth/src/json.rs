@@ -28,6 +28,7 @@ pub fn operation_name(op: Operation) -> &'static str {
         Operation::StreamInspect => "stream_inspect",
         Operation::TransferStream => "transfer_stream",
         Operation::UpdateNodeSlots => "update_node_slots",
+        Operation::DeleteGroup => "delete_group",
     }
 }
 

@@ -26,14 +26,27 @@ pub fn cluster() -> String {
     )
 }
 
-pub fn wal(url: &str, cluster: &str, epoch: u64, params: &str) -> PgWal {
+pub const NODE: u32 = 7;
+
+pub fn config(url: &str, cluster: &str, epoch: u64, params: &str) -> Config {
     let separator = if url.contains('?') { '&' } else { '?' };
     let uri = if params.is_empty() {
         url.to_owned()
     } else {
         format!("{url}{separator}{params}")
     };
-    PgWal::new(Config::parse(&uri).unwrap().identity(cluster, 7, epoch)).unwrap()
+
+    Config::parse(&uri).unwrap().identity(cluster, NODE, epoch)
+}
+
+pub fn wal(url: &str, cluster: &str, epoch: u64, params: &str) -> PgWal {
+    PgWal::new(config(url, cluster, epoch, params)).unwrap()
+}
+
+pub async fn recovering(url: &str, cluster: &str, epoch: u64, params: &str) -> PgWal {
+    PgWal::recovering(config(url, cluster, 0, params), NODE, epoch)
+        .await
+        .unwrap()
 }
 
 pub fn record(stream_id: u64, base_offset: u64, payload: &[u8]) -> StreamRecordBatch {
@@ -50,7 +63,7 @@ pub async fn slots(url: &str, cluster: &str) -> i64 {
     let pool = sqlx::PgPool::connect(url).await.unwrap();
     let count = sqlx::query_scalar("SELECT count(*) FROM pg_tables WHERE tablename LIKE $1")
         .bind(format!(
-            "pico\\_wal\\_{:08x}\\_7\\_%",
+            "pico\\_wal\\_{:08x}\\_{NODE}\\_%",
             crc32fast::hash(cluster.as_bytes())
         ))
         .fetch_one(&pool)

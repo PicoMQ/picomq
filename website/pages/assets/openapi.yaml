@@ -4,20 +4,24 @@ info:
   version: 0.1.0
   description: >
     The Pico protocol, PicoMQ's native HTTP API, plus the admin API served by
-    each node's admin listener. A stream is addressed by its path. Requests for
-    a stream owned by another node return 307 with the owner's address. With
-    auth required, send `Authorization: Bearer <token>` (probes stay open).
+    each node's admin listener. A topic is addressed by its path. Topics with
+    more than one partition take `?partition=N` on every topic request.
+    Requests for a partition owned by another node return 307 with the owner's
+    address. With auth required, send `Authorization: Bearer <token>` (probes
+    stay open).
 servers:
   - url: http://127.0.0.1:4437
     description: Protocol listener
 
 tags:
   - name: streams
-    description: The Pico protocol.
+    description: Topics over the Pico protocol.
+  - name: groups
+    description: Consumer groups on a Pico protocol listener.
   - name: schemas
     description: Schema registry on the protocol listener.
   - name: stream-config
-    description: Protocol-neutral stream config on the protocol listener.
+    description: Topic config on the protocol listener.
   - name: admin
     description: Admin listener endpoints (default port 9090).
   - name: tokens
@@ -30,7 +34,7 @@ paths:
   /:
     get:
       tags: [streams]
-      summary: List streams
+      summary: List topics
       operationId: listStreams
       parameters:
         - name: prefix
@@ -47,7 +51,7 @@ paths:
           schema: { type: integer, minimum: 0 }
       responses:
         "200":
-          description: Streams under the prefix.
+          description: Topics under the prefix that the caller may read.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StreamList" }
@@ -59,12 +63,13 @@ paths:
   /{stream}:
     parameters:
       - $ref: "#/components/parameters/Stream"
+      - $ref: "#/components/parameters/Partition"
     put:
       tags: [streams]
-      summary: Create a stream
+      summary: Create a topic
       description: >
-        Idempotent. A request body is appended as the first records. Stream
-        names may contain slashes, the whole path is the name.
+        Creates a single-partition topic. Idempotent, and takes no body: append
+        with POST. Names may contain slashes, the whole path is the name.
       operationId: createStream
       parameters:
         - name: Content-Type
@@ -73,11 +78,11 @@ paths:
           schema: { type: string, default: application/octet-stream }
         - name: Pico-TTL
           in: header
-          description: Retention in seconds.
+          description: Seconds without appends or reads after which the whole topic expires.
           schema: { type: integer, minimum: 0 }
         - name: Pico-Expires-At
           in: header
-          description: Absolute expiry time (RFC 3339 or unix ms).
+          description: Absolute expiry time (RFC 3339 or unix ms). Not with Pico-TTL.
           schema: { type: string }
         - name: Pico-Closed
           in: header
@@ -91,26 +96,30 @@ paths:
           in: header
           description: Validate appends against the bound schema. Defaults to false.
           schema: { type: boolean }
-      requestBody:
-        description: Optional initial records.
-        content:
-          "*/*":
-            schema: { type: string, format: binary }
       responses:
         "201":
           description: Created.
           headers:
             Pico-Next-Seq: { $ref: "#/components/headers/NextSeq" }
+            Pico-Partitions: { $ref: "#/components/headers/Partitions" }
         "200":
-          description: Already exists with the same content type.
+          description: Already exists with the same settings.
           headers:
             Pico-Next-Seq: { $ref: "#/components/headers/NextSeq" }
+            Pico-Partitions: { $ref: "#/components/headers/Partitions" }
+        "400":
+          description: A body, both expiry headers, or an invalid header.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
         "409":
-          description: Exists with a different content type.
+          description: Exists with different settings.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -140,7 +149,7 @@ paths:
           schema: { type: integer, minimum: 0 }
         - name: Pico-Closed
           in: header
-          description: Seal the stream after this append.
+          description: Seal the topic after this append. With no body, only seals.
           schema: { type: boolean }
         - name: Pico-Trim-Seq
           in: header
@@ -165,12 +174,25 @@ paths:
             Pico-Timestamp:
               description: Timestamp assigned to the records.
               schema: { type: string }
+            Pico-Producer-Epoch:
+              description: The producer epoch the append was accepted at.
+              schema: { type: integer }
+            Pico-Producer-Seq:
+              description: The producer sequence the append was accepted at.
+              schema: { type: integer }
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "412":
+          description: Pico-Match-Seq did not match the tail.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/Unavailable"
         "409":
-          description: Producer conflict or sealed stream.
+          description: Producer sequence gap, sealed topic, or the partition is moving.
           headers:
             Pico-Expected-Seq:
               description: The producer sequence the server expected next.
@@ -222,7 +244,7 @@ paths:
               description: Present when the response reaches the tail.
               schema: { type: boolean }
             Pico-Closed:
-              description: Present when the stream is sealed and fully read.
+              description: Present when the topic is sealed and fully read.
               schema: { type: boolean }
             Pico-Cursor:
               description: Opaque resume token for paginated catch-up reads.
@@ -244,14 +266,19 @@ paths:
           $ref: "#/components/responses/Unauthenticated"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
     head:
       tags: [streams]
-      summary: Stream metadata
+      summary: Topic metadata
       operationId: headStream
       responses:
         "200":
-          description: Metadata in headers, no body.
+          description: >
+            Metadata in headers, no body. On a topic with several partitions
+            the sequences appear only with `?partition=`.
           headers:
+            Pico-Partitions: { $ref: "#/components/headers/Partitions" }
             Pico-Next-Seq: { $ref: "#/components/headers/NextSeq" }
             Pico-Start-Seq:
               schema: { type: integer }
@@ -264,19 +291,22 @@ paths:
             Pico-Schema:
               description: The bound schema name, present when bound.
               schema: { type: string }
+            Pico-Kafka-Topic:
+              description: The topic's Kafka name, present when it has one.
+              schema: { type: string }
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          description: No such stream.
+          description: No such topic.
     delete:
       tags: [streams]
-      summary: Delete a stream
+      summary: Delete a topic
       operationId: deleteStream
       responses:
         "204":
-          description: Deleted. The name is immediately reusable.
+          description: Deleted with all of its partitions. The name is immediately reusable.
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -289,22 +319,18 @@ paths:
       - name: name
         in: path
         required: true
-        description: The stream path without requiring a leading slash. Topic `orders` is `/orders`.
+        description: The topic name, with or without a leading slash. `orders.eu` and `orders/eu` are the same topic.
         schema: { type: string }
     get:
       tags: [stream-config]
-      summary: Read stream schema config
+      summary: Read topic config
       operationId: getStreamConfig
       responses:
         "200":
-          description: Current schema bind and validation flag.
+          description: Schema bind, validation flag, partition count, and Kafka name.
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  schema: { type: string, nullable: true }
-                  schemaValidate: { type: boolean }
+              schema: { $ref: "#/components/schemas/TopicConfig" }
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -313,7 +339,7 @@ paths:
           description: No such stream.
     patch:
       tags: [stream-config]
-      summary: Update stream schema config
+      summary: Update a topic's schema bind
       operationId: patchStreamConfig
       requestBody:
         required: true
@@ -322,29 +348,25 @@ paths:
             schema:
               type: object
               properties:
-                schema: { type: string, nullable: true }
+                schema: { type: [string, "null"] }
                 schemaValidate: { type: boolean }
       responses:
         "200":
           description: Updated config.
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  schema: { type: string, nullable: true }
-                  schemaValidate: { type: boolean }
+              schema: { $ref: "#/components/schemas/TopicConfig" }
         "400":
-          description: Empty patch, unknown schema, or invalid body.
+          description: Empty patch, unknown schema, an attempt to set kafkaTopic, or invalid body.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+              schema: { $ref: "#/components/schemas/MessageError" }
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          description: No such stream.
+          description: No such topic.
 
   /_schemas/{name}:
     parameters:
@@ -377,7 +399,7 @@ paths:
           description: Unparseable schema, unknown format, or no registry configured.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+              schema: { $ref: "#/components/schemas/MessageError" }
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -409,6 +431,211 @@ paths:
         "404":
           description: No such schema.
 
+  /_groups:
+    get:
+      tags: [groups]
+      summary: List every group in the cluster
+      operationId: listGroups
+      responses:
+        "200":
+          description: Group names.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  groups:
+                    type: array
+                    items: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /_groups/{group}:
+    parameters:
+      - $ref: "#/components/parameters/Group"
+    get:
+      tags: [groups]
+      summary: Describe a group
+      operationId: describeGroup
+      responses:
+        "200":
+          description: State, generation, and members, from the coordinator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupDescription" }
+        "404":
+          $ref: "#/components/responses/GroupError"
+    delete:
+      tags: [groups]
+      summary: Delete a group and its offsets
+      operationId: deleteGroup
+      responses:
+        "204":
+          description: Deleted.
+        "404":
+          $ref: "#/components/responses/GroupError"
+        "409":
+          $ref: "#/components/responses/GroupError"
+  /_groups/{group}/members:
+    parameters:
+      - $ref: "#/components/parameters/Group"
+    post:
+      tags: [groups]
+      summary: Join a group
+      description: Returns once the rebalance completes, with the topics assigned to this member.
+      operationId: joinGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscription]
+              properties:
+                subscription:
+                  type: array
+                  items: { type: string }
+                memberId: { type: string }
+                instanceId: { type: string }
+                clientId: { type: string }
+                sessionTimeoutMs: { type: integer, minimum: 1000, maximum: 300000 }
+                rebalanceTimeoutMs: { type: integer }
+      responses:
+        "200":
+          description: Joined.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memberId: { type: string }
+                  generation: { type: integer }
+                  assignment:
+                    type: array
+                    items: { type: string }
+                  members:
+                    type: array
+                    items: { type: string }
+        "409":
+          $ref: "#/components/responses/GroupError"
+        "429":
+          $ref: "#/components/responses/GroupError"
+  /_groups/{group}/members/{member}:
+    parameters:
+      - $ref: "#/components/parameters/Group"
+      - $ref: "#/components/parameters/Member"
+    get:
+      tags: [groups]
+      summary: A member's current assignment
+      operationId: groupAssignment
+      parameters:
+        - name: generation
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: instance_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: The assignment at this generation.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  generation: { type: integer }
+                  assignment:
+                    type: array
+                    items: { type: string }
+        "404":
+          $ref: "#/components/responses/GroupError"
+        "409":
+          $ref: "#/components/responses/GroupError"
+    delete:
+      tags: [groups]
+      summary: Leave a group
+      operationId: leaveGroup
+      parameters:
+        - name: instance_id
+          in: query
+          schema: { type: string }
+      responses:
+        "204":
+          description: Left.
+  /_groups/{group}/members/{member}/heartbeat:
+    parameters:
+      - $ref: "#/components/parameters/Group"
+      - $ref: "#/components/parameters/Member"
+    post:
+      tags: [groups]
+      summary: Keep a member alive
+      operationId: heartbeat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [generation]
+              properties:
+                generation: { type: integer }
+                instanceId: { type: string }
+      responses:
+        "204":
+          description: Alive.
+        "404":
+          $ref: "#/components/responses/GroupError"
+        "409":
+          $ref: "#/components/responses/GroupError"
+  /_groups/{group}/offsets:
+    parameters:
+      - $ref: "#/components/parameters/Group"
+    put:
+      tags: [groups]
+      summary: Commit offsets
+      description: Send memberId and generation together to commit as a member.
+      operationId: commitOffsets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [offsets]
+              properties:
+                offsets: { $ref: "#/components/schemas/Offsets" }
+                memberId: { type: string }
+                generation: { type: integer }
+                instanceId: { type: string }
+      responses:
+        "204":
+          description: Committed.
+        "409":
+          $ref: "#/components/responses/GroupError"
+    get:
+      tags: [groups]
+      summary: Fetch committed offsets
+      operationId: fetchOffsets
+      parameters:
+        - name: stream
+          in: query
+          description: Topics to fetch, repeated. All of them when absent.
+          schema:
+            type: array
+            items: { type: string }
+          explode: true
+      responses:
+        "200":
+          description: Committed offsets by topic.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  offsets: { $ref: "#/components/schemas/Offsets" }
+
   /health:
     get:
       tags: [admin]
@@ -435,10 +662,11 @@ paths:
                   ready: { type: boolean }
                   serving: { type: boolean }
                   registered: { type: boolean }
+                  fenced: { type: boolean }
                   appliedIndex: { type: integer }
                   nodeId: { type: integer }
         "503":
-          description: Not ready.
+          description: Not ready, with the same body. A fenced node is never ready.
   /admin/cluster:
     get:
       tags: [admin]
@@ -477,10 +705,11 @@ paths:
   /admin/streams/{stream}:
     get:
       tags: [admin]
-      summary: One stream's placement and state
+      summary: One partition's placement and state
       servers: [{ url: "http://127.0.0.1:9090" }]
       parameters:
         - $ref: "#/components/parameters/Stream"
+        - $ref: "#/components/parameters/Partition"
       responses:
         "200":
           description: Owner, state, epoch, offsets, pending transfer.
@@ -496,7 +725,7 @@ paths:
   /admin/transfer:
     post:
       tags: [admin]
-      summary: Transfer a stream to another node
+      summary: Transfer a partition to another node
       servers: [{ url: "http://127.0.0.1:9090" }]
       requestBody:
         required: true
@@ -507,9 +736,10 @@ paths:
               required: [stream, toNode]
               properties:
                 stream: { type: string }
+                partition: { type: integer, description: Required for topics with several partitions. }
                 toNode: { type: integer }
       responses:
-        "200":
+        "202":
           description: Transfer recorded. Completion is asynchronous.
           content:
             application/json:
@@ -517,6 +747,7 @@ paths:
                 type: object
                 properties:
                   stream: { type: string }
+                  partition: { type: integer }
                   streamId: { type: integer }
                   toNode: { type: integer }
                   pending: { type: boolean }
@@ -524,7 +755,7 @@ paths:
           description: Invalid target or a conflicting transfer is pending.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+              schema: { $ref: "#/components/schemas/MessageError" }
         "401":
           $ref: "#/components/responses/AdminUnauthenticated"
         "403":
@@ -594,7 +825,7 @@ paths:
           description: Invalid id or scope.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/AdminError" }
+              schema: { $ref: "#/components/schemas/MessageError" }
         "401":
           $ref: "#/components/responses/AdminUnauthenticated"
         "403":
@@ -603,7 +834,7 @@ paths:
           description: Token id already exists.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/AdminError" }
+              schema: { $ref: "#/components/schemas/MessageError" }
   /admin/tokens/{id}:
     delete:
       tags: [tokens]
@@ -625,12 +856,12 @@ paths:
           description: No such token.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/AdminError" }
+              schema: { $ref: "#/components/schemas/MessageError" }
         "409":
           description: Token changed concurrently.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/AdminError" }
+              schema: { $ref: "#/components/schemas/MessageError" }
 
 components:
   securitySchemes:
@@ -642,11 +873,29 @@ components:
       name: stream
       in: path
       required: true
-      description: The stream name. Names are paths and may contain slashes.
+      description: The topic name. Names are paths and may contain slashes.
+      schema: { type: string }
+    Partition:
+      name: partition
+      in: query
+      description: The partition. Required on topics with several partitions.
+      schema: { type: integer, minimum: 0 }
+    Group:
+      name: group
+      in: path
+      required: true
+      schema: { type: string }
+    Member:
+      name: member
+      in: path
+      required: true
       schema: { type: string }
   headers:
     NextSeq:
-      description: The stream's next sequence. Pass as `seq` to resume.
+      description: The partition's next sequence. Pass as `seq` to resume.
+      schema: { type: integer }
+    Partitions:
+      description: The topic's partition count.
       schema: { type: integer }
   responses:
     Unauthenticated:
@@ -662,6 +911,19 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    Unavailable:
+      description: The node is stopping or metadata is unreachable. Retry.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    GroupError:
+      description: >
+        unknown_member, not_found, rebalance_in_progress, illegal_generation,
+        inconsistent_protocol, conflict, fenced, capacity_exceeded, or
+        coordinator_unavailable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     AdminUnauthenticated:
       description: Missing or invalid credential.
       headers:
@@ -669,12 +931,12 @@ components:
           schema: { type: string, enum: [Bearer] }
       content:
         application/json:
-          schema: { $ref: "#/components/schemas/AdminError" }
+          schema: { $ref: "#/components/schemas/MessageError" }
     AdminForbidden:
       description: Valid credential, insufficient scope.
       content:
         application/json:
-          schema: { $ref: "#/components/schemas/AdminError" }
+          schema: { $ref: "#/components/schemas/MessageError" }
   schemas:
     Error:
       type: object
@@ -683,11 +945,12 @@ components:
         error: { type: string }
         message: { type: string }
         next_seq: { type: integer }
-    AdminError:
+    MessageError:
       type: object
+      description: Errors on the admin listener and the topic config and schema routes.
       required: [error]
       properties:
-        error: { type: string }
+        error: { type: string, description: A message. }
     JsonBatch:
       type: object
       required: [records]
@@ -729,8 +992,9 @@ components:
             properties:
               name: { type: string }
               content_type: { type: string }
-              start_seq: { type: integer }
-              next_seq: { type: integer }
+              partitions: { type: integer }
+              start_seq: { type: integer, description: Single-partition topics only. }
+              next_seq: { type: integer, description: Single-partition topics only. }
               closed: { type: boolean }
               ttl: { type: integer }
               expires_at: { type: string }
@@ -743,6 +1007,7 @@ components:
         nodeEpoch: { type: integer }
         advertisedAddress: { type: string }
         registered: { type: boolean }
+        fenced: { type: boolean }
         appliedIndex: { type: integer }
         streamCount: { type: integer }
         objectCount: { type: integer }
@@ -789,21 +1054,26 @@ components:
         openingCount: { type: integer }
         placedCount: { type: integer }
         local: { type: boolean }
+        fenced: { type: boolean }
     StreamDetail:
       type: object
       properties:
         name: { type: string }
+        topicId: { type: string }
+        partitions: { type: integer }
+        partition: { type: integer }
         streamId: { type: integer }
         ownerNodeId: { type: [integer, "null"] }
         ownerAdvertisedAddress: { type: [string, "null"] }
         ownerLocal: { type: boolean }
         contentType: { type: string }
+        kafkaTopic: { type: [string, "null"] }
         ttlSeconds: { type: [integer, "null"] }
         expiresAtMs: { type: [integer, "null"] }
         closed: { type: boolean }
         state:
           type: [string, "null"]
-          description: Placement state, opening or placed. Null before first open.
+          description: opened or closed. Null before first open.
         epoch: { type: [integer, "null"] }
         nodeId:
           type: [integer, "null"]
@@ -866,6 +1136,7 @@ components:
                 stream_inspect,
                 transfer_stream,
                 update_node_slots,
+                delete_group,
               ]
         audiences:
           type: array
@@ -899,3 +1170,39 @@ components:
         token: { type: string }
         scope: { $ref: "#/components/schemas/Scope" }
         createdAtMs: { type: integer }
+    TopicConfig:
+      type: object
+      properties:
+        schema: { type: [string, "null"] }
+        schemaValidate: { type: boolean }
+        partitions: { type: integer }
+        kafkaTopic: { type: [string, "null"], description: Follows from the name. Read only. }
+    Offsets:
+      type: object
+      additionalProperties:
+        type: object
+        required: [position]
+        properties:
+          position: { type: integer }
+          metadata: { type: [string, "null"] }
+    GroupDescription:
+      type: object
+      properties:
+        group: { type: string }
+        state: { type: string }
+        generation: { type: integer }
+        protocolType: { type: string }
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              memberId: { type: string }
+              instanceId: { type: [string, "null"] }
+              clientId: { type: string }
+              subscription:
+                type: array
+                items: { type: string }
+              assignment:
+                type: array
+                items: { type: string }

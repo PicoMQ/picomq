@@ -9,7 +9,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot, watch};
 
 use crate::config::Config;
 use crate::frame;
-use crate::node::signed;
+use crate::node::{Claim, HELD, signed};
 use crate::ring::Ring;
 use crate::schema::{NODE, Schema};
 
@@ -52,8 +52,7 @@ struct Inner {
     schema: Arc<Schema>,
     ring: Arc<Mutex<Ring>>,
     cluster_id: String,
-    node_id: u32,
-    epoch: u64,
+    claim: Claim,
     batch_interval: Duration,
     max_bytes_in_batch: u64,
     max_unflushed_bytes: u64,
@@ -84,8 +83,7 @@ impl Writer {
                 schema,
                 ring,
                 cluster_id: config.cluster_id.clone(),
-                node_id: config.node_id,
-                epoch: config.epoch,
+                claim: config.claim(),
                 batch_interval: config.batch_interval,
                 max_bytes_in_batch: config.max_bytes_in_batch,
                 max_unflushed_bytes: config.max_unflushed_bytes,
@@ -230,8 +228,8 @@ impl Inner {
     fn error(&self, failure: &Failure) -> WalError {
         match failure {
             Failure::Fenced => WalError::Fenced {
-                node_id: self.node_id,
-                our_epoch: self.epoch,
+                node_id: self.claim.node_id,
+                our_epoch: self.claim.epoch,
             },
             Failure::Shutdown => WalError::Shutdown,
             Failure::Broken(reason) => WalError::Io(std::io::Error::other(reason.clone())),
@@ -255,25 +253,25 @@ impl Inner {
         let body = frame::encode(batch.start, batch.records.iter().map(|p| &p.record));
         let sql = format!(
             "INSERT INTO {table} (start_offset, end_offset, epoch, body) \
-             SELECT $1, $2, $3, $4 FROM {NODE} \
-             WHERE cluster_id = $5 AND node_id = $6 AND epoch = $3 FOR SHARE \
+             SELECT $5, $6, $3, $7 FROM {NODE} WHERE {HELD} FOR SHARE \
              ON CONFLICT (start_offset) DO NOTHING"
         );
         let start = signed(batch.start).map_err(broken)?;
         let end = signed(batch.end).map_err(broken)?;
-        let epoch = signed(self.epoch).map_err(broken)?;
+        let epoch = signed(self.claim.epoch).map_err(broken)?;
         let mut closing = self.closing.subscribe();
         let mut delay = RETRY_FLOOR;
         let mut attempts: u32 = 0;
         loop {
             let attempt = async {
                 let inserted = sqlx::query(AssertSqlSafe(sql.as_str()))
+                    .bind(&self.cluster_id)
+                    .bind(i64::from(self.claim.node_id))
+                    .bind(epoch)
+                    .bind(self.claim.failover)
                     .bind(start)
                     .bind(end)
-                    .bind(epoch)
                     .bind(body.as_slice())
-                    .bind(&self.cluster_id)
-                    .bind(i64::from(self.node_id))
                     .execute(&self.pool)
                     .await?
                     .rows_affected();
@@ -337,12 +335,12 @@ impl Inner {
             self.confirmed.send_replace(confirmed);
             for pending in batch.records {
                 let record_offset = RecordOffset {
-                    epoch: self.epoch,
+                    epoch: self.claim.epoch,
                     offset: pending.offset,
                     size: pending.size,
                 };
                 let next_offset = RecordOffset {
-                    epoch: self.epoch,
+                    epoch: self.claim.epoch,
                     offset: record_offset.end_offset(),
                     size: 0,
                 };

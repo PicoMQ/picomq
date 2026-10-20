@@ -1,8 +1,7 @@
 //! `pico serve` arguments.
 //!
 //! One `--meta-url` points at the SQL metadata log, and `--protocol` picks
-//! which HTTP frontend is mounted. The Kafka listener runs alongside it
-//! unless `--no-kafka` is set.
+//! which HTTP frontend is mounted. The Kafka listener always runs alongside it.
 //!
 //! This module only *parses*: every field maps to
 //! [`picomq_runtime::ServerConfig`], which owns what starting a server means.
@@ -23,10 +22,6 @@ pub struct ServeArgs {
     #[arg(long, env = "PICO_NODE_ID", default_value_t = 1)]
     node_id: i32,
 
-    /// Fencing token for this incarnation. Defaults to the current time in
-    #[arg(long, env = "PICO_NODE_EPOCH")]
-    node_epoch: Option<i64>,
-
     /// `--http-port`, collapsed into one flag).
     #[arg(long, env = "PICO_LISTEN", default_value = "127.0.0.1:4437")]
     listen: SocketAddr,
@@ -42,11 +37,7 @@ pub struct ServeArgs {
     #[arg(long, env = "PICO_KAFKA_ADVERTISE")]
     kafka_advertise: Option<String>,
 
-    /// Do not open the Kafka listener.
-    #[arg(long, env = "PICO_NO_KAFKA")]
-    no_kafka: bool,
-
-    #[arg(long)]
+    #[arg(long, env = "PICO_NO_ADMIN")]
     no_admin: bool,
 
     /// Public URL of this node, used for cross-node redirects and registered
@@ -75,21 +66,29 @@ pub struct ServeArgs {
     cluster_id: String,
 
     /// `--routing`).
-    #[arg(long, value_enum, default_value_t = RoutingArg::Redirect)]
+    #[arg(long, value_enum, env = "PICO_ROUTING", default_value_t = RoutingArg::Redirect)]
     routing: RoutingArg,
 
     /// Placement weight: how many streams this node takes relative to its
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, env = "PICO_SLOTS", default_value_t = 1)]
     slots: u32,
 
     /// `--long-poll-timeout-sec`).
-    #[arg(long, default_value_t = 25)]
+    #[arg(long, env = "PICO_LONG_POLL_TIMEOUT_SEC", default_value_t = 25)]
     long_poll_timeout_sec: u64,
 
-    #[arg(long, default_value_t = 55)]
+    #[arg(long, env = "PICO_SSE_MAX_DURATION_SEC", default_value_t = 55)]
     sse_max_duration_sec: u64,
 
-    #[arg(long, default_value_t = 64 * 1024)]
+    /// Seconds between this node's heartbeats.
+    #[arg(long, env = "PICO_HEARTBEAT_INTERVAL_SEC", default_value_t = 5)]
+    heartbeat_interval_sec: u64,
+
+    /// Seconds a node may miss heartbeats before its partitions fail over.
+    #[arg(long, env = "PICO_NODE_TIMEOUT_SEC", default_value_t = 30)]
+    node_timeout_sec: u64,
+
+    #[arg(long, env = "PICO_MAX_CHUNK_SIZE", default_value_t = 64 * 1024)]
     max_chunk_size: usize,
 
     /// Cap on a single request body. Oversized bodies get `413`.
@@ -97,33 +96,34 @@ pub struct ServeArgs {
     max_request_size: usize,
 
     /// Seconds to fail readiness before closing listeners, so a load balancer
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, env = "PICO_SHUTDOWN_DRAIN_SEC", default_value_t = 0)]
     shutdown_drain_sec: u64,
 
     /// Accept queue depth for the listeners. The kernel clamps it to
     /// `somaxconn` (128 on macOS, 4096 on current Linux).
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, env = "PICO_BACKLOG", default_value_t = 1024)]
     backlog: i32,
 
-    #[arg(long)]
+    #[arg(long, env = "PICO_WAL_CACHE_SIZE")]
     wal_cache_size: Option<u64>,
 
-    #[arg(long)]
+    #[arg(long, env = "PICO_BLOCK_CACHE_SIZE")]
     block_cache_size: Option<u64>,
 
     /// `--wal-upload-threshold`).
-    #[arg(long)]
+    #[arg(long, env = "PICO_WAL_UPLOAD_THRESHOLD")]
     wal_upload_threshold: Option<u64>,
 
     /// Upload buffered WAL this often even below the threshold. 0 disables it.
-    #[arg(long)]
+    #[arg(long, env = "PICO_WAL_UPLOAD_INTERVAL_MS")]
     wal_upload_interval_ms: Option<u64>,
 
     /// `off` leaves requests open and refuses non-loopback binds.
     #[arg(long, value_enum, env = "PICO_AUTH", default_value_t = AuthArg::Off)]
     auth: AuthArg,
 
-    /// Permit non-loopback binds with auth off.
+    /// Permit non-loopback binds that are unauthenticated: the Kafka
+    /// listener always, and the HTTP listeners when auth is off.
     #[arg(long, env = "PICO_INSECURE_ALLOW_REMOTE")]
     insecure_allow_remote: bool,
 
@@ -159,7 +159,7 @@ pub enum RoutingArg {
 impl ServeArgs {
     /// `protocol` is the global `--protocol` flag: which HTTP frontend to
     /// serve. Kafka is a listener, not a frontend choice, so `--protocol
-    /// kafka` is rejected here; use `--no-kafka` to turn its listener off.
+    /// kafka` is rejected here.
     pub fn into_config(
         self,
         protocol: ProtocolArg,
@@ -169,8 +169,7 @@ impl ServeArgs {
             ProtocolArg::Ds => HttpProtocol::Ds,
             ProtocolArg::Kafka => {
                 return Err(
-                    "`serve` takes --protocol pico or ds; the Kafka listener is always on unless --no-kafka is set"
-                        .into(),
+                    "`serve` takes --protocol pico or ds; the Kafka listener is always on".into(),
                 );
             }
         };
@@ -203,15 +202,15 @@ impl ServeArgs {
 
         Ok(ServerConfig {
             node_id: self.node_id,
-            node_epoch: self.node_epoch.unwrap_or(defaults.node_epoch),
+            node_epoch: defaults.node_epoch,
             addr: self.listen,
             admin_addr: (!self.no_admin).then_some(self.admin_listen),
             advertised_url: self.http_address,
             http_protocol,
-            kafka: (!self.no_kafka).then_some(KafkaConfig {
+            kafka: KafkaConfig {
                 listen: self.kafka_listen,
                 advertise: self.kafka_advertise,
-            }),
+            },
             meta_backend: MetaBackend::parse(&self.meta_url)?,
             storage_uri: self.storage,
             wal_uri: self.wal,
@@ -223,6 +222,8 @@ impl ServeArgs {
             slots: self.slots,
             long_poll_timeout: Duration::from_secs(self.long_poll_timeout_sec),
             sse_max_duration: Duration::from_secs(self.sse_max_duration_sec),
+            heartbeat_interval: Duration::from_secs(self.heartbeat_interval_sec),
+            node_timeout: Duration::from_secs(self.node_timeout_sec),
             max_chunk_size: self.max_chunk_size,
             max_request_size: self.max_request_size,
             shutdown_drain: Duration::from_secs(self.shutdown_drain_sec),
@@ -236,5 +237,24 @@ impl ServeArgs {
             schema_registry: self.schema_registry,
             engine,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Command;
+
+    use super::*;
+
+    #[test]
+    fn every_flag_has_an_environment_variable() {
+        let command = ServeArgs::augment_args(Command::new("serve"));
+
+        let missing: Vec<_> = command
+            .get_arguments()
+            .filter(|arg| arg.get_env().is_none())
+            .map(|arg| arg.get_id().to_string())
+            .collect();
+        assert!(missing.is_empty(), "flags without PICO_*: {missing:?}");
     }
 }

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use picomq_auth::Authorizer;
+use picomq_auth::{Audience, Authorizer};
 use picomq_server::PicoNode;
 use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
 use tokio::net::TcpListener;
@@ -37,9 +37,6 @@ pub enum HttpProtocol {
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
     pub protocol: HttpProtocol,
-    /// Where the protocol listener binds. Port 0 binds an ephemeral port. Read
-    /// the effective address back from [`RunningServer::local_addr`].
-    pub addr: SocketAddr,
     /// Where `/health` and `/ready` bind. `None` disables the admin listener
     pub admin_addr: Option<SocketAddr>,
     pub routing_mode: RoutingMode,
@@ -64,7 +61,6 @@ impl Default for ServeOptions {
     fn default() -> Self {
         Self {
             protocol: HttpProtocol::Pico,
-            addr: SocketAddr::from(([127, 0, 0, 1], 4437)),
             admin_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9090))),
             routing_mode: RoutingMode::Redirect,
             long_poll_timeout: Duration::from_secs(25),
@@ -91,18 +87,27 @@ pub struct RunningServer {
     shutdown_drain: Duration,
 }
 
-/// Bind `options.protocol` on `options.addr` and, when configured, the admin
+/// Serve `options.protocol` on `listener` and, when configured, the admin
 /// routes on `options.admin_addr`.
 ///
 /// The node is constructed by the caller, which lets one node be served by
 /// different sockets in tests and keeps this crate free of metadata-backend
 /// choices.
-pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Result<RunningServer> {
+pub async fn serve(
+    node: Arc<PicoNode>,
+    listener: TcpListener,
+    options: ServeOptions,
+) -> std::io::Result<RunningServer> {
+    let audience = match options.protocol {
+        HttpProtocol::Pico => Audience::Pico,
+        HttpProtocol::Ds => Audience::DurableStreams,
+    };
     let common_router = common::router(
-        node.service(),
+        node.topics(),
         node.ownership(),
         options.routing_mode,
         options.authorizer.clone(),
+        audience,
         options.max_request_size,
     );
     let protocol_router = match options.protocol {
@@ -110,6 +115,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
             .merge(groups::router(
                 groups::GroupState {
                     groups: node.groups(),
+                    topics: node.topics(),
                     ownership: node.ownership(),
                     mode: options.routing_mode,
                     authorizer: options.authorizer.clone(),
@@ -119,7 +125,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
             .fallback_service(
                 Arc::new(
                     PicoFrontend::with_tuning(
-                        node.service(),
+                        node.topics(),
                         node.ownership(),
                         options.routing_mode,
                         options.long_poll_timeout,
@@ -134,7 +140,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
         HttpProtocol::Ds => common_router.fallback_service(
             Arc::new(
                 DsFrontend::with_tuning(
-                    node.service(),
+                    node.topics(),
                     node.ownership(),
                     options.routing_mode,
                     options.long_poll_timeout,
@@ -154,14 +160,13 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
         .with_authorizer(options.authorizer.clone());
     let mut tasks = Vec::with_capacity(2);
 
-    let (local_addr, task) =
-        spawn_listener(options.addr, options.backlog, protocol_router, &stop).await?;
+    let (local_addr, task) = spawn_listener(listener, protocol_router, &stop)?;
     tasks.push(task);
 
     let mut admin_addr = None;
     if let Some(addr) = options.admin_addr {
-        let (bound, task) =
-            spawn_listener(addr, options.backlog, admin::router(admin.clone()), &stop).await?;
+        let listener = bind(addr, options.backlog)?;
+        let (bound, task) = spawn_listener(listener, admin::router(admin.clone()), &stop)?;
         admin_addr = Some(bound);
         tasks.push(task);
     }
@@ -188,7 +193,7 @@ pub async fn serve(node: Arc<PicoNode>, options: ServeOptions) -> std::io::Resul
 /// Bind a listener with an explicit accept queue. `TcpListener::bind` gives
 /// no way to set the backlog, so the socket is built by hand for the one
 /// call that matters (`listen`).
-fn bind(addr: SocketAddr, backlog: i32) -> std::io::Result<TcpListener> {
+pub fn bind(addr: SocketAddr, backlog: i32) -> std::io::Result<TcpListener> {
     let domain = if addr.is_ipv6() {
         Domain::IPV6
     } else {
@@ -203,13 +208,11 @@ fn bind(addr: SocketAddr, backlog: i32) -> std::io::Result<TcpListener> {
     TcpListener::from_std(socket.into())
 }
 
-async fn spawn_listener(
-    addr: SocketAddr,
-    backlog: i32,
+fn spawn_listener(
+    listener: TcpListener,
     router: Router,
     stop: &watch::Sender<bool>,
 ) -> std::io::Result<(SocketAddr, JoinHandle<()>)> {
-    let listener = bind(addr, backlog)?;
     let bound = listener.local_addr()?;
     let mut stop = stop.subscribe();
     let task = tokio::spawn(async move {
@@ -246,14 +249,15 @@ impl RunningServer {
         self.node.clone()
     }
 
-    /// (fail readiness, wait out the drain window), stop accepting and let
-    /// in-flight requests finish, then `node.close()`.
+    /// (fail readiness, wait out the drain window), end live reads, stop
+    /// accepting and let in-flight requests finish, then `node.close()`.
     pub async fn shutdown(self) {
         self.admin.stop_serving();
         if !self.shutdown_drain.is_zero() {
             tracing::info!(drain = ?self.shutdown_drain, "draining before shutdown");
             tokio::time::sleep(self.shutdown_drain).await;
         }
+        self.node.service().stop_live_reads();
         let _ = self.stop.send(true);
         for task in self.tasks {
             let _ = task.await;

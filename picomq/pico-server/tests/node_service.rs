@@ -1,28 +1,33 @@
-//! Service-level end-to-end: a `PicoNode` on the metadata plane with
-//! memory object storage.
-//!
-//! Covers create/append/read/close via services, with the atomic-batch and
-//! trim tail. A third test repeats the core flow over the SQL-backed
-//! sink (SQLite), and further tests cover long-poll waiters, producer
-//! idempotency over the wire, delete, and ownership routing. Service-level
-//! layer lands in a later phase.
-
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
+use picomq_metadata::sink::Proposed;
+use picomq_metadata::{
+    CommandSink, LocalSink, MetadataCommand, MetadataError, MetadataState, ViewPublisher, apply,
+};
 use picomq_server::ownership::OwnershipService as _;
 use picomq_server::record::encode_batch;
 use picomq_server::{
-    AppendCommand, CreateCommand, ErrorKind, LogRecord, NodeConfig, OffsetToken, PicoNode,
+    AppendBatchResult, AppendCommand, CreateCommand, ErrorKind, Log, LogRecord, MAX_NEW_PARTITIONS,
+    NodeConfig, OffsetToken, PicoNode, ServiceError, Topic, Topics, partition_log,
 };
-use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
+use s3stream::{MemoryObjectStorage, ObjectStorageTrait, StreamState};
 
 async fn start_node(
     node_id: i32,
     sink: Arc<dyn CommandSink>,
     views: Arc<ViewPublisher>,
+) -> PicoNode {
+    start_engine(node_id, sink, views, s3stream::Config::default()).await
+}
+
+async fn start_engine(
+    node_id: i32,
+    sink: Arc<dyn CommandSink>,
+    views: Arc<ViewPublisher>,
+    engine: s3stream::Config,
 ) -> PicoNode {
     let object_storage: Arc<dyn ObjectStorageTrait> =
         Arc::new(MemoryObjectStorage::new((node_id * 2) as i16));
@@ -33,6 +38,8 @@ async fn start_node(
             node_id,
             node_epoch: 1,
             http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
+            heartbeat_interval: Duration::from_millis(100),
+            engine,
             ..Default::default()
         },
         sink,
@@ -54,9 +61,8 @@ fn create(name: &str, content_type: &str) -> CreateCommand {
     CreateCommand::new(name, content_type)
 }
 
-fn append(name: &str, values: &[&[u8]], content_type: &str) -> AppendCommand {
+fn append(values: &[&[u8]], content_type: &str) -> AppendCommand {
     AppendCommand {
-        name: name.into(),
         records: values
             .iter()
             .map(|v| LogRecord::value(Bytes::copy_from_slice(v)))
@@ -66,109 +72,106 @@ fn append(name: &str, values: &[&[u8]], content_type: &str) -> AppendCommand {
     }
 }
 
-/// (+ its `atomicBatchAppendReadAndTrim` tail).
-#[tokio::test]
-async fn create_append_read_close_via_services() {
-    let node = local_node().await;
-    let services = node.service();
+async fn log_of(topics: &Topics, name: &str) -> Log {
+    let topic = topics.get(name).await.unwrap().unwrap();
+    partition_log(&topic, 0).unwrap()
+}
 
-    let created = services
+#[tokio::test]
+async fn create_append_read_close_via_topics() {
+    let node = local_node().await;
+    let topics = node.topics();
+
+    let created = topics
         .create(create("/streams/demo", "text/plain"))
         .await
         .unwrap();
     assert!(created.created);
 
-    let appended = services
-        .append(append("/streams/demo", &[b"hello"], "text/plain"))
+    let appended = topics
+        .append("/streams/demo", 0, append(&[b"hello"], "text/plain"))
         .await
         .unwrap();
     assert!(appended.applied);
     assert!(!appended.closed);
 
-    let batch = services
-        .read("/streams/demo", OffsetToken::beginning(), 1024, 0)
+    let batch = topics
+        .read("/streams/demo", 0, OffsetToken::beginning(), 1024, 0)
         .await
         .unwrap();
     assert_eq!(batch.records.len(), 1);
     assert_eq!(&batch.records[0].record.value[..], b"hello");
     assert!(batch.up_to_date);
 
-    assert!(
-        services
-            .close("/streams/demo")
-            .await
-            .unwrap()
-            .next_offset
-            .record_offset()
-            >= 1
-    );
-    assert!(
-        services
-            .head("/streams/demo")
-            .await
-            .unwrap()
-            .unwrap()
-            .closed
-    );
+    let closed = topics.close("/streams/demo").await.unwrap();
+    assert!(closed.next_offset.record_offset() >= 1);
+    let closed = topics.get("/streams/demo").await.unwrap().unwrap();
+    assert!(closed.closed);
 
-    services
+    topics
         .create(create("/streams/batch", "application/octet-stream"))
         .await
         .unwrap();
-    let appended = services
-        .append(append(
+    let appended = topics
+        .append(
             "/streams/batch",
-            &[b"a", b"bb", b"ccc"],
-            "application/octet-stream",
-        ))
+            0,
+            append(&[b"a", b"bb", b"ccc"], "application/octet-stream"),
+        )
         .await
         .unwrap();
     assert!(appended.applied);
     assert_eq!(appended.next_offset.record_offset(), 3);
 
-    let all = services
-        .read("/streams/batch", OffsetToken::beginning(), 1024, 0)
+    let all = topics
+        .read("/streams/batch", 0, OffsetToken::beginning(), 1024, 0)
         .await
         .unwrap();
-    assert_eq!(all.records.len(), 3);
-    assert_eq!(&all.records[0].record.value[..], b"a");
-    assert_eq!(&all.records[1].record.value[..], b"bb");
-    assert_eq!(&all.records[2].record.value[..], b"ccc");
-    assert_eq!(all.records[0].offset.record_offset(), 0);
-    assert_eq!(all.records[1].offset.record_offset(), 1);
-    assert_eq!(all.records[2].offset.record_offset(), 2);
+    let values: Vec<&[u8]> = all.records.iter().map(|r| &r.record.value[..]).collect();
+    assert_eq!(values, [b"a".as_slice(), b"bb", b"ccc"]);
+    let offsets: Vec<u64> = all
+        .records
+        .iter()
+        .map(|r| r.offset.record_offset())
+        .collect();
+    assert_eq!(offsets, [0, 1, 2]);
     assert!(all.up_to_date);
 
-    let tail = services
-        .read("/streams/batch", OffsetToken::of_record_offset(1), 1024, 0)
+    let tail = topics
+        .read(
+            "/streams/batch",
+            0,
+            OffsetToken::of_record_offset(1),
+            1024,
+            0,
+        )
         .await
         .unwrap();
     assert_eq!(tail.records.len(), 2);
     assert_eq!(&tail.records[0].record.value[..], b"bb");
 
-    let limited = services
-        .read("/streams/batch", OffsetToken::beginning(), 1024, 2)
+    let limited = topics
+        .read("/streams/batch", 0, OffsetToken::beginning(), 1024, 2)
         .await
         .unwrap();
     assert_eq!(limited.records.len(), 2);
     assert_eq!(limited.next_offset.record_offset(), 2);
     assert!(!limited.up_to_date);
 
-    let effective = services.trim("/streams/batch", 2).await.unwrap();
+    let effective = topics.trim("/streams/batch", 0, 2).await.unwrap();
     assert!(effective <= 2, "effective trim {effective}");
-    assert_eq!(
-        services
-            .head("/streams/batch")
-            .await
-            .unwrap()
-            .unwrap()
-            .start_offset
-            .record_offset(),
-        effective
-    );
+    let topic = topics.get("/streams/batch").await.unwrap().unwrap();
+    let offsets = topics.offsets(&topic, 0).await.unwrap();
+    assert_eq!(offsets.start_offset.record_offset(), effective);
 
-    let trimmed = services
-        .read("/streams/batch", OffsetToken::of_record_offset(2), 1024, 0)
+    let trimmed = topics
+        .read(
+            "/streams/batch",
+            0,
+            OffsetToken::of_record_offset(2),
+            1024,
+            0,
+        )
         .await
         .unwrap();
     assert_eq!(trimmed.records.len(), 1);
@@ -178,25 +181,25 @@ async fn create_append_read_close_via_services() {
 }
 
 #[tokio::test]
-async fn concurrent_producers_on_one_stream_pipeline() {
+async fn concurrent_producers_on_one_topic_pipeline() {
     let node = local_node().await;
-    let services = node.service();
-    services
+    let topics = node.topics();
+    topics
         .create(create("/streams/hot", "application/octet-stream"))
         .await
         .unwrap();
 
     let mut tasks = tokio::task::JoinSet::new();
     for producer in 0..8u8 {
-        let services = Arc::clone(&services);
+        let topics = Arc::clone(&topics);
         tasks.spawn(async move {
             for record in 0..16u8 {
-                services
-                    .append(append(
+                topics
+                    .append(
                         "/streams/hot",
-                        &[&[producer, record]],
-                        "application/octet-stream",
-                    ))
+                        0,
+                        append(&[&[producer, record]], "application/octet-stream"),
+                    )
                     .await
                     .unwrap();
             }
@@ -206,8 +209,8 @@ async fn concurrent_producers_on_one_stream_pipeline() {
         joined.unwrap();
     }
 
-    let all = services
-        .read("/streams/hot", OffsetToken::beginning(), 1 << 20, 0)
+    let all = topics
+        .read("/streams/hot", 0, OffsetToken::beginning(), 1 << 20, 0)
         .await
         .unwrap();
     assert_eq!(all.records.len(), 128);
@@ -215,7 +218,6 @@ async fn concurrent_producers_on_one_stream_pipeline() {
     for (i, record) in all.records.iter().enumerate() {
         assert_eq!(record.offset.record_offset(), i as u64, "offsets dense");
     }
-    // Per-producer record order is preserved even though producers interleave.
     for producer in 0..8u8 {
         let seen: Vec<u8> = all
             .records
@@ -234,47 +236,59 @@ async fn concurrent_producers_on_one_stream_pipeline() {
 }
 
 #[tokio::test]
-async fn list_and_match_seq_via_services() {
+async fn list_and_match_seq_via_topics() {
     let node = local_node().await;
-    let services = node.service();
+    let topics = node.topics();
 
     for name in ["/list/a", "/list/b", "/list/c", "/other/x"] {
-        services.create(create(name, "text/plain")).await.unwrap();
+        topics.create(create(name, "text/plain")).await.unwrap();
     }
 
-    let all = services.list("/list/", None, 0).await.unwrap();
-    let names: Vec<&str> = all.streams.iter().map(|m| m.name.as_str()).collect();
-    assert_eq!(names, ["/list/a", "/list/b", "/list/c"]);
+    let names = |list: &picomq_server::TopicList| -> Vec<String> {
+        list.topics
+            .iter()
+            .map(|m| m.topic.name.spelling().to_owned())
+            .collect()
+    };
+
+    let all = topics.list("/list/", None, 0).unwrap();
+    assert_eq!(names(&all), ["/list/a", "/list/b", "/list/c"]);
     assert!(!all.has_more);
 
-    let page = services.list("/list/", None, 2).await.unwrap();
-    let names: Vec<&str> = page.streams.iter().map(|m| m.name.as_str()).collect();
-    assert_eq!(names, ["/list/a", "/list/b"]);
+    let page = topics.list("/list/", None, 2).unwrap();
+    assert_eq!(names(&page), ["/list/a", "/list/b"]);
     assert!(page.has_more);
 
-    let rest = services.list("/list/", Some("/list/b"), 0).await.unwrap();
-    let names: Vec<&str> = rest.streams.iter().map(|m| m.name.as_str()).collect();
-    assert_eq!(names, ["/list/c"]);
+    let rest = topics.list("/list/", Some("/list/b"), 0).unwrap();
+    assert_eq!(names(&rest), ["/list/c"]);
     assert!(!rest.has_more);
 
-    let at = |payload: &[u8], match_seq: u64| AppendCommand {
+    let at = |payload: &'static [u8], match_seq: u64| AppendCommand {
         match_seq: Some(match_seq),
-        ..append("/list/a", &[payload], "text/plain")
+        ..append(&[payload], "text/plain")
     };
-    let first = services.append(at(b"one", 0)).await.unwrap();
+    let first = topics.append("/list/a", 0, at(b"one", 0)).await.unwrap();
     assert!(first.applied);
     assert_eq!(first.next_offset.record_offset(), 1);
 
-    let conflict = services.append(at(b"stale", 0)).await.unwrap_err();
+    let conflict = topics
+        .append("/list/a", 0, at(b"stale", 0))
+        .await
+        .unwrap_err();
     assert_eq!(conflict.kind, ErrorKind::MatchFailed);
     assert_eq!(conflict.next_offset.unwrap().record_offset(), 1);
 
-    assert!(services.append(at(b"two", 1)).await.unwrap().applied);
+    assert!(
+        topics
+            .append("/list/a", 0, at(b"two", 1))
+            .await
+            .unwrap()
+            .applied
+    );
 
     node.close().await;
 }
 
-/// The core flow on the SQL-backed sink: same service, durable log underneath.
 #[tokio::test]
 async fn core_flow_on_sql_sink() {
     use picomq_sql::{MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
@@ -295,180 +309,181 @@ async fn core_flow_on_sql_sink() {
     .await
     .unwrap();
     let node = start_node(1, Arc::new(sink), views).await;
-    let services = node.service();
+    let topics = node.topics();
 
-    services
+    topics
         .create(create("/sql/demo", "application/json"))
         .await
         .unwrap();
-    // Frontends split JSON arrays; the service stores one record per element.
-    let appended = services
-        .append(append(
+    let appended = topics
+        .append(
             "/sql/demo",
-            &[br#"{"a":1}"#, br#"{"b":2}"#],
-            "application/json",
-        ))
+            0,
+            append(&[br#"{"a":1}"#, br#"{"b":2}"#], "application/json"),
+        )
         .await
         .unwrap();
     assert_eq!(appended.next_offset.record_offset(), 2);
 
-    let read = services
-        .read("/sql/demo", OffsetToken::beginning(), 0, 0)
+    let read = topics
+        .read("/sql/demo", 0, OffsetToken::beginning(), 0, 0)
         .await
         .unwrap();
     assert_eq!(read.records.len(), 2);
     assert_eq!(&read.records[0].record.value[..], br#"{"a":1}"#);
     assert_eq!(&read.records[1].record.value[..], br#"{"b":2}"#);
 
-    assert!(services.delete("/sql/demo").await.unwrap());
-    assert!(services.head("/sql/demo").await.unwrap().is_none());
-    assert!(!services.delete("/sql/demo").await.unwrap());
+    assert!(topics.delete("/sql/demo").await.unwrap());
+    assert!(topics.get("/sql/demo").await.unwrap().is_none());
+    assert!(!topics.delete("/sql/demo").await.unwrap());
 
     node.close().await;
 }
 
-/// Long-poll: a parked reader wakes when an append passes its offset, and
-/// `wait_appended` short-circuits on already-readable data and closed streams.
 #[tokio::test]
 async fn wait_appended_long_poll() {
     let node = local_node().await;
-    let services = node.service();
-
-    services
+    let topics = node.topics();
+    topics
         .create(create("/poll/a", "text/plain"))
         .await
         .unwrap();
 
-    let waiter = services.clone();
+    let waiter = topics.clone();
     let parked = tokio::spawn(async move {
         waiter
-            .wait_appended("/poll/a", OffsetToken::beginning(), Duration::from_secs(10))
+            .wait_appended(
+                "/poll/a",
+                0,
+                OffsetToken::beginning(),
+                Duration::from_secs(10),
+            )
             .await
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(!parked.is_finished());
 
-    services
-        .append(append("/poll/a", &[b"x"], "text/plain"))
+    topics
+        .append("/poll/a", 0, append(&[b"x"], "text/plain"))
         .await
         .unwrap();
     assert!(parked.await.unwrap().unwrap());
 
-    // Already readable: immediate true.
-    assert!(
-        services
-            .wait_appended(
-                "/poll/a",
-                OffsetToken::beginning(),
-                Duration::from_millis(1)
-            )
-            .await
-            .unwrap()
-    );
-    // Unknown stream: false.
-    assert!(
-        !services
-            .wait_appended(
-                "/poll/none",
-                OffsetToken::beginning(),
-                Duration::from_millis(1)
-            )
-            .await
-            .unwrap()
-    );
-    // Closed stream: true.
-    services.close("/poll/a").await.unwrap();
-    assert!(
-        services
-            .wait_appended(
-                "/poll/a",
-                OffsetToken::of_record_offset(99),
-                Duration::from_millis(1)
-            )
-            .await
-            .unwrap()
-    );
+    let ready = topics
+        .wait_appended(
+            "/poll/a",
+            0,
+            OffsetToken::beginning(),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+    assert!(ready);
+
+    let unknown = topics
+        .wait_appended(
+            "/poll/none",
+            0,
+            OffsetToken::beginning(),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+    assert!(!unknown);
+
+    topics.close("/poll/a").await.unwrap();
+    let closed = topics
+        .wait_appended(
+            "/poll/a",
+            0,
+            OffsetToken::of_record_offset(99),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+    assert!(closed);
 
     node.close().await;
 }
 
-/// Producer idempotency over the service: duplicate suppressed, stale epoch
-/// fenced, gap rejected. And the closed-stream replay path.
 #[tokio::test]
 async fn producer_idempotency_and_closed_replay() {
     use picomq_server::types::Producer;
 
     let node = local_node().await;
-    let services = node.service();
-    services
+    let topics = node.topics();
+    topics
         .create(create("/prod/a", "text/plain"))
         .await
         .unwrap();
 
-    let with_producer = |payload: &[u8], epoch: u64, seq: u64| AppendCommand {
+    let with_producer = |payload: &'static [u8], epoch: u64, seq: u64| AppendCommand {
         producer: Some(Producer::new("p1", epoch, seq).unwrap()),
-        ..append("/prod/a", &[payload], "text/plain")
+        ..append(&[payload], "text/plain")
     };
 
     assert!(
-        services
-            .append(with_producer(b"one", 1, 0))
+        topics
+            .append("/prod/a", 0, with_producer(b"one", 1, 0))
             .await
             .unwrap()
             .applied
     );
-    // Duplicate (same seq): not applied, last seq echoed.
-    let dup = services.append(with_producer(b"one", 1, 0)).await.unwrap();
+    let dup = topics
+        .append("/prod/a", 0, with_producer(b"one", 1, 0))
+        .await
+        .unwrap();
     assert!(!dup.applied);
     assert_eq!(dup.producer_seq, Some(0));
-    // Gap.
-    let gap = services
-        .append(with_producer(b"three", 1, 2))
+
+    let gap = topics
+        .append("/prod/a", 0, with_producer(b"three", 1, 2))
         .await
         .unwrap_err();
     assert_eq!(gap.kind, ErrorKind::SequenceGap);
     assert_eq!((gap.expected_seq, gap.received_seq), (Some(1), Some(2)));
-    // Stale epoch after a bump.
+
     assert!(
-        services
-            .append(with_producer(b"two", 2, 0))
+        topics
+            .append("/prod/a", 0, with_producer(b"two", 2, 0))
             .await
             .unwrap()
             .applied
     );
-    let stale = services
-        .append(with_producer(b"nope", 1, 1))
+    let stale = topics
+        .append("/prod/a", 0, with_producer(b"nope", 1, 1))
         .await
         .unwrap_err();
     assert_eq!(stale.kind, ErrorKind::Fenced);
     assert_eq!(stale.producer_epoch, Some(2));
 
-    // Producer-attributed close, then idempotent close replay.
     let close = AppendCommand {
         close_after: true,
         producer: Some(Producer::new("p1", 2, 1).unwrap()),
-        ..append("/prod/a", &[b"last"], "text/plain")
+        ..append(&[b"last"], "text/plain")
     };
-    assert!(services.append(close.clone()).await.unwrap().closed);
-    let replay = services.append(close).await.unwrap();
+    assert!(
+        topics
+            .append("/prod/a", 0, close.clone())
+            .await
+            .unwrap()
+            .closed
+    );
+    let replay = topics.append("/prod/a", 0, close).await.unwrap();
     assert!(replay.closed);
     assert!(!replay.applied);
-    // A different producer appending to the closed stream is rejected.
+
     let other = AppendCommand {
         producer: Some(Producer::new("p2", 0, 0).unwrap()),
-        ..append("/prod/a", &[b"x"], "text/plain")
+        ..append(&[b"x"], "text/plain")
     };
-    let err = services.append(other).await.unwrap_err();
+    let err = topics.append("/prod/a", 0, other).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::Closed);
     assert!(err.closed);
 
     node.close().await;
 }
 
-/// Ownership routing: a stream opened by another registered node resolves to
-/// a remote owner with that node's advertised address. Unknown names and
-/// closed streams stay local. Driven end-to-end through two nodes sharing
-/// one metadata plane.
 #[tokio::test]
 async fn ownership_routes_to_open_owner() {
     let (sink, views) = LocalSink::new();
@@ -476,36 +491,50 @@ async fn ownership_routes_to_open_owner() {
     let node1 = start_node(1, sink.clone(), views.clone()).await;
     let node2 = start_node(2, sink.clone(), views.clone()).await;
 
-    // Unknown name: local (create may land here).
-    let owner = node1.ownership().owner_of("/own/a").await.unwrap();
-    assert!(owner.local);
-    assert_eq!(owner.stream_id, None);
+    let unknown = node1
+        .ownership()
+        .owner_of(&Log::Group("absent".into()))
+        .await
+        .unwrap();
+    assert!(unknown.local);
+    assert_eq!(unknown.stream_id, None);
 
     node1
-        .service()
+        .topics()
         .create(create("/own/a", "text/plain"))
         .await
         .unwrap();
-    assert!(node1.ownership().owner_of("/own/a").await.unwrap().local);
-    let from_node2 = node2.ownership().owner_of("/own/a").await.unwrap();
-    assert!(!from_node2.local);
-    assert_eq!(from_node2.owner_node_id, Some(1));
+    let log = log_of(&node1.topics(), "/own/a").await;
+
+    let placed = node2.ownership().owner_of(&log).await.unwrap();
+    assert!(!placed.local);
+    assert_eq!(placed.owner_node_id, Some(1));
+
+    node1
+        .topics()
+        .append("/own/a", 0, append(&[b"opened"], "text/plain"))
+        .await
+        .unwrap();
+    let local = node1.ownership().owner_of(&log).await.unwrap();
+    assert!(local.local);
+
+    let remote = node2.ownership().owner_of(&log).await.unwrap();
+    assert!(!remote.local);
+    assert_eq!(remote.owner_node_id, Some(1));
+    assert_eq!(remote.epoch, local.epoch);
     assert_eq!(
-        from_node2.owner_advertised_address.as_deref(),
+        remote.owner_advertised_address.as_deref(),
         Some("http://127.0.0.1:4001")
     );
 
-    // Closing releases ownership: closed (not OPENED) streams are local anywhere.
     node1.close().await;
-    let released = node2.ownership().owner_of("/own/a").await.unwrap();
+    let released = node2.ownership().owner_of(&log).await.unwrap();
     assert!(released.local);
     assert!(released.stream_id.is_some());
 
     node2.close().await;
 }
 
-/// Nodes sharing one object and WAL bucket, as a cluster shares S3.
-/// The WAL prefixes by cluster/node/epoch, so one bucket is safe.
 async fn start_shared_node(
     node_id: i32,
     node_epoch: i64,
@@ -549,12 +578,8 @@ async fn wait_for_view(
     }
 }
 
-/// A live transfer: the source drains and closes, the completion re-points
-/// the stream, the target pre-warms it, and appends continue on the target
-/// with full data continuity. Appends racing the transfer either land
-/// durably (and survive the move) or fail with a transfer conflict.
 #[tokio::test]
-async fn transfer_moves_stream_to_target_node() {
+async fn transfer_moves_partition_to_target_node() {
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
@@ -579,35 +604,31 @@ async fn transfer_moves_stream_to_target_node() {
     .await;
 
     node1
-        .service()
+        .topics()
         .create(create("/xfer/a", "text/plain"))
         .await
         .unwrap();
     node1
-        .service()
-        .append(append("/xfer/a", &[b"before"], "text/plain"))
+        .topics()
+        .append("/xfer/a", 0, append(&[b"before"], "text/plain"))
         .await
         .unwrap();
+    let log = log_of(&node1.topics(), "/xfer/a").await;
+    let topic = node1.topics().get("/xfer/a").await.unwrap().unwrap();
+    let before = node1.topics().watermarks(&topic, 0).await.unwrap().epoch;
 
-    // Appends race the transfer proposal. Every Ok append is durable and must
-    // survive the move. Acceptable failures are the transfer conflict while
-    // the move is pending and the open refusal once the target holds the
-    // stream. Both surface before any data is written.
     let racer = {
-        let services = node1.service();
+        let topics = node1.topics();
         tokio::spawn(async move {
             let mut applied = 0u64;
             for i in 0..20u8 {
-                match services
-                    .append(append("/xfer/a", &[&[i]], "text/plain"))
+                match topics
+                    .append("/xfer/a", 0, append(&[&[i]], "text/plain"))
                     .await
                 {
                     Ok(_) => applied += 1,
                     Err(e) => {
-                        assert!(
-                            matches!(e.kind, ErrorKind::Transferring | ErrorKind::BadRequest),
-                            "unexpected failure {e:?}"
-                        );
+                        assert_eq!(e.kind, ErrorKind::Transferring, "{e:?}");
                         break;
                     }
                 }
@@ -615,7 +636,7 @@ async fn transfer_moves_stream_to_target_node() {
             applied
         })
     };
-    let stream_id = node1.transfer_stream("/xfer/a", 2).await.unwrap();
+    let stream_id = node1.transfer(&log, 2).await.unwrap();
     let raced = racer.await.unwrap();
 
     wait_for_view(&views, "transfer completion", |view| {
@@ -627,7 +648,6 @@ async fn transfer_moves_stream_to_target_node() {
                 .is_some_and(|row| row.node_id == 2)
     })
     .await;
-    // Pre-warm: the target opens the stream without any client request.
     wait_for_view(&views, "target pre-warm open", |view| {
         view.state
             .streams
@@ -636,38 +656,40 @@ async fn transfer_moves_stream_to_target_node() {
     })
     .await;
 
-    // Every node now routes the stream to node 2.
-    let owner = node1.ownership().owner_of("/xfer/a").await.unwrap();
+    let owner = node1.ownership().owner_of(&log).await.unwrap();
     assert!(!owner.local);
     assert_eq!(owner.owner_node_id, Some(2));
-    assert!(node2.ownership().owner_of("/xfer/a").await.unwrap().local);
+    assert!(node2.ownership().owner_of(&log).await.unwrap().local);
 
-    // Continuity: the target serves the full history plus new appends.
     let appended = node2
-        .service()
-        .append(append("/xfer/a", &[b"after"], "text/plain"))
+        .topics()
+        .append("/xfer/a", 0, append(&[b"after"], "text/plain"))
         .await
         .unwrap();
     assert!(appended.applied);
     let all = node2
-        .service()
-        .read("/xfer/a", OffsetToken::beginning(), 1 << 20, 0)
+        .topics()
+        .read("/xfer/a", 0, OffsetToken::beginning(), 1 << 20, 0)
         .await
         .unwrap();
     assert_eq!(all.records.len() as u64, 2 + raced);
     assert_eq!(&all.records[0].record.value[..], b"before");
     assert_eq!(&all.records.last().unwrap().record.value[..], b"after");
 
+    let after = node2.topics().watermarks(&topic, 0).await.unwrap().epoch;
+    assert!(after > before, "epoch {before} -> {after}");
+    assert_eq!(
+        node2.topics().epochs(&topic, 0).unwrap(),
+        [(before, 0), (after, 1 + raced)]
+    );
+
     node1.close().await;
     node2.close().await;
 }
 
-/// Crash window: the source dies after the transfer was requested but before
-/// it completed. When the source comes back (bumped epoch), its watcher seals
-/// the stream at its last epoch and finishes the transfer.
 #[tokio::test]
 async fn stale_transfer_completes_when_source_restarts() {
-    use picomq_metadata::MetadataCommand;
+    use picomq_metadata::{MetadataCommand, Proposer};
 
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
@@ -683,10 +705,8 @@ async fn stale_transfer_completes_when_source_restarts() {
     )
     .await;
 
-    // A crashed node 1 left behind: registered, one stream opened, a transfer
-    // requested but never completed. Raw proposals stand in for the process
-    // that no longer exists.
     sink.propose(MetadataCommand::RegisterNode {
+        wal: String::new(),
         node_id: 1,
         node_epoch: 1,
         http_address: "http://127.0.0.1:4001".into(),
@@ -696,21 +716,21 @@ async fn stale_transfer_completes_when_source_restarts() {
     .await
     .unwrap();
     sink.propose(MetadataCommand::CreateStream {
-        node_id: 1,
-        node_epoch: 1,
+        proposer: Proposer::new(1, 1),
     })
     .await
     .unwrap();
     let stream_id = views.load().state.next_stream_id - 1;
     sink.propose(MetadataCommand::OpenStream {
-        node_id: 1,
-        node_epoch: 1,
+        proposer: Proposer::new(1, 1),
+
         stream_id,
         epoch: 5,
     })
     .await
     .unwrap();
     sink.propose(MetadataCommand::TransferStream {
+        proposer: Proposer::new(1, 1),
         stream_id,
         from_node: 1,
         to_node: 2,
@@ -725,8 +745,6 @@ async fn stale_transfer_completes_when_source_restarts() {
             .contains_key(&stream_id)
     );
 
-    // The source restarts at a bumped epoch and its watcher converges the
-    // stale transfer.
     let node1 = start_shared_node(1, 2, sink, views.clone(), object_storage, wal_storage).await;
     wait_for_view(&views, "stale transfer completion", |view| {
         !view.state.pending_transfers.contains_key(&stream_id)
@@ -742,61 +760,40 @@ async fn stale_transfer_completes_when_source_restarts() {
     node2.close().await;
 }
 
-/// Registry entries and data survive a node restart: the KV plane holds the
-/// registry (the entry cache is a cache, not the source of truth) and the
-/// shared object storage holds the data.
 #[tokio::test]
-async fn named_streams_survive_restart() {
+async fn topics_survive_restart() {
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
 
-    let node = PicoNode::start(
-        NodeConfig {
-            node_id: 1,
-            node_epoch: 1,
-            ..Default::default()
-        },
+    let node = start_shared_node(
+        1,
+        1,
         sink.clone(),
         views.clone(),
         object_storage.clone(),
         wal_storage.clone(),
-        None,
     )
-    .await
-    .unwrap();
-    node.service()
+    .await;
+    node.topics()
         .create(create("/durable/a", "text/plain"))
         .await
         .unwrap();
-    node.service()
-        .append(append("/durable/a", &[b"kept"], "text/plain"))
+    node.topics()
+        .append("/durable/a", 0, append(&[b"kept"], "text/plain"))
         .await
         .unwrap();
     node.close().await;
 
-    // Same metadata plane and storage, fresh node at a higher epoch.
-    let node = PicoNode::start(
-        NodeConfig {
-            node_id: 1,
-            node_epoch: 2,
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        None,
-    )
-    .await
-    .unwrap();
+    let node = start_shared_node(1, 2, sink, views, object_storage, wal_storage).await;
 
-    let head = node.service().head("/durable/a").await.unwrap().unwrap();
-    assert_eq!(head.next_offset.record_offset(), 1);
+    let topic = node.topics().get("/durable/a").await.unwrap().unwrap();
+    let offsets = node.topics().offsets(&topic, 0).await.unwrap();
+    assert_eq!(offsets.next_offset.record_offset(), 1);
     let read = node
-        .service()
-        .read("/durable/a", OffsetToken::beginning(), 0, 0)
+        .topics()
+        .read("/durable/a", 0, OffsetToken::beginning(), 0, 0)
         .await
         .unwrap();
     assert_eq!(read.records.len(), 1);
@@ -805,15 +802,12 @@ async fn named_streams_survive_restart() {
     node.close().await;
 }
 
-/// A Kafka RecordBatch v2 as a client would send it: `values` as records,
-/// optionally stamped with an idempotent-producer identity (inside the CRC
-/// region, so the CRC is recomputed as the client's encoder would).
 fn kafka_batch(producer: Option<(i64, i16, i32)>, values: &[&[u8]]) -> Bytes {
     let records: Vec<LogRecord> = values
         .iter()
         .map(|v| LogRecord::value(Bytes::copy_from_slice(v)))
         .collect();
-    let mut batch = encode_batch(0, 1, &records).to_vec();
+    let mut batch = encode_batch(0, -1, 1, &records).to_vec();
     if let Some((id, epoch, base_seq)) = producer {
         batch[43..51].copy_from_slice(&id.to_be_bytes());
         batch[51..53].copy_from_slice(&epoch.to_be_bytes());
@@ -824,67 +818,60 @@ fn kafka_batch(producer: Option<(i64, i16, i32)>, values: &[&[u8]]) -> Bytes {
     Bytes::from(batch)
 }
 
-fn produce(name: &str, payload: Bytes) -> picomq_server::AppendBatchCommand {
-    picomq_server::AppendBatchCommand {
-        name: name.into(),
-        payload,
-    }
+async fn produce(
+    topics: &Topics,
+    name: &str,
+    payload: Bytes,
+) -> Result<AppendBatchResult, ServiceError> {
+    let topic = topics.get(name).await.unwrap().unwrap();
+    let submitted = topics.submit_batch(&topic, 0, payload).await?;
+    topics.finish_batch(submitted).await
 }
 
-/// Kafka batch append/read/watermarks and idempotent producer dedup at the
-/// service layer, plus the record-level read of the same bytes.
 #[tokio::test]
 async fn kafka_batch_append_read_and_idempotency() {
     let node = local_node().await;
-    let services = node.service();
-    let external_id = *b"0123456789abcdef";
-    services
-        .create(CreateCommand {
-            external_id: Some(external_id),
-            ..create("/topics/demo", "application/octet-stream")
-        })
+    let topics = node.topics();
+    let service = node.service();
+    let created = topics
+        .create(create("/topics/demo", "application/octet-stream"))
         .await
         .unwrap();
+    let log = log_of(&topics, "/topics/demo").await;
 
     let sent = kafka_batch(None, &[b"k1", b"k2", b"k3"]);
-    let appended = services
-        .append_batch(produce("/topics/demo", sent.clone()))
+    let appended = produce(&topics, "/topics/demo", sent.clone())
         .await
         .unwrap();
     assert!(!appended.duplicate);
     assert_eq!(appended.base_offset, 0);
     assert_eq!(appended.log_start_offset, 0);
 
-    let watermarks = services.watermarks("/topics/demo").await.unwrap();
+    let watermarks = service.watermarks(&log).await.unwrap();
     assert_eq!(watermarks.log_start_offset, 0);
     assert_eq!(watermarks.high_watermark, 3);
 
-    let from_start = services
-        .read_batches("/topics/demo", 0, usize::MAX)
-        .await
-        .unwrap();
+    let from_start = service.read_batches(&log, 0, usize::MAX).await.unwrap();
     assert_eq!(from_start.batches.len(), 1);
     assert_eq!(from_start.batches[0].base_offset, 0);
     assert_eq!(from_start.batches[0].last_offset, 3);
     assert_eq!(from_start.batches[0].count, 3);
-    // Stored verbatim except the patched base-offset field.
     assert_eq!(&from_start.batches[0].payload[..8], &0i64.to_be_bytes());
-    assert_eq!(&from_start.batches[0].payload[8..], &sent[8..]);
+    assert_eq!(&from_start.batches[0].payload[8..12], &sent[8..12]);
+    assert_eq!(
+        &from_start.batches[0].payload[12..16],
+        &(watermarks.epoch as i32).to_be_bytes()
+    );
+    assert_eq!(&from_start.batches[0].payload[16..], &sent[16..]);
     assert_eq!(from_start.next_offset, 3);
 
-    // Mid-batch fetch returns the covering batch verbatim.
-    let mid = services
-        .read_batches("/topics/demo", 1, usize::MAX)
-        .await
-        .unwrap();
+    let mid = service.read_batches(&log, 1, usize::MAX).await.unwrap();
     assert_eq!(mid.batches.len(), 1);
     assert_eq!(mid.batches[0].base_offset, 0);
     assert_eq!(mid.next_offset, 3);
 
-    // The record-level read (the HTTP frontends' path) decodes the same
-    // bytes and skips the leading records of a mid-batch start.
-    let records = services
-        .read("/topics/demo", OffsetToken::of_record_offset(1), 0, 0)
+    let records = topics
+        .read("/topics/demo", 0, OffsetToken::of_record_offset(1), 0, 0)
         .await
         .unwrap();
     let values: Vec<&[u8]> = records
@@ -896,121 +883,117 @@ async fn kafka_batch_append_read_and_idempotency() {
     assert_eq!(records.records[0].offset.record_offset(), 1);
     assert!(records.up_to_date);
 
-    // Topic UUID resolves back to the stream.
-    assert_eq!(
-        services.lookup_by_external_id(external_id).await.unwrap(),
-        Some("/topics/demo".to_owned())
-    );
-    assert_eq!(
-        services.lookup_by_external_id([7u8; 16]).await.unwrap(),
-        None
+    let id = created.meta.topic.id;
+    let by_id = topics.by_id(&id).await.unwrap().unwrap();
+    assert_eq!(by_id.name.spelling(), "/topics/demo");
+    assert!(
+        topics
+            .by_id(&picomq_server::TopicId([7u8; 16]))
+            .await
+            .unwrap()
+            .is_none()
     );
 
-    let idem = services
-        .append_batch(produce(
-            "/topics/demo",
-            kafka_batch(Some((1, 0, 0)), &[b"i1", b"i2"]),
-        ))
-        .await
-        .unwrap();
+    let idem = produce(
+        &topics,
+        "/topics/demo",
+        kafka_batch(Some((1, 0, 0)), &[b"i1", b"i2"]),
+    )
+    .await
+    .unwrap();
     assert!(!idem.duplicate);
     assert_eq!(idem.base_offset, 3);
 
-    // The idempotent batch got its base offset patched to 3.
-    let second = services
-        .read_batches("/topics/demo", 3, usize::MAX)
-        .await
-        .unwrap();
+    let second = service.read_batches(&log, 3, usize::MAX).await.unwrap();
     assert_eq!(&second.batches[0].payload[..8], &3i64.to_be_bytes());
 
-    let dup = services
-        .append_batch(produce(
-            "/topics/demo",
-            kafka_batch(Some((1, 0, 0)), &[b"i1", b"i2"]),
-        ))
-        .await
-        .unwrap();
+    let dup = produce(
+        &topics,
+        "/topics/demo",
+        kafka_batch(Some((1, 0, 0)), &[b"i1", b"i2"]),
+    )
+    .await
+    .unwrap();
     assert!(dup.duplicate);
     assert_eq!(dup.base_offset, 3);
 
-    let gap = services
-        .append_batch(produce(
-            "/topics/demo",
-            kafka_batch(Some((1, 0, 3)), &[b"g"]),
-        ))
-        .await
-        .unwrap_err();
+    let gap = produce(
+        &topics,
+        "/topics/demo",
+        kafka_batch(Some((1, 0, 3)), &[b"g"]),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(gap.kind, ErrorKind::SequenceGap);
     assert_eq!((gap.expected_seq, gap.received_seq), (Some(2), Some(3)));
 
-    let bumped = services
-        .append_batch(produce(
-            "/topics/demo",
-            kafka_batch(Some((1, 1, 0)), &[b"e"]),
-        ))
-        .await
-        .unwrap();
+    let bumped = produce(
+        &topics,
+        "/topics/demo",
+        kafka_batch(Some((1, 1, 0)), &[b"e"]),
+    )
+    .await
+    .unwrap();
     assert!(!bumped.duplicate);
     assert_eq!(bumped.base_offset, 5);
 
-    let fenced = services
-        .append_batch(produce(
-            "/topics/demo",
-            kafka_batch(Some((1, 0, 1)), &[b"s"]),
-        ))
-        .await
-        .unwrap_err();
+    let fenced = produce(
+        &topics,
+        "/topics/demo",
+        kafka_batch(Some((1, 0, 1)), &[b"s"]),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(fenced.kind, ErrorKind::Fenced);
     assert_eq!(fenced.producer_epoch, Some(1));
 
-    // Not a record batch at all.
-    let junk = services
-        .append_batch(produce(
-            "/topics/demo",
-            Bytes::from_static(b"definitely not kafka"),
-        ))
-        .await
-        .unwrap_err();
+    let junk = produce(
+        &topics,
+        "/topics/demo",
+        Bytes::from_static(b"definitely not kafka"),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(junk.kind, ErrorKind::CorruptBatch);
 
     node.close().await;
 }
 
-/// HTTP appends and Kafka produces land in one log and read back through
-/// either path, with the HTTP records carrying the service's monotonic
-/// `LogAppendTime`.
 #[tokio::test]
 async fn http_and_kafka_writers_share_one_log() {
     let node = local_node().await;
-    let services = node.service();
-    services
+    let topics = node.topics();
+    topics
         .create(create("/mixed/log", "application/octet-stream"))
         .await
         .unwrap();
+    let log = log_of(&topics, "/mixed/log").await;
 
-    let http = services
-        .append(append(
+    let http = topics
+        .append(
             "/mixed/log",
-            &[b"h1", b"h2"],
-            "application/octet-stream",
-        ))
+            0,
+            append(&[b"h1", b"h2"], "application/octet-stream"),
+        )
         .await
         .unwrap();
     assert_eq!(http.next_offset.record_offset(), 2);
-    let kafka = services
-        .append_batch(produce("/mixed/log", kafka_batch(None, &[b"k1"])))
+    let kafka = produce(&topics, "/mixed/log", kafka_batch(None, &[b"k1"]))
         .await
         .unwrap();
     assert_eq!(kafka.base_offset, 2);
-    let http = services
-        .append(append("/mixed/log", &[b"h3"], "application/octet-stream"))
+    let http = topics
+        .append(
+            "/mixed/log",
+            0,
+            append(&[b"h3"], "application/octet-stream"),
+        )
         .await
         .unwrap();
     assert_eq!(http.next_offset.record_offset(), 4);
 
-    // Record view: one dense log.
-    let all = services
-        .read("/mixed/log", OffsetToken::beginning(), 0, 0)
+    let all = topics
+        .read("/mixed/log", 0, OffsetToken::beginning(), 0, 0)
         .await
         .unwrap();
     let values: Vec<&[u8]> = all.records.iter().map(|r| &r.record.value[..]).collect();
@@ -1021,16 +1004,15 @@ async fn http_and_kafka_writers_share_one_log() {
         .map(|r| r.offset.record_offset())
         .collect();
     assert_eq!(offsets, [0, 1, 2, 3]);
-    // Server timestamps: equal within a batch, strictly increasing across
-    // HTTP batches, and the Kafka batch keeps its own CreateTime.
+
     let ts: Vec<i64> = all.records.iter().map(|r| r.record.timestamp_ms).collect();
     assert_eq!(ts[0], ts[1]);
     assert!(ts[3] > ts[0]);
     assert_eq!(ts[2], 1);
 
-    // Batch view: three batches with the offsets a Kafka consumer expects.
-    let batches = services
-        .read_batches("/mixed/log", 0, usize::MAX)
+    let batches = node
+        .service()
+        .read_batches(&log, 0, usize::MAX)
         .await
         .unwrap();
     assert_eq!(
@@ -1050,101 +1032,82 @@ async fn http_and_kafka_writers_share_one_log() {
     node.close().await;
 }
 
-/// Producer spans are not durably written per append; after a restart they
-/// are rebuilt from the stored batch headers, so a retry of a pre-restart
-/// batch still replays as a duplicate with its original offset.
 #[tokio::test]
 async fn kafka_producer_state_survives_restart_via_rescan() {
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
-    let node = PicoNode::start(
-        NodeConfig {
-            node_id: 1,
-            node_epoch: 1,
-            ..Default::default()
-        },
+    let node = start_shared_node(
+        1,
+        1,
         sink.clone(),
         views.clone(),
         object_storage.clone(),
         wal_storage.clone(),
-        None,
     )
-    .await
-    .unwrap();
+    .await;
 
     let batch = |seq: i32, count: usize| {
         let values: Vec<Vec<u8>> = (0..count).map(|i| vec![i as u8]).collect();
         let values: Vec<&[u8]> = values.iter().map(Vec::as_slice).collect();
-        produce("/topics/replayed", kafka_batch(Some((42, 0, seq)), &values))
+        kafka_batch(Some((42, 0, seq)), &values)
     };
 
-    node.service()
+    node.topics()
         .create(create("/topics/replayed", "application/octet-stream"))
         .await
         .unwrap();
-    let first = node.service().append_batch(batch(0, 3)).await.unwrap();
-    let second = node.service().append_batch(batch(3, 2)).await.unwrap();
+    let first = produce(&node.topics(), "/topics/replayed", batch(0, 3))
+        .await
+        .unwrap();
+    let second = produce(&node.topics(), "/topics/replayed", batch(3, 2))
+        .await
+        .unwrap();
     assert_eq!((first.base_offset, second.base_offset), (0, 3));
     node.close().await;
 
-    let node = PicoNode::start(
-        NodeConfig {
-            node_id: 1,
-            node_epoch: 2,
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        None,
-    )
-    .await
-    .unwrap();
+    let node = start_shared_node(1, 2, sink, views, object_storage, wal_storage).await;
 
-    // Retry of the second batch dedupes against rescanned state.
-    let retry = node.service().append_batch(batch(3, 2)).await.unwrap();
+    let retry = produce(&node.topics(), "/topics/replayed", batch(3, 2))
+        .await
+        .unwrap();
     assert!(retry.duplicate);
     assert_eq!(retry.base_offset, 3);
-    // The next sequence continues where the pre-restart session left off.
-    let next = node.service().append_batch(batch(5, 1)).await.unwrap();
+    let next = produce(&node.topics(), "/topics/replayed", batch(5, 1))
+        .await
+        .unwrap();
     assert!(!next.duplicate);
     assert_eq!(next.base_offset, 5);
-    // A sequence gap is still rejected.
-    let gap = node.service().append_batch(batch(9, 1)).await.unwrap_err();
+    let gap = produce(&node.topics(), "/topics/replayed", batch(9, 1))
+        .await
+        .unwrap_err();
     assert_eq!(gap.kind, ErrorKind::SequenceGap);
 
     node.close().await;
 }
 
-/// Multi-batch payloads sum record counts, each batch header patched with
-/// its own assigned base offset. Producers require single batches, and
-/// client creates cannot claim the reserved subtree.
 #[tokio::test]
-async fn kafka_multi_batch_spans_and_reserved_names() {
+async fn kafka_multi_batch_spans() {
     let node = local_node().await;
-    let services = node.service();
-    services
+    let topics = node.topics();
+    topics
         .create(create("/topics/multi", "application/octet-stream"))
         .await
         .unwrap();
+    let log = log_of(&topics, "/topics/multi").await;
 
     let one = kafka_batch(None, &[b"a", b"b"]);
     let two = kafka_batch(None, &[b"c", b"d", b"e"]);
     let payload = Bytes::from([&one[..], &two[..]].concat());
-    let appended = services
-        .append_batch(produce("/topics/multi", payload))
-        .await
-        .unwrap();
+    let appended = produce(&topics, "/topics/multi", payload).await.unwrap();
     assert_eq!(appended.base_offset, 0);
-    let watermarks = services.watermarks("/topics/multi").await.unwrap();
+    let watermarks = node.service().watermarks(&log).await.unwrap();
     assert_eq!(watermarks.high_watermark, 5);
 
-    // Each contained batch comes back with its own patched base offset.
-    let read = services
-        .read_batches("/topics/multi", 0, usize::MAX)
+    let read = node
+        .service()
+        .read_batches(&log, 0, usize::MAX)
         .await
         .unwrap();
     let stored: Vec<u8> = read
@@ -1156,221 +1119,176 @@ async fn kafka_multi_batch_spans_and_reserved_names() {
     assert_eq!(&stored[..8], &0i64.to_be_bytes());
     assert_eq!(&stored[one.len()..one.len() + 8], &2i64.to_be_bytes());
     assert_eq!(read.next_offset, 5);
-    let records = services
-        .read("/topics/multi", OffsetToken::beginning(), 0, 0)
+
+    let records = topics
+        .read("/topics/multi", 0, OffsetToken::beginning(), 0, 0)
         .await
         .unwrap();
     assert_eq!(records.records.len(), 5);
     assert_eq!(records.records[4].offset.record_offset(), 4);
 
-    // Idempotent producers must send exactly one batch.
     let with_producer = kafka_batch(Some((9, 0, 0)), &[b"x"]);
-    let rejected = services
-        .append_batch(produce(
-            "/topics/multi",
-            Bytes::from([&with_producer[..], &two[..]].concat()),
-        ))
-        .await
-        .unwrap_err();
+    let rejected = produce(
+        &topics,
+        "/topics/multi",
+        Bytes::from([&with_producer[..], &two[..]].concat()),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(rejected.kind, ErrorKind::BadRequest);
-
-    // Reserved namespace is closed to client creates.
-    let reserved = services
-        .create(create("/_sys/groups/g1", "application/json"))
-        .await
-        .unwrap_err();
-    assert_eq!(reserved.kind, ErrorKind::BadRequest);
-    let mut internal = create("/_sys/groups/g1", "application/json");
-    internal.internal = true;
-    services.create(internal).await.unwrap();
 
     node.close().await;
 }
 
-/// Topic aliases: derived from the stream name when legal, explicit when
-/// given, exclusive, and resolvable in both directions.
 #[tokio::test]
-async fn kafka_topic_aliases_derive_claim_and_resolve() {
+async fn names_share_one_canonical_topic() {
     let node = local_node().await;
-    let services = node.service();
+    let topics = node.topics();
 
-    // Derived: slashes become dots.
-    let created = services
+    let created = topics
         .create(create("/orders/eu", "application/json"))
         .await
         .unwrap();
-    assert_eq!(created.meta.kafka_topic.as_deref(), Some("orders.eu"));
-    assert_eq!(
-        services.lookup_by_topic("orders.eu").await.unwrap(),
-        Some("/orders/eu".to_owned())
-    );
+    assert!(created.created);
+    assert_eq!(created.meta.topic.name.kafka(), Some("orders.eu"));
 
-    // A stream whose name cannot be a topic has none.
-    let none = services
-        .create(create("/has space", "application/json"))
-        .await
-        .unwrap();
-    assert_eq!(none.meta.kafka_topic, None);
+    let by_kafka = topics.get_kafka("orders.eu").await.unwrap().unwrap();
+    assert_eq!(by_kafka.name.spelling(), "/orders/eu");
+    let by_dots = topics.get("/orders.eu").await.unwrap().unwrap();
+    assert_eq!(by_dots.id, created.meta.topic.id);
 
-    // Derived collision: the later stream simply has no topic.
-    let dotted = services
+    let again = topics
         .create(create("/orders.eu", "application/json"))
         .await
         .unwrap();
-    assert!(dotted.created);
-    assert_eq!(dotted.meta.kafka_topic, None);
+    assert!(!again.created);
+    assert_eq!(again.meta.topic.id, created.meta.topic.id);
+    assert_eq!(again.meta.topic.name.spelling(), "/orders/eu");
 
-    // Explicit alias, and an explicit collision is a conflict.
-    let explicit = services
-        .create(create("/a/b/c", "application/json").with_kafka_topic("abc"))
-        .await
-        .unwrap();
-    assert_eq!(explicit.meta.kafka_topic.as_deref(), Some("abc"));
-    let clash = services
-        .create(create("/other", "application/json").with_kafka_topic("abc"))
+    let conflict = topics
+        .create(create("/orders.eu", "text/plain"))
         .await
         .unwrap_err();
-    assert_eq!(clash.kind, ErrorKind::Conflict);
-    let invalid = services
-        .create(create("/bad", "application/json").with_kafka_topic("no/slash"))
-        .await
-        .unwrap_err();
-    assert_eq!(invalid.kind, ErrorKind::BadRequest);
+    assert_eq!(conflict.kind, ErrorKind::Conflict);
 
-    // Re-alias through update: the old topic frees up.
-    let config = services
-        .update_stream(picomq_server::UpdateStreamCommand {
-            name: "/a/b/c".into(),
-            kafka_topic: Some(Some("renamed".into())),
-            ..Default::default()
-        })
+    let spaced = topics
+        .create(create("/has space", "application/json"))
         .await
         .unwrap();
-    assert_eq!(config.kafka_topic.as_deref(), Some("renamed"));
-    assert_eq!(services.lookup_by_topic("abc").await.unwrap(), None);
-    services
-        .create(create("/other", "application/json").with_kafka_topic("abc"))
-        .await
-        .unwrap();
+    assert_eq!(spaced.meta.topic.name.kafka(), None);
+    assert!(topics.get_kafka("has space").await.unwrap().is_none());
 
-    let topics = services.list_topics();
-    assert_eq!(
-        topics,
-        vec![
-            ("abc".to_owned(), "/other".to_owned()),
-            ("orders.eu".to_owned(), "/orders/eu".to_owned()),
-            ("renamed".to_owned(), "/a/b/c".to_owned()),
-        ]
-    );
-
-    // Delete frees the topic for the dotted stream to claim.
-    assert!(services.delete("/orders/eu").await.unwrap());
-    assert_eq!(services.lookup_by_topic("orders.eu").await.unwrap(), None);
-    services
-        .update_stream(picomq_server::UpdateStreamCommand {
-            name: "/orders.eu".into(),
-            kafka_topic: Some(Some("orders.eu".into())),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        services.lookup_by_topic("orders.eu").await.unwrap(),
-        Some("/orders.eu".to_owned())
-    );
+    let kafka: Vec<String> = topics
+        .kafka_topics()
+        .into_iter()
+        .map(|topic| topic.name.canonical().to_owned())
+        .collect();
+    assert_eq!(kafka, ["orders.eu"]);
 
     node.close().await;
 }
 
-/// Index records exist after create and are gone after delete.
 #[tokio::test]
-async fn external_id_lookup_uses_replicated_index() {
+async fn recreated_topic_starts_without_history() {
     let node = local_node().await;
-    let services = node.service();
-    let external_id = *b"0123456789abcdef";
+    let topics = node.topics();
 
-    let mut command = create("/topics/indexed", "application/octet-stream");
-    command.external_id = Some(external_id);
-    services.create(command).await.unwrap();
-
-    assert_eq!(
-        services.lookup_by_external_id(external_id).await.unwrap(),
-        Some("/topics/indexed".to_owned())
-    );
-    assert_eq!(
-        services
-            .lookup_by_external_id(*b"ffffffffffffffff")
-            .await
-            .unwrap(),
-        None
-    );
-
-    let stream_id = services
-        .lookup_stream_id("/topics/indexed")
+    let first = topics.create(create("/again", "text/plain")).await.unwrap();
+    topics
+        .append("/again", 0, append(&[b"old"], "text/plain"))
         .await
-        .unwrap()
         .unwrap();
+    assert!(topics.delete("/again").await.unwrap());
+
+    let second = topics.create(create("/again", "text/plain")).await.unwrap();
+    assert!(second.created);
+    assert_ne!(second.meta.topic.id, first.meta.topic.id);
+    assert!(topics.by_id(&first.meta.topic.id).await.unwrap().is_none());
+
+    let read = topics
+        .read("/again", 0, OffsetToken::beginning(), 0, 0)
+        .await
+        .unwrap();
+    assert!(read.records.is_empty());
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn topic_and_log_indexes_follow_create_and_delete() {
+    let node = local_node().await;
+    let topics = node.topics();
+
+    let created = topics
+        .create(create("/topics/indexed", "application/octet-stream"))
+        .await
+        .unwrap();
+    let id = created.meta.topic.id;
+    let log = log_of(&topics, "/topics/indexed").await;
+    let stream_id = node.service().stream_id(&log).unwrap().unwrap();
+
     let view = node.views().load();
+    assert!(view.state.get_kv("topic/topics.indexed").is_some());
+    assert_eq!(
+        view.state
+            .get_kv(&format!("topic-id/{}", id.hex()))
+            .as_deref(),
+        Some(b"topics.indexed".as_slice())
+    );
     assert_eq!(
         view.state
             .get_kv(&format!("idx/sid/{stream_id}"))
             .as_deref(),
-        Some(b"/topics/indexed".as_slice())
+        Some(log.key().as_bytes())
     );
-    assert!(
-        view.state
-            .get_kv("idx/extid/30313233343536373839616263646566")
-            .is_some()
-    );
+    assert!(view.state.get_kv(&log.key()).is_some());
 
-    assert!(services.delete("/topics/indexed").await.unwrap());
-    assert_eq!(
-        services.lookup_by_external_id(external_id).await.unwrap(),
-        None
-    );
+    assert!(topics.delete("/topics/indexed").await.unwrap());
+    assert!(topics.by_id(&id).await.unwrap().is_none());
+
     let view = node.views().load();
-    assert!(view.state.get_kv(&format!("idx/sid/{stream_id}")).is_none());
+    assert!(view.state.get_kv("topic/topics.indexed").is_none());
     assert!(
         view.state
-            .get_kv("idx/extid/30313233343536373839616263646566")
+            .get_kv(&format!("topic-id/{}", id.hex()))
             .is_none()
     );
+    assert!(view.state.get_kv(&format!("idx/sid/{stream_id}")).is_none());
+    assert!(view.state.get_kv(&log.key()).is_none());
 
     node.close().await;
 }
 
-/// The sweep expires a TTL'd stream no request ever touches. Observed via
-/// raw view reads so lazy expire-on-access cannot be doing the work.
 #[tokio::test]
-async fn ttl_sweep_expires_untouched_streams() {
+async fn ttl_sweep_expires_untouched_topics() {
     let node = local_node().await;
-    let services = node.service();
+    let topics = node.topics();
 
     let mut command = create("/streams/ephemeral", "text/plain");
     command.ttl_seconds = Some(1);
-    services.create(command).await.unwrap();
+    topics.create(command).await.unwrap();
     assert!(
         node.views()
             .load()
             .state
-            .get_kv("/streams/ephemeral")
+            .get_kv("topic/streams.ephemeral")
             .is_some()
     );
 
     let (tx, rx) = tokio::sync::watch::channel(true);
-    let sweep = services.spawn_ttl_sweep(rx, Duration::from_millis(20));
+    let sweep = topics.spawn_ttl_sweep(rx, Duration::from_millis(20));
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while node
         .views()
         .load()
         .state
-        .get_kv("/streams/ephemeral")
+        .get_kv("topic/streams.ephemeral")
         .is_some()
     {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "sweep never expired the stream"
+            "sweep never expired the topic"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -1380,60 +1298,46 @@ async fn ttl_sweep_expires_untouched_streams() {
     node.close().await;
 }
 
-/// Listing pages with `start_after`/`limit`.
 #[tokio::test]
 async fn list_paginates_with_start_after() {
     let node = local_node().await;
-    let services = node.service();
+    let topics = node.topics();
     for i in 0..5 {
-        services
+        topics
             .create(create(&format!("/page/{i}"), "text/plain"))
             .await
             .unwrap();
     }
 
-    let first = services.list("/page/", None, 2).await.unwrap();
-    assert_eq!(
-        first
-            .streams
+    let names = |list: picomq_server::TopicList| -> (Vec<String>, bool) {
+        let names = list
+            .topics
             .iter()
-            .map(|s| s.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["/page/0", "/page/1"]
-    );
-    assert!(first.has_more);
+            .map(|m| m.topic.name.spelling().to_owned())
+            .collect();
+        (names, list.has_more)
+    };
 
-    let second = services.list("/page/", Some("/page/1"), 2).await.unwrap();
-    assert_eq!(
-        second
-            .streams
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["/page/2", "/page/3"]
-    );
-    assert!(second.has_more);
+    let (first, more) = names(topics.list("/page/", None, 2).unwrap());
+    assert_eq!(first, ["/page/0", "/page/1"]);
+    assert!(more);
 
-    let last = services.list("/page/", Some("/page/3"), 2).await.unwrap();
-    assert_eq!(
-        last.streams
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["/page/4"]
-    );
-    assert!(!last.has_more);
+    let (second, more) = names(topics.list("/page/", Some("/page/1"), 2).unwrap());
+    assert_eq!(second, ["/page/2", "/page/3"]);
+    assert!(more);
+
+    let (last, more) = names(topics.list("/page/", Some("/page/3"), 2).unwrap());
+    assert_eq!(last, ["/page/4"]);
+    assert!(!more);
 
     node.close().await;
 }
 
 #[tokio::test]
 async fn append_rejects_schema_invalid_records() {
-    use bytes::Bytes;
     use object_store::memory::InMemory;
     use picomq_schema::{Registry, SchemaFormat};
 
-    let store = InMemory::new();
     let schema = Bytes::from_static(
         br#"{
         "title": "Person",
@@ -1464,74 +1368,1102 @@ async fn append_rejects_schema_invalid_records() {
         views,
         object_storage,
         wal_storage,
-        Some(Arc::new(Registry::new(store))),
+        Some(Arc::new(Registry::new(InMemory::new()))),
     )
     .await
     .unwrap();
-    let services = node.service();
+    let topics = node.topics();
 
-    services
-        .put_schema("person", SchemaFormat::Json, schema)
+    let registry = topics.schema_registry().unwrap();
+    registry
+        .put("person", SchemaFormat::Json, schema)
         .await
         .unwrap();
-    let fetched = services.get_schema("person").await.unwrap().unwrap();
-    assert_eq!(fetched.0, SchemaFormat::Json);
+    assert_eq!(
+        registry.get("person").await.unwrap().unwrap().0,
+        SchemaFormat::Json
+    );
 
     let mut cmd = create("/streams/orders", "application/json");
     cmd.schema_name = Some("person".into());
     cmd.schema_validate = true;
-    services.create(cmd).await.unwrap();
+    topics.create(cmd).await.unwrap();
 
-    let ok = services
-        .append(append(
+    let ok = topics
+        .append(
             "/streams/orders",
-            &[br#"{"name":"alice"}"#],
-            "application/json",
-        ))
+            0,
+            append(&[br#"{"name":"alice"}"#], "application/json"),
+        )
         .await
         .unwrap();
     assert!(ok.applied);
 
-    let err = services
-        .append(append(
+    let err = topics
+        .append(
             "/streams/orders",
-            &[br#"{"name":1}"#],
-            "application/json",
-        ))
+            0,
+            append(&[br#"{"name":1}"#], "application/json"),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::SchemaViolation);
 
-    // Unbound stream ignores the registered schema.
-    services
+    topics
         .create(create("/streams/raw", "application/json"))
         .await
         .unwrap();
-    services
-        .append(append(
+    topics
+        .append(
             "/streams/raw",
-            &[br#"{"name":1}"#],
-            "application/json",
-        ))
+            0,
+            append(&[br#"{"name":1}"#], "application/json"),
+        )
         .await
         .unwrap();
 
-    services
-        .update_stream(picomq_server::UpdateStreamCommand {
+    topics
+        .update(picomq_server::UpdateTopicCommand {
             name: "/streams/orders".into(),
             schema_validate: Some(false),
             ..Default::default()
         })
         .await
         .unwrap();
-    services
-        .append(append(
+    topics
+        .append(
             "/streams/orders",
-            &[br#"{"name":1}"#],
-            "application/json",
-        ))
+            0,
+            append(&[br#"{"name":1}"#], "application/json"),
+        )
         .await
         .unwrap();
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn partitions_grow_and_stay_independent() {
+    let node = local_node().await;
+    let topics = node.topics();
+
+    let created = topics
+        .create(CreateCommand {
+            partitions: 2,
+            ..create("/parts", "text/plain")
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.meta.partitions.len(), 2);
+
+    topics
+        .append("/parts", 1, append(&[b"one"], "text/plain"))
+        .await
+        .unwrap();
+    let first = topics
+        .read("/parts", 0, OffsetToken::beginning(), 0, 0)
+        .await
+        .unwrap();
+    let second = topics
+        .read("/parts", 1, OffsetToken::beginning(), 0, 0)
+        .await
+        .unwrap();
+    assert!(first.records.is_empty());
+    assert_eq!(&second.records[0].record.value[..], b"one");
+
+    let grown = topics.grow("/parts", 4, &[]).await.unwrap();
+    assert_eq!(grown.partitions, 4);
+    topics
+        .append("/parts", 3, append(&[b"three"], "text/plain"))
+        .await
+        .unwrap();
+    assert_eq!(
+        topics.grow("/parts", 3, &[]).await.unwrap_err().kind,
+        ErrorKind::BadRequest
+    );
+
+    let missing = topics
+        .append("/parts", 4, append(&[b"x"], "text/plain"))
+        .await
+        .unwrap_err();
+    assert_eq!(missing.kind, ErrorKind::NotFound);
+
+    let close = topics.close("/parts").await.unwrap_err();
+    assert_eq!(close.kind, ErrorKind::BadRequest);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn closed_topics_do_not_grow() {
+    let node = local_node().await;
+    let topics = node.topics();
+
+    topics
+        .create(create("/sealed", "text/plain"))
+        .await
+        .unwrap();
+    topics.close("/sealed").await.unwrap();
+
+    let grown = topics.grow("/sealed", 2, &[]).await.unwrap_err();
+    assert_eq!(grown.kind, ErrorKind::Closed);
+    assert_eq!(topics.get("/sealed").await.unwrap().unwrap().partitions, 1);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn partition_counts_are_capped() {
+    let node = local_node().await;
+    let topics = node.topics();
+
+    let oversized = topics
+        .create(CreateCommand {
+            partitions: MAX_NEW_PARTITIONS + 1,
+            ..create("/huge", "text/plain")
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(oversized.kind, ErrorKind::BadRequest);
+    assert!(topics.get("/huge").await.unwrap().is_none());
+
+    topics.create(create("/small", "text/plain")).await.unwrap();
+    let grown = topics
+        .grow("/small", MAX_NEW_PARTITIONS + 2, &[])
+        .await
+        .unwrap_err();
+    assert_eq!(grown.kind, ErrorKind::BadRequest);
+    assert_eq!(topics.get("/small").await.unwrap().unwrap().partitions, 1);
+
+    node.close().await;
+}
+
+fn stream_ids(node: &PicoNode, topic: &Topic) -> Vec<u64> {
+    (0..topic.partitions)
+        .map(|index| {
+            let log = partition_log(topic, index).unwrap();
+            node.service().stream_id(&log).unwrap().unwrap()
+        })
+        .collect()
+}
+
+fn placements(node: &PicoNode, topic: &Topic) -> Vec<(i32, StreamState)> {
+    let view = node.views().load();
+
+    stream_ids(node, topic)
+        .iter()
+        .map(|stream_id| {
+            let row = view.state.streams[stream_id];
+            (row.node_id, row.state)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn partitions_are_placed_across_nodes() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+
+    let topic = node1
+        .topics()
+        .create(CreateCommand {
+            partitions: 4,
+            ..create("/spread", "text/plain")
+        })
+        .await
+        .unwrap()
+        .meta
+        .topic;
+
+    let placed = placements(&node1, &topic);
+    assert!(
+        placed
+            .iter()
+            .all(|(_, state)| *state == StreamState::Closed)
+    );
+    for node_id in [1, 2] {
+        assert!(
+            placed.iter().any(|(owner, _)| *owner == node_id),
+            "{placed:?}"
+        );
+    }
+
+    let grown = node2.topics().grow("/spread", 6, &[]).await.unwrap();
+    let added = &placements(&node1, &grown)[4..];
+    for node_id in [1, 2] {
+        assert!(
+            added.iter().any(|(owner, _)| *owner == node_id),
+            "{added:?}"
+        );
+    }
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn initial_records_keep_the_first_partition_local() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+
+    for name in ["/seeded/a", "/seeded/b", "/seeded/c"] {
+        let topic = node2
+            .topics()
+            .create(CreateCommand {
+                initial_records: vec![LogRecord::value(Bytes::from_static(b"seed"))],
+                ..create(name, "text/plain")
+            })
+            .await
+            .unwrap()
+            .meta
+            .topic;
+
+        assert_eq!(placements(&node2, &topic), vec![(2, StreamState::Opened)]);
+    }
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn deleted_topics_release_streams_held_by_other_nodes() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+
+    let topic = node1
+        .topics()
+        .create(CreateCommand {
+            partitions: 4,
+            ..create("/doomed", "text/plain")
+        })
+        .await
+        .unwrap()
+        .meta
+        .topic;
+    let mut held = Vec::new();
+    for (index, stream_id) in stream_ids(&node1, &topic).into_iter().enumerate() {
+        if views.load().state.streams[&stream_id].node_id != 2 {
+            continue;
+        }
+
+        node2
+            .topics()
+            .append("/doomed", index as u32, append(&[b"x"], "text/plain"))
+            .await
+            .unwrap();
+        held.push(stream_id);
+    }
+    assert!(!held.is_empty());
+    assert!(
+        held.iter()
+            .all(|id| views.load().state.streams[id].state == StreamState::Opened)
+    );
+
+    assert!(node1.topics().delete("/doomed").await.unwrap());
+    wait_for_view(&views, "held streams deleted", |view| {
+        held.iter().all(|id| !view.state.streams.contains_key(id))
+    })
+    .await;
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn a_clean_shutdown_hands_streams_to_the_survivors() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+    let (_lease, leadership) = tokio::sync::watch::channel(true);
+    let failover = node1.spawn_failover(leadership, Duration::from_millis(50));
+
+    let topic = node1
+        .topics()
+        .create(CreateCommand {
+            partitions: 2,
+            ..create("/handoff", "text/plain")
+        })
+        .await
+        .unwrap()
+        .meta
+        .topic;
+    assert!(
+        placements(&node1, &topic)
+            .iter()
+            .any(|(owner, _)| *owner == 2)
+    );
+
+    node2.close().await;
+
+    let streams = stream_ids(&node1, &topic);
+    wait_for_view(&views, "streams of node 2 placed on node 1", |view| {
+        streams
+            .iter()
+            .all(|stream_id| view.state.streams[stream_id].node_id == 1)
+    })
+    .await;
+
+    failover.abort();
+    node1.close().await;
+}
+
+#[tokio::test]
+async fn a_fenced_node_notices() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+    let mut fenced = node2.fenced();
+
+    let heartbeats = views.load().state.nodes[&2].heartbeats;
+    node1
+        .metadata()
+        .fence_node(2, node2.metadata().node_epoch(), heartbeats)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), fenced.wait_for(|fenced| *fenced))
+        .await
+        .expect("node 2 never noticed the fence")
+        .unwrap();
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn delete_records_waits_for_the_upload() {
+    let (sink, views) = LocalSink::new();
+    let engine = s3stream::Config {
+        wal_upload_interval_ms: 100,
+        ..Default::default()
+    };
+    let node = start_engine(1, Arc::new(sink), views, engine).await;
+    let topics = node.topics();
+
+    topics
+        .create(create("/trimmed", "text/plain"))
+        .await
+        .unwrap();
+    topics
+        .append("/trimmed", 0, append(&[b"a", b"b", b"c"], "text/plain"))
+        .await
+        .unwrap();
+    let topic = topics.get("/trimmed").await.unwrap().unwrap();
+
+    let start = topics
+        .delete_records(&topic, 0, 2, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(start >= 2, "start {start}");
+    assert_eq!(
+        topics
+            .offsets(&topic, 0)
+            .await
+            .unwrap()
+            .start_offset
+            .record_offset(),
+        start
+    );
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn delete_records_times_out_before_the_upload() {
+    let node = local_node().await;
+    let topics = node.topics();
+
+    topics
+        .create(create("/pending", "text/plain"))
+        .await
+        .unwrap();
+    topics
+        .append("/pending", 0, append(&[b"a", b"b"], "text/plain"))
+        .await
+        .unwrap();
+    let topic = topics.get("/pending").await.unwrap().unwrap();
+
+    let error = topics
+        .delete_records(&topic, 0, 2, Duration::from_millis(200))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Timeout);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_retried_close_seals_after_an_interrupted_one() {
+    use picomq_server::types::Producer;
+
+    let node = local_node().await;
+    let topics = node.topics();
+    topics
+        .create(create("/interrupted", "text/plain"))
+        .await
+        .unwrap();
+
+    let last = |close_after| AppendCommand {
+        producer: Some(Producer::new("p1", 1, 0).unwrap()),
+        close_after,
+        ..append(&[b"last"], "text/plain")
+    };
+    topics.append("/interrupted", 0, last(false)).await.unwrap();
+
+    let retried = topics.append("/interrupted", 0, last(true)).await.unwrap();
+    assert!(!retried.applied);
+    assert!(retried.closed);
+    assert!(topics.get("/interrupted").await.unwrap().unwrap().closed);
+
+    let again = topics.append("/interrupted", 0, last(true)).await.unwrap();
+    assert!(again.closed);
+    assert_eq!(again.next_offset.record_offset(), 1);
+
+    node.close().await;
+}
+
+async fn start_sqlite_node(
+    path: &std::path::Path,
+    node_id: i32,
+    poll_interval: Duration,
+    object_storage: Arc<dyn ObjectStorageTrait>,
+    wal_storage: Arc<dyn ObjectStorageTrait>,
+) -> (PicoNode, Arc<ViewPublisher>) {
+    use picomq_sql::{MetaStore, SqlSink, SqlSinkConfig, SqliteStore};
+
+    let store: Arc<dyn MetaStore> = Arc::new(SqliteStore::open(path).await.unwrap());
+    let (sink, views) = SqlSink::open(
+        store,
+        SqlSinkConfig {
+            poll_interval,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let node = start_shared_node(
+        node_id,
+        1,
+        Arc::new(sink),
+        views.clone(),
+        object_storage,
+        wal_storage,
+    )
+    .await;
+    (node, views)
+}
+
+async fn start_lagging_pair(
+    path: &std::path::Path,
+) -> (PicoNode, Arc<ViewPublisher>, PicoNode, Arc<ViewPublisher>) {
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let (node1, views1) = start_sqlite_node(
+        path,
+        1,
+        Duration::from_millis(1),
+        object_storage.clone(),
+        wal_storage.clone(),
+    )
+    .await;
+    let (node2, views2) = start_sqlite_node(
+        path,
+        2,
+        Duration::from_secs(60),
+        object_storage,
+        wal_storage,
+    )
+    .await;
+    (node1, views1, node2, views2)
+}
+
+#[tokio::test]
+async fn a_lagging_node_syncs_before_reporting_a_topic_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node1, views1, node2, views2) = start_lagging_pair(&dir.path().join("meta.db")).await;
+
+    node1
+        .topics()
+        .create(create("/fresh", "text/plain"))
+        .await
+        .unwrap();
+    assert!(views2.load().applied_index < views1.load().applied_index);
+
+    let found = tokio::time::timeout(Duration::from_secs(5), node2.topics().get("/fresh"))
+        .await
+        .expect("the lookup waited for the poll")
+        .unwrap();
+    assert!(found.is_some());
+    assert!(node2.topics().get("/missing").await.unwrap().is_none());
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn deleted_topics_destroy_streams_that_were_never_opened() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views.clone()).await;
+    let topics = node.topics();
+
+    topics
+        .create(create("/never-opened", "text/plain"))
+        .await
+        .unwrap();
+    let log = log_of(&topics, "/never-opened").await;
+    let stream_id = node.service().stream_id(&log).unwrap().unwrap();
+    let row = views.load().state.streams[&stream_id];
+    assert_eq!(row.state, StreamState::Closed);
+    assert_eq!(row.node_id, 1);
+
+    assert!(topics.delete("/never-opened").await.unwrap());
+    wait_for_view(&views, "the placed stream to be destroyed", |view| {
+        !view.state.streams.contains_key(&stream_id)
+    })
+    .await;
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn partitions_go_to_the_requested_owners() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let node1 = start_shared_node(
+        1,
+        1,
+        sink.clone(),
+        views.clone(),
+        object_storage.clone(),
+        wal_storage.clone(),
+    )
+    .await;
+    let node2 = start_shared_node(2, 1, sink, views.clone(), object_storage, wal_storage).await;
+    let topics = node1.topics();
+    let owners_of = |topic: &Topic| -> Vec<i32> {
+        let state = &views.load().state;
+        (0..topic.partitions)
+            .map(|index| {
+                let log = partition_log(topic, index).unwrap();
+                let stream_id = node1.service().stream_id(&log).unwrap().unwrap();
+                state.streams[&stream_id].node_id
+            })
+            .collect()
+    };
+
+    topics
+        .create(CreateCommand {
+            partitions: 4,
+            owners: vec![2, 1, 2, 1],
+            ..create("/assigned", "text/plain")
+        })
+        .await
+        .unwrap();
+    let topic = topics.get("/assigned").await.unwrap().unwrap();
+    assert_eq!(owners_of(&topic), [2, 1, 2, 1]);
+
+    let grown = topics.grow("/assigned", 6, &[1, 2]).await.unwrap();
+    assert_eq!(owners_of(&grown), [2, 1, 2, 1, 1, 2]);
+
+    let missing = topics.grow("/assigned", 8, &[1]).await.unwrap_err();
+    assert_eq!(missing.kind, ErrorKind::BadRequest);
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn a_restarted_coordinator_keeps_the_members_that_join_it() {
+    use picomq_server::{JoinInput, Membership};
+
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let join = || JoinInput {
+        group_id: "g".to_owned(),
+        member_id: String::new(),
+        instance_id: None,
+        client_id: "test".to_owned(),
+        membership: Membership::Subscribed(vec!["/a".to_owned()]),
+        session_timeout_ms: 10_000,
+        rebalance_timeout_ms: 2_000,
+        require_known_member_id: false,
+    };
+
+    let node = start_shared_node(
+        1,
+        1,
+        sink.clone(),
+        views.clone(),
+        object_storage.clone(),
+        wal_storage.clone(),
+    )
+    .await;
+    assert!(node.groups().join(join()).await.result.is_ok());
+    node.close().await;
+
+    let restarted = start_shared_node(1, 2, sink, views, object_storage, wal_storage).await;
+    assert!(restarted.groups().join(join()).await.result.is_ok());
+    let described = restarted.groups().describe("g").await.unwrap();
+    assert_eq!(described.members.len(), 1);
+
+    restarted.close().await;
+}
+
+struct Recorder {
+    sink: LocalSink,
+    applied: std::sync::Mutex<Vec<(u64, MetadataCommand)>>,
+}
+
+#[async_trait::async_trait]
+impl CommandSink for Recorder {
+    async fn propose(&self, command: MetadataCommand) -> Result<Proposed, MetadataError> {
+        let proposed = self.sink.propose(command.clone()).await?;
+        self.applied
+            .lock()
+            .unwrap()
+            .push((proposed.applied_index, command));
+        Ok(proposed)
+    }
+
+    async fn sync(&self) -> Result<(), MetadataError> {
+        self.sink.sync().await
+    }
+}
+
+#[tokio::test]
+async fn new_logs_are_published_with_their_owner() {
+    let (sink, views) = LocalSink::new();
+    let recorder = Arc::new(Recorder {
+        sink,
+        applied: Default::default(),
+    });
+    let node = start_node(1, recorder.clone(), views).await;
+    let service = node.service();
+    let local = Log::Group("local".into());
+    let placed = Log::Group("placed".into());
+
+    service.create_local_log(&local).await.unwrap();
+    service.create_placed_log(&placed, None).await.unwrap();
+
+    let streams =
+        [&local, &placed].map(|log| (log.key(), service.stream_id(log).unwrap().unwrap()));
+    let mut applied = recorder.applied.lock().unwrap().clone();
+    applied.sort_by_key(|(index, _)| *index);
+    let mut state = MetadataState::new();
+    for (_, command) in &applied {
+        apply(&mut state, command).unwrap();
+        for (key, stream_id) in &streams {
+            if state.get_kv(key).is_some() {
+                assert_ne!(
+                    state.streams[stream_id].node_id, -1,
+                    "{key} was published before it had an owner"
+                );
+            }
+        }
+    }
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_lost_claim_destroys_its_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node1, _, node2, views2) = start_lagging_pair(&dir.path().join("meta.db")).await;
+    let log = Log::Group("claimed".into());
+
+    node1.service().create_local_log(&log).await.unwrap();
+    node2.service().create_local_log(&log).await.unwrap();
+
+    let winner = node1.service().stream_id(&log).unwrap().unwrap();
+    assert_eq!(node2.service().stream_id(&log).unwrap(), Some(winner));
+    assert!(views2.load().state.streams.keys().eq([&winner]));
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn a_claim_that_cannot_own_its_stream_destroys_it() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views.clone()).await;
+    let log = Log::Group("unowned".into());
+
+    let placed = node.service().create_placed_log(&log, Some(99)).await;
+    assert!(placed.is_err());
+    assert_eq!(node.service().stream_id(&log).unwrap(), None);
+    let state = &views.load().state;
+    assert!(state.streams.is_empty());
+    assert!(state.get_kv(&log.key()).is_none());
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_failed_append_reopens_the_stream_at_a_new_epoch() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views.clone()).await;
+    let topics = node.topics();
+    topics
+        .create(create("/reopened", "text/plain"))
+        .await
+        .unwrap();
+    topics
+        .append("/reopened", 0, append(&[b"first"], "text/plain"))
+        .await
+        .unwrap();
+    let log = log_of(&topics, "/reopened").await;
+    let stream_id = node.service().stream_id(&log).unwrap().unwrap();
+    let held = node.service().streams().held(stream_id).unwrap();
+
+    held.close().await.unwrap();
+    let failed = topics
+        .append("/reopened", 0, append(&[b"lost"], "text/plain"))
+        .await
+        .unwrap_err();
+    assert_eq!(failed.kind, ErrorKind::Durability);
+
+    let appended = topics
+        .append("/reopened", 0, append(&[b"second"], "text/plain"))
+        .await
+        .unwrap();
+    assert_eq!(appended.next_offset.record_offset(), 2);
+    let row = views.load().state.streams[&stream_id];
+    assert_eq!((row.state, row.epoch), (StreamState::Opened, 2));
+
+    node.close().await;
+}
+
+/// A node WAL that can be told to fail its next append before writing it.
+struct Faulty {
+    wal: picomq_server::wal::ObjectWal,
+    fail: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl picomq_server::wal::Wal for Faulty {
+    fn location(&self) -> String {
+        self.wal.location()
+    }
+
+    async fn open(
+        &self,
+        node_id: i32,
+        epoch: i64,
+    ) -> Result<Arc<dyn s3stream::WriteAheadLogTrait>, s3stream::Error> {
+        Ok(Arc::new(FaultyLog {
+            log: self.wal.open(node_id, epoch).await?,
+            fail: self.fail.clone(),
+        }))
+    }
+
+    async fn take_over(
+        &self,
+        request: &s3stream::FailoverRequest,
+    ) -> Result<Arc<dyn s3stream::WriteAheadLogTrait>, s3stream::Error> {
+        self.wal.take_over(request).await
+    }
+}
+
+struct FaultyLog {
+    log: Arc<dyn s3stream::WriteAheadLogTrait>,
+    fail: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl s3stream::WriteAheadLogTrait for FaultyLog {
+    async fn start(&self) -> Result<(), s3stream::WalError> {
+        self.log.start().await
+    }
+
+    async fn shutdown_gracefully(&self) {
+        self.log.shutdown_gracefully().await
+    }
+
+    fn metadata(&self) -> s3stream_wal::WalMetadata {
+        self.log.metadata()
+    }
+
+    fn uri(&self) -> &str {
+        self.log.uri()
+    }
+
+    fn submit(
+        &self,
+        record: s3stream::StreamRecordBatch,
+    ) -> Result<s3stream_wal::PendingAppend, s3stream::WalError> {
+        if self.fail.swap(false, Ordering::SeqCst) {
+            let failed = std::io::Error::other("injected write failure");
+            return Ok(s3stream_wal::PendingAppend {
+                durable: Box::pin(async move { Err(s3stream::WalError::Io(failed)) }),
+            });
+        }
+        self.log.submit(record)
+    }
+
+    fn set_append_listener(&self, listener: s3stream_wal::AppendListener) {
+        self.log.set_append_listener(listener)
+    }
+
+    async fn get(
+        &self,
+        offset: s3stream_wal::RecordOffset,
+    ) -> Result<s3stream::StreamRecordBatch, s3stream::WalError> {
+        self.log.get(offset).await
+    }
+
+    async fn get_range(
+        &self,
+        start: s3stream_wal::RecordOffset,
+        end: s3stream_wal::RecordOffset,
+    ) -> Result<Vec<s3stream::StreamRecordBatch>, s3stream::WalError> {
+        self.log.get_range(start, end).await
+    }
+
+    fn confirm_offset(&self) -> s3stream_wal::RecordOffset {
+        self.log.confirm_offset()
+    }
+
+    fn recover(&self) -> s3stream_wal::RecoverStream {
+        self.log.recover()
+    }
+
+    async fn reset(&self) -> Result<(), s3stream::WalError> {
+        self.log.reset().await
+    }
+
+    async fn trim(&self, offset: s3stream_wal::RecordOffset) -> Result<(), s3stream::WalError> {
+        self.log.trim(offset).await
+    }
+}
+
+async fn faulty_node() -> (PicoNode, Arc<AtomicBool>) {
+    let (sink, views) = LocalSink::new();
+    let fail = Arc::new(AtomicBool::new(false));
+    let wal = Faulty {
+        wal: picomq_server::wal::ObjectWal::new(
+            "picomq",
+            "",
+            Arc::new(MemoryObjectStorage::new(1)),
+        ),
+        fail: fail.clone(),
+    };
+    let node = PicoNode::start_with_wal(
+        NodeConfig {
+            node_id: 1,
+            node_epoch: 1,
+            ..Default::default()
+        },
+        Arc::new(sink),
+        views,
+        Arc::new(MemoryObjectStorage::new(0)),
+        Arc::new(wal),
+        None,
+    )
+    .await
+    .unwrap();
+    (node, fail)
+}
+
+async fn values(topics: &Topics, name: &str) -> Vec<Bytes> {
+    topics
+        .read(name, 0, OffsetToken::beginning(), 1 << 20, 0)
+        .await
+        .unwrap()
+        .records
+        .into_iter()
+        .map(|record| record.record.value)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_retry_after_a_failed_append_is_written_not_deduplicated() {
+    use picomq_server::types::Producer;
+
+    let (node, fail) = faulty_node().await;
+    let topics = node.topics();
+    topics
+        .create(create("/retried", "text/plain"))
+        .await
+        .unwrap();
+    let send = |payload: &'static [u8], seq: u64| AppendCommand {
+        producer: Some(Producer::new("p", 0, seq).unwrap()),
+        ..append(&[payload], "text/plain")
+    };
+
+    topics
+        .append("/retried", 0, send(b"zero", 0))
+        .await
+        .unwrap();
+    fail.store(true, Ordering::SeqCst);
+    let failed = topics
+        .append("/retried", 0, send(b"one", 1))
+        .await
+        .unwrap_err();
+    assert_eq!(failed.kind, ErrorKind::Durability);
+
+    let retried = topics.append("/retried", 0, send(b"one", 1)).await.unwrap();
+    assert!(
+        retried.applied,
+        "the retry is written, not acked as a duplicate"
+    );
+    assert_eq!(values(&topics, "/retried").await, ["zero", "one"]);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_kafka_retry_after_a_failed_append_is_written_not_deduplicated() {
+    let (node, fail) = faulty_node().await;
+    let topics = node.topics();
+    topics
+        .create(create("/produced", "application/octet-stream"))
+        .await
+        .unwrap();
+
+    produce(
+        &topics,
+        "/produced",
+        kafka_batch(Some((1, 0, 0)), &[b"zero"]),
+    )
+    .await
+    .unwrap();
+    fail.store(true, Ordering::SeqCst);
+    let failed = produce(
+        &topics,
+        "/produced",
+        kafka_batch(Some((1, 0, 1)), &[b"one"]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failed.kind, ErrorKind::Durability);
+
+    let retried = produce(
+        &topics,
+        "/produced",
+        kafka_batch(Some((1, 0, 1)), &[b"one"]),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !retried.duplicate,
+        "the retry is written, not acked as a duplicate"
+    );
+    assert_eq!(values(&topics, "/produced").await, ["zero", "one"]);
+
+    node.close().await;
+}
+
+struct Outage {
+    sink: LocalSink,
+    down: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl CommandSink for Outage {
+    async fn propose(&self, command: MetadataCommand) -> Result<Proposed, MetadataError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(MetadataError::Unavailable {
+                message: "store down".into(),
+            });
+        }
+        self.sink.propose(command).await
+    }
+
+    async fn sync(&self) -> Result<(), MetadataError> {
+        self.sink.sync().await
+    }
+}
+
+#[tokio::test]
+async fn a_metadata_outage_is_reported_as_unavailable() {
+    let (sink, views) = LocalSink::new();
+    let outage = Arc::new(Outage {
+        sink,
+        down: Default::default(),
+    });
+    let node = start_node(1, outage.clone(), views).await;
+    let topics = node.topics();
+
+    outage.down.store(true, Ordering::SeqCst);
+    let error = topics
+        .create(CreateCommand::new("/during", "text/plain"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Unavailable, "{error}");
+
+    outage.down.store(false, Ordering::SeqCst);
+    topics
+        .create(CreateCommand::new("/during", "text/plain"))
+        .await
+        .unwrap();
+
+    node.close().await;
+}
+
+/// A Kafka batch whose records all carry `timestamp_ms` as their create time.
+fn timed_batch(timestamp_ms: i64, values: &[&[u8]]) -> Vec<u8> {
+    let records: Vec<LogRecord> = values
+        .iter()
+        .map(|v| LogRecord::value(Bytes::copy_from_slice(v)))
+        .collect();
+    let mut batch = encode_batch(0, -1, timestamp_ms, &records).to_vec();
+    batch[21..23].copy_from_slice(&0i16.to_be_bytes());
+    let crc = crc32c::crc32c(&batch[21..]);
+    batch[17..21].copy_from_slice(&crc.to_be_bytes());
+    batch
+}
+
+#[tokio::test]
+async fn timestamp_lookups_skip_records_trimmed_inside_a_batch() {
+    let (sink, views) = LocalSink::new();
+    let engine = s3stream::Config {
+        wal_upload_interval_ms: 100,
+        ..Default::default()
+    };
+    let node = start_engine(1, Arc::new(sink), views, engine).await;
+    let topics = node.topics();
+    topics
+        .create(create("/topics/timed", "application/octet-stream"))
+        .await
+        .unwrap();
+    produce(
+        &topics,
+        "/topics/timed",
+        Bytes::from(timed_batch(100, &[b"a", b"b"])),
+    )
+    .await
+    .unwrap();
+    let topic = topics.get("/topics/timed").await.unwrap().unwrap();
+    let start = topics
+        .delete_records(&topic, 0, 1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert_eq!(start, 1);
+
+    let found = topics
+        .record_at_or_after(&topic, 0, 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.offset.record_offset(), 1);
+    let newest = topics
+        .record_with_max_timestamp(&topic, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(newest.offset.record_offset(), 1);
 
     node.close().await;
 }

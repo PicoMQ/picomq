@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use picomq_protocol::WireRequest;
 use picomq_protocol::groups::{
-    AssignmentRequest, AssignmentResponse, CommitRequest, DescribeRequest, FetchOffsetsRequest,
-    GroupDescription, GroupListing, GroupSummary, HeartbeatRequest, JoinRequest, JoinResponse,
-    LeaveRequest, ListGroupsRequest, MemberFence, Offsets, OffsetsResponse,
+    AssignmentRequest, AssignmentResponse, CommitRequest, DeleteGroupRequest, DescribeRequest,
+    FetchOffsetsRequest, GroupDescription, GroupListing, HeartbeatRequest, JoinRequest,
+    JoinResponse, LeaveRequest, ListGroupsRequest, MemberFence, Offsets, OffsetsResponse,
 };
 use picomq_protocol::pico::{
     AppendRequest, AppendResponse, CloseRequest, CloseResponse, CreateRequest, CreateResponse,
@@ -16,6 +18,7 @@ use reqwest::Response;
 
 use crate::error::{ClientError, ErrorKind, Result};
 use crate::retry::RetryPolicy;
+use crate::routes::Routes;
 use crate::types::{
     AppendAck, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo, StreamListing,
 };
@@ -34,6 +37,7 @@ pub struct PicoClient {
     http: reqwest::Client,
     base_url: String,
     retry: RetryPolicy,
+    routes: Arc<Routes>,
 }
 
 impl PicoClient {
@@ -50,17 +54,20 @@ impl PicoClient {
             http,
             base_url: endpoint.trim_end_matches('/').to_owned(),
             retry,
+            routes: Arc::new(Routes::new(endpoint)),
         }
     }
 
     pub async fn append_as(
         &self,
         name: &str,
+        partition: Option<u32>,
         records: &[Bytes],
         producer: &ProducerRef<'_>,
     ) -> Result<ProducerAck> {
         let records_wire = wire_records(records);
         let mut request = AppendRequest::new(name, &records_wire);
+        request.partition = partition;
         request.producer = Some(*producer);
         let response = self.call(request.encode()).await?;
         let ack = AppendResponse::decode(response.headers());
@@ -80,10 +87,13 @@ impl PicoClient {
         })
     }
 
-    pub async fn trim(&self, name: &str, seq: u64) -> Result<String> {
-        let response = self
-            .call(TrimRequest { stream: name, seq }.encode())
-            .await?;
+    pub async fn trim(&self, name: &str, partition: Option<u32>, seq: u64) -> Result<String> {
+        let request = TrimRequest {
+            stream: name,
+            partition,
+            seq,
+        };
+        let response = self.call(request.encode()).await?;
         Ok(seq_string(
             TrimResponse::decode(response.headers()).start_seq,
         ))
@@ -162,7 +172,14 @@ impl PicoClient {
         GroupDescription::decode(&response.bytes().await?).map_err(invalid_response)
     }
 
-    pub async fn list_groups(&self) -> Result<Vec<GroupSummary>> {
+    pub async fn delete_group(&self, group: &str) -> Result<()> {
+        let request = DeleteGroupRequest {
+            group: group.to_owned(),
+        };
+        self.call(request.encode()).await.map(drop)
+    }
+
+    pub async fn list_groups(&self) -> Result<Vec<String>> {
         let response = self
             .retry
             .run(|| self.call(ListGroupsRequest.encode()))
@@ -174,12 +191,21 @@ impl PicoClient {
 
     async fn call(&self, wire: WireRequest) -> Result<Response> {
         let ok = wire.ok;
-        let response = send(&self.http, build(&self.http, &self.base_url, wire)).await?;
+        let response = send(
+            &self.http,
+            &self.routes,
+            build(&self.http, &self.base_url, wire),
+        )
+        .await?;
         expect(response, ok).await
     }
 
-    async fn head_once(&self, name: &str) -> Result<Option<StreamInfo>> {
-        let response = self.call(HeadRequest { stream: name }.encode()).await?;
+    async fn head_once(&self, name: &str, partition: Option<u32>) -> Result<Option<StreamInfo>> {
+        let request = HeadRequest {
+            stream: name,
+            partition,
+        };
+        let response = self.call(request.encode()).await?;
         let Some(head) = HeadResponse::decode(response.status().as_u16(), response.headers())
         else {
             return Ok(None);
@@ -187,8 +213,9 @@ impl PicoClient {
         Ok(Some(StreamInfo {
             name: name.to_owned(),
             content_type: head.content_type,
-            start: seq_string(head.start_seq),
-            next: seq_string(head.next_seq),
+            partitions: head.partitions,
+            start: head.start_seq.map(|seq| seq.to_string()),
+            next: head.next_seq.map(|seq| seq.to_string()),
             closed: head.closed,
             ttl_seconds: head.ttl_seconds,
             expires_at: head.expires_at,
@@ -198,11 +225,13 @@ impl PicoClient {
     async fn read_once(
         &self,
         name: &str,
+        partition: Option<u32>,
         from: &str,
         live: Live,
         limits: ReadLimits,
     ) -> Result<ReadPage> {
         let mut request = ReadRequest::new(name, from);
+        request.partition = partition;
         request.count = limits.count;
         request.bytes = limits.bytes;
         request.live = (live == Live::LongPoll).then_some(LIVE_LONG_POLL);
@@ -251,8 +280,9 @@ impl PicoClient {
                 .map(|entry| StreamInfo {
                     name: entry.name,
                     content_type: entry.content_type,
-                    start: entry.start_seq.to_string(),
-                    next: entry.next_seq.to_string(),
+                    partitions: entry.partitions,
+                    start: entry.start_seq.map(|seq| seq.to_string()),
+                    next: entry.next_seq.map(|seq| seq.to_string()),
                     closed: entry.closed,
                     ttl_seconds: entry.ttl_seconds,
                     expires_at: entry.expires_at,
@@ -291,20 +321,21 @@ impl StreamApi for PicoClient {
         Ok(CreateResponse::decode(response.status().as_u16(), response.headers()).created)
     }
 
-    async fn head(&self, name: &str) -> Result<Option<StreamInfo>> {
-        self.retry.run(|| self.head_once(name)).await
+    async fn head(&self, name: &str, partition: Option<u32>) -> Result<Option<StreamInfo>> {
+        self.retry.run(|| self.head_once(name, partition)).await
     }
 
     async fn append(
         &self,
         name: &str,
+        partition: Option<u32>,
         records: &[Bytes],
         _content_type: &str,
     ) -> Result<AppendAck> {
         let records_wire = wire_records(records);
-        let response = self
-            .call(AppendRequest::new(name, &records_wire).encode())
-            .await?;
+        let mut request = AppendRequest::new(name, &records_wire);
+        request.partition = partition;
+        let response = self.call(request.encode()).await?;
         let ack = AppendResponse::decode(response.headers());
         let next = seq_string(ack.next_seq);
         Ok(AppendAck {
@@ -320,12 +351,13 @@ impl StreamApi for PicoClient {
     async fn read(
         &self,
         name: &str,
+        partition: Option<u32>,
         from: &str,
         live: Live,
         limits: ReadLimits,
     ) -> Result<ReadPage> {
         self.retry
-            .run(|| self.read_once(name, from, live, limits))
+            .run(|| self.read_once(name, partition, from, live, limits))
             .await
     }
 
@@ -387,15 +419,35 @@ const MAX_REDIRECT_HOPS: usize = 5;
 // Authorization, rides each redirect hop.
 pub(crate) async fn send(
     http: &reqwest::Client,
+    routes: &Routes,
     builder: reqwest::RequestBuilder,
 ) -> Result<Response> {
     let mut request = builder.build()?;
+    let key = routes.key(request.url());
+    if let Some(key) = &key {
+        routes.resolve(key, request.url_mut());
+    }
+    let deleting = request.method() == reqwest::Method::DELETE;
     for _ in 0..MAX_REDIRECT_HOPS {
         let base = request.url().clone();
         let retry = request.try_clone();
-        let response = http.execute(request).await?;
+        let response = match http.execute(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(key) = &key {
+                    routes.forget(key);
+                }
+                return Err(error.into());
+            }
+        };
         let status = response.status().as_u16();
         if status != 307 && status != 308 {
+            if deleting
+                && response.status().is_success()
+                && let Some(key) = &key
+            {
+                routes.forget(key);
+            }
             return Ok(response);
         }
         let Some(target) = header(&response, "location").and_then(|loc| base.join(&loc).ok())
@@ -406,6 +458,9 @@ pub(crate) async fn send(
                 "redirect_without_location",
             ));
         };
+        if let Some(key) = &key {
+            routes.learn(key, &target);
+        }
         let mut next = retry.expect("bodies are Bytes, always clonable");
         *next.url_mut() = target;
         request = next;

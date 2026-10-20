@@ -48,6 +48,9 @@ pub fn encode(state: &MetadataState) -> Bytes {
         put_str(&mut buf, &node.http_address);
         buf.put_u32_le(node.slots);
         put_str_map(&mut buf, &node.protocol_addresses);
+        put_str(&mut buf, &node.wal);
+        buf.put_u64_le(node.heartbeats);
+        buf.put_u8(u8::from(node.fenced));
     }
     buf.put_u64_le(state.next_producer_id);
 
@@ -93,6 +96,13 @@ pub fn encode(state: &MetadataState) -> Bytes {
         buf.put_i32_le(pending.to_node);
     }
 
+    buf.put_u64_le(state.epochs.len() as u64);
+    for ((stream_id, epoch), start_offset) in state.epochs.iter() {
+        buf.put_u64_le(*stream_id);
+        buf.put_i64_le(*epoch);
+        buf.put_u64_le(*start_offset);
+    }
+
     buf.freeze()
 }
 
@@ -125,12 +135,7 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
             state: stream_state,
             node_id,
         };
-        state.streams.insert(stream_id, row);
-        if stream_state == StreamState::Opened {
-            state.opening_by_node.insert((node_id, stream_id), ());
-        } else if stream_state == StreamState::Closed && epoch == -1 && node_id != -1 {
-            state.placed_by_node.insert((node_id, stream_id), ());
-        }
+        state.put_stream(row);
     }
 
     for _ in 0..get_u64(&mut buf)? {
@@ -139,6 +144,13 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
         let http_address = get_str(&mut buf)?;
         let slots = get_u32(&mut buf)?;
         let protocol_addresses = get_str_map(&mut buf)?;
+        let wal = get_str(&mut buf)?;
+        let heartbeats = get_u64(&mut buf)?;
+        let fenced = match get_u8(&mut buf)? {
+            0 => false,
+            1 => true,
+            other => return Err(SnapshotError::Corrupt(format!("fenced flag {other}"))),
+        };
         state.nodes.insert(
             node_id,
             NodeRow {
@@ -147,9 +159,13 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
                 http_address,
                 slots,
                 protocol_addresses,
+                wal,
+                heartbeats,
+                fenced,
             },
         );
     }
+
     state.next_producer_id = get_u64(&mut buf)?;
 
     state.next_object_id = get_u64(&mut buf)?;
@@ -219,6 +235,13 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
         state
             .pending_transfers
             .insert(stream_id, PendingTransfer { from_node, to_node });
+    }
+
+    for _ in 0..get_u64(&mut buf)? {
+        let stream_id = get_u64(&mut buf)?;
+        let epoch = get_i64(&mut buf)?;
+        let start_offset = get_u64(&mut buf)?;
+        state.epochs.insert((stream_id, epoch), start_offset);
     }
 
     if buf.has_remaining() {
@@ -340,7 +363,7 @@ checked_get!(get_i64, i64, get_i64_le, 8);
 mod tests {
     use super::*;
     use crate::apply::apply;
-    use crate::command::MetadataCommand;
+    use crate::command::{MetadataCommand, Proposer};
     use s3stream::{CommitStreamSetObjectRequest, CompactStreamObjectRequest, ObjectStreamRange};
 
     /// A state exercising every section: streams (opened + closed), nodes with
@@ -351,10 +374,12 @@ mod tests {
         for (node_id, node_epoch, addr, kafka) in [
             (1, 10i64, "http://n1:9090", Some("n1:9092")),
             (2, 20, "", None),
+            (3, 30, "http://n3:9090", None),
         ] {
             apply(
                 &mut state,
                 &MetadataCommand::RegisterNode {
+                    wal: format!("2@s3://wal/node-{node_id}"),
                     node_id,
                     node_epoch,
                     http_address: addr.into(),
@@ -374,9 +399,19 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::AllocateProducerIds {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 count: 5,
+            },
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &MetadataCommand::FenceNode {
+                proposer: Proposer::new(1, 10),
+                node_id: 2,
+                node_epoch: 20,
+                heartbeats: 0,
             },
         )
         .unwrap();
@@ -384,8 +419,7 @@ mod tests {
             apply(
                 &mut state,
                 &MetadataCommand::CreateStream {
-                    node_id: 1,
-                    node_epoch: 10,
+                    proposer: Proposer::new(1, 10),
                 },
             )
             .unwrap();
@@ -393,8 +427,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::OpenStream {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 stream_id: 0,
                 epoch: 1,
             },
@@ -403,8 +437,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::PrepareObject {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 count: 4,
                 ttl_ms: 60_000,
                 now_ms: 7,
@@ -414,8 +448,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::CommitStreamSetObject {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 request: CommitStreamSetObjectRequest {
                     object_id: 0,
                     object_size: 64,
@@ -438,8 +472,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::CompactStreamObject {
-                node_id: 1,
-                node_epoch: 10,
+                proposer: Proposer::new(1, 10),
+
                 request: CompactStreamObjectRequest {
                     object_id: 1,
                     object_size: 32,
@@ -464,6 +498,7 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::CleanDestroyedObjects {
+                proposer: Proposer::new(1, 10),
                 object_ids: vec![100],
             },
         )
@@ -472,6 +507,7 @@ mod tests {
             apply(
                 &mut state,
                 &MetadataCommand::PutKv {
+                    proposer: Proposer::new(1, 10),
                     key: key.into(),
                     value: Bytes::from(value),
                 },
@@ -481,9 +517,10 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::TransferStream {
+                proposer: Proposer::new(1, 10),
                 stream_id: 0,
                 from_node: 1,
-                to_node: 2,
+                to_node: 3,
             },
         )
         .unwrap();

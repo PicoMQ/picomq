@@ -8,11 +8,11 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use picomq_metadata::{LocalSink, MetadataNodeHandle};
+use picomq_metadata::{LocalSink, MetadataNodeHandle, Registration};
 use s3stream::{
-    AppendContext, Config, CreateStreamOptions, FetchContext, KVClient as _, KeyValue,
-    MemoryObjectStorage, ObjectStorageTrait, ObjectWalConfig, ObjectWalService, OpenStreamOptions,
-    RecordBatch, S3StreamBuilder, StreamManagerTrait as _,
+    AppendContext, Config, CreateStreamOptions, FetchContext, MemoryObjectStorage,
+    ObjectStorageTrait, ObjectWalConfig, ObjectWalService, OpenStreamOptions, RecordBatch,
+    S3StreamBuilder, StreamManagerTrait as _,
 };
 
 const NODE_ID: i32 = 1;
@@ -21,10 +21,19 @@ const NODE_EPOCH: i64 = 1;
 #[tokio::test]
 async fn engine_end_to_end_on_real_metadata_plane() {
     let (sink, views) = LocalSink::new();
-    let handle = MetadataNodeHandle::new(NODE_ID, NODE_EPOCH, Arc::new(sink), views.clone());
-    // MetadataLifecycle registers the node before serving. Every write
-    // command below is fenced on this registration.
-    handle.register("http://node-1:9090").await.unwrap();
+    let handle = MetadataNodeHandle::register(
+        Arc::new(sink),
+        views.clone(),
+        Registration {
+            node_id: NODE_ID,
+            node_epoch: NODE_EPOCH,
+            http_address: "http://node-1:9090".into(),
+            slots: 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
 
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
@@ -38,7 +47,6 @@ async fn engine_end_to_end_on_real_metadata_plane() {
         .write_ahead_log(Arc::new(ObjectWalService::new(wal_storage, wal_config)))
         .stream_manager(Arc::new(handle.stream_manager()))
         .object_manager(Arc::new(handle.object_manager()))
-        .kv_client(Arc::new(handle.kv_client()))
         .build()
         .await
         .unwrap();
@@ -150,19 +158,13 @@ async fn engine_end_to_end_on_real_metadata_plane() {
     assert_eq!(total, 10);
     assert_eq!(views.load().state.get_stream(stream_id).unwrap().epoch, 2);
 
-    // KV through the real MetadataKvClient (replicated, not MemoryKvClient).
+    // KV through the real MetadataKvClient, replicated through the plane.
     let kv = handle.kv_client();
-    kv.put_kv(KeyValue {
-        key: "topic/0".into(),
-        value: Bytes::from_static(b"42"),
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        kv.get_kv("topic/0").await.unwrap(),
-        Some(Bytes::from_static(b"42"))
-    );
-    assert_eq!(kv.list_kv("topic/").await.unwrap().len(), 1);
+    kv.put_kv("topic/0", Bytes::from_static(b"42"))
+        .await
+        .unwrap();
+    assert_eq!(kv.get_kv("topic/0"), Some(Bytes::from_static(b"42")));
+    assert_eq!(kv.list_kv("topic/").len(), 1);
     assert_eq!(
         views.load().state.get_kv("topic/0"),
         Some(Bytes::from_static(b"42"))

@@ -1,6 +1,6 @@
 # Go client
 
-The native Go SDK supports PicoMQ's Pico and Durable Streams HTTP protocols without cgo or a Rust runtime.
+The native Go SDK speaks PicoMQ's Pico and Durable Streams HTTP protocols, without cgo or a Rust runtime.
 
 ## Install
 
@@ -47,34 +47,66 @@ func main() {
 }
 ```
 
-Construct a Durable Streams client with `NewDurableStreams`. Constructors do not perform network I/O.
+`NewDurableStreams` builds a Durable Streams client, and `Connect` returns the protocol-neutral `Client` interface. Constructors do no network I/O. Every call takes a `context.Context`, and cancelling it interrupts both requests and retry delays.
 
-## Reads and live records
+## Partitions
 
-Positions are protocol-specific opaque strings. Always continue from the `Next` position returned by PicoMQ.
+A topic created over Kafka can have several partitions. `stream.Partition(i)` addresses one, with the same `Head`, `Append`, `Read`, `Records`, and `Subscribe` calls, plus `Trim`, `AppendAs`, and `NewProducer` on Pico.
 
-`Read` fetches one page. `Records` builds a record iterator over page reads. Set `RecordsOptions.Live` to use long polling after the iterator catches up. Cancel the context passed to `Next` to interrupt a pending read.
+```go
+partition := client.Stream("/orders").Partition(2)
+page, err := partition.Read(ctx, client.Beginning(), picomq.ReadOptions{})
+```
 
-## SSE subscriptions
+## Reads and subscriptions
 
-`Subscribe` opens the SSE endpoint and returns data and control events. Subscriptions reconnect by default, send `Last-Event-ID` when resuming, and stop when their lifetime context is canceled or `Close` is called.
+Positions are protocol-specific opaque strings. Always continue from the `Next` position a call returned.
 
-Data events contain decoded records. Control events expose the next position, caught-up state, and stream-closed state. Call `Close` when abandoning a subscription.
+- `Read` fetches one page.
+- `Records` iterates over records across pages. `RecordsOptions.Live` keeps long polling after it catches up.
+- `Subscribe` opens an SSE stream of data and control events. It reconnects by default, resumes with `Last-Event-ID`, and stops when its context is cancelled or `Close` is called.
 
 ## Producers
 
-Pico streams provide `NewProducer`. Producers batch records, bound buffered bytes, sequence batches, and safely retry using producer identity, epoch, and sequence. `Send` returns a pending acknowledgement; `SendDurable` waits directly for the assigned record position. A terminal batch failure poisons the producer, and recovery requires a new producer with a higher epoch.
+`NewProducer` on a Pico stream batches records, bounds buffered bytes, and retries safely under a producer id, epoch, and sequence.
 
-Plain appends are never retried automatically because they do not carry a deduplication key.
+```go
+producer := client.Stream("/orders").NewProducer("writer-1", nil)
+seq, err := producer.SendDurable(ctx, picomq.AppendRecord{Body: []byte("x")})
+```
 
-## Authentication and retries
+`Send` returns a pending acknowledgement, and `SendDurable` waits for the assigned position. A terminal batch failure poisons the producer, and recovery takes a new producer with a higher epoch. For one-off idempotent appends, `AppendAs` sends records under an explicit `ProducerRef`. Plain appends are never retried, because they carry no deduplication key.
 
-Use `WithToken` to attach a bearer token. Ownership redirects are followed explicitly so credentials and request bodies are preserved across PicoMQ nodes.
+## Consumer groups
 
-Use `WithRetryPolicy` to configure retries for safe, read-shaped operations. Context cancellation interrupts both network requests and retry delays.
+A group member joins, heartbeats in the background, and follows rebalances. See [Consumer groups](/docs/design/groups) for how assignment works.
 
-Errors can be inspected with `errors.As` into `*picomq.ClientError` or classified with `picomq.IsKind`.
+```go
+member, err := client.NewGroupMember(ctx, "billing", []string{"/orders", "/payments"}, nil)
+if err != nil {
+    log.Fatal(err)
+}
+defer member.Leave(ctx)
 
-## Protocol differences
+for _, topic := range member.Assignment().Streams {
+    // read topic, then commit progress
+    _ = member.Commit(ctx, picomq.Offsets{topic: {Position: 42}})
+}
+```
 
-The protocol-neutral `Client` interface is the union of the shared client surface. Operations without a Durable Streams equivalent, such as `List`, return a structured `unsupported` error. Trimming, record headers, and identified producers are Pico-specific stream extensions. Durable Streams appends exactly one raw record per request. Pico starts at `"0"`; Durable Streams begins at `"-1"` and also supports the `"now"` position.
+`Assignments` delivers each new assignment after a rebalance, and `Err` reports a member that could not rejoin. The lower-level calls are on `PicoClient`: `JoinGroup`, `Heartbeat`, `GroupAssignment`, `LeaveGroup`, `CommitOffsets`, `FetchOffsets`, `DescribeGroup`, `ListGroups`, and `DeleteGroup`.
+
+## Configuration
+
+| Option | Effect |
+| --- | --- |
+| `WithToken` | Sends a bearer token on every request, including each redirect hop |
+| `WithRetryPolicy` | Retries read-shaped calls. `NoRetries` and `RetryAttempts` build common policies |
+| `WithH2C` | Speaks cleartext HTTP/2 for multiplexed appends |
+| `WithHTTPClient` | Uses your own `*http.Client` |
+
+The client follows ownership redirects itself, keeping the credential and request body, see the [HTTP API conventions](/docs/api#conventions).
+
+## Errors
+
+Errors unwrap to `*picomq.ClientError`, with a kind, the HTTP status, and the server's code. `picomq.IsKind` classifies them. Operations a protocol has no equivalent for, such as `List`, `Trim`, and groups over Durable Streams, return the `ErrorUnsupported` kind.

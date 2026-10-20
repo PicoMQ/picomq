@@ -14,7 +14,7 @@ use picomq_auth::{
 };
 use picomq_client::{ClientConfig, ErrorKind, PicoClient, RetryPolicy, StreamApi};
 use picomq_http::HttpProtocol as ServeProtocol;
-use picomq_runtime::{AuthMode, MetaBackend, PicoServer, ServerConfig};
+use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, PicoServer, ServerConfig};
 
 async fn secured_server(dir: &std::path::Path) -> (PicoServer, String, AccessToken) {
     let (root, _) = AccessToken::issue("ops/root").unwrap();
@@ -22,7 +22,7 @@ async fn secured_server(dir: &std::path::Path) -> (PicoServer, String, AccessTok
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
         http_protocol: ServeProtocol::Pico,
-        kafka: None,
+        kafka: KafkaConfig::new(SocketAddr::from(([127, 0, 0, 1], 0))),
         meta_backend: MetaBackend::parse("sqlite::memory:").unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
         wal_uri: Some(format!("2@file://{}", dir.join("wal").display())),
@@ -102,7 +102,7 @@ async fn error_kinds_distinguish_auth_from_fencing() {
         seq: 0,
     };
     rooted
-        .append_as("/orders", &[Bytes::from_static(b"a")], &producer)
+        .append_as("/orders", None, &[Bytes::from_static(b"a")], &producer)
         .await
         .unwrap();
     let stale = picomq_client::pico::ProducerRef {
@@ -111,7 +111,7 @@ async fn error_kinds_distinguish_auth_from_fencing() {
         seq: 1,
     };
     let err = rooted
-        .append_as("/orders", &[Bytes::from_static(b"b")], &stale)
+        .append_as("/orders", None, &[Bytes::from_static(b"b")], &stale)
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::StaleEpoch);
@@ -156,8 +156,12 @@ async fn redirects_keep_the_credential_per_hop() {
     .await;
 
     let client = with_token(&format!("http://{entry}"), Some("tok".to_owned()));
-    let info = client.head("/orders").await.unwrap().unwrap();
-    assert_eq!(info.next, "7", "served by the owner behind the redirect");
+    let info = client.head("/orders", None).await.unwrap().unwrap();
+    assert_eq!(
+        info.next.as_deref(),
+        Some("7"),
+        "served by the owner behind the redirect"
+    );
 }
 
 #[tokio::test]
@@ -171,6 +175,6 @@ async fn redirect_loops_fail_instead_of_spinning() {
     .await;
 
     let client = with_token(&format!("http://{looper}"), None);
-    let err = client.head("/orders").await.unwrap_err();
+    let err = client.head("/orders", None).await.unwrap_err();
     assert_eq!(err.code, "too_many_redirects");
 }

@@ -1,0 +1,30 @@
+[package]
+name = "picomq-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "PicoMQ protocol conformance against third-party suites and clients"
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "pico-conformance"
+path = "src/main.rs"
+
+[dependencies]
+picomq-http = { workspace = true }
+picomq-runtime = { workspace = true }
+s3stream = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true }
+crc32fast = { workspace = true }
+kafka-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["net", "process"] }
+
+[lints]
+workspace = true

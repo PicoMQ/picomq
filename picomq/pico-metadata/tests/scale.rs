@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use picomq_metadata::{MetadataCommand, MetadataState, apply};
+use picomq_metadata::{MetadataCommand, MetadataState, Proposer, apply};
 
 const NODE_A: i32 = 1;
 const NODE_B: i32 = 2;
@@ -21,6 +21,7 @@ fn build(total: u64, open_every: u64) -> MetadataState {
         apply(
             &mut state,
             &MetadataCommand::RegisterNode {
+                wal: String::new(),
                 node_id,
                 node_epoch: EPOCH,
                 http_address: String::new(),
@@ -34,8 +35,7 @@ fn build(total: u64, open_every: u64) -> MetadataState {
         apply(
             &mut state,
             &MetadataCommand::CreateStream {
-                node_id: NODE_A,
-                node_epoch: EPOCH,
+                proposer: Proposer::new(NODE_A, EPOCH),
             },
         )
         .unwrap();
@@ -48,8 +48,8 @@ fn build(total: u64, open_every: u64) -> MetadataState {
             apply(
                 &mut state,
                 &MetadataCommand::OpenStream {
-                    node_id,
-                    node_epoch: EPOCH,
+                    proposer: Proposer::new(node_id, EPOCH),
+
                     stream_id: i,
                     epoch: 1,
                 },
@@ -103,8 +103,7 @@ fn run_gate(total: u64) {
     apply(
         &mut fork,
         &MetadataCommand::CreateStream {
-            node_id: NODE_A,
-            node_epoch: EPOCH,
+            proposer: Proposer::new(NODE_A, EPOCH),
         },
     )
     .unwrap();

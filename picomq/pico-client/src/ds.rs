@@ -11,6 +11,7 @@ use reqwest::Response;
 use crate::error::{ClientError, Result};
 use crate::pico::{build, default_http, send};
 use crate::retry::RetryPolicy;
+use crate::routes::Routes;
 use crate::types::{
     AppendAck, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo, StreamListing,
 };
@@ -19,6 +20,7 @@ pub struct DsClient {
     http: reqwest::Client,
     base_url: String,
     retry: RetryPolicy,
+    routes: Routes,
 }
 
 impl DsClient {
@@ -35,17 +37,27 @@ impl DsClient {
             http,
             base_url: endpoint.trim_end_matches('/').to_owned(),
             retry,
+            routes: Routes::new(endpoint),
         }
     }
 
     async fn call(&self, wire: WireRequest) -> Result<Response> {
         let ok = wire.ok;
-        let response = send(&self.http, build(&self.http, &self.base_url, wire)).await?;
+        let response = send(
+            &self.http,
+            &self.routes,
+            build(&self.http, &self.base_url, wire),
+        )
+        .await?;
         expect(response, ok).await
     }
 
-    async fn head_once(&self, name: &str) -> Result<Option<StreamInfo>> {
-        let response = self.call(HeadRequest { stream: name }.encode()).await?;
+    async fn head_once(&self, name: &str, partition: Option<u32>) -> Result<Option<StreamInfo>> {
+        let request = HeadRequest {
+            stream: name,
+            partition,
+        };
+        let response = self.call(request.encode()).await?;
         let Some(head) = HeadResponse::decode(response.status().as_u16(), response.headers())
         else {
             return Ok(None);
@@ -53,8 +65,12 @@ impl DsClient {
         Ok(Some(StreamInfo {
             name: name.to_owned(),
             content_type: head.content_type,
-            start: OFFSET_BEGINNING.to_owned(),
-            next: head.next_offset.unwrap_or_default(),
+            partitions: head.partitions,
+            start: head
+                .next_offset
+                .is_some()
+                .then(|| OFFSET_BEGINNING.to_owned()),
+            next: head.next_offset,
             closed: head.closed,
             ttl_seconds: head.ttl_seconds,
             expires_at: head.expires_at,
@@ -64,11 +80,13 @@ impl DsClient {
     async fn read_once(
         &self,
         name: &str,
+        partition: Option<u32>,
         from: &str,
         live: Live,
         _limits: ReadLimits,
     ) -> Result<ReadPage> {
         let mut request = ReadRequest::new(name, from);
+        request.partition = partition;
         request.live = (live == Live::LongPoll).then_some(LIVE_LONG_POLL);
         let response = self.call(request.encode()).await?;
 
@@ -122,18 +140,25 @@ impl StreamApi for DsClient {
         Ok(CreateResponse::decode(response.status().as_u16(), response.headers()).created)
     }
 
-    async fn head(&self, name: &str) -> Result<Option<StreamInfo>> {
-        self.retry.run(|| self.head_once(name)).await
+    async fn head(&self, name: &str, partition: Option<u32>) -> Result<Option<StreamInfo>> {
+        self.retry.run(|| self.head_once(name, partition)).await
     }
 
-    async fn append(&self, name: &str, records: &[Bytes], content_type: &str) -> Result<AppendAck> {
+    async fn append(
+        &self,
+        name: &str,
+        partition: Option<u32>,
+        records: &[Bytes],
+        content_type: &str,
+    ) -> Result<AppendAck> {
         let [body] = records else {
             return Err(ClientError::unsupported(format!(
                 "the Durable Streams protocol appends one message per request, got {}",
                 records.len()
             )));
         };
-        let request = AppendRequest::new(name, content_type, body.clone());
+        let mut request = AppendRequest::new(name, content_type, body.clone());
+        request.partition = partition;
         let response = self.call(request.encode()).await?;
         let next = AppendResponse::decode(response.headers())
             .next_offset
@@ -148,12 +173,13 @@ impl StreamApi for DsClient {
     async fn read(
         &self,
         name: &str,
+        partition: Option<u32>,
         from: &str,
         live: Live,
         limits: ReadLimits,
     ) -> Result<ReadPage> {
         self.retry
-            .run(|| self.read_once(name, from, live, limits))
+            .run(|| self.read_once(name, partition, from, live, limits))
             .await
     }
 

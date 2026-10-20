@@ -143,4 +143,4 @@ Producers write to a named stream, so there is no partitioner. Reading one entit
 | **Rescaling** | Changing partition counts moves data and disrupts all consumers. Hot partitions cannot be split in place | The stream is the unit of placement. A hot stream moves to another node on its own and offsets do not change |
 | **Lifecycle** | Retention applies per topic. One entity's data cannot be trimmed or deleted independently | Retention, trimming, and deletion are per stream operations |
 
-Funneling works the same way on PicoMQ. A topic with N partitions is N streams under one prefix. Producers hash to a stream, consumers fan in across the prefix. Reads are 1x sequential and retention deletes whole segments, as in Kafka. Kafka clients connect through the [Kafka protocol](/docs/kafka).
+Funneling works on PicoMQ too. A topic can have N partitions, and Kafka producers and consumer groups use them as they would on Kafka, through the [Kafka protocol](/docs/kafka). Reads are 1x sequential. Records are not deleted by age: a topic is trimmed explicitly, or expires as a whole once idle for its TTL.

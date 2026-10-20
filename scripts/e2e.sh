@@ -12,6 +12,11 @@
 #             Rust, TypeScript and Go client suites, Go restart test
 #   cluster   two nodes, Pico HTTP + Kafka, auth required
 #             ownership redirects, groups across nodes, Rust, TypeScript and Go cluster suites
+#             Kafka partitions across nodes, admin APIs, failover of a killed node
+#   pgwal     the cluster scenario with each node's WAL in Postgres
+#   chaos     two nodes under faults: paused nodes, a paused leader, a paused
+#             Postgres and a clean stop lose no acknowledged write and fence
+#             no healthy node
 #   ds        two nodes, Durable Streams HTTP + Kafka, auth off
 #             Go Durable Streams live and cluster suites
 #   extension pico inside Postgres, Pico HTTP + Kafka, auth off
@@ -22,7 +27,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCENARIOS=("$@")
 if [ ${#SCENARIOS[@]} -eq 0 ]; then
-  SCENARIOS=(single cluster ds extension)
+  SCENARIOS=(single cluster pgwal chaos ds extension)
 fi
 
 NODE1="http://127.0.0.1:4437"
@@ -30,23 +35,26 @@ NODE2="http://127.0.0.1:4438"
 ADMIN1="http://127.0.0.1:9090"
 ADMIN2="http://127.0.0.1:9091"
 KAFKA="127.0.0.1:9092"
+KAFKA2="127.0.0.1:9093"
 
 export PICO_IMAGE="${PICO_IMAGE:-picomq-e2e:local}"
 export PICO_PG_IMAGE="${PICO_PG_IMAGE:-picomq-pg-e2e:local}"
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 
-compose_file() {
+compose_files() {
   case "$1" in
-    single) echo "$ROOT/harness/aio/compose.yml" ;;
-    cluster | ds) echo "$ROOT/harness/aio/compose.cluster.yml" ;;
-    extension) echo "$ROOT/harness/aio/compose.extension.yml" ;;
+    single) echo "-f $ROOT/harness/aio/compose.yml" ;;
+    cluster | chaos | ds) echo "-f $ROOT/harness/aio/compose.cluster.yml" ;;
+    pgwal) echo "-f $ROOT/harness/aio/compose.cluster.yml -f $ROOT/harness/aio/compose.pgwal.yml" ;;
+    extension) echo "-f $ROOT/harness/aio/compose.extension.yml" ;;
     *) echo "unknown scenario: $1" >&2; exit 2 ;;
   esac
 }
 
 compose() {
-  docker compose -f "$(compose_file "$1")" "${@:2}"
+  # shellcheck disable=SC2046
+  docker compose $(compose_files "$1") "${@:2}"
 }
 
 wait_ready() {
@@ -64,6 +72,16 @@ wait_ready() {
 rust_protocol_suite() {
   log "$1: rust protocol e2e"
   (cd "$ROOT" && cargo test --locked -p picomq-runtime --test docker_e2e -- --ignored --test-threads=1 --nocapture)
+}
+
+rust_cluster_suite() {
+  log "$1: rust cluster e2e"
+  (cd "$ROOT" && cargo test --locked -p picomq-runtime --test cluster -- --ignored --test-threads=1 --nocapture)
+}
+
+rust_chaos_suite() {
+  log "$1: rust chaos e2e"
+  (cd "$ROOT" && cargo test --locked -p picomq-runtime --test chaos -- --ignored --test-threads=1 --nocapture)
 }
 
 rust_extension_suite() {
@@ -90,27 +108,46 @@ run_single() {
   export PICO_PROTOCOL=pico PICO_AUTH=off
   export PICO_ENDPOINT="$NODE1" PICO_KAFKA="$KAFKA"
   export PICOMQ_INTEGRATION=1 PICOMQ_ENDPOINT="$NODE1"
-  export PICOMQ_RESTART_CMD="docker compose -f $(compose_file single) restart pico"
+  export PICOMQ_RESTART_CMD="docker compose $(compose_files single) restart pico"
   unset PICO_ENDPOINT_2 PICOMQ_ENDPOINT_2 PICOMQ_AUTH_REQUIRED PICOMQ_DS_INTEGRATION
 
-  wait_ready "$ADMIN1"
-  rust_protocol_suite single
-  rust_client_suite single --skip follow_cluster_redirects
-  typescript_suite single
-  go_suite single
+  wait_ready "$ADMIN1" &&
+    rust_protocol_suite single &&
+    rust_client_suite single --skip follow_cluster_redirects &&
+    typescript_suite single &&
+    go_suite single
 }
 
 run_cluster() {
+  local scenario="${1:-cluster}"
   export PICO_PROTOCOL=pico PICO_AUTH=required
   export PICO_ENDPOINT="$NODE1" PICO_ENDPOINT_2="$NODE2" PICO_KAFKA="$KAFKA"
   export PICOMQ_INTEGRATION=1 PICOMQ_AUTH_REQUIRED=1 PICOMQ_ENDPOINT="$NODE1" PICOMQ_ENDPOINT_2="$NODE2"
+  export PICO_KAFKA_2="$KAFKA2" PICO_ADMIN_2="$ADMIN2"
+  export PICOMQ_KILL_CMD="docker compose $(compose_files "$scenario") kill -s KILL pico2"
+  export PICOMQ_START_CMD="docker compose $(compose_files "$scenario") up --detach pico2"
   unset PICOMQ_RESTART_CMD PICOMQ_DS_INTEGRATION
 
-  wait_ready "$ADMIN1"
-  wait_ready "$ADMIN2"
-  rust_client_suite cluster
-  typescript_suite cluster
-  go_suite cluster
+  wait_ready "$ADMIN1" &&
+    wait_ready "$ADMIN2" &&
+    rust_client_suite "$scenario" &&
+    typescript_suite "$scenario" &&
+    go_suite "$scenario" &&
+    rust_cluster_suite "$scenario"
+}
+
+run_pgwal() {
+  run_cluster pgwal
+}
+
+run_chaos() {
+  export PICO_PROTOCOL=pico PICO_AUTH=required
+  export PICO_ENDPOINT="$NODE1" PICO_KAFKA="$KAFKA" PICO_KAFKA_2="$KAFKA2" PICO_ADMIN_2="$ADMIN2"
+  export PICOMQ_COMPOSE="docker compose $(compose_files chaos)"
+
+  wait_ready "$ADMIN1" &&
+    wait_ready "$ADMIN2" &&
+    rust_chaos_suite chaos
 }
 
 run_ds() {
@@ -118,23 +155,23 @@ run_ds() {
   export PICOMQ_DS_INTEGRATION=1 PICOMQ_DS_ENDPOINT="$NODE1" PICOMQ_DS_ENDPOINT_2="$NODE2"
   unset PICO_ENDPOINT PICO_ENDPOINT_2 PICOMQ_INTEGRATION PICOMQ_AUTH_REQUIRED PICOMQ_ENDPOINT PICOMQ_ENDPOINT_2 PICOMQ_RESTART_CMD
 
-  wait_ready "$ADMIN1"
-  wait_ready "$ADMIN2"
-  go_suite ds
+  wait_ready "$ADMIN1" &&
+    wait_ready "$ADMIN2" &&
+    go_suite ds
 }
 
 run_extension() {
-  local file
-  file="$(compose_file extension)"
+  local files
+  files="$(compose_files extension)"
   export PICO_ENDPOINT="$NODE1" PICO_STANDBY_ENDPOINT="$NODE2" PICO_KAFKA="$KAFKA"
-  export PICO_CRASH_CMD="docker compose -f $file kill -s KILL pico && docker compose -f $file up --detach --wait pico"
-  export PICO_RESTART_CMD="docker compose -f $file restart pico"
+  export PICO_CRASH_CMD="docker compose $files kill -s KILL pico && docker compose $files up --detach --wait pico"
+  export PICO_RESTART_CMD="docker compose $files restart pico"
   unset PICO_ENDPOINT_2 PICOMQ_INTEGRATION PICOMQ_AUTH_REQUIRED PICOMQ_ENDPOINT PICOMQ_ENDPOINT_2 PICOMQ_RESTART_CMD PICOMQ_DS_INTEGRATION
 
-  wait_ready "$ADMIN1"
-  docker compose -f "$file" up --detach --wait standby
-  rust_extension_suite extension
-  rust_protocol_suite extension
+  wait_ready "$ADMIN1" &&
+    compose extension up --detach --wait standby &&
+    rust_extension_suite extension &&
+    rust_protocol_suite extension
 }
 
 run() {
@@ -143,7 +180,7 @@ run() {
 
   case "$scenario" in
     single) export PICO_PROTOCOL=pico PICO_AUTH=off ;;
-    cluster) export PICO_PROTOCOL=pico PICO_AUTH=required ;;
+    cluster | pgwal | chaos) export PICO_PROTOCOL=pico PICO_AUTH=required PICO_HEARTBEAT_INTERVAL_SEC=1 PICO_NODE_TIMEOUT_SEC=5 ;;
     ds) export PICO_PROTOCOL=ds PICO_AUTH=off ;;
     extension) export PICO_PROTOCOL=pico PICO_AUTH=off ;;
   esac

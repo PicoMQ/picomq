@@ -13,7 +13,7 @@ use crate::scope::{Operation, OperationGroups, ReadWrite, Scope};
 impl Scope {
     /// True when `child` grants no access beyond `self`.
     pub fn contains(&self, child: &Scope) -> bool {
-        self.streams.contains_set(&child.streams)
+        self.contains_streams(&child.streams)
             && self.tokens.contains_set(&child.tokens)
             && contains_groups(&self.groups, &child.groups)
             && child.ops.iter().all(|op| self.allows_operation(*op))
@@ -107,6 +107,17 @@ mod tests {
         let child = reader_child(ResourceSet::prefix("/t/"));
         assert!(issuer.contains(&child));
         check_issue(&issuer, "t/reader", &child).unwrap();
+    }
+
+    #[test]
+    fn stream_narrowing_compares_canonical_names() {
+        let mut issuer = issuer_root();
+        issuer.streams = ResourceSet::prefix("/t/");
+
+        for allowed in [ResourceSet::exact("/t.x"), ResourceSet::prefix("t.x/")] {
+            assert!(issuer.contains(&reader_child(allowed)));
+        }
+        assert!(!issuer.contains(&reader_child(ResourceSet::exact("/u.x"))));
     }
 
     #[test]

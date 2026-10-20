@@ -4,7 +4,7 @@ An append is durable when the record is in the write-ahead log, which lives in o
 
 ## The append path
 
-An append arrives at the stream's owning node as a `POST`. The node checks the producer's epoch and sequence against the registry entry, assigns the next offsets, and submits the record to the storage engine. Submission happens under a per-stream lock so the order of offsets is fixed, but the caller waits for durability outside the lock. Requests pipelined on the same stream stack up in the WAL and share the same flush.
+An append arrives at the partition's owning node, as an HTTP `POST` or a Kafka `Produce`. The node checks the producer's epoch and sequence against the partition's log entry, assigns the next offsets, and submits the record to the storage engine. Submission happens under a per-stream lock so the order of offsets is fixed, but the caller waits for durability outside the lock. Requests pipelined on the same stream stack up in the WAL and share the same flush.
 
 Inside the engine the record goes to two places. It enters the log cache, which serves tail reads, and it enters the WAL, which makes it durable.
 
@@ -46,7 +46,9 @@ Incoming records accumulate into a bulk, and each bulk becomes one write to the 
 
 Group commit is what makes this affordable. One write of a few hundred kilobytes contains every record that arrived while the previous write was in flight, so per-record cost drops as concurrency rises. A single append on an idle stream pays one round trip, tens of milliseconds on S3, a millisecond or two in Postgres.
 
-Records are framed with a checksum and every WAL write carries the node's epoch. A node that lost its registration cannot extend its WAL past a takeover, which is part of the fencing described in [Streams](/docs/design/streams). The layout of each backend, the Postgres ring of tables, and what each survives are on the [Write-ahead log](/docs/design/wal) page.
+Records are framed with a checksum. Each backend fences its WAL, so a node whose WAL was taken over cannot acknowledge another write. Fencing, the layout of each backend, the Postgres ring of tables, and what each survives are on the [Write-ahead log](/docs/design/wal) page.
+
+If a WAL write fails, the append fails and the node releases the stream and drops its cached producer state. The retry reopens the stream at the next epoch and reloads the producers from what was persisted, so a failed append is never half applied.
 
 ## From WAL to committed objects
 
@@ -85,4 +87,4 @@ Once the commit is applied, the WAL objects it covers hold no unique data and ar
 
 ## Recovery
 
-When a stream is opened after a crash, the engine lists the WAL objects under the previous session's prefix and replays the records past the last committed offset. Acknowledged records are recovered because acknowledgement required the WAL upload to complete. Records that were in flight but never acknowledged may be absent, which is the standard contract: an append without an acknowledgement was never promised.
+A restarting node recovers its own WAL, and the lease holder recovers a dead node's WAL during [failover](/docs/design/failover). Either way the records past the last committed offset are replayed and uploaded before the streams move on. Acknowledged records are recovered because acknowledgement required the WAL write to complete. Records that were in flight but never acknowledged may be absent, which is the standard contract: an append without an acknowledgement was never promised. Details per backend are in [Write-ahead log](/docs/design/wal#recovery).

@@ -13,6 +13,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::routing::any;
@@ -24,22 +25,23 @@ use picomq_auth::{Audience, Authorizer};
 use picomq_protocol::ds::{
     H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ,
     H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR, H_STREAM_EXPIRES_AT, H_STREAM_NEXT_OFFSET,
-    H_STREAM_SCHEMA, H_STREAM_SCHEMA_VALIDATE, H_STREAM_SEQ, H_STREAM_SSE_DATA_ENCODING,
-    H_STREAM_TTL, H_STREAM_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, OFFSET_NOW, Q_CURSOR, Q_LIVE,
-    Q_OFFSET, SseEncoder, encode_json_array, split_body,
+    H_STREAM_PARTITIONS, H_STREAM_SCHEMA, H_STREAM_SCHEMA_VALIDATE, H_STREAM_SEQ,
+    H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL, H_STREAM_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE,
+    OFFSET_NOW, Q_CURSOR, Q_LIVE, Q_OFFSET, SseEncoder, encode_json_array, split_body,
 };
 use picomq_protocol::mime::{is_json, mime_of};
 use picomq_server::ownership::OwnershipService;
 use picomq_server::types::Producer;
 use picomq_server::{
-    AppendCommand, CreateCommand, ErrorKind, LogRecord, OffsetToken, ReadResult, S3StreamService,
-    ServiceError,
+    AppendCommand, CreateCommand, ErrorKind, LogRecord, OffsetToken, ReadResult, ServiceError,
+    Topics,
 };
 
 use crate::http::{
     bad_request, base_response, cursor, etag, format_instant, header_str, parse_instant_header,
     parse_strict_u64_header, query_param, set_header, truthy,
 };
+use crate::partition;
 use crate::route::{RoutingMode, route, stream_name};
 
 const CT_EVENT_STREAM: &str = "text/event-stream";
@@ -49,11 +51,11 @@ const CACHE_CATCH_UP: &str = "public, max-age=60, stale-while-revalidate=300";
 const DEFAULT_MAX_CHUNK_SIZE: usize = 64 * 1024;
 const DEFAULT_MAX_REQUEST_SIZE: usize = 32 * 1024 * 1024;
 
-/// The Durable Streams frontend over one node's service + ownership pair.
+/// The Durable Streams frontend over one node's topics + ownership pair.
 ///
 /// Defaults: 25s long poll, 55s SSE cap, 64 KiB chunks, 32 MiB request bodies.
 pub struct DsFrontend {
-    service: Arc<S3StreamService>,
+    topics: Arc<Topics>,
     ownership: Arc<dyn OwnershipService>,
     authorizer: Option<Arc<Authorizer>>,
     mode: RoutingMode,
@@ -65,12 +67,12 @@ pub struct DsFrontend {
 
 impl DsFrontend {
     pub fn new(
-        service: Arc<S3StreamService>,
+        topics: Arc<Topics>,
         ownership: Arc<dyn OwnershipService>,
         mode: RoutingMode,
     ) -> Self {
         Self::with_tuning(
-            service,
+            topics,
             ownership,
             mode,
             Duration::from_secs(25),
@@ -81,7 +83,7 @@ impl DsFrontend {
     }
 
     pub fn with_tuning(
-        service: Arc<S3StreamService>,
+        topics: Arc<Topics>,
         ownership: Arc<dyn OwnershipService>,
         mode: RoutingMode,
         long_poll_timeout: Duration,
@@ -90,7 +92,7 @@ impl DsFrontend {
         max_request_size: usize,
     ) -> Self {
         Self {
-            service,
+            topics,
             ownership,
             authorizer: None,
             mode,
@@ -129,12 +131,17 @@ async fn dispatch(
     request: axum::extract::Request,
 ) -> Response {
     let (parts, body) = request.into_parts();
+    let body = match axum::body::to_bytes(body, frontend.max_request_size).await {
+        Ok(body) => body,
+        Err(_) => return fail(413, "content too large"),
+    };
     let permit = match crate::auth::gate(
         frontend.authorizer.as_deref(),
         Audience::DurableStreams,
         &parts.method,
         &parts.uri,
         &parts.headers,
+        &body,
     )
     .await
     {
@@ -145,45 +152,51 @@ async fn dispatch(
         Some(permit) => permit.stream_name,
         None => stream_name(&parts.uri),
     };
+    let requested = match partition::requested(&parts.uri) {
+        Ok(requested) => requested,
+        Err(e) => return service_error_response(e),
+    };
     if let Some(response) = route(
         frontend.ownership.as_ref(),
+        &frontend.topics,
         frontend.mode,
         &parts.method,
         &parts.uri,
         &name,
+        requested,
     )
     .await
     {
         return response;
     }
-    let body = match axum::body::to_bytes(body, frontend.max_request_size).await {
-        Ok(body) => body,
-        Err(_) => return fail(413, "content too large"),
-    };
-    frontend
-        .handle(parts.method, parts.uri, parts.headers, body, name)
-        .await
+    frontend.handle(parts, body, name, requested).await
 }
 
 impl DsFrontend {
     async fn handle(
         &self,
-        method: Method,
-        uri: Uri,
-        headers: HeaderMap,
+        parts: Parts,
         body: Bytes,
         name: String,
+        requested: Option<u32>,
     ) -> Response {
+        let Parts {
+            method,
+            uri,
+            headers,
+            ..
+        } = parts;
+
         let result = match method {
             Method::OPTIONS => Ok(options()),
             Method::PUT => self.put(&uri, &headers, body, name).await,
-            Method::POST => self.post(&uri, &headers, body, name).await,
-            Method::DELETE => match self.service.delete(&name).await {
+            Method::POST => self.post(&headers, body, name, requested).await,
+            Method::DELETE => match self.topics.delete(&name).await {
                 Ok(deleted) => Ok(respond(if deleted { 204 } else { 404 }, None, false)),
                 Err(e) => Err(e),
             },
-            Method::HEAD => self.head(&name).await,
-            Method::GET => self.get(&uri, &headers, &name).await,
+            Method::HEAD => self.head(&name, requested).await,
+            Method::GET => self.get(&uri, &headers, &name, requested).await,
             _ => Ok(fail(405, "method not allowed")),
         };
         result.unwrap_or_else(service_error_response)
@@ -213,34 +226,30 @@ impl DsFrontend {
             records_of(&content_type, &body, true)?
         };
         let result = self
-            .service
+            .topics
             .create(CreateCommand {
-                name,
-                content_type,
                 ttl_seconds,
                 expires_at_ms,
                 closed: truthy(headers, H_STREAM_CLOSED),
                 initial_records,
-                external_id: None,
-                internal: false,
                 schema_name: header_str(headers, H_STREAM_SCHEMA)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned),
                 schema_validate: truthy(headers, H_STREAM_SCHEMA_VALIDATE),
-                kafka_topic: None,
+                ..CreateCommand::new(name, content_type)
             })
             .await?;
         let meta = result.meta;
 
         let mut response = respond(
             if result.created { 201 } else { 200 },
-            Some(&meta.next_offset),
-            meta.closed,
+            meta.partitions.first().map(|offsets| &offsets.next_offset),
+            meta.topic.closed,
         );
         set_header(
             &mut response,
             header::CONTENT_TYPE.as_str(),
-            &meta.content_type,
+            &meta.topic.content_type,
         );
         if result.created {
             let mut location = self
@@ -257,11 +266,12 @@ impl DsFrontend {
 
     async fn post(
         &self,
-        _uri: &Uri,
         headers: &HeaderMap,
         body: Bytes,
         name: String,
+        requested: Option<u32>,
     ) -> Result<Response, ServiceError> {
+        let partition = partition::resolve(&self.topics, &name, requested).await?;
         let close = truthy(headers, H_STREAM_CLOSED);
         let producer = producer_of(headers)?;
         let has_producer = producer.is_some();
@@ -277,10 +287,11 @@ impl DsFrontend {
         };
 
         let result = self
-            .service
+            .topics
             .append(
+                &name,
+                partition,
                 AppendCommand {
-                    name,
                     records,
                     content_type: content_type.clone(),
                     stream_seq: header_str(headers, H_STREAM_SEQ).map(str::to_owned),
@@ -310,27 +321,34 @@ impl DsFrontend {
         Ok(response)
     }
 
-    async fn head(&self, name: &str) -> Result<Response, ServiceError> {
-        let Some(meta) = self.service.head(name).await? else {
+    async fn head(&self, name: &str, requested: Option<u32>) -> Result<Response, ServiceError> {
+        let Some((topic, offsets)) = partition::head(&self.topics, name, requested).await? else {
             return Ok(respond(404, None, false));
         };
-        let mut response = respond(200, Some(&meta.next_offset), meta.closed);
+
+        let next = offsets.map(|offsets| offsets.next_offset);
+        let mut response = respond(200, next.as_ref(), topic.closed);
+        set_header(
+            &mut response,
+            H_STREAM_PARTITIONS,
+            &topic.partitions.to_string(),
+        );
         set_header(
             &mut response,
             header::CONTENT_TYPE.as_str(),
-            &meta.content_type,
+            &topic.content_type,
         );
-        if let Some(ttl) = meta.ttl_seconds {
+        if let Some(ttl) = topic.ttl_seconds {
             set_header(&mut response, H_STREAM_TTL, &ttl.to_string());
         }
-        if let Some(expires_at_ms) = meta.expires_at_ms {
+        if let Some(expires_at_ms) = topic.expires_at_ms {
             set_header(
                 &mut response,
                 H_STREAM_EXPIRES_AT,
                 &format_instant(expires_at_ms),
             );
         }
-        if let Some(schema_name) = &meta.schema_name {
+        if let Some(schema_name) = &topic.schema_name {
             set_header(&mut response, H_STREAM_SCHEMA, schema_name);
         }
         Ok(response)
@@ -341,30 +359,43 @@ impl DsFrontend {
         uri: &Uri,
         headers: &HeaderMap,
         name: &str,
+        requested: Option<u32>,
     ) -> Result<Response, ServiceError> {
+        let partition = partition::resolve(&self.topics, name, requested).await?;
         let live = query_param(uri, Q_LIVE).filter(|v| !v.is_empty());
         let offset_raw = query_param(uri, Q_OFFSET);
         let offset_now = offset_raw
             .as_deref()
             .is_some_and(|raw| raw.eq_ignore_ascii_case(OFFSET_NOW));
         let offset = self
-            .parse_offset(name, offset_raw.as_deref(), live.is_some())
+            .parse_offset(name, partition, offset_raw.as_deref(), live.is_some())
             .await?;
         let cursor_raw = query_param(uri, Q_CURSOR);
+        let scope = format!("{name}:{partition}");
 
         match live.as_deref() {
             None => {
                 let out = self
-                    .service
-                    .read(name, offset, self.max_chunk_size, 0)
+                    .topics
+                    .read(name, partition, offset, self.max_chunk_size, 0)
                     .await?;
-                self.write_read(headers, name, offset, out, false, offset_now)
+                self.write_read(headers, &scope, offset, out, false, offset_now)
             }
             Some(LIVE_LONG_POLL) => {
-                self.long_poll(headers, name, offset, cursor_raw.as_deref())
+                self.long_poll(
+                    headers,
+                    name,
+                    partition,
+                    &scope,
+                    offset,
+                    cursor_raw.as_deref(),
+                )
+                .await
+            }
+            Some(LIVE_SSE) => {
+                self.sse(name, partition, offset, cursor_raw.as_deref())
                     .await
             }
-            Some(LIVE_SSE) => self.sse(name, offset, cursor_raw.as_deref()).await,
             Some(_) => Err(bad_request("invalid live mode")),
         }
     }
@@ -373,38 +404,41 @@ impl DsFrontend {
         &self,
         headers: &HeaderMap,
         name: &str,
+        partition: u32,
+        scope: &str,
         offset: OffsetToken,
         cursor_raw: Option<&str>,
     ) -> Result<Response, ServiceError> {
         let cursor = cursor(cursor_raw);
         let out = self
-            .service
-            .read(name, offset, self.max_chunk_size, 0)
+            .topics
+            .read(name, partition, offset, self.max_chunk_size, 0)
             .await?;
         if !(out.records.is_empty() && out.up_to_date) || out.closed {
-            let mut response = self.write_read(headers, name, offset, out, true, false)?;
+            let mut response = self.write_read(headers, scope, offset, out, true, false)?;
             set_header(&mut response, H_STREAM_CURSOR, &cursor.to_string());
             return Ok(response);
         }
 
         if self
-            .service
-            .wait_appended(name, offset, self.long_poll_timeout)
+            .topics
+            .wait_appended(name, partition, offset, self.long_poll_timeout)
             .await?
         {
             let out = self
-                .service
-                .read(name, offset, self.max_chunk_size, 0)
+                .topics
+                .read(name, partition, offset, self.max_chunk_size, 0)
                 .await?;
-            let mut response = self.write_read(headers, name, offset, out, true, false)?;
+            let mut response = self.write_read(headers, scope, offset, out, true, false)?;
             set_header(&mut response, H_STREAM_CURSOR, &cursor.to_string());
             return Ok(response);
         }
 
-        let Some(meta) = self.service.head(name).await? else {
+        let Some((topic, offsets)) = partition::offsets(&self.topics, name, partition).await?
+        else {
             return Ok(respond(404, None, false));
         };
-        let mut response = respond(204, Some(&meta.next_offset), meta.closed);
+        let mut response = respond(204, Some(&offsets.next_offset), topic.closed);
         set_header(&mut response, H_STREAM_CURSOR, &cursor.to_string());
         set_header(&mut response, H_STREAM_UP_TO_DATE, "true");
         Ok(response)
@@ -416,13 +450,14 @@ impl DsFrontend {
     async fn sse(
         &self,
         name: &str,
+        partition: u32,
         start: OffsetToken,
         cursor_raw: Option<&str>,
     ) -> Result<Response, ServiceError> {
-        let Some(meta) = self.service.head(name).await? else {
+        let Some(topic) = self.topics.get(name).await? else {
             return Ok(respond(404, None, false));
         };
-        let encoder = SseEncoder::new(&meta.content_type);
+        let encoder = SseEncoder::new(&topic.content_type);
         let cursor = cursor(cursor_raw);
 
         let mut response = base_response(200);
@@ -437,7 +472,7 @@ impl DsFrontend {
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(8);
-        let service = self.service.clone();
+        let topics = self.topics.clone();
         let name = name.to_owned();
         let max_chunk_size = self.max_chunk_size;
         let deadline = tokio::time::Instant::now() + self.sse_max_duration;
@@ -445,7 +480,10 @@ impl DsFrontend {
             let mut offset = start;
             let mut announced_caught_up = false;
             while tokio::time::Instant::now() < deadline {
-                let Ok(read) = service.read(&name, offset, max_chunk_size, 0).await else {
+                let Ok(read) = topics
+                    .read(&name, partition, offset, max_chunk_size, 0)
+                    .await
+                else {
                     return;
                 };
 
@@ -489,8 +527,8 @@ impl DsFrontend {
                     announced_caught_up = true;
                 }
 
-                if service
-                    .wait_appended(&name, offset, Duration::from_secs(1))
+                if topics
+                    .wait_appended(&name, partition, offset, Duration::from_secs(1))
                     .await
                     .is_err()
                 {
@@ -507,7 +545,7 @@ impl DsFrontend {
     fn write_read(
         &self,
         headers: &HeaderMap,
-        name: &str,
+        scope: &str,
         start: OffsetToken,
         out: ReadResult,
         live: bool,
@@ -545,7 +583,7 @@ impl DsFrontend {
         set_header(&mut response, header::CONTENT_TYPE.as_str(), content_type);
 
         if !live && !offset_now {
-            let etag = etag(name, &start, &out.next_offset, out.closed && empty_tail);
+            let etag = etag(scope, &start, &out.next_offset, out.closed && empty_tail);
             set_header(&mut response, header::ETAG.as_str(), &etag);
             if header_str(headers, header::IF_NONE_MATCH.as_str()) == Some(etag.as_str()) {
                 *response.status_mut() = StatusCode::NOT_MODIFIED;
@@ -569,6 +607,7 @@ impl DsFrontend {
     async fn parse_offset(
         &self,
         name: &str,
+        partition: u32,
         raw: Option<&str>,
         required: bool,
     ) -> Result<OffsetToken, ServiceError> {
@@ -579,11 +618,9 @@ impl DsFrontend {
             return Ok(OffsetToken::beginning());
         };
         if raw.eq_ignore_ascii_case(OFFSET_NOW) {
-            return self
-                .service
-                .head(name)
+            return partition::offsets(&self.topics, name, partition)
                 .await?
-                .map(|meta| meta.next_offset)
+                .map(|(_, offsets)| offsets.next_offset)
                 .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound));
         }
         OffsetToken::parse(Some(raw))
@@ -648,7 +685,9 @@ fn service_error_response(e: ServiceError) -> Response {
         ErrorKind::Conflict | ErrorKind::Transferring | ErrorKind::Closed => {
             respond(409, e.next_offset.as_ref(), e.closed)
         }
-        ErrorKind::Durability => fail(500, &e.message),
+        ErrorKind::Durability | ErrorKind::Internal => fail(500, &e.message),
+        ErrorKind::Timeout => fail(504, &e.message),
+        ErrorKind::Unavailable => fail(503, &e.message),
     }
 }
 

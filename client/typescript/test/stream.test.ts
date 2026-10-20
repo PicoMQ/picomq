@@ -12,6 +12,11 @@ function page(records: StreamRecord[], next: string, upToDate: boolean, closed =
 
 function fakeApi(pages: ReadPage[]): StreamApi {
   let index = 0
+  const read = vi.fn(async () => {
+    const next = pages[Math.min(index, pages.length - 1)]!
+    index += 1
+    return next
+  })
   return {
     protocol: () => 'pico',
     beginning: () => '0',
@@ -24,11 +29,7 @@ function fakeApi(pages: ReadPage[]): StreamApi {
     create: vi.fn(),
     head: vi.fn(),
     append: vi.fn(),
-    read: async () => {
-      const next = pages[Math.min(index, pages.length - 1)]!
-      index += 1
-      return next
-    },
+    read,
     subscribe: () => {
       throw new Error('not used')
     },
@@ -85,6 +86,22 @@ describe('Stream.records', () => {
       bodies.push(new TextDecoder().decode(rec.body))
     }
     expect(bodies).toEqual(['a', 'b'])
+  })
+
+  it('reads the requested partition', async () => {
+    const api = fakeApi([page([record('0', 'a')], '1', true)])
+    const stream = new Stream(api, '/s')
+    const positions: string[] = []
+    for await (const rec of stream.records(undefined, { partition: 2 })) {
+      positions.push(rec.position)
+    }
+    for await (const rec of stream.records()) {
+      positions.push(rec.position)
+    }
+
+    expect(positions).toEqual(['0', '0'])
+    expect(api.read).toHaveBeenNthCalledWith(1, '/s', '0', 'off', {}, { partition: 2 })
+    expect(api.read).toHaveBeenNthCalledWith(2, '/s', '0', 'off', {}, {})
   })
 })
 

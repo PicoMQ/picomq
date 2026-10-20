@@ -1,4 +1,5 @@
 import { ClientError, isAbortError } from '../error'
+import { Routes } from './routes'
 
 const MAX_REDIRECT_HOPS = 5
 
@@ -16,11 +17,14 @@ export class Http {
   private fetch: FetchLike | undefined
   private agentClose: (() => Promise<void>) | undefined
   private initPromise: Promise<void> | undefined
+  private readonly routes: Routes
 
   constructor(
+    endpoint: string,
     private readonly token?: string,
     http2 = false,
   ) {
+    this.routes = new Routes(endpoint)
     if (!http2) {
       this.fetch = (url, init) => globalThis.fetch(url, init as RequestInit)
     }
@@ -35,7 +39,8 @@ export class Http {
   async send(req: HttpRequest): Promise<Response> {
     await this.ensureFetch()
     const fetch = this.fetch!
-    let url = req.url
+    const key = this.routes.key(req.url)
+    let url = key === undefined ? req.url : this.routes.resolve(key, req.url)
     const headers = new Headers(req.headers)
     if (this.token && !headers.has('Authorization')) {
       headers.set('Authorization', `Bearer ${this.token}`)
@@ -58,10 +63,14 @@ export class Http {
         if (isAbortError(err) || req.signal?.aborted) {
           throw ClientError.aborted(err instanceof Error ? err.message : 'Aborted')
         }
+        if (key !== undefined) this.routes.forget(key)
         throw ClientError.transport(err instanceof Error ? err.message : String(err))
       }
 
       if (response.status !== 307 && response.status !== 308) {
+        if (key !== undefined && req.method === 'DELETE' && response.ok) {
+          this.routes.forget(key)
+        }
         return response
       }
 
@@ -72,7 +81,9 @@ export class Http {
           code: 'redirect_without_location',
         })
       }
-      url = new URL(location, url).toString()
+      const next = new URL(location, url).toString()
+      if (key !== undefined) this.routes.learn(key, next)
+      url = next
     }
 
     throw new ClientError('other', 'too_many_redirects', { code: 'too_many_redirects' })

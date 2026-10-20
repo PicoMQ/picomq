@@ -15,6 +15,7 @@ use super::{
 pub(super) const MAX_GROUPS: usize = 1_000;
 pub(super) const MAX_MEMBERS_PER_GROUP: usize = 10_000;
 pub(super) const MAX_STREAMS_PER_GROUP: usize = 10_000;
+pub(super) const MAX_PARTITIONS_PER_GROUP: usize = 10_000;
 pub(super) const MAX_SUBSCRIPTION_ENTRIES_PER_GROUP: usize = 1_000_000;
 pub(super) const MAX_GROUP_ID_BYTES: usize = 255;
 pub(super) const MAX_MEMBER_ID_BYTES: usize = 512;
@@ -118,6 +119,13 @@ pub(super) struct Rebalance {
     pub(super) waiters: BTreeMap<String, oneshot::Sender<JoinOutcome>>,
 }
 
+impl Rebalance {
+    /// Every member still expected has joined.
+    pub(super) fn ready(&self) -> bool {
+        !self.joined.is_empty() && self.joined == self.expected
+    }
+}
+
 pub(super) struct Group {
     pub(super) loaded_epoch: i64,
     pub(super) phase: GroupState,
@@ -129,23 +137,18 @@ pub(super) struct Group {
     pub(super) appends_since_snapshot: u64,
     pub(super) next_rebalance_id: u64,
     pub(super) rebalance: Option<Rebalance>,
-    pub(super) sync_waiters: BTreeMap<String, oneshot::Sender<SyncOutcome>>,
+    pub(super) sync_waiters: BTreeMap<String, oneshot::Sender<Result<SyncOutcome, GroupError>>>,
     pub(super) last_activity: Instant,
 }
 
 impl Group {
-    pub(super) fn loaded(
-        epoch: i64,
-        names: Names,
-        offsets: OffsetTable,
-        appends_since_snapshot: u64,
-    ) -> Self {
+    pub(super) fn loaded(epoch: i64, offsets: OffsetTable, appends_since_snapshot: u64) -> Self {
         Self {
             loaded_epoch: epoch,
             phase: GroupState::Empty,
             generation: 0,
             mode: None,
-            names,
+            names: Names::default(),
             members: BTreeMap::new(),
             offsets,
             appends_since_snapshot,
@@ -169,15 +172,20 @@ impl Group {
             return;
         }
         for id in expired {
-            remove_member(self, &id);
+            depart(self, &id, GroupError::UnknownMember);
         }
-        if self.members.is_empty() {
-            self.reset_empty();
-            self.rebalance = None;
-            self.sync_waiters.clear();
-        } else if self.phase == GroupState::Stable {
-            self.phase = GroupState::PreparingRebalance;
+        settle(self);
+    }
+
+    /// Answers everything pending before the coordinator discards this
+    /// state: the group is served elsewhere now, or reloaded here.
+    pub(super) fn unload(&mut self) {
+        if let Some(rebalance) = self.rebalance.take() {
+            for (member_id, sender) in rebalance.waiters {
+                let _ = sender.send(JoinOutcome::error(GroupError::NotCoordinator, member_id));
+            }
         }
+        answer_syncs(self, GroupError::NotCoordinator);
     }
 
     pub(super) fn reset_empty(&mut self) {
@@ -214,13 +222,51 @@ impl Group {
     }
 }
 
-pub(super) fn remove_member(state: &mut Group, member_id: &str) {
+/// Removes a member, answering its own pending join or sync with `answer`.
+/// The caller settles the group afterwards.
+pub(super) fn depart(state: &mut Group, member_id: &str, answer: GroupError) {
     state.members.remove(member_id);
-    state.sync_waiters.remove(member_id);
+    if let Some(sender) = state.sync_waiters.remove(member_id) {
+        let _ = sender.send(Err(answer));
+    }
     if let Some(rebalance) = &mut state.rebalance {
         rebalance.expected.remove(member_id);
         rebalance.joined.remove(member_id);
-        rebalance.waiters.remove(member_id);
+        if let Some(sender) = rebalance.waiters.remove(member_id) {
+            let _ = sender.send(JoinOutcome::error(answer, member_id.to_owned()));
+        }
+    }
+}
+
+/// Moves the group on after its membership changed: an empty group resets,
+/// a rebalance every expected member has joined completes, and a group that
+/// was settled starts a new rebalance.
+pub(super) fn settle(state: &mut Group) {
+    if state.members.is_empty() {
+        state.rebalance = None;
+        state.reset_empty();
+        return;
+    }
+
+    state.names.sweep();
+    match &state.rebalance {
+        Some(rebalance) if rebalance.ready() => {
+            for (sender, outcome) in complete_rebalance(state) {
+                let _ = sender.send(outcome);
+            }
+        }
+        Some(_) => {}
+        None if state.phase != GroupState::PreparingRebalance => {
+            state.phase = GroupState::PreparingRebalance;
+            answer_syncs(state, GroupError::RebalanceInProgress);
+        }
+        None => {}
+    }
+}
+
+fn answer_syncs(state: &mut Group, answer: GroupError) {
+    for (_, sender) in std::mem::take(&mut state.sync_waiters) {
+        let _ = sender.send(Err(answer));
     }
 }
 
@@ -250,41 +296,14 @@ pub(super) fn evict_idle_groups(groups: &mut HashMap<String, Arc<Mutex<Group>>>,
     }
 }
 
-pub(super) fn complete_rebalance(
-    state: &mut Group,
-    timed_out: bool,
-) -> Vec<(oneshot::Sender<JoinOutcome>, JoinOutcome)> {
-    let Some(mut rebalance) = state.rebalance.take() else {
+fn complete_rebalance(state: &mut Group) -> Vec<(oneshot::Sender<JoinOutcome>, JoinOutcome)> {
+    let Some(rebalance) = state.rebalance.take() else {
         return Vec::new();
     };
-    if timed_out {
-        let missing: Vec<String> = rebalance
-            .expected
-            .difference(&rebalance.joined)
-            .cloned()
-            .collect();
-        for id in missing {
-            state.members.remove(&id);
-            rebalance.waiters.remove(&id);
-        }
-    }
-    if state.members.is_empty() || rebalance.joined.is_empty() {
-        state.reset_empty();
-        return rebalance
-            .waiters
-            .into_values()
-            .map(|sender| {
-                (
-                    sender,
-                    JoinOutcome::error(GroupError::RebalanceInProgress, String::new()),
-                )
-            })
-            .collect();
-    }
 
     let now = Instant::now();
     state.generation = state.generation.wrapping_add(1).max(1);
-    state.sync_waiters.clear();
+    answer_syncs(state, GroupError::RebalanceInProgress);
     match state.mode.clone() {
         Some(Mode::Subscribed) => complete_subscribed(state, rebalance, now),
         Some(Mode::Client {
@@ -439,16 +458,6 @@ fn select_protocol(state: &Group, leader: &str, members: &BTreeSet<String>) -> O
     })
 }
 
-pub(super) fn send_join_completions(
-    completions: Option<Vec<(oneshot::Sender<JoinOutcome>, JoinOutcome)>>,
-) {
-    if let Some(completions) = completions {
-        for (sender, outcome) in completions {
-            let _ = sender.send(outcome);
-        }
-    }
-}
-
 pub(super) fn member_from_input(input: &JoinInput, names: &mut Names, now: Instant) -> Member {
     Member {
         instance_id: input.instance_id.clone(),
@@ -510,7 +519,7 @@ pub(super) fn validate_group_id(group_id: &str) -> Result<(), GroupError> {
     }
 }
 
-pub(super) fn validate_stream_name(name: &str) -> Result<(), GroupError> {
+fn validate_stream_name(name: &str) -> Result<(), GroupError> {
     if name.is_empty() || name.len() > MAX_STREAM_NAME_BYTES {
         Err(GroupError::InvalidRequest)
     } else {
@@ -556,24 +565,9 @@ pub(super) fn new_member_id(client_id: &str) -> String {
     format!("{client_id}-{}", uuid::Uuid::new_v4())
 }
 
-pub(super) fn group_stream_name(group_id: &str) -> String {
-    let mut encoded = String::with_capacity(group_id.len() * 2);
-    for byte in group_id.as_bytes() {
-        use std::fmt::Write;
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    format!("/_sys/groups/{encoded}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stream_name_is_collision_free() {
-        assert_ne!(group_stream_name("a/b"), group_stream_name("a%2fb"));
-        assert!(group_stream_name("g").starts_with("/_sys/groups/"));
-    }
 
     #[test]
     fn names_are_shared_and_swept() {
@@ -587,5 +581,29 @@ mod tests {
         names.sweep();
         assert_eq!(names.len(), 1);
         assert!(names.contains("b"));
+    }
+    #[test]
+    fn unloading_answers_everything_pending() {
+        let mut group = Group::loaded(1, OffsetTable::new(), 0);
+        let (join, joined) = oneshot::channel();
+        let (sync, synced) = oneshot::channel();
+        group.rebalance = Some(Rebalance {
+            id: 1,
+            expected: BTreeSet::from(["a".to_owned()]),
+            joined: BTreeSet::from(["a".to_owned()]),
+            waiters: BTreeMap::from([("a".to_owned(), join)]),
+        });
+        group.sync_waiters.insert("b".to_owned(), sync);
+
+        group.unload();
+
+        assert_eq!(
+            joined.blocking_recv().unwrap().result.err(),
+            Some(GroupError::NotCoordinator)
+        );
+        assert_eq!(
+            synced.blocking_recv().unwrap().err(),
+            Some(GroupError::NotCoordinator)
+        );
     }
 }

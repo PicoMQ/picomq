@@ -10,10 +10,16 @@ A PicoMQ deployment has three components. Nodes serve clients and hold only cach
 
 ## Anatomy of a node
 
-Each node runs the same stack. An HTTP listener speaks the Pico protocol or Durable Streams, and a Kafka listener serves Kafka clients. An admin listener serves the admin API and the dashboard. Behind them, an ownership router decides whether this node serves a stream or redirects, the stream service manages the registry of names and per-stream state, and the `s3stream` engine moves records to and from storage. The same stack runs as a process or as the [Postgres extension](/docs/operations/deployment/postgres).
+Each node runs the same stack. An HTTP listener speaks the Pico protocol or Durable Streams, a Kafka listener serves Kafka clients, and an admin listener serves the admin API and the dashboard. Behind them:
+
+- The ownership router decides whether this node serves a partition or redirects, see [Ownership and routing](/docs/design/ownership).
+- The topic layer maps names to topics, partitions, and logs, see [Topics and streams](/docs/design/streams), and the group coordinator runs [consumer groups](/docs/design/groups).
+- The `s3stream` engine moves records to and from storage.
+
+The same stack runs as a process or as the [Postgres extension](/docs/operations/deployment/postgres).
 
 <div class="pico-diagram">
-<svg viewBox="0 0 559 434" width="559" role="img" aria-label="A node runs listeners, routing, the stream service, and the engine. The engine writes to object storage. The service proposes commands to the SQL metadata log.">
+<svg viewBox="0 0 559 434" width="559" role="img" aria-label="A node runs listeners, routing, topics and groups, and the engine. The engine writes to object storage. Topics and groups propose commands to the SQL metadata log.">
   <defs>
     <marker id="arr2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0 0.5 L7.5 4 L0 7.5 Z" class="arrow"/>
@@ -32,8 +38,8 @@ Each node runs the same stack. An HTTP listener speaks the Pico protocol or Dura
 <text x="108" y="160" text-anchor="middle" class="label">ownership router</text>
 <text x="108" y="178" text-anchor="middle" class="sub">serve here or 307</text>
     <rect x="276" y="136" width="216" height="56" class="box"/>
-<text x="383" y="160" text-anchor="middle" class="label">stream service</text>
-<text x="383" y="178" text-anchor="middle" class="sub">registry, sessions</text>
+<text x="383" y="160" text-anchor="middle" class="label">topics and groups</text>
+<text x="383" y="178" text-anchor="middle" class="sub">partitions, logs, offsets</text>
     <rect x="0" y="232" width="216" height="56" class="box-accent"/>
 <text x="108" y="256" text-anchor="middle" class="label">s3stream engine</text>
 <text x="108" y="274" text-anchor="middle" class="sub">WAL, objects, caches</text>
@@ -59,7 +65,7 @@ The engine is the only writer of record data. It appends to a [write-ahead log](
 
 ## The metadata log
 
-All cluster state changes are commands: register a node, create a stream, open it, commit an object, transfer ownership. A node proposes a command to the SQL database, where an ordered log table assigns it a position. Every node tails that table and applies each command to an in-memory state, so all nodes converge on the same view without talking to each other.
+All cluster state changes are commands, such as registering a node, opening a stream, committing an object, or fencing a dead node. The full list is in [Metadata](/docs/design/metadata). A node proposes a command to the SQL database, where an ordered log table assigns it a position. Every node tails that table and applies each command to an in-memory state, so all nodes converge on the same view without talking to each other.
 
 <div class="pico-diagram">
 <svg viewBox="10 10 710 280" width="710" role="img" aria-label="Nodes propose commands to the SQL log. The log orders them. All nodes tail the log and apply commands to the same in-memory state.">
@@ -107,8 +113,21 @@ The applied state answers every routing and placement question: which node owns 
 
 ## Request routing
 
-Stream names look like URL paths and any node accepts any request. The receiving node checks the view. If the stream is open on another node the client gets a `307` redirect to its advertised address. If it is unowned or local the node serves it directly. Epoch fencing backs this up: a node that lost its registration cannot commit anything, so a stale redirect can waste a hop but never split a stream.
+Any node accepts any request. A request for a partition owned elsewhere gets a `307` redirect to its owner over HTTP, or `NOT_LEADER_OR_FOLLOWER` over Kafka. Fencing backs this up, so a stale view can cost a hop but never split a stream. The rules are in [Ownership and routing](/docs/design/ownership).
 
 ## Background work
 
-A few loops run outside the request path. Every node tails the metadata log and watches for stream transfers involving it. One node at a time holds a SQL lease and runs maintenance: expiring abandoned object uploads and deleting destroyed objects from storage. Any node crossing a snapshot interval writes the next snapshot. None of these tasks are special roles, whichever node holds the lease does the work and losing it just moves the work elsewhere.
+A few loops run outside the request path. Some run on every node, the rest only on the node holding the SQL [lease](/docs/design/leases). None of them is a special role: whichever node holds the lease does that work, and losing it moves the work elsewhere.
+
+| Loop | Runs on | Does |
+| --- | --- | --- |
+| Tailer | Every node | Applies the metadata log and publishes views |
+| Heartbeat | Every node | Keeps the node live, and stops it once it is fenced |
+| Transfer watcher | Every node | Hands off or takes over streams in a [transfer](/docs/design/transfers) |
+| Deleted cleanup | Every node | Destroys owned streams whose topic was deleted |
+| Compaction check | Every node | Starts compaction for streams with too many objects |
+| Snapshot | Whichever node crosses the interval | Writes the next [snapshot](/docs/design/metadata#snapshots) |
+| Failover | Lease holder | Fences silent nodes and moves their streams, see [Failover](/docs/design/failover) |
+| Object expiry and cleaner | Lease holder | Reclaims abandoned uploads and deletes destroyed objects, see [Garbage collection](/docs/design/gc) |
+| TTL sweep | Lease holder | Deletes topics whose TTL lapsed |
+| Token expiry | Lease holder | Removes expired tokens |

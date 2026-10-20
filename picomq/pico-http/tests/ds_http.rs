@@ -9,6 +9,7 @@ mod common;
 
 use std::time::Duration;
 
+use picomq_server::CreateCommand;
 use serde_json::Value;
 
 use common::ds_server;
@@ -439,4 +440,80 @@ async fn ds_official_client_conformance() {
     assert!(head.stream_closed);
     stream.delete().await.unwrap();
     assert!(stream.head().await.is_err());
+}
+
+#[tokio::test]
+async fn partitions_are_addressed_one_at_a_time() {
+    let server = ds_server().await;
+    let http = client();
+    let url = format!("{}/spread", server.base_url);
+    server
+        .node
+        .topics()
+        .create(CreateCommand {
+            partitions: 2,
+            ..CreateCommand::new("/spread", "text/plain")
+        })
+        .await
+        .unwrap();
+
+    for (partition, body) in [(0, "zero"), (1, "one")] {
+        let appended = http
+            .post(format!("{url}?partition={partition}"))
+            .header("Content-Type", "text/plain")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(appended.status(), 204);
+    }
+
+    let without_partition = http
+        .post(&url)
+        .header("Content-Type", "text/plain")
+        .body("lost")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(without_partition.status(), 400);
+    let beyond = http
+        .get(format!("{url}?partition=2&offset=-1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(beyond.status(), 404);
+    let malformed = http
+        .get(format!("{url}?partition=-1&offset=-1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), 400);
+
+    let head = http.head(&url).send().await.unwrap();
+    assert_eq!(head.status(), 200);
+    assert_eq!(head.headers()["Stream-Partitions"], "2");
+    assert!(head.headers().get("Stream-Next-Offset").is_none());
+    let head = http
+        .head(format!("{url}?partition=1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.headers()["Stream-Next-Offset"], "00000000000000000001");
+
+    let first = http
+        .get(format!("{url}?partition=0&offset=-1"))
+        .send()
+        .await
+        .unwrap();
+    let second = http
+        .get(format!("{url}?partition=1&offset=-1"))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(first.headers()["ETag"], second.headers()["ETag"]);
+    assert_eq!(first.text().await.unwrap(), "zero");
+    assert_eq!(second.text().await.unwrap(), "one");
+
+    let without_partition = http.get(format!("{url}?offset=-1")).send().await.unwrap();
+    assert_eq!(without_partition.status(), 400);
 }

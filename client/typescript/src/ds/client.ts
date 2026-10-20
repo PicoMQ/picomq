@@ -12,6 +12,7 @@ import {
   H_STREAM_CLOSED,
   H_STREAM_EXPIRES_AT,
   H_STREAM_NEXT_OFFSET,
+  H_STREAM_PARTITIONS,
   H_STREAM_TTL,
   H_STREAM_UP_TO_DATE,
 } from './headers'
@@ -21,6 +22,7 @@ import type {
   AppendOptions,
   CallOptions,
   Live,
+  PartitionOptions,
   Protocol,
   ReadLimits,
   ReadPage,
@@ -48,7 +50,7 @@ export class DsClient implements StreamApi {
     retry: RetryPolicy = RetryPolicy.none(),
   ) {
     this.baseUrl = endpoint.replace(/\/+$/, '')
-    this.http = new Http(token, http2)
+    this.http = new Http(this.baseUrl, token, http2)
     this.retry = retry
   }
 
@@ -85,9 +87,9 @@ export class DsClient implements StreamApi {
     )
   }
 
-  async head(name: string, options?: CallOptions): Promise<StreamInfo | null> {
+  async head(name: string, options?: PartitionOptions): Promise<StreamInfo | null> {
     return this.retry.run(
-      () => this.headOnce(name, options?.signal),
+      () => this.headOnce(name, options?.partition, options?.signal),
       retryableError,
       options?.signal,
     )
@@ -109,7 +111,7 @@ export class DsClient implements StreamApi {
     const response = await expectDs(
       await this.http.send({
         method: 'POST',
-        url: this.url(name),
+        url: this.url(name, '', options?.partition),
         headers: { 'Content-Type': options?.contentType ?? DEFAULT_CONTENT_TYPE },
         body: toArrayBuffer(envelope.body),
         signal: options?.signal,
@@ -125,10 +127,10 @@ export class DsClient implements StreamApi {
     from: string,
     live: Live,
     limits: ReadLimits = {},
-    options?: CallOptions,
+    options?: PartitionOptions,
   ): Promise<ReadPage> {
     return this.retry.run(
-      () => this.readOnce(name, from, live, limits, options?.signal),
+      () => this.readOnce(name, from, live, limits, options?.partition, options?.signal),
       retryableError,
       options?.signal,
     )
@@ -136,7 +138,8 @@ export class DsClient implements StreamApi {
 
   subscribe(name: string, from: string, options: SubscribeOptions = {}): AsyncIterable<SseEvent> {
     const http = this.http
-    const streamUrl = (offset: string) => this.url(name, `?offset=${urlencode(offset)}&live=sse`)
+    const streamUrl = (offset: string) =>
+      this.url(name, `?offset=${urlencode(offset)}&live=sse`, options.partition)
     return subscribeLoop(from, options, {
       open: async (offset, lastEventId, signal) => {
         const headers: { [key: string]: string } = { Accept: 'text/event-stream' }
@@ -221,17 +224,29 @@ export class DsClient implements StreamApi {
     return true
   }
 
-  private async headOnce(name: string, signal?: AbortSignal): Promise<StreamInfo | null> {
-    const response = await this.http.send({ method: 'HEAD', url: this.url(name), signal })
+  private async headOnce(
+    name: string,
+    partition: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<StreamInfo | null> {
+    const response = await this.http.send({
+      method: 'HEAD',
+      url: this.url(name, '', partition),
+      signal,
+    })
     if (response.status === 404) {
       return null
     }
     await expectDs(response, [200])
     const info: StreamInfo = {
       name,
-      start: OFFSET_BEGINNING,
-      next: header(response, H_STREAM_NEXT_OFFSET) ?? '',
+      partitions: parseOptionalUint(header(response, H_STREAM_PARTITIONS)) ?? 1,
       closed: truthy(response, H_STREAM_CLOSED),
+    }
+    const next = header(response, H_STREAM_NEXT_OFFSET)
+    if (next !== undefined) {
+      info.start = OFFSET_BEGINNING
+      info.next = next
     }
     const contentType = header(response, 'content-type')
     if (contentType !== undefined) info.contentType = contentType
@@ -247,6 +262,7 @@ export class DsClient implements StreamApi {
     from: string,
     live: Live,
     _limits: ReadLimits,
+    partition: number | undefined,
     signal?: AbortSignal,
   ): Promise<ReadPage> {
     let query = `?offset=${urlencode(from)}`
@@ -255,7 +271,7 @@ export class DsClient implements StreamApi {
     }
 
     const response = await expectDs(
-      await this.http.send({ method: 'GET', url: this.url(name, query), signal }),
+      await this.http.send({ method: 'GET', url: this.url(name, query, partition), signal }),
       [200, 204],
     )
 
@@ -284,8 +300,12 @@ export class DsClient implements StreamApi {
     }
   }
 
-  private url(name: string, query = ''): string {
+  private url(name: string, query = '', partition?: number): string {
     const path = name.startsWith('/') ? name : `/${name}`
+    if (partition !== undefined) {
+      query += `${query === '' ? '?' : '&'}partition=${partition}`
+    }
+
     return `${this.baseUrl}${path}${query}`
   }
 }

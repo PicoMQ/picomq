@@ -4,11 +4,12 @@ use std::time::Duration;
 use bytes::Bytes;
 use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
 use picomq_server::{
-    CommittedOffset, GroupCoordinator, GroupError, GroupState, JoinInput, JoinOutcome,
-    JoinProtocol, Joined, MemberFence, MemberRole, Membership, NodeConfig, OffsetCommit, PicoNode,
-    SyncInput,
+    CommittedOffset, CreateCommand, GroupCoordinator, GroupError, GroupState, JoinInput,
+    JoinOutcome, JoinProtocol, Joined, MemberFence, MemberRole, Membership, NodeConfig,
+    OffsetCommit, Partition, PicoNode, SyncInput, TopicId,
 };
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
+use tokio::task::JoinHandle;
 
 async fn start_node(
     node_id: i32,
@@ -36,11 +37,16 @@ async fn start_node(
     .unwrap()
 }
 
-fn commit(stream: &str, position: u64) -> OffsetCommit {
+fn partition(byte: u8) -> Partition {
+    Partition::new(TopicId([byte; 16]), 0)
+}
+
+fn commit(partition: Partition, position: u64) -> OffsetCommit {
     OffsetCommit {
-        stream: stream.to_owned(),
+        partition,
         value: CommittedOffset {
             position,
+            leader_epoch: None,
             metadata: Some("checkpoint".to_owned()),
         },
     }
@@ -111,7 +117,7 @@ async fn find_coordinator_is_the_owner_of_the_group_stream() {
 
     node1
         .groups()
-        .commit_offsets("orders", None, &[commit("/events", 7)])
+        .commit_offsets("orders", None, &[commit(partition(1), 7)])
         .await
         .unwrap();
 
@@ -127,28 +133,60 @@ async fn find_coordinator_is_the_owner_of_the_group_stream() {
 }
 
 #[tokio::test]
+async fn every_node_lists_every_group() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+
+    node1
+        .groups()
+        .commit_offsets("orders", None, &[commit(partition(1), 7)])
+        .await
+        .unwrap();
+    node2
+        .groups()
+        .commit_offsets("a/b", None, &[commit(partition(1), 7)])
+        .await
+        .unwrap();
+
+    for node in [&node1, &node2] {
+        let mut listed = node.groups().list();
+        listed.sort();
+        assert_eq!(listed, ["a/b", "orders"]);
+    }
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
 async fn offsets_replay_into_a_fresh_coordinator() {
     let (sink, views) = LocalSink::new();
     let node = start_node(1, Arc::new(sink), views).await;
 
     node.groups()
-        .commit_offsets("orders", None, &[commit("/events", 42)])
+        .commit_offsets("orders", None, &[commit(partition(1), 42)])
         .await
         .unwrap();
 
     let restarted = GroupCoordinator::new(
         node.config().node_id,
         node.service(),
+        node.topics(),
         node.ownership(),
         node.views(),
     );
     let fetched = restarted
-        .fetch_offsets("orders", Some(&["/events".to_owned(), "/other".to_owned()]))
+        .fetch_offsets("orders", Some(&[partition(1), partition(2)]))
         .await
         .unwrap();
     assert_eq!(fetched.len(), 1);
-    assert_eq!(fetched["/events"].position, 42);
-    assert_eq!(fetched["/events"].metadata.as_deref(), Some("checkpoint"));
+    assert_eq!(fetched[&partition(1)].position, 42);
+    assert_eq!(
+        fetched[&partition(1)].metadata.as_deref(),
+        Some("checkpoint")
+    );
     assert!(
         restarted
             .fetch_offsets("unknown", None)
@@ -223,16 +261,24 @@ async fn subscribed_members_receive_a_server_side_assignment() {
         MemberRole::Subscribed { subscription, .. } if subscription == &all
     )));
 
-    let stream = &assignment_of(&second)[0];
+    assert!(!assignment_of(&second).is_empty());
     assert_eq!(
         groups
-            .commit_offsets("g", Some(fence(2, &second.member_id)), &[commit(stream, 5)])
+            .commit_offsets(
+                "g",
+                Some(fence(2, &second.member_id)),
+                &[commit(partition(3), 5)]
+            )
             .await,
         Ok(())
     );
     assert_eq!(
         groups
-            .commit_offsets("g", Some(fence(1, &second.member_id)), &[commit(stream, 6)])
+            .commit_offsets(
+                "g",
+                Some(fence(1, &second.member_id)),
+                &[commit(partition(3), 6)]
+            )
             .await,
         Err(GroupError::IllegalGeneration)
     );
@@ -404,6 +450,292 @@ async fn a_group_keeps_one_membership_mode_until_empty() {
         .join(join("g", "", client("consumer", "range", "")))
         .await;
     assert!(switched.result.is_ok());
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn snapshots_drop_offsets_of_deleted_topics() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let topics = node.topics();
+
+    let kept = topics
+        .create(CreateCommand::new("/kept", "text/plain"))
+        .await
+        .unwrap()
+        .meta
+        .topic;
+    let deleted = topics
+        .create(CreateCommand::new("/deleted", "text/plain"))
+        .await
+        .unwrap()
+        .meta
+        .topic;
+    let kept = Partition::new(kept.id, 0);
+    let deleted_partition = Partition::new(deleted.id, 0);
+
+    node.groups()
+        .commit_offsets("orders", None, &[commit(deleted_partition, 3)])
+        .await
+        .unwrap();
+    assert!(topics.delete("/deleted").await.unwrap());
+
+    for position in 0..64 {
+        node.groups()
+            .commit_offsets("orders", None, &[commit(kept, position)])
+            .await
+            .unwrap();
+    }
+
+    let fetched = node.groups().fetch_offsets("orders", None).await.unwrap();
+    assert_eq!(fetched.len(), 1);
+    assert_eq!(fetched[&kept].position, 63);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn offset_deletes_survive_replay_and_snapshots() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+
+    groups
+        .commit_offsets(
+            "orders",
+            None,
+            &[commit(partition(1), 1), commit(partition(2), 2)],
+        )
+        .await
+        .unwrap();
+    groups
+        .delete_offsets("orders", &[partition(1), partition(3)])
+        .await
+        .unwrap();
+
+    let replayed = || {
+        GroupCoordinator::new(
+            node.config().node_id,
+            node.service(),
+            node.topics(),
+            node.ownership(),
+            node.views(),
+        )
+    };
+    let fetched = replayed().fetch_offsets("orders", None).await.unwrap();
+    assert_eq!(fetched.keys().copied().collect::<Vec<_>>(), [partition(2)]);
+
+    for position in 0..64 {
+        groups
+            .commit_offsets("orders", None, &[commit(partition(2), position)])
+            .await
+            .unwrap();
+    }
+
+    let fetched = replayed().fetch_offsets("orders", None).await.unwrap();
+    assert_eq!(fetched.keys().copied().collect::<Vec<_>>(), [partition(2)]);
+    assert_eq!(fetched[&partition(2)].position, 63);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn groups_delete_only_when_empty() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+
+    assert_eq!(groups.delete("g").await, Err(GroupError::GroupNotFound));
+
+    let member = groups.join(join("g", "", subscribed(&["/a"]))).await;
+    groups
+        .commit_offsets("g", None, &[commit(partition(1), 5)])
+        .await
+        .unwrap();
+    assert_eq!(groups.delete("g").await, Err(GroupError::NonEmpty));
+
+    groups.leave("g", &[(member.member_id.clone(), None)]).await;
+    assert_eq!(groups.list(), ["g"]);
+    groups.delete("g").await.unwrap();
+
+    assert!(groups.list().is_empty());
+    assert_eq!(groups.delete("g").await, Err(GroupError::GroupNotFound));
+    assert!(groups.fetch_offsets("g", None).await.unwrap().is_empty());
+
+    node.close().await;
+}
+
+async fn stable_member(groups: &Arc<GroupCoordinator>, group: &str) -> String {
+    let first = groups
+        .join(join(group, "", client("consumer", "range", "a")))
+        .await;
+    groups
+        .sync(SyncInput {
+            group_id: group.to_owned(),
+            generation: first.generation,
+            member_id: first.member_id.clone(),
+            instance_id: None,
+            assignments: vec![(first.member_id.clone(), Bytes::from_static(b"all"))],
+        })
+        .await
+        .unwrap();
+    first.member_id
+}
+
+fn spawn_join(groups: &Arc<GroupCoordinator>, input: JoinInput) -> JoinHandle<JoinOutcome> {
+    let groups = Arc::clone(groups);
+    tokio::spawn(async move { groups.join(input).await })
+}
+
+#[tokio::test]
+async fn a_leave_during_a_rebalance_completes_the_pending_joins() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+    let first = stable_member(&groups, "g").await;
+
+    let pending = spawn_join(&groups, join("g", "", client("consumer", "range", "b")));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    groups.leave("g", &[(first, None)]).await;
+
+    let second = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("the pending join completed")
+        .unwrap();
+    let Ok(Joined::Client {
+        leader, members, ..
+    }) = &second.result
+    else {
+        panic!("{second:?}");
+    };
+    assert_eq!(leader, &second.member_id);
+    assert_eq!(members.len(), 1);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_newer_join_supersedes_the_pending_one() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+    let first = stable_member(&groups, "g").await;
+
+    let named = groups
+        .join(JoinInput {
+            require_known_member_id: true,
+            ..join("g", "", client("consumer", "range", "b"))
+        })
+        .await;
+    assert_eq!(
+        named.result.as_ref().err(),
+        Some(&GroupError::MemberIdRequired)
+    );
+    let second = named.member_id;
+
+    let earlier = spawn_join(
+        &groups,
+        join("g", &second, client("consumer", "range", "b")),
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let later = spawn_join(
+        &groups,
+        join("g", &second, client("consumer", "range", "b")),
+    );
+
+    let earlier = earlier.await.unwrap();
+    assert_eq!(earlier.result.err(), Some(GroupError::Superseded));
+
+    groups
+        .join(join("g", &first, client("consumer", "range", "a")))
+        .await
+        .result
+        .unwrap();
+    assert!(later.await.unwrap().result.is_ok());
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_group_on_a_fenced_node_waits_for_its_log_to_be_recovered() {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let node1 = start_node(1, sink.clone(), views.clone()).await;
+    let node2 = start_node(2, sink.clone(), views.clone()).await;
+
+    let created = node2
+        .groups()
+        .join(join("g", "", client("consumer", "range", "a")))
+        .await;
+    assert!(created.result.is_ok());
+
+    let heartbeats = views.load().state.nodes[&2].heartbeats;
+    node1
+        .metadata()
+        .fence_node(2, node2.metadata().node_epoch(), heartbeats)
+        .await
+        .unwrap();
+
+    let rejoined = node1
+        .groups()
+        .join(JoinInput {
+            require_known_member_id: true,
+            ..join("g", "", client("consumer", "range", "b"))
+        })
+        .await;
+    assert_eq!(
+        rejoined.result.err(),
+        Some(GroupError::CoordinatorNotAvailable)
+    );
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn an_expired_member_departs_and_the_rebalance_completes_without_it() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+
+    let first = groups
+        .join(JoinInput {
+            session_timeout_ms: 1_000,
+            ..join("g", "", client("consumer", "range", "a"))
+        })
+        .await;
+    groups
+        .sync(SyncInput {
+            group_id: "g".to_owned(),
+            generation: first.generation,
+            member_id: first.member_id.clone(),
+            instance_id: None,
+            assignments: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let second = groups
+        .join(JoinInput {
+            rebalance_timeout_ms: 10_000,
+            ..join("g", "", client("consumer", "range", "b"))
+        })
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let Ok(Joined::Client {
+        leader, members, ..
+    }) = &second.result
+    else {
+        panic!("{second:?}");
+    };
+    assert_eq!(leader, &second.member_id);
+    assert_eq!(members.len(), 1);
 
     node.close().await;
 }

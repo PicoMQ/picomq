@@ -28,7 +28,9 @@ Trimming a stream advances its start offset. Objects that fall entirely below th
 </svg>
 </div>
 
-Deleting a stream marks all of its objects. Compaction rewrites small objects into larger ones and marks the originals. An object id that was reserved for an upload that never committed expires after its TTL and is marked as well. WAL objects are the one exception: they are deleted directly by their owning node once a commit covers them, as described in [Writes](/docs/design/writes).
+Deleting a topic, or the lease holder expiring one by its TTL, removes its keys first. The owner of each internal stream then deletes it, which marks all of its objects, so space is reclaimed shortly after the name is gone. Compaction rewrites small objects into larger ones and marks the originals. An object id that was reserved for an upload that never committed expires after its TTL and is marked as well.
+
+WAL objects are the one exception. Their writer deletes them once a commit covers them, as described in [Writes](/docs/design/writes), and after [failover](/docs/design/failover) the lease holder does the same for the dead node's WAL.
 
 ## Two-phase deletion
 

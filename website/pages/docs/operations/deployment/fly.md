@@ -45,7 +45,9 @@ Every app gets the same `PICO_META_URL`, `PICO_STORAGE`, and `PICO_AUTH_BOOTSTRA
 
 A few choices in the configs matter and are worth keeping when adapting them.
 
-`auto_stop_machines` is off. A stopped Machine is a crashed node. The cluster recovers, streams revive elsewhere or wait for the restart, but it is a recovery path, not a scaling mechanism. Node count changes should go through the admin transfer workflow instead.
+`auto_stop_machines` is off. A stopped Machine hands its streams to the other nodes, and a crashed one has them moved after the node timeout, but either way it is a failover path, not a scaling mechanism.
+
+`kill_timeout` is `30` seconds, above the `5` second drain. Fly's default of `5` would kill a stopping node right after its drain, before it hands off, leaving its streams to wait out the node timeout.
 
 The health check hits `/ready` on the admin port, so Fly routes traffic only after the node has registered. Combined with `--shutdown-drain-sec` this makes `fly deploy` a clean rolling restart.
 

@@ -30,9 +30,13 @@ func (c *PicoClient) Create(ctx context.Context, name, contentType string, ttl t
 	return
 }
 
-func (c *PicoClient) Head(ctx context.Context, name string) (info *StreamInfo, err error) {
+func (c *PicoClient) Head(ctx context.Context, name string) (*StreamInfo, error) {
+	return c.head(ctx, name, nil)
+}
+
+func (c *PicoClient) head(ctx context.Context, name string, partition *uint32) (info *StreamInfo, err error) {
 	err = c.core.run(ctx, func() error {
-		response, callErr := c.core.send(ctx, wireRequest{method: http.MethodHead, url: c.core.streamURL(name, nil)})
+		response, callErr := c.core.send(ctx, wireRequest{method: http.MethodHead, url: c.core.streamURL(name, withPartition(nil, partition))})
 		if callErr != nil {
 			return callErr
 		}
@@ -44,22 +48,36 @@ func (c *PicoClient) Head(ctx context.Context, name string) (info *StreamInfo, e
 		if _, callErr = expectPico(response, http.StatusOK); callErr != nil {
 			return callErr
 		}
-		info = &StreamInfo{Name: name, ContentType: response.Header.Get("Content-Type"), Start: defaultString(response.Header.Get("Pico-Start-Seq"), "0"), Next: defaultString(response.Header.Get("Pico-Next-Seq"), "0"), Closed: headerBool(response.Header, "Pico-Closed"), TTL: time.Duration(headerUint(response.Header, "Pico-TTL")) * time.Second, ExpiresAt: response.Header.Get("Pico-Expires-At")}
+
+		info = &StreamInfo{
+			Name:        name,
+			ContentType: response.Header.Get("Content-Type"),
+			Start:       response.Header.Get("Pico-Start-Seq"),
+			Next:        response.Header.Get("Pico-Next-Seq"),
+			Partitions:  partitionCount(headerUint(response.Header, "Pico-Partitions")),
+			Closed:      headerBool(response.Header, "Pico-Closed"),
+			TTL:         time.Duration(headerUint(response.Header, "Pico-TTL")) * time.Second,
+			ExpiresAt:   response.Header.Get("Pico-Expires-At"),
+		}
 		return nil
 	})
 	return
 }
 
 func (c *PicoClient) Append(ctx context.Context, name string, records []AppendRecord) (AppendAck, error) {
-	return c.append(ctx, name, records, nil)
+	return c.append(ctx, name, nil, records)
 }
 
 func (c *PicoClient) AppendAs(ctx context.Context, name string, records []AppendRecord, producer ProducerRef) (ProducerAck, error) {
+	return c.appendAs(ctx, name, nil, records, producer)
+}
+
+func (c *PicoClient) appendAs(ctx context.Context, name string, partition *uint32, records []AppendRecord, producer ProducerRef) (ProducerAck, error) {
 	headers := make(http.Header)
 	headers.Set("Pico-Producer-Id", producer.ID)
 	headers.Set("Pico-Producer-Epoch", strconv.FormatUint(producer.Epoch, 10))
 	headers.Set("Pico-Producer-Seq", strconv.FormatUint(producer.Seq, 10))
-	ack, responseHeaders, err := c.appendWithHeaders(ctx, name, records, headers)
+	ack, responseHeaders, err := c.appendWithHeaders(ctx, name, partition, records, headers)
 	if err != nil {
 		return ProducerAck{}, err
 	}
@@ -67,12 +85,12 @@ func (c *PicoClient) AppendAs(ctx context.Context, name string, records []Append
 	return ProducerAck{Applied: applied, Duplicate: !applied && len(records) > 0, Ack: ack}, nil
 }
 
-func (c *PicoClient) append(ctx context.Context, name string, records []AppendRecord, headers http.Header) (AppendAck, error) {
-	ack, _, err := c.appendWithHeaders(ctx, name, records, headers)
+func (c *PicoClient) append(ctx context.Context, name string, partition *uint32, records []AppendRecord) (AppendAck, error) {
+	ack, _, err := c.appendWithHeaders(ctx, name, partition, records, nil)
 	return ack, err
 }
 
-func (c *PicoClient) appendWithHeaders(ctx context.Context, name string, records []AppendRecord, headers http.Header) (AppendAck, http.Header, error) {
+func (c *PicoClient) appendWithHeaders(ctx context.Context, name string, partition *uint32, records []AppendRecord, headers http.Header) (AppendAck, http.Header, error) {
 	payload, err := encodeBatch(records)
 	if err != nil {
 		return AppendAck{}, nil, &ClientError{Kind: ErrorBadRequest, Code: "invalid_record", Message: err.Error(), Cause: err}
@@ -81,7 +99,7 @@ func (c *PicoClient) appendWithHeaders(ctx context.Context, name string, records
 		headers = make(http.Header)
 	}
 	headers.Set("Content-Type", "application/vnd.picomq.batch")
-	response, err := c.core.send(ctx, wireRequest{method: http.MethodPost, url: c.core.streamURL(name, nil), headers: headers, body: payload})
+	response, err := c.core.send(ctx, wireRequest{method: http.MethodPost, url: c.core.streamURL(name, withPartition(nil, partition)), headers: headers, body: payload})
 	if err != nil {
 		return AppendAck{}, nil, err
 	}
@@ -92,7 +110,11 @@ func (c *PicoClient) appendWithHeaders(ctx context.Context, name string, records
 	return AppendAck{Start: defaultString(response.Header.Get("Pico-Start-Seq"), next), Next: next, Timestamp: int64(headerUint(response.Header, "Pico-Timestamp"))}, response.Header, nil
 }
 
-func (c *PicoClient) Read(ctx context.Context, name, from string, options ReadOptions) (page ReadPage, err error) {
+func (c *PicoClient) Read(ctx context.Context, name, from string, options ReadOptions) (ReadPage, error) {
+	return c.read(ctx, name, nil, from, options)
+}
+
+func (c *PicoClient) read(ctx context.Context, name string, partition *uint32, from string, options ReadOptions) (page ReadPage, err error) {
 	err = c.core.run(ctx, func() error {
 		query := url.Values{"format": {"binary"}, "seq": {from}}
 		if options.Limits.Count > 0 {
@@ -104,7 +126,7 @@ func (c *PicoClient) Read(ctx context.Context, name, from string, options ReadOp
 		if options.Live == LiveLongPoll {
 			query.Set("live", "long-poll")
 		}
-		response, callErr := c.core.send(ctx, wireRequest{method: http.MethodGet, url: c.core.streamURL(name, query)})
+		response, callErr := c.core.send(ctx, wireRequest{method: http.MethodGet, url: c.core.streamURL(name, withPartition(query, partition))})
 		if callErr != nil {
 			return callErr
 		}
@@ -145,13 +167,14 @@ func (c *PicoClient) List(ctx context.Context, prefix string, limit uint64) (lis
 		// The server uses snake_case; decode explicitly to keep the public model independent.
 		var raw struct {
 			Streams []struct {
-				Name        string `json:"name"`
-				ContentType string `json:"content_type"`
-				Start       uint64 `json:"start_seq"`
-				Next        uint64 `json:"next_seq"`
-				Closed      bool   `json:"closed"`
-				TTL         uint64 `json:"ttl"`
-				ExpiresAt   string `json:"expires_at"`
+				Name        string  `json:"name"`
+				ContentType string  `json:"content_type"`
+				Start       *uint64 `json:"start_seq"`
+				Next        *uint64 `json:"next_seq"`
+				Partitions  uint64  `json:"partitions"`
+				Closed      bool    `json:"closed"`
+				TTL         uint64  `json:"ttl"`
+				ExpiresAt   string  `json:"expires_at"`
 			} `json:"streams"`
 			HasMore bool `json:"has_more"`
 		}
@@ -161,18 +184,31 @@ func (c *PicoClient) List(ctx context.Context, prefix string, limit uint64) (lis
 		listing = StreamListing{Streams: make([]StreamInfo, 0, len(raw.Streams))}
 		listing.HasMore = raw.HasMore
 		for _, item := range raw.Streams {
-			listing.Streams = append(listing.Streams, StreamInfo{Name: item.Name, ContentType: item.ContentType, Start: strconv.FormatUint(item.Start, 10), Next: strconv.FormatUint(item.Next, 10), Closed: item.Closed, TTL: time.Duration(item.TTL) * time.Second, ExpiresAt: item.ExpiresAt})
+			listing.Streams = append(listing.Streams, StreamInfo{
+				Name:        item.Name,
+				ContentType: item.ContentType,
+				Start:       formatSeq(item.Start),
+				Next:        formatSeq(item.Next),
+				Partitions:  partitionCount(item.Partitions),
+				Closed:      item.Closed,
+				TTL:         time.Duration(item.TTL) * time.Second,
+				ExpiresAt:   item.ExpiresAt,
+			})
 		}
 		return nil
 	})
 	return
 }
 
-func (c *PicoClient) Trim(ctx context.Context, name string, seq uint64) (start string, err error) {
+func (c *PicoClient) Trim(ctx context.Context, name string, seq uint64) (string, error) {
+	return c.trim(ctx, name, nil, seq)
+}
+
+func (c *PicoClient) trim(ctx context.Context, name string, partition *uint32, seq uint64) (start string, err error) {
 	err = c.core.run(ctx, func() error {
 		headers := make(http.Header)
 		headers.Set("Pico-Trim-Seq", strconv.FormatUint(seq, 10))
-		response, callErr := c.core.send(ctx, wireRequest{method: http.MethodPost, url: c.core.streamURL(name, nil), headers: headers})
+		response, callErr := c.core.send(ctx, wireRequest{method: http.MethodPost, url: c.core.streamURL(name, withPartition(nil, partition)), headers: headers})
 		if callErr != nil {
 			return callErr
 		}
@@ -402,7 +438,12 @@ func (c *PicoClient) DescribeGroup(ctx context.Context, group string) (descripti
 	return
 }
 
-func (c *PicoClient) ListGroups(ctx context.Context) (groups []GroupSummary, err error) {
+func (c *PicoClient) DeleteGroup(ctx context.Context, group string) error {
+	_, err := c.groupCall(ctx, http.MethodDelete, c.core.groupURL(nil, group), nil, http.StatusNoContent)
+	return err
+}
+
+func (c *PicoClient) ListGroups(ctx context.Context) (groups []string, err error) {
 	err = c.core.run(ctx, func() error {
 		data, callErr := c.groupCall(ctx, http.MethodGet, c.core.groupURL(nil), nil, http.StatusOK)
 		if callErr != nil {
@@ -410,19 +451,13 @@ func (c *PicoClient) ListGroups(ctx context.Context) (groups []GroupSummary, err
 		}
 
 		var raw struct {
-			Groups []struct {
-				Group string `json:"group"`
-				State string `json:"state"`
-			} `json:"groups"`
+			Groups []string `json:"groups"`
 		}
 		if callErr = json.Unmarshal(data, &raw); callErr != nil {
 			return invalidResponse(callErr)
 		}
 
-		groups = make([]GroupSummary, 0, len(raw.Groups))
-		for _, group := range raw.Groups {
-			groups = append(groups, GroupSummary{Group: group.Group, State: group.State})
-		}
+		groups = raw.Groups
 		return nil
 	})
 	return
@@ -467,6 +502,13 @@ func nonNil(values []string) []string {
 		return []string{}
 	}
 	return values
+}
+
+func formatSeq(value *uint64) string {
+	if value == nil {
+		return ""
+	}
+	return strconv.FormatUint(*value, 10)
 }
 
 func defaultString(value, fallback string) string {

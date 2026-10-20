@@ -1,6 +1,6 @@
 # TypeScript client
 
-`@picomq/client` is the TypeScript SDK for the HTTP protocols. It speaks the native Pico protocol and [Durable Streams](/docs/design/protocols) behind one `StreamApi` surface, and includes a batching producer for high-throughput appends. It runs on Node 20+ and anywhere else `fetch` and web streams exist.
+`@picomq/client` is the TypeScript SDK for the HTTP protocols. It speaks the native Pico protocol and [Durable Streams](/docs/design/protocols) behind one `StreamApi` surface, and adds a batching producer and consumer group members on Pico. It runs on Node 20+ and anywhere else `fetch` and web streams exist.
 
 ## Install
 
@@ -24,23 +24,21 @@ for await (const record of stream.records()) {
 }
 ```
 
-Records accept `Uint8Array`, `string`, or `{ body, key, headers }`. Header values are strings or `Uint8Array`. Records read back carry the server timestamp and the key when one was set. Pass `{ live: true }` to `records()` to keep tailing after catching up instead of returning.
+Records accept `Uint8Array`, `string`, or `{ body, key, headers, timestamp }`. Header values are strings or `Uint8Array`. Records read back carry the server timestamp, and the key when one was set. `records()` starts at the beginning, or at a position you pass, and `records(from, { live: true })` keeps tailing after catching up. Positions are protocol-specific strings, so always continue from the `next` a call returned.
 
-## Configuration
+## Partitions
 
-`connect` takes an optional `ClientConfig`:
+A topic created over Kafka can have several partitions. Calls that address one take a `partition` option: `head`, `append`, `read`, `records`, `subscribe`, `trim`, and producers.
 
-| Field | Meaning |
-| --- | --- |
-| `token` | Bearer token sent on every request, including each redirect hop. |
-| `http2` | Speak cleartext HTTP/2 (h2c) for multiplexed appends. Opt-in, the server must support it. |
-| `retry` | `RetryPolicy` applied to idempotent calls (`create`, `head`, `read`, `list`, `close`, `delete`, `trim`). Plain `append` is never retried because it has no dedupe key, use a producer when you need safe retries. |
-
-The client follows ownership redirects (`307`) itself and re-attaches the credential on every hop, which standard HTTP clients refuse to do across origins. See the [HTTP API conventions](/docs/api#conventions).
+```ts
+for await (const record of stream.records(pico.beginning(), { partition: 2 })) {
+  console.log(record.position)
+}
+```
 
 ## Producers
 
-For exactly-once appends, a producer batches sends, sequences them under a producer id and epoch, and dedupes retries server side.
+A producer batches sends, sequences them under a producer id and epoch, and dedupes retries server side.
 
 ```ts
 const producer = stream.producer('writer-1')
@@ -48,7 +46,23 @@ const seq = await producer.sendDurable('x')
 await producer.close()
 ```
 
-`send()` returns a `Pending` whose `durable()` resolves to the assigned sequence number. If a batch fails terminally the session is poisoned and further sends throw, so open a new producer with a higher epoch to continue.
+`send()` returns a `Pending` whose `durable()` resolves to the assigned sequence number. If a batch fails terminally the producer is poisoned and further sends throw, so open a new producer with a higher `epoch` to continue. For one-off idempotent appends, `appendAs` sends records under an explicit producer id, epoch, and sequence.
+
+## Consumer groups
+
+A `GroupMember` joins, heartbeats in the background, and follows rebalances. See [Consumer groups](/docs/design/groups) for how assignment works.
+
+```ts
+import { GroupMember } from '@picomq/client'
+
+const member = await GroupMember.join(pico, 'billing', ['/orders', '/payments'])
+for (const topic of member.assignment().streams) {
+  await member.commit({ [topic]: { position: 42 } })
+}
+await member.leave()
+```
+
+`assignments()` yields each new assignment after a rebalance, and `error()` reports a member that could not rejoin. The lower-level calls are on the Pico client: `joinGroup`, `heartbeat`, `groupAssignment`, `leaveGroup`, `commitOffsets`, `fetchOffsets`, `describeGroup`, `listGroups`, and `deleteGroup`.
 
 ## Live subscriptions
 
@@ -65,10 +79,18 @@ for await (const event of stream.subscribe(pico.beginning())) {
 
 Subscriptions reconnect with exponential backoff by default. Tune with `reconnect`, `maxReconnectAttempts`, `reconnectDelayMs`, and `maxReconnectDelayMs`, and cancel with an `AbortSignal`.
 
+## Configuration
+
+`connect` takes an optional `ClientConfig`:
+
+| Field | Meaning |
+| --- | --- |
+| `token` | Bearer token sent on every request, including each redirect hop |
+| `http2` | Speak cleartext HTTP/2 (h2c) for multiplexed appends. The server must support it |
+| `retry` | `RetryPolicy` for idempotent calls: `create`, `head`, `read`, `list`, `close`, `delete`, `trim`. Plain `append` is never retried, because it has no dedupe key |
+
+The client follows ownership redirects itself and re-attaches the credential on every hop, see the [HTTP API conventions](/docs/api#conventions).
+
 ## Errors
 
-Every failure is a `ClientError` with a stable `kind` (`not_found`, `closed`, `conflict`, `stale_epoch`, `transport`, and friends), the HTTP `status`, and a machine readable `code`.
-
-## Protocol differences
-
-The `StreamApi` surface exposes the union of both protocols and throws an `unsupported` error where one side has no equivalent. Notably, listing streams is Pico-only, batch appends over Durable Streams are limited to one record per request, and position tokens are protocol-specific strings, so always feed back the `next` value a call returned rather than constructing one.
+Every failure is a `ClientError` with a stable `kind`, such as `not_found`, `closed`, `conflict`, `stale_epoch`, `permission_denied`, `transport`, or `unsupported`, plus the HTTP `status` and the server's `code`. Durable Streams has no equivalent for `list`, `trim`, or groups, which throw `unsupported`.

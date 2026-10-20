@@ -262,12 +262,12 @@ async fn writer(
         let result = match client.as_ref() {
             Client::Pico(client) => {
                 client
-                    .append(&name, &payload.records, payload.content_type)
+                    .append(&name, None, &payload.records, payload.content_type)
                     .await
             }
             Client::Ds(client) => {
                 client
-                    .append(&name, &payload.records, payload.content_type)
+                    .append(&name, None, &payload.records, payload.content_type)
                     .await
             }
         };
@@ -375,7 +375,7 @@ async fn reader(client: Arc<Client>, name: String, read: Arc<Counters>, stop: Ar
 
     while !stop.load(Ordering::Relaxed) {
         match api
-            .read(&name, &next, Live::Off, ReadLimits::bytes(READ_BYTES))
+            .read(&name, None, &next, Live::Off, ReadLimits::bytes(READ_BYTES))
             .await
         {
             Ok(page) => {

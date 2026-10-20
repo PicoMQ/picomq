@@ -3,11 +3,12 @@ import { Producer, type ProducerClient } from '../src/producer'
 import { RetryPolicy } from '../src/retry'
 import { toEnvelopes } from '../src/record'
 import { ClientError } from '../src/error'
-import type { AppendInput, ProducerAck, ProducerRef } from '../src/types'
+import type { AppendInput, PartitionOptions, ProducerAck, ProducerRef } from '../src/types'
 
 interface Call {
   records: AppendInput[]
   producer: ProducerRef
+  options: PartitionOptions | undefined
 }
 
 function fakeClient(
@@ -15,8 +16,8 @@ function fakeClient(
 ): { client: ProducerClient; calls: Call[] } {
   const calls: Call[] = []
   const client: ProducerClient = {
-    async appendAs(_name, records, producer) {
-      const call = { records, producer }
+    async appendAs(_name, records, producer, options) {
+      const call = { records, producer, options }
       calls.push(call)
       const result = respond(call, calls.length - 1)
       if (result instanceof Error) throw result
@@ -147,6 +148,23 @@ describe('Producer', () => {
     await a.durable()
     await b.durable()
     expect(events).toEqual(['start:0', 'end:0', 'start:1', 'end:1'])
+    await producer.close()
+  })
+
+  it('sends the configured partition on every append', async () => {
+    const { client, calls } = fakeClient((call) => okAck(0, call.records.length))
+    const producer = new Producer(client, '/s', 'id', { lingerMs: 0, partition: 4 })
+    await producer.sendDurable('a')
+    await producer.sendDurable('b')
+    expect(calls.map((call) => call.options)).toEqual([{ partition: 4 }, { partition: 4 }])
+    await producer.close()
+  })
+
+  it('omits the partition when unset', async () => {
+    const { client, calls } = fakeClient((call) => okAck(0, call.records.length))
+    const producer = new Producer(client, '/s', 'id', { lingerMs: 0 })
+    await producer.sendDurable('a')
+    expect(calls[0]!.options).toEqual({})
     await producer.close()
   })
 

@@ -241,7 +241,7 @@ kcat -C -b $BOOTSTRAP -t demo -o beginning -e
 kcat -G demo-group -b $BOOTSTRAP -X auto.offset.reset=earliest demo
 ```
 
-Topic deletion goes through `DeleteTopics`, which `kcat` does not expose. Use any admin-capable client, or the admin API at `$ADMIN` to inspect and delete the stream behind the topic.
+Topic deletion goes through `DeleteTopics`, which `kcat` does not expose. Use any Kafka admin client, or `DELETE` the topic over HTTP on the stream listener. The admin API at `$ADMIN` shows where each partition lives.
 
 :::
 

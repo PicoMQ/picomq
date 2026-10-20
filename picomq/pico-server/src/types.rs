@@ -5,6 +5,9 @@ use bytes::Bytes;
 use crate::error::{ErrorKind, ServiceError};
 use crate::record::LogRecord;
 pub use crate::record::StreamRecord;
+use crate::topic::Topic;
+
+pub const MAX_NEW_PARTITIONS: u32 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OffsetToken {
@@ -95,12 +98,6 @@ pub struct NumericProducer {
     pub first_seq: i32,
 }
 
-#[derive(Debug, Clone)]
-pub struct AppendBatchCommand {
-    pub name: String,
-    pub payload: Bytes,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppendBatchResult {
     pub base_offset: u64,
@@ -109,7 +106,7 @@ pub struct AppendBatchResult {
 }
 
 pub struct SubmittedBatchAppend {
-    pub(crate) name: String,
+    pub(crate) key: String,
     pub(crate) stream_id: u64,
     pub(crate) base_offset: u64,
     pub(crate) log_start_offset: u64,
@@ -117,6 +114,9 @@ pub struct SubmittedBatchAppend {
     pub(crate) duplicate: bool,
     pub(crate) pending: Option<s3stream::PendingAppend>,
     pub(crate) batches: Vec<StreamBatch>,
+    pub(crate) epoch: u64,
+    /// Producer state to persist once the append is durable.
+    pub(crate) checkpoint: Option<crate::log::LogEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,21 +139,22 @@ pub struct BatchReadResult {
 pub struct StreamWatermarks {
     pub log_start_offset: u64,
     pub high_watermark: u64,
+    pub epoch: u64,
 }
 
 #[derive(Debug, Clone)]
 pub struct CreateCommand {
     pub name: String,
     pub content_type: String,
+    pub partitions: u32,
+    /// Node to place each partition on. Empty lets placement choose.
+    pub owners: Vec<i32>,
     pub ttl_seconds: Option<u64>,
     pub expires_at_ms: Option<i64>,
     pub closed: bool,
     pub initial_records: Vec<LogRecord>,
-    pub external_id: Option<[u8; 16]>,
-    pub internal: bool,
     pub schema_name: Option<String>,
     pub schema_validate: bool,
-    pub kafka_topic: Option<String>,
 }
 
 impl CreateCommand {
@@ -161,32 +162,15 @@ impl CreateCommand {
         Self {
             name: name.into(),
             content_type: content_type.into(),
+            partitions: 1,
+            owners: Vec::new(),
             ttl_seconds: None,
             expires_at_ms: None,
             closed: false,
             initial_records: Vec::new(),
-            external_id: None,
-            internal: false,
             schema_name: None,
             schema_validate: false,
-            kafka_topic: None,
         }
-    }
-
-    pub fn with_external_id(
-        name: impl Into<String>,
-        content_type: impl Into<String>,
-        external_id: [u8; 16],
-    ) -> Self {
-        Self {
-            external_id: Some(external_id),
-            ..Self::new(name, content_type)
-        }
-    }
-
-    pub fn with_kafka_topic(mut self, topic: impl Into<String>) -> Self {
-        self.kafka_topic = Some(topic.into());
-        self
     }
 
     pub fn with_schema_name(mut self, schema_name: impl Into<String>) -> Self {
@@ -208,37 +192,50 @@ impl CreateCommand {
                 "ttlSeconds and expiresAt are mutually exclusive",
             ));
         }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamConfig {
-    pub name: String,
-    pub schema_name: Option<String>,
-    pub schema_validate: bool,
-    pub kafka_topic: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct UpdateStreamCommand {
-    pub name: String,
-    pub schema_name: Option<Option<String>>,
-    pub schema_validate: Option<bool>,
-    pub kafka_topic: Option<Option<String>>,
-}
-
-impl UpdateStreamCommand {
-    pub fn validate(&self) -> Result<(), ServiceError> {
-        if self.schema_name.is_none()
-            && self.schema_validate.is_none()
-            && self.kafka_topic.is_none()
-        {
+        if self.partitions == 0 {
             return Err(ServiceError::with_message(
                 ErrorKind::BadRequest,
                 None,
                 false,
-                "no stream config fields to update",
+                "a topic needs at least one partition",
+            ));
+        }
+        if self.partitions > MAX_NEW_PARTITIONS {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                format!("a topic is created with at most {MAX_NEW_PARTITIONS} partitions"),
+            ));
+        }
+        if !self.owners.is_empty() && self.owners.len() != self.partitions as usize {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "owners must name a node for every partition",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UpdateTopicCommand {
+    pub name: String,
+    pub schema_name: Option<Option<String>>,
+    pub schema_validate: Option<bool>,
+}
+
+impl UpdateTopicCommand {
+    pub fn validate(&self) -> Result<(), ServiceError> {
+        if self.schema_name.is_none() && self.schema_validate.is_none() {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "no topic config fields to update",
             ));
         }
         Ok(())
@@ -248,12 +245,11 @@ impl UpdateStreamCommand {
 #[derive(Debug, Clone)]
 pub struct CreateResult {
     pub created: bool,
-    pub meta: StreamMeta,
+    pub meta: TopicMeta,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct AppendCommand {
-    pub name: String,
     pub records: Vec<LogRecord>,
     pub content_type: Option<String>,
     pub stream_seq: Option<String>,
@@ -309,25 +305,30 @@ impl ReadResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamMeta {
-    pub name: String,
+#[derive(Debug, Clone)]
+pub struct LogRead {
+    pub records: Vec<StreamRecord>,
+    pub next_offset: OffsetToken,
+    pub up_to_date: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogOffsets {
     pub stream_id: u64,
-    pub content_type: String,
-    pub ttl_seconds: Option<u64>,
-    pub expires_at_ms: Option<i64>,
     pub start_offset: OffsetToken,
     pub next_offset: OffsetToken,
     pub submitted_offset: OffsetToken,
-    pub closed: bool,
-    pub external_id: [u8; 16],
-    pub schema_name: Option<String>,
-    pub kafka_topic: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicMeta {
+    pub topic: Topic,
+    pub partitions: Vec<LogOffsets>,
 }
 
 #[derive(Debug, Clone)]
-pub struct StreamList {
-    pub streams: Vec<StreamMeta>,
+pub struct TopicList {
+    pub topics: Vec<TopicMeta>,
     pub has_more: bool,
 }
 
@@ -340,24 +341,32 @@ pub struct NodeMeta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Owner {
     pub stream_id: Option<u64>,
+    pub epoch: i64,
     pub local: bool,
     pub owner_node_id: Option<i32>,
     pub owner_advertised_address: Option<String>,
 }
 
 impl Owner {
-    pub fn local(stream_id: Option<u64>) -> Self {
+    pub fn local(stream_id: Option<u64>, epoch: i64) -> Self {
         Self {
             stream_id,
+            epoch,
             local: true,
             owner_node_id: None,
             owner_advertised_address: None,
         }
     }
 
-    pub fn remote(stream_id: u64, owner_node_id: i32, owner_advertised_address: String) -> Self {
+    pub fn remote(
+        stream_id: u64,
+        epoch: i64,
+        owner_node_id: i32,
+        owner_advertised_address: String,
+    ) -> Self {
         Self {
             stream_id: Some(stream_id),
+            epoch,
             local: false,
             owner_node_id: Some(owner_node_id),
             owner_advertised_address: Some(owner_advertised_address),

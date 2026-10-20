@@ -1,13 +1,13 @@
-//! Stream ownership: who serves a named stream (the HTTP layer turns a remote
+//! Log ownership: which node serves a log (the HTTP layer turns a remote
 //! owner into a 307 redirect).
 //!
 //! [`MetadataOwnershipService`] reads the owner from the published metadata
 //! view. The decision table:
 //!
-//! 1. name not registered → local (create lands here).
-//! 2. pending transfer → the transfer target.
-//! 3. opened, or placed but never opened → the owning node.
-//! 4. closed → local (any node can revive it).
+//! 1. log not registered → local (create lands here).
+//! 2. pending transfer to a live node → the transfer target.
+//! 3. opened, or placed on a live node → the owning node.
+//! 4. owner fenced or never placed → local.
 
 use std::sync::Arc;
 
@@ -16,12 +16,13 @@ use picomq_metadata::ViewPublisher;
 use s3stream::StreamState;
 
 use crate::error::ServiceError;
+use crate::log::Log;
 use crate::service::S3StreamService;
 use crate::types::{NodeMeta, Owner};
 
 #[async_trait]
 pub trait OwnershipService: Send + Sync {
-    async fn owner_of(&self, name: &str) -> Result<Owner, ServiceError>;
+    async fn owner_of(&self, log: &Log) -> Result<Owner, ServiceError>;
 
     fn local_node(&self) -> NodeMeta;
 }
@@ -51,43 +52,61 @@ impl MetadataOwnershipService {
 
 #[async_trait]
 impl OwnershipService for MetadataOwnershipService {
-    async fn owner_of(&self, name: &str) -> Result<Owner, ServiceError> {
-        let Some(stream_id) = self.service.lookup_stream_id(name).await? else {
-            return Ok(Owner::local(None));
+    async fn owner_of(&self, log: &Log) -> Result<Owner, ServiceError> {
+        let Some(stream_id) = self.service.stream_id(log)? else {
+            return Ok(Owner::local(None, -1));
         };
         let view = self.views.load();
+        let epoch = view
+            .state
+            .streams
+            .get(&stream_id)
+            .map(|row| row.epoch)
+            .unwrap_or(-1);
 
-        // A pending transfer routes to the target, which stalls the open
-        // until the handoff settles.
-        if let Some(pending) = view.state.pending_transfers.get(&stream_id) {
+        let pending = view
+            .state
+            .pending_transfers
+            .get(&stream_id)
+            .filter(|pending| {
+                view.state
+                    .nodes
+                    .get(&pending.to_node)
+                    .is_some_and(|node| !node.fenced)
+            });
+        if let Some(pending) = pending {
             if pending.to_node == self.node_id {
-                return Ok(Owner::local(Some(stream_id)));
+                return Ok(Owner::local(Some(stream_id), epoch));
             }
             return Ok(match view.state.get_node_address(pending.to_node) {
-                Some(address) => Owner::remote(stream_id, pending.to_node, address.to_owned()),
-                None => Owner::local(Some(stream_id)),
+                Some(address) => {
+                    Owner::remote(stream_id, epoch, pending.to_node, address.to_owned())
+                }
+                None => Owner::local(Some(stream_id), epoch),
             });
         }
 
         let Some(row) = view.state.streams.get(&stream_id).copied() else {
-            return Ok(Owner::local(Some(stream_id)));
+            return Ok(Owner::local(Some(stream_id), epoch));
         };
-        // Opened streams route to their owner. Placed streams that never
-        // opened route to their placement. Closed streams stay local so any
-        // node can revive them after their owner shut down.
-        let routable = row.state == StreamState::Opened || (row.epoch == -1 && row.node_id != -1);
-        if !routable {
-            return Ok(Owner::local(Some(stream_id)));
+        let owner_live = view
+            .state
+            .nodes
+            .get(&row.node_id)
+            .is_some_and(|node| !node.fenced);
+        let routable = owner_live && (row.state == StreamState::Opened || row.node_id != -1);
+        if !routable || row.node_id == self.node_id {
+            return Ok(Owner::local(Some(stream_id), epoch));
         }
-        let owner_id = row.node_id;
-        if owner_id == self.node_id {
-            return Ok(Owner::local(Some(stream_id)));
-        }
-        match view.state.get_node_address(owner_id) {
-            Some(address) if !address.is_empty() => {
-                Ok(Owner::remote(stream_id, owner_id, address.to_owned()))
-            }
-            _ => Ok(Owner::local(Some(stream_id))),
+
+        match view.state.get_node_address(row.node_id) {
+            Some(address) if !address.is_empty() => Ok(Owner::remote(
+                stream_id,
+                epoch,
+                row.node_id,
+                address.to_owned(),
+            )),
+            _ => Ok(Owner::local(Some(stream_id), epoch)),
         }
     }
 

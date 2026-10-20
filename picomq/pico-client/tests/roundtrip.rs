@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use picomq_client::{ErrorKind, Live, Protocol, ReadLimits, connect};
 use picomq_http::HttpProtocol as ServeProtocol;
-use picomq_runtime::{MetaBackend, PicoServer, ServerConfig};
+use picomq_runtime::{KafkaConfig, MetaBackend, PicoServer, ServerConfig};
 
 struct Server {
     server: PicoServer,
@@ -19,7 +19,7 @@ async fn start(protocol: Protocol, dir: &std::path::Path) -> Server {
     let server = picomq_runtime::start(ServerConfig {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         admin_addr: None,
-        kafka: None,
+        kafka: KafkaConfig::new(SocketAddr::from(([127, 0, 0, 1], 0))),
         http_protocol: match protocol {
             Protocol::Pico => ServeProtocol::Pico,
             Protocol::Ds => ServeProtocol::Ds,
@@ -48,7 +48,7 @@ async fn lifecycle(protocol: Protocol) {
     let server = start(protocol, dir.path()).await;
     let client = connect(protocol, &server.endpoint).unwrap();
 
-    assert!(client.head("/streams/nope").await.unwrap().is_none());
+    assert!(client.head("/streams/nope", None).await.unwrap().is_none());
 
     assert!(
         client
@@ -67,18 +67,24 @@ async fn lifecycle(protocol: Protocol) {
     let ack = client
         .append(
             "/streams/orders",
+            None,
             &[Bytes::from_static(b"first")],
             "text/plain",
         )
         .await
         .unwrap();
-    let head = client.head("/streams/orders").await.unwrap().unwrap();
-    assert_eq!(head.next, ack.next, "head agrees with the append ack");
+    let head = client.head("/streams/orders", None).await.unwrap().unwrap();
+    assert_eq!(
+        head.next,
+        Some(ack.next.clone()),
+        "head agrees with the append ack"
+    );
     assert!(!head.closed);
 
     let page = client
         .read(
             "/streams/orders",
+            None,
             &client.beginning(),
             Live::Off,
             ReadLimits::server_default(),
@@ -93,6 +99,7 @@ async fn lifecycle(protocol: Protocol) {
     let idle = client
         .read(
             "/streams/orders",
+            None,
             &page.next,
             Live::LongPoll,
             ReadLimits::server_default(),
@@ -104,12 +111,13 @@ async fn lifecycle(protocol: Protocol) {
 
     let final_position = client.close("/streams/orders").await.unwrap();
     assert_eq!(final_position, ack.next);
-    let closed = client.head("/streams/orders").await.unwrap().unwrap();
+    let closed = client.head("/streams/orders", None).await.unwrap().unwrap();
     assert!(closed.closed);
 
     let error = client
         .append(
             "/streams/orders",
+            None,
             &[Bytes::from_static(b"after close")],
             "text/plain",
         )
@@ -179,6 +187,7 @@ async fn pico_records_carry_timestamps() {
     client
         .append(
             "/streams/ts",
+            None,
             &[Bytes::from_static(b"a"), Bytes::from_static(b"b")],
             "text/plain",
         )
@@ -188,6 +197,7 @@ async fn pico_records_carry_timestamps() {
     let page = client
         .read(
             "/streams/ts",
+            None,
             &client.beginning(),
             Live::Off,
             ReadLimits::server_default(),

@@ -9,7 +9,7 @@ import (
 )
 
 func (c *DurableStreamsClient) Stream(name string) *Stream {
-	return &Stream{api: c, name: name, beginning: c.Beginning()}
+	return &Stream{client: c, name: name}
 }
 
 func (c *DurableStreamsClient) Create(ctx context.Context, name, contentType string, ttl time.Duration) (created bool, err error) {
@@ -30,9 +30,13 @@ func (c *DurableStreamsClient) Create(ctx context.Context, name, contentType str
 	return
 }
 
-func (c *DurableStreamsClient) Head(ctx context.Context, name string) (info *StreamInfo, err error) {
+func (c *DurableStreamsClient) Head(ctx context.Context, name string) (*StreamInfo, error) {
+	return c.head(ctx, name, nil)
+}
+
+func (c *DurableStreamsClient) head(ctx context.Context, name string, partition *uint32) (info *StreamInfo, err error) {
 	err = c.core.run(ctx, func() error {
-		response, e := c.core.send(ctx, wireRequest{method: http.MethodHead, url: c.core.streamURL(name, nil)})
+		response, e := c.core.send(ctx, wireRequest{method: http.MethodHead, url: c.core.streamURL(name, withPartition(nil, partition))})
 		if e != nil {
 			return e
 		}
@@ -44,13 +48,33 @@ func (c *DurableStreamsClient) Head(ctx context.Context, name string) (info *Str
 		if _, e = expectDS(response, http.StatusOK); e != nil {
 			return e
 		}
-		info = &StreamInfo{Name: name, ContentType: response.Header.Get("Content-Type"), Start: "-1", Next: response.Header.Get("Stream-Next-Offset"), Closed: headerBool(response.Header, "Stream-Closed"), TTL: time.Duration(headerUint(response.Header, "Stream-TTL")) * time.Second, ExpiresAt: response.Header.Get("Stream-Expires-At")}
+
+		next := response.Header.Get("Stream-Next-Offset")
+		start := ""
+		if next != "" {
+			start = "-1"
+		}
+
+		info = &StreamInfo{
+			Name:        name,
+			ContentType: response.Header.Get("Content-Type"),
+			Start:       start,
+			Next:        next,
+			Partitions:  partitionCount(headerUint(response.Header, "Stream-Partitions")),
+			Closed:      headerBool(response.Header, "Stream-Closed"),
+			TTL:         time.Duration(headerUint(response.Header, "Stream-TTL")) * time.Second,
+			ExpiresAt:   response.Header.Get("Stream-Expires-At"),
+		}
 		return nil
 	})
 	return
 }
 
 func (c *DurableStreamsClient) Append(ctx context.Context, name string, records []AppendRecord) (AppendAck, error) {
+	return c.append(ctx, name, nil, records)
+}
+
+func (c *DurableStreamsClient) append(ctx context.Context, name string, partition *uint32, records []AppendRecord) (AppendAck, error) {
 	if len(records) != 1 {
 		return AppendAck{}, unsupported("the Durable Streams protocol appends exactly one record per request")
 	}
@@ -66,7 +90,7 @@ func (c *DurableStreamsClient) Append(ctx context.Context, name string, records 
 		contentType = "application/octet-stream"
 	}
 	h.Set("Content-Type", contentType)
-	response, err := c.core.send(ctx, wireRequest{method: http.MethodPost, url: c.core.streamURL(name, nil), headers: h, body: records[0].Body})
+	response, err := c.core.send(ctx, wireRequest{method: http.MethodPost, url: c.core.streamURL(name, withPartition(nil, partition)), headers: h, body: records[0].Body})
 	if err != nil {
 		return AppendAck{}, err
 	}
@@ -77,13 +101,17 @@ func (c *DurableStreamsClient) Append(ctx context.Context, name string, records 
 	return AppendAck{Start: next, Next: next}, nil
 }
 
-func (c *DurableStreamsClient) Read(ctx context.Context, name, from string, options ReadOptions) (page ReadPage, err error) {
+func (c *DurableStreamsClient) Read(ctx context.Context, name, from string, options ReadOptions) (ReadPage, error) {
+	return c.read(ctx, name, nil, from, options)
+}
+
+func (c *DurableStreamsClient) read(ctx context.Context, name string, partition *uint32, from string, options ReadOptions) (page ReadPage, err error) {
 	err = c.core.run(ctx, func() error {
 		q := url.Values{"offset": {from}}
 		if options.Live == LiveLongPoll {
 			q.Set("live", "long-poll")
 		}
-		response, e := c.core.send(ctx, wireRequest{method: http.MethodGet, url: c.core.streamURL(name, q)})
+		response, e := c.core.send(ctx, wireRequest{method: http.MethodGet, url: c.core.streamURL(name, withPartition(q, partition))})
 		if e != nil {
 			return e
 		}

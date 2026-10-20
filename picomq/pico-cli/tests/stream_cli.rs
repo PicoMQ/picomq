@@ -88,6 +88,102 @@ async fn ds_protocol_lifecycle() {
     lifecycle("ds").await;
 }
 
+async fn partition_flag(protocol: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(dir.path(), protocol);
+    await_ready(&reqwest::Client::new(), &server.admin_url).await;
+
+    pico(
+        &server,
+        protocol,
+        &["create", "/streams/single", "--content-type", "text/plain"],
+        None,
+    )
+    .ok();
+
+    let head = pico(&server, protocol, &["head", "/streams/single"], None).ok();
+    assert!(head.stdout.starts_with("partitions=1 "), "{}", head.stdout);
+
+    let appended = pico(
+        &server,
+        protocol,
+        &[
+            "append",
+            "/streams/single",
+            "--partition",
+            "0",
+            "--content-type",
+            "text/plain",
+        ],
+        Some("alpha\n"),
+    )
+    .ok();
+    assert!(appended.stderr.contains("next="), "{}", appended.stderr);
+
+    let head = pico(
+        &server,
+        protocol,
+        &["head", "/streams/single", "--partition", "0"],
+        None,
+    )
+    .ok();
+    assert!(head.stdout.starts_with("partitions=1 "), "{}", head.stdout);
+    assert!(!head.stdout.contains("next=-"), "{}", head.stdout);
+
+    let read = pico(
+        &server,
+        protocol,
+        &["read", "/streams/single", "--partition", "0"],
+        None,
+    )
+    .ok();
+    assert!(read.stdout.contains("alpha"), "{}", read.stdout);
+
+    let head = pico(
+        &server,
+        protocol,
+        &["head", "/streams/single", "--partition", "1"],
+        None,
+    );
+    assert_eq!(head.code, 1, "{}", head.stderr);
+    assert!(head.stderr.contains("not found"), "{}", head.stderr);
+
+    let appended = pico(
+        &server,
+        protocol,
+        &[
+            "append",
+            "/streams/single",
+            "--partition",
+            "1",
+            "--content-type",
+            "text/plain",
+        ],
+        Some("beta\n"),
+    );
+    assert_eq!(appended.code, 1, "{}", appended.stderr);
+    assert!(appended.stderr.contains("not_found"), "{}", appended.stderr);
+
+    let read = pico(
+        &server,
+        protocol,
+        &["read", "/streams/single", "--partition", "1"],
+        None,
+    );
+    assert_eq!(read.code, 1, "{}", read.stderr);
+    assert!(read.stderr.contains("not_found"), "{}", read.stderr);
+}
+
+#[tokio::test]
+async fn pico_protocol_partition_flag() {
+    partition_flag("pico").await;
+}
+
+#[tokio::test]
+async fn ds_protocol_partition_flag() {
+    partition_flag("ds").await;
+}
+
 /// Batching and listing are Pico protocol features. The CLI says so instead of
 /// pretending.
 #[tokio::test]
@@ -121,7 +217,7 @@ async fn protocol_specific_commands() {
 
     let listed = pico(&server, "pico", &["ls", "--prefix", "/streams/"], None).ok();
     assert!(
-        listed.stdout.contains("/streams/batched"),
+        listed.stdout.contains("/streams/batched partitions=1 "),
         "{}",
         listed.stdout
     );

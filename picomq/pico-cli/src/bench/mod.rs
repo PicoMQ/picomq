@@ -45,6 +45,10 @@ pub struct BenchArgs {
     #[arg(long, default_value_t = 1)]
     streams: usize,
 
+    /// Partitions per topic (Kafka only).
+    #[arg(long, default_value_t = 1)]
+    partitions: i32,
+
     /// Connection pools to spread appends over, so one pool is not the limit.
     #[arg(long, default_value_t = 1)]
     connections: usize,
@@ -117,6 +121,9 @@ pub(crate) struct Schedule {
 pub async fn run(endpoint: &Target, args: BenchArgs) -> Result<i32, ClientError> {
     match endpoint.protocol {
         ProtocolArg::Kafka => kafka::run(endpoint, args).await,
+        ProtocolArg::Pico | ProtocolArg::Ds if args.partitions > 1 => Err(
+            ClientError::unsupported("--partitions needs --protocol kafka"),
+        ),
         ProtocolArg::Pico | ProtocolArg::Ds => http::run(endpoint, args).await,
     }
 }

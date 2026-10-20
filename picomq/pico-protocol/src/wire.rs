@@ -65,6 +65,21 @@ pub(crate) fn stream_path(name: &str) -> String {
     }
 }
 
+pub const Q_PARTITION: &str = "partition";
+
+pub(crate) fn partition_path(name: &str, partition: Option<u32>) -> String {
+    let mut path = stream_path(name);
+    push_partition(&mut path, partition);
+    path
+}
+
+pub(crate) fn push_partition(target: &mut String, partition: Option<u32>) {
+    if let Some(partition) = partition {
+        let separator = if target.contains('?') { '&' } else { '?' };
+        target.push_str(&format!("{separator}{Q_PARTITION}={partition}"));
+    }
+}
+
 pub(crate) fn urlencode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {

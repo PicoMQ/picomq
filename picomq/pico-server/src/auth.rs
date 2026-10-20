@@ -1,7 +1,4 @@
 //! KV-backed token store over the metadata plane.
-//!
-//! Records live at `auth/token/{id}` with no leading slash, so they cannot
-//! collide with stream registry keys (which are always URI paths).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,18 +7,18 @@ use async_trait::async_trait;
 use picomq_auth::{
     AuthError, Authorizer, ID_MAX_LEN, ID_MIN_LEN, TokenRecord, TokenStore, Verifier,
 };
-use s3stream::{KVClient, KeyValue};
+use picomq_metadata::MetadataKvClient;
 
 /// Metadata KV prefix for token records. Must not start with `/`.
 pub const TOKEN_KEY_PREFIX: &str = "auth/token/";
 
-/// [`TokenStore`] over an [`KVClient`].
+/// [`TokenStore`] over the metadata KV.
 pub struct KvTokenStore {
-    kv: Arc<dyn KVClient>,
+    kv: MetadataKvClient,
 }
 
 impl KvTokenStore {
-    pub fn new(kv: Arc<dyn KVClient>) -> Self {
+    pub fn new(kv: MetadataKvClient) -> Self {
         Self { kv }
     }
 
@@ -44,12 +41,7 @@ fn validate_id(id: &str) -> Result<(), AuthError> {
 #[async_trait]
 impl TokenStore for KvTokenStore {
     async fn get(&self, id: &str) -> Result<Option<TokenRecord>, AuthError> {
-        let Some(bytes) = self
-            .kv
-            .get_kv(&Self::key(id))
-            .await
-            .map_err(Self::map_err)?
-        else {
+        let Some(bytes) = self.kv.get_kv(&Self::key(id)) else {
             return Ok(None);
         };
         Ok(Some(TokenRecord::decode(&bytes)?))
@@ -58,16 +50,13 @@ impl TokenStore for KvTokenStore {
     async fn put_if_absent(&self, record: TokenRecord) -> Result<bool, AuthError> {
         validate_id(&record.id)?;
         let key = Self::key(&record.id);
-        if self.kv.get_kv(&key).await.map_err(Self::map_err)?.is_some() {
+        if self.kv.get_kv(&key).is_some() {
             return Ok(false);
         }
         let encoded = record.encode();
         let stored = self
             .kv
-            .put_kv_if_absent(KeyValue {
-                key,
-                value: encoded.clone(),
-            })
+            .put_kv_if_absent(&key, encoded.clone())
             .await
             .map_err(Self::map_err)?;
         Ok(stored == encoded)
@@ -75,7 +64,7 @@ impl TokenStore for KvTokenStore {
 
     async fn delete_if(&self, id: &str, expected: &Verifier) -> Result<bool, AuthError> {
         let key = Self::key(id);
-        let Some(bytes) = self.kv.get_kv(&key).await.map_err(Self::map_err)? else {
+        let Some(bytes) = self.kv.get_kv(&key) else {
             return Ok(false);
         };
         let record = TokenRecord::decode(&bytes)?;
@@ -92,21 +81,16 @@ impl TokenStore for KvTokenStore {
 
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<TokenRecord>, AuthError> {
         let kv_prefix = format!("{TOKEN_KEY_PREFIX}{prefix}");
-        let entries = self.kv.list_kv(&kv_prefix).await.map_err(Self::map_err)?;
+        let entries = self.kv.list_kv(&kv_prefix);
         let mut out = Vec::with_capacity(entries.len());
-        for entry in entries {
-            out.push(TokenRecord::decode(&entry.value)?);
+        for (_, value) in entries {
+            out.push(TokenRecord::decode(&value)?);
         }
         Ok(out)
     }
 
     async fn count(&self) -> Result<usize, AuthError> {
-        let entries = self
-            .kv
-            .list_kv(TOKEN_KEY_PREFIX)
-            .await
-            .map_err(Self::map_err)?;
-        Ok(entries.len())
+        Ok(self.kv.list_kv(TOKEN_KEY_PREFIX).len())
     }
 }
 
@@ -117,7 +101,7 @@ pub struct TokenService {
 }
 
 impl TokenService {
-    pub fn new(kv: Arc<dyn KVClient>) -> Self {
+    pub fn new(kv: MetadataKvClient) -> Self {
         let store = Arc::new(KvTokenStore::new(kv));
         let authorizer = Arc::new(Authorizer::new(store.clone()));
         Self { store, authorizer }
@@ -154,15 +138,9 @@ impl TokenService {
     ) -> tokio::task::JoinHandle<()> {
         let service = self.clone();
         tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(tick).await;
-                if leadership.has_changed().is_err() {
-                    return;
-                }
-                if !*leadership.borrow_and_update() {
-                    continue;
-                }
-                if let Err(error) = service.remove_expired(picomq_common::now_ms()).await {
+            while let Some(leading) = crate::leadership::tick(&mut leadership, tick).await {
+                if leading && let Err(error) = service.remove_expired(picomq_common::now_ms()).await
+                {
                     tracing::debug!(%error, "token expiry failed");
                 }
             }
@@ -174,7 +152,21 @@ impl TokenService {
 mod tests {
     use super::*;
     use picomq_auth::{AccessToken, Scope};
-    use s3stream::MemoryKvClient;
+    use picomq_metadata::{LocalSink, MetadataNodeHandle, Registration};
+
+    async fn kv() -> MetadataKvClient {
+        let (sink, views) = LocalSink::new();
+        let registration = Registration {
+            node_id: 1,
+            node_epoch: 1,
+            slots: 1,
+            ..Default::default()
+        };
+        MetadataNodeHandle::register(Arc::new(sink), views, registration)
+            .await
+            .unwrap()
+            .kv_client()
+    }
 
     fn record(id: &str) -> TokenRecord {
         let (_, verifier) = AccessToken::issue(id).unwrap();
@@ -189,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_get_duplicate_and_delete_if() {
-        let store = KvTokenStore::new(MemoryKvClient::new());
+        let store = KvTokenStore::new(kv().await);
         let first = record("a/one");
         assert!(store.put_if_absent(first.clone()).await.unwrap());
         assert_eq!(store.get("a/one").await.unwrap().as_ref(), Some(&first));
@@ -208,7 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_prefix_ordered() {
-        let store = KvTokenStore::new(MemoryKvClient::new());
+        let store = KvTokenStore::new(kv().await);
         for id in ["t/b", "t/a", "u/x"] {
             assert!(store.put_if_absent(record(id)).await.unwrap());
         }
@@ -237,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_expired_only_removes_expired() {
-        let kv = MemoryKvClient::new();
+        let kv = kv().await;
         let store = KvTokenStore::new(kv.clone());
         let service = TokenService::new(kv);
         store
@@ -259,7 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn expiry_loop_gated_on_leadership() {
-        let kv = MemoryKvClient::new();
+        let kv = kv().await;
         let store = KvTokenStore::new(kv.clone());
         let service = Arc::new(TokenService::new(kv));
         store
@@ -289,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_id_rejected_on_put() {
-        let store = KvTokenStore::new(MemoryKvClient::new());
+        let store = KvTokenStore::new(kv().await);
         let mut rec = record("ok");
         rec.id.clear();
         assert!(matches!(

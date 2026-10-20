@@ -31,6 +31,7 @@ type coreClient struct {
 	token          string
 	retry          RetryPolicy
 	ownedTransport bool
+	routes         *routes
 }
 
 type PicoClient struct{ core *coreClient }
@@ -116,7 +117,7 @@ func newCore(protocol Protocol, endpoint string, options ...Option) (*coreClient
 			cfg.httpClient = &http.Client{Transport: transport}
 		}
 	}
-	return &coreClient{protocol: protocol, baseURL: base, http: cfg.httpClient, token: cfg.token, retry: cfg.retry, ownedTransport: owned}, nil
+	return &coreClient{protocol: protocol, baseURL: base, http: cfg.httpClient, token: cfg.token, retry: cfg.retry, ownedTransport: owned, routes: newRoutes(base)}, nil
 }
 
 func (c *PicoClient) Protocol() Protocol           { return ProtocolPico }
@@ -147,6 +148,18 @@ func (c *coreClient) streamURL(name string, query url.Values) string {
 	return u.String()
 }
 
+func withPartition(query url.Values, partition *uint32) url.Values {
+	if partition == nil {
+		return query
+	}
+
+	if query == nil {
+		query = url.Values{}
+	}
+	query.Set("partition", strconv.FormatUint(uint64(*partition), 10))
+	return query
+}
+
 type wireRequest struct {
 	method, url string
 	headers     http.Header
@@ -154,7 +167,15 @@ type wireRequest struct {
 }
 
 func (c *coreClient) send(ctx context.Context, request wireRequest) (*http.Response, error) {
-	current := request.url
+	start, err := url.Parse(request.url)
+	if err != nil {
+		return nil, err
+	}
+	key, keyed := c.routes.key(start)
+	current := start.String()
+	if keyed {
+		current = c.routes.resolve(key, start).String()
+	}
 	visited := map[string]struct{}{}
 	for hop := 0; hop <= maxRedirects; hop++ {
 		if _, ok := visited[current]; ok {
@@ -180,9 +201,15 @@ func (c *coreClient) send(ctx context.Context, request wireRequest) (*http.Respo
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
+			if keyed {
+				c.routes.forget(key)
+			}
 			return nil, &ClientError{Kind: ErrorTransport, Code: "transport", Message: err.Error(), Cause: err}
 		}
 		if response.StatusCode != http.StatusTemporaryRedirect && response.StatusCode != http.StatusPermanentRedirect {
+			if keyed && request.method == http.MethodDelete && response.StatusCode < http.StatusMultipleChoices {
+				c.routes.forget(key)
+			}
 			return response, nil
 		}
 		io.Copy(io.Discard, io.LimitReader(response.Body, maxErrorBody))
@@ -205,6 +232,9 @@ func (c *coreClient) send(ctx context.Context, request wireRequest) (*http.Respo
 		}
 		if base.Scheme == "https" && next.Scheme == "http" {
 			return nil, &ClientError{Kind: ErrorInvalidResponse, Code: "unsafe_redirect", Message: "ownership redirect cannot downgrade from HTTPS to HTTP"}
+		}
+		if keyed {
+			c.routes.learn(key, next)
 		}
 		current = next.String()
 	}
@@ -261,6 +291,13 @@ func headerBool(header http.Header, name string) bool {
 func headerUint(header http.Header, name string) uint64 {
 	value, _ := strconv.ParseUint(header.Get(name), 10, 64)
 	return value
+}
+
+func partitionCount(value uint64) uint32 {
+	if value == 0 {
+		return 1
+	}
+	return uint32(value)
 }
 
 func expectPico(response *http.Response, expected ...int) ([]byte, error) {

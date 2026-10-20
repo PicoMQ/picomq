@@ -17,6 +17,7 @@
 # The admin listener (9090) is intentionally not published.
 
 primary_region = "iad"
+kill_timeout = 30
 
 [build]
   dockerfile = "../../Dockerfile"

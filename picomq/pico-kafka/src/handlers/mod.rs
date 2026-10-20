@@ -1,16 +1,19 @@
 pub(crate) mod common;
+mod configs;
+mod epochs;
 mod fetch;
 mod group;
 mod metadata;
 mod offsets;
+mod partitions;
 mod produce;
 mod producer;
+mod records;
 mod topics;
 mod versions;
 
 use bytes::Bytes;
 use kafka_protocol::messages::ApiKey;
-use picomq_server::ServiceError;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
@@ -23,8 +26,6 @@ pub enum HandlerError {
     Protocol(String),
     #[error("unimplemented api key {0}")]
     Unimplemented(i16),
-    #[error(transparent)]
-    Service(#[from] ServiceError),
 }
 
 pub type DeferredOutcome = std::pin::Pin<
@@ -70,6 +71,16 @@ pub async fn dispatch(
         key if key == ApiKey::InitProducerId as i16 => producer::handle(ctx, req, body).await,
         key if key == ApiKey::CreateTopics as i16 => topics::create(ctx, req, body).await,
         key if key == ApiKey::DeleteTopics as i16 => topics::delete(ctx, req, body).await,
+        key if key == ApiKey::CreatePartitions as i16 => partitions::create(ctx, req, body).await,
+        key if key == ApiKey::DescribeConfigs as i16 => configs::describe(ctx, req, body).await,
+        key if key == ApiKey::IncrementalAlterConfigs as i16 => {
+            configs::alter(ctx, req, body).await
+        }
+        key if key == ApiKey::DeleteRecords as i16 => records::delete(ctx, req, body).await,
+        key if key == ApiKey::OffsetForLeaderEpoch as i16 => epochs::handle(ctx, req, body).await,
+        key if key == ApiKey::DescribeCluster as i16 => {
+            metadata::describe_cluster(ctx, req, body).await
+        }
         key if matches!(
             ApiKey::try_from(key),
             Ok(ApiKey::FindCoordinator
@@ -80,7 +91,9 @@ pub async fn dispatch(
                 | ApiKey::DescribeGroups
                 | ApiKey::ListGroups
                 | ApiKey::OffsetCommit
-                | ApiKey::OffsetFetch)
+                | ApiKey::OffsetFetch
+                | ApiKey::DeleteGroups
+                | ApiKey::OffsetDelete)
         ) =>
         {
             group::handle(ctx, req, body).await

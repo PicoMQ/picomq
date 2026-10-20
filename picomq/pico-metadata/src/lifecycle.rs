@@ -1,8 +1,8 @@
 //! Leader-gated background maintenance: prepared-object expiry + object GC.
 //!
 //! Loops start on leader election, stop on step-down, and re-check leadership
-//! before every tick. The tick bodies only need a [`CommandSink`] and a
-//! [`ViewPublisher`], so the same lifecycle runs over `LocalSink` and
+//! before every tick. The tick bodies propose through the node's
+//! [`MetadataNodeHandle`], so the same lifecycle runs over `LocalSink` and
 //! `SqlSink`.
 
 use std::sync::Arc;
@@ -11,10 +11,8 @@ use std::time::Duration;
 
 use s3stream::{CompactOperations, ObjectPath, ObjectStorageTrait, gen_object_key};
 
-use crate::command::MetadataCommand;
 use crate::error::MetadataError;
-use crate::sink::CommandSink;
-use crate::view::ViewPublisher;
+use crate::manager::MetadataNodeHandle;
 
 pub const MAX_DELETE_BATCH_COUNT: usize = 2000;
 
@@ -32,20 +30,17 @@ pub enum CleanError {
 }
 
 pub struct ObjectCleaner {
-    sink: Arc<dyn CommandSink>,
-    views: Arc<ViewPublisher>,
+    node: MetadataNodeHandle,
     object_storage: Option<Arc<dyn ObjectStorageTrait>>,
 }
 
 impl ObjectCleaner {
     pub fn new(
-        sink: Arc<dyn CommandSink>,
-        views: Arc<ViewPublisher>,
+        node: MetadataNodeHandle,
         object_storage: Option<Arc<dyn ObjectStorageTrait>>,
     ) -> Self {
         Self {
-            sink,
-            views,
+            node,
             object_storage,
         }
     }
@@ -58,7 +53,7 @@ impl ObjectCleaner {
     /// then propose `CleanDestroyedObjects` for everything cleaned.
     pub async fn clean(&self, limit: usize) -> Result<Vec<u64>, CleanError> {
         let batch = limit.min(MAX_DELETE_BATCH_COUNT);
-        let marked = self.views.load().state.peek_destroyed_objects(batch);
+        let marked = self.node.views().load().state.peek_destroyed_objects(batch);
         if marked.is_empty() {
             return Ok(Vec::new());
         }
@@ -97,9 +92,7 @@ impl ObjectCleaner {
         }
         tokio::time::timeout(
             CLEAN_STEP_TIMEOUT,
-            self.sink.propose(MetadataCommand::CleanDestroyedObjects {
-                object_ids: cleaned.clone(),
-            }),
+            self.node.clean_destroyed_objects(cleaned.clone()),
         )
         .await
         .map_err(|_| CleanError::Timeout)??;
@@ -108,7 +101,7 @@ impl ObjectCleaner {
 }
 
 pub struct MetadataLifecycle {
-    sink: Arc<dyn CommandSink>,
+    node: MetadataNodeHandle,
     cleaner: Arc<ObjectCleaner>,
     tick: Duration,
     leader: Arc<AtomicBool>,
@@ -116,9 +109,9 @@ pub struct MetadataLifecycle {
 }
 
 impl MetadataLifecycle {
-    pub fn new(sink: Arc<dyn CommandSink>, cleaner: Arc<ObjectCleaner>, tick: Duration) -> Self {
+    pub fn new(node: MetadataNodeHandle, cleaner: Arc<ObjectCleaner>, tick: Duration) -> Self {
         Self {
-            sink,
+            node,
             cleaner,
             tick,
             leader: Arc::new(AtomicBool::new(false)),
@@ -132,7 +125,7 @@ impl MetadataLifecycle {
         }
         let mut loops = self.loops.lock().expect("lifecycle lock");
         loops.push(tokio::spawn(expire_loop(
-            self.sink.clone(),
+            self.node.clone(),
             self.leader.clone(),
             self.tick,
         )));
@@ -181,18 +174,13 @@ impl Drop for MetadataLifecycle {
     }
 }
 
-async fn expire_loop(sink: Arc<dyn CommandSink>, leader: Arc<AtomicBool>, tick: Duration) {
+async fn expire_loop(node: MetadataNodeHandle, leader: Arc<AtomicBool>, tick: Duration) {
     loop {
         tokio::time::sleep(tick).await;
         if !leader.load(Ordering::SeqCst) {
             return;
         }
-        if let Err(error) = sink
-            .propose(MetadataCommand::ExpirePreparedObjects {
-                now_ms: picomq_common::now_ms(),
-            })
-            .await
-        {
+        if let Err(error) = node.expire_prepared_objects(picomq_common::now_ms()).await {
             tracing::debug!(%error, "expire prepared objects failed");
         }
     }
@@ -209,7 +197,7 @@ async fn clean_loop(cleaner: Arc<ObjectCleaner>, leader: Arc<AtomicBool>, tick: 
                 tracing::warn!(%error, "object cleaner failed, destroyed marks retained")
             }
             Ok(_) => {
-                let backlog = cleaner.views.load().state.mark_destroyed.len();
+                let backlog = cleaner.node.views().load().state.mark_destroyed.len();
                 if backlog > MAX_DELETE_BATCH_COUNT {
                     tracing::warn!(
                         backlog,
@@ -224,34 +212,39 @@ async fn clean_loop(cleaner: Arc<ObjectCleaner>, leader: Arc<AtomicBool>, tick: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::MetadataResult;
-    use crate::sink::LocalSink;
+    use crate::command::{MetadataCommand, MetadataResult, Proposer};
+    use crate::manager::Registration;
+    use crate::sink::{CommandSink, LocalSink};
+    use crate::view::ViewPublisher;
     use s3stream::MemoryObjectStorage;
 
     const NODE: i32 = 1;
     const EPOCH: i64 = 1;
 
-    async fn registered_sink() -> (Arc<LocalSink>, Arc<ViewPublisher>) {
+    async fn registered_sink() -> (Arc<LocalSink>, MetadataNodeHandle, Arc<ViewPublisher>) {
         let (sink, views) = LocalSink::new();
         let sink = Arc::new(sink);
-        sink.propose(MetadataCommand::RegisterNode {
-            node_id: NODE,
-            node_epoch: EPOCH,
-            http_address: String::new(),
-            slots: 1,
-            protocol_addresses: Default::default(),
-        })
+        let node = MetadataNodeHandle::register(
+            sink.clone(),
+            views.clone(),
+            Registration {
+                node_id: NODE,
+                node_epoch: EPOCH,
+                slots: 1,
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
-        (sink, views)
+        (sink, node, views)
     }
 
     /// Commit `object_id` as a *stream object* of `stream_id`. The kind a
     /// later stream delete marks destroyed (the FIFO the cleaner drains).
     async fn commit_object(sink: &Arc<LocalSink>, stream_id: u64, object_id: u64) {
         sink.propose(MetadataCommand::PrepareObject {
-            node_id: NODE,
-            node_epoch: EPOCH,
+            proposer: Proposer::new(NODE, EPOCH),
+
             count: 1,
             ttl_ms: 60_000,
             now_ms: 0,
@@ -259,8 +252,8 @@ mod tests {
         .await
         .unwrap();
         sink.propose(MetadataCommand::CompactStreamObject {
-            node_id: NODE,
-            node_epoch: EPOCH,
+            proposer: Proposer::new(NODE, EPOCH),
+
             request: s3stream::CompactStreamObjectRequest {
                 object_id,
                 object_size: 10,
@@ -283,8 +276,7 @@ mod tests {
     async fn destroyed_object_fixture(sink: &Arc<LocalSink>) -> u64 {
         let stream_id = match sink
             .propose(MetadataCommand::CreateStream {
-                node_id: NODE,
-                node_epoch: EPOCH,
+                proposer: Proposer::new(NODE, EPOCH),
             })
             .await
             .unwrap()
@@ -294,8 +286,8 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         };
         sink.propose(MetadataCommand::OpenStream {
-            node_id: NODE,
-            node_epoch: EPOCH,
+            proposer: Proposer::new(NODE, EPOCH),
+
             stream_id,
             epoch: 1,
         })
@@ -303,16 +295,16 @@ mod tests {
         .unwrap();
         commit_object(sink, stream_id, 0).await;
         sink.propose(MetadataCommand::CloseStream {
-            node_id: NODE,
-            node_epoch: EPOCH,
+            proposer: Proposer::new(NODE, EPOCH),
+
             stream_id,
             epoch: 1,
         })
         .await
         .unwrap();
         sink.propose(MetadataCommand::DeleteStream {
-            node_id: NODE,
-            node_epoch: EPOCH,
+            proposer: Proposer::new(NODE, EPOCH),
+
             stream_id,
             epoch: 1,
         })
@@ -324,12 +316,12 @@ mod tests {
     /// Clean deletes from storage AND drops the catalog marks.
     #[tokio::test]
     async fn clean_deletes_and_unmarks() {
-        let (sink, views) = registered_sink().await;
+        let (sink, node, views) = registered_sink().await;
         let object_id = destroyed_object_fixture(&sink).await;
         assert_eq!(views.load().state.peek_destroyed_objects(10).len(), 1);
 
         let storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
-        let cleaner = ObjectCleaner::new(sink.clone(), views.clone(), Some(storage));
+        let cleaner = ObjectCleaner::new(node.clone(), Some(storage));
         let cleaned = cleaner.clean(MAX_DELETE_BATCH_COUNT).await.unwrap();
         assert_eq!(cleaned, vec![object_id]);
         assert!(views.load().state.peek_destroyed_objects(10).is_empty());
@@ -346,10 +338,10 @@ mod tests {
 
     #[tokio::test]
     async fn clean_without_storage_retains_deletable() {
-        let (sink, views) = registered_sink().await;
+        let (sink, node, views) = registered_sink().await;
         destroyed_object_fixture(&sink).await;
 
-        let cleaner = ObjectCleaner::new(sink.clone(), views.clone(), None);
+        let cleaner = ObjectCleaner::new(node.clone(), None);
         assert!(
             cleaner
                 .clean(MAX_DELETE_BATCH_COUNT)
@@ -364,11 +356,11 @@ mod tests {
     /// expiry reclaims a lapsed prepared object end to end.
     #[tokio::test]
     async fn lifecycle_expires_prepared_objects_while_leader() {
-        let (sink, views) = registered_sink().await;
+        let (sink, node, views) = registered_sink().await;
         // Prepared at t=0 with a 1 ms TTL: long expired against wall-clock now.
         sink.propose(MetadataCommand::PrepareObject {
-            node_id: NODE,
-            node_epoch: EPOCH,
+            proposer: Proposer::new(NODE, EPOCH),
+
             count: 1,
             ttl_ms: 1,
             now_ms: 0,
@@ -376,8 +368,8 @@ mod tests {
         .await
         .unwrap();
 
-        let cleaner = Arc::new(ObjectCleaner::new(sink.clone(), views.clone(), None));
-        let lifecycle = MetadataLifecycle::new(sink.clone(), cleaner, Duration::from_millis(5));
+        let cleaner = Arc::new(ObjectCleaner::new(node.clone(), None));
+        let lifecycle = MetadataLifecycle::new(node.clone(), cleaner, Duration::from_millis(5));
         lifecycle.on_leader_start();
         lifecycle.on_leader_start(); // idempotent
 
@@ -402,10 +394,10 @@ mod tests {
     /// `drive` follows a leadership watch: loops run only while `true`.
     #[tokio::test]
     async fn drive_follows_leadership_watch() {
-        let (sink, views) = registered_sink().await;
+        let (sink, node, views) = registered_sink().await;
         sink.propose(MetadataCommand::PrepareObject {
-            node_id: NODE,
-            node_epoch: EPOCH,
+            proposer: Proposer::new(NODE, EPOCH),
+
             count: 1,
             ttl_ms: 1,
             now_ms: 0,
@@ -413,9 +405,9 @@ mod tests {
         .await
         .unwrap();
 
-        let cleaner = Arc::new(ObjectCleaner::new(sink.clone(), views.clone(), None));
+        let cleaner = Arc::new(ObjectCleaner::new(node.clone(), None));
         let lifecycle = Arc::new(MetadataLifecycle::new(
-            sink.clone(),
+            node.clone(),
             cleaner,
             Duration::from_millis(5),
         ));

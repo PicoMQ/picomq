@@ -1,6 +1,8 @@
 //! The state transition function: `apply(state, command) -> result`.
 //!
-//! Fencing, idempotency and cascade rules all live in this one pure function.
+//! Every command but `RegisterNode` is checked against its proposer first: a
+//! node that is unregistered, fenced, or behind its current epoch changes
+//! nothing. Fencing, idempotency and cascade rules all live in this one pure function.
 //! It is deterministic and synchronous. No clock (`now_ms` rides in the
 //! command), no I/O, no locks. So the same state and command always produce
 //! the same next state and result.
@@ -10,7 +12,7 @@ use s3stream::{
     S3ObjectMetadata, S3ObjectType, StreamOffsetRange, StreamState,
 };
 
-use crate::command::{MetadataCommand, MetadataResult};
+use crate::command::{MetadataCommand, MetadataResult, Proposer};
 use crate::error::MetadataError;
 use crate::state::{
     MetadataState, NodeRow, PendingTransfer, StreamObjectRow, StreamRow, StreamSetObjectRow,
@@ -34,6 +36,10 @@ fn apply_inner(
     state: &mut MetadataState,
     command: &MetadataCommand,
 ) -> Result<MetadataResult, MetadataError> {
+    if let Some(proposer) = command.proposer() {
+        check_proposer(state, proposer)?;
+    }
+
     match command {
         MetadataCommand::RegisterNode {
             node_id,
@@ -41,6 +47,7 @@ fn apply_inner(
             http_address,
             slots,
             protocol_addresses,
+            wal,
         } => register_node(
             state,
             *node_id,
@@ -48,93 +55,92 @@ fn apply_inner(
             http_address,
             *slots,
             protocol_addresses,
+            wal,
         ),
-        MetadataCommand::PlaceStream { stream_id } => place_stream(state, *stream_id),
-        MetadataCommand::CreateStream {
+        MetadataCommand::SetNodeSlots { node_id, slots, .. } => {
+            set_node_slots(state, *node_id, *slots)
+        }
+        MetadataCommand::Heartbeat { proposer } => heartbeat(state, proposer.node_id),
+        MetadataCommand::FenceNode {
+            proposer,
             node_id,
             node_epoch,
-        } => create_stream(state, *node_id, *node_epoch),
+            heartbeats,
+        } => fence_node(state, *proposer, *node_id, *node_epoch, *heartbeats),
+        MetadataCommand::PlaceStream {
+            stream_id, node_id, ..
+        } => place_stream(state, *stream_id, *node_id),
+        MetadataCommand::CreateStream { .. } => create_stream(state),
+        MetadataCommand::CreateStreams { count, .. } => create_streams(state, *count),
         MetadataCommand::OpenStream {
-            node_id,
-            node_epoch,
+            proposer,
             stream_id,
             epoch,
-        } => open_stream(state, *node_id, *node_epoch, *stream_id, *epoch),
+        } => open_stream(state, proposer.node_id, *stream_id, *epoch),
         MetadataCommand::TrimStream {
-            node_id,
-            node_epoch,
+            proposer,
             stream_id,
             epoch,
             new_start_offset,
         } => trim_stream(
             state,
-            *node_id,
-            *node_epoch,
+            proposer.node_id,
             *stream_id,
             *epoch,
             *new_start_offset,
         ),
         MetadataCommand::CloseStream {
-            node_id,
-            node_epoch,
+            proposer,
             stream_id,
             epoch,
-        } => close_stream(state, *node_id, *node_epoch, *stream_id, *epoch),
+        } => close_stream(state, proposer.node_id, *stream_id, *epoch),
         MetadataCommand::DeleteStream {
-            node_id,
-            node_epoch,
+            proposer,
             stream_id,
             epoch,
-        } => delete_stream(state, *node_id, *node_epoch, *stream_id, *epoch),
+        } => delete_stream(state, proposer.node_id, *stream_id, *epoch),
         MetadataCommand::PrepareObject {
-            node_id,
-            node_epoch,
             count,
             ttl_ms,
             now_ms,
-        } => prepare_object(state, *node_id, *node_epoch, *count, *ttl_ms, *now_ms),
+            ..
+        } => prepare_object(state, *count, *ttl_ms, *now_ms),
         MetadataCommand::CommitStreamSetObject {
-            node_id,
-            node_epoch,
+            proposer,
             request,
             now_ms,
-        } => commit_stream_set_object(state, *node_id, *node_epoch, request, *now_ms),
+        } => commit_stream_set_object(state, proposer.node_id, request, *now_ms),
         MetadataCommand::CompactStreamObject {
-            node_id,
-            node_epoch,
-            request,
-            now_ms,
-        } => compact_stream_object(state, *node_id, *node_epoch, request, *now_ms),
-        MetadataCommand::ExpirePreparedObjects { now_ms } => {
+            request, now_ms, ..
+        } => compact_stream_object(state, request, *now_ms),
+        MetadataCommand::ExpirePreparedObjects { now_ms, .. } => {
             expire_prepared_objects(state, *now_ms)
         }
-        MetadataCommand::CleanDestroyedObjects { object_ids } => {
+        MetadataCommand::CleanDestroyedObjects { object_ids, .. } => {
             clean_destroyed_objects(state, object_ids)
         }
-        MetadataCommand::PutKv { key, value } => put_kv(state, key, value),
-        MetadataCommand::PutKvIfAbsent { key, value } => put_kv_if_absent(state, key, value),
-        MetadataCommand::DeleteKv { key } => delete_kv(state, key),
-        MetadataCommand::DeleteKvIfMatches { key, expected } => {
+        MetadataCommand::PutKv { key, value, .. } => put_kv(state, key, value),
+        MetadataCommand::PutKvIfAbsent { key, value, .. } => put_kv_if_absent(state, key, value),
+        MetadataCommand::DeleteKv { key, .. } => delete_kv(state, key),
+        MetadataCommand::DeleteKvIfMatches { key, expected, .. } => {
             delete_kv_if_matches(state, key, expected)
         }
+        MetadataCommand::PutKvIfMatches {
+            key,
+            expected,
+            value,
+            ..
+        } => put_kv_if_matches(state, key, expected, value),
         MetadataCommand::TransferStream {
             stream_id,
             from_node,
             to_node,
+            ..
         } => transfer_stream(state, *stream_id, *from_node, *to_node),
-        MetadataCommand::CompleteTransfer { stream_id, epoch } => {
-            complete_transfer(state, *stream_id, *epoch)
-        }
-        MetadataCommand::CreateStreams {
-            node_id,
-            node_epoch,
-            count,
-        } => create_streams(state, *node_id, *node_epoch, *count),
-        MetadataCommand::AllocateProducerIds {
-            node_id,
-            node_epoch,
-            count,
-        } => allocate_producer_ids(state, *node_id, *node_epoch, *count),
+        MetadataCommand::CompleteTransfer {
+            stream_id, epoch, ..
+        } => complete_transfer(state, *stream_id, *epoch),
+        MetadataCommand::AllocateProducerIds { count, .. } => allocate_producer_ids(state, *count),
     }
 }
 
@@ -145,54 +151,108 @@ fn register_node(
     http_address: &str,
     slots: u32,
     protocol_addresses: &std::collections::BTreeMap<String, String>,
+    wal: &str,
 ) -> Result<MetadataResult, MetadataError> {
-    if let Some(node) = state.nodes.get(&node_id)
-        && node.epoch > node_epoch
-    {
-        return Err(MetadataError::NodeEpochMismatch {
-            node_id,
-            message: format!(
-                "node {node_id} epoch {} fences register with epoch {node_epoch}",
-                node.epoch
-            ),
-        });
-    }
-    let http_address = if http_address.is_empty() {
-        state
-            .nodes
-            .get(&node_id)
-            .map(|n| n.http_address.clone())
-            .unwrap_or_default()
-    } else {
-        http_address.to_owned()
+    let stored = state.nodes.get(&node_id).cloned();
+    let epoch = match &stored {
+        Some(node) => node_epoch.max(node.epoch + 1),
+        None => node_epoch,
     };
-    let protocol_addresses = if protocol_addresses.is_empty() {
-        state
-            .nodes
-            .get(&node_id)
-            .map(|n| n.protocol_addresses.clone())
-            .unwrap_or_default()
-    } else {
-        protocol_addresses.clone()
-    };
+
+    let stored = stored.as_ref();
     state.nodes.insert(
         node_id,
         NodeRow {
             node_id,
-            epoch: node_epoch,
-            http_address,
+            epoch,
+            http_address: kept(
+                http_address.to_owned(),
+                http_address.is_empty(),
+                stored.map(|node| &node.http_address),
+            ),
             slots,
-            protocol_addresses,
+            protocol_addresses: kept(
+                protocol_addresses.clone(),
+                protocol_addresses.is_empty(),
+                stored.map(|node| &node.protocol_addresses),
+            ),
+            wal: kept(wal.to_owned(), wal.is_empty(), stored.map(|node| &node.wal)),
+            heartbeats: stored.map_or(0, |node| node.heartbeats),
+            fenced: false,
         },
     );
+    Ok(MetadataResult::Id(epoch as u64))
+}
+
+fn set_node_slots(
+    state: &mut MetadataState,
+    node_id: i32,
+    slots: u32,
+) -> Result<MetadataResult, MetadataError> {
+    let node = state
+        .nodes
+        .get_mut(&node_id)
+        .ok_or_else(|| MetadataError::NodeEpochMismatch {
+            node_id,
+            message: format!("node {node_id} is not registered"),
+        })?;
+    node.slots = slots;
     Ok(MetadataResult::Unit)
 }
 
-fn node_epoch_check(
-    state: &MetadataState,
+fn heartbeat(state: &mut MetadataState, node_id: i32) -> Result<MetadataResult, MetadataError> {
+    if let Some(node) = state.nodes.get_mut(&node_id) {
+        node.heartbeats += 1;
+    }
+
+    Ok(MetadataResult::Unit)
+}
+
+/// A node fencing itself is leaving, never a stale observer of its own
+/// heartbeats.
+fn fence_node(
+    state: &mut MetadataState,
+    proposer: Proposer,
     node_id: i32,
     node_epoch: i64,
-) -> Result<(), MetadataError> {
+    heartbeats: u64,
+) -> Result<MetadataResult, MetadataError> {
+    let leaving = proposer == Proposer::new(node_id, node_epoch);
+    match state.nodes.get_mut(&node_id) {
+        None => Err(MetadataError::NodeEpochMismatch {
+            node_id,
+            message: format!("node {node_id} is not registered"),
+        }),
+        Some(node)
+            if node.fenced
+                || node.epoch != node_epoch
+                || (!leaving && node.heartbeats != heartbeats) =>
+        {
+            Err(MetadataError::Redundant {
+                message: format!(
+                    "node {node_id} is no longer at epoch {node_epoch} with {heartbeats} heartbeats"
+                ),
+            })
+        }
+        Some(node) => {
+            node.fenced = true;
+            Ok(MetadataResult::Unit)
+        }
+    }
+}
+
+fn kept<T: Clone>(given: T, unset: bool, stored: Option<&T>) -> T {
+    match stored {
+        Some(stored) if unset => stored.clone(),
+        _ => given,
+    }
+}
+
+fn check_proposer(state: &MetadataState, proposer: Proposer) -> Result<(), MetadataError> {
+    let Proposer {
+        node_id,
+        node_epoch,
+    } = proposer;
     match state.nodes.get(&node_id) {
         None => Err(MetadataError::NodeEpochMismatch {
             node_id,
@@ -205,29 +265,50 @@ fn node_epoch_check(
                 node.epoch
             ),
         }),
+        Some(node) if node.fenced => Err(MetadataError::NodeEpochMismatch {
+            node_id,
+            message: format!("node {node_id} epoch {node_epoch} is fenced"),
+        }),
         Some(_) => Ok(()),
     }
 }
 
-fn create_stream(
-    state: &mut MetadataState,
+/// Only a stream's owner changes its lifecycle, unless that owner is fenced,
+/// which is how failover recovers a dead node's streams.
+fn check_owner(
+    state: &MetadataState,
+    stream: &StreamRow,
     node_id: i32,
-    node_epoch: i64,
-) -> Result<MetadataResult, MetadataError> {
-    node_epoch_check(state, node_id, node_epoch)?;
+) -> Result<(), MetadataError> {
+    let owner_live = state
+        .nodes
+        .get(&stream.node_id)
+        .is_some_and(|node| !node.fenced);
+    if stream.node_id == node_id || !owner_live {
+        return Ok(());
+    }
+
+    Err(MetadataError::StreamFenced {
+        stream_id: stream.stream_id,
+        epoch: stream.epoch,
+        message: format!(
+            "stream {} is owned by node {}, not node {node_id}",
+            stream.stream_id, stream.node_id
+        ),
+    })
+}
+
+fn create_stream(state: &mut MetadataState) -> Result<MetadataResult, MetadataError> {
     let stream_id = state.next_stream_id;
     state.next_stream_id += 1;
-    state.streams.insert(
+    state.put_stream(StreamRow {
         stream_id,
-        StreamRow {
-            stream_id,
-            epoch: -1,
-            start_offset: 0,
-            end_offset: 0,
-            state: StreamState::Closed,
-            node_id: -1,
-        },
-    );
+        epoch: -1,
+        start_offset: 0,
+        end_offset: 0,
+        state: StreamState::Closed,
+        node_id: -1,
+    });
     Ok(MetadataResult::Id(stream_id))
 }
 
@@ -235,13 +316,7 @@ fn create_stream(
 const MAX_CREATE_STREAMS: u32 = 4096;
 
 /// Batched create. Ids are consecutive starting at the returned first id.
-fn create_streams(
-    state: &mut MetadataState,
-    node_id: i32,
-    node_epoch: i64,
-    count: u32,
-) -> Result<MetadataResult, MetadataError> {
-    node_epoch_check(state, node_id, node_epoch)?;
+fn create_streams(state: &mut MetadataState, count: u32) -> Result<MetadataResult, MetadataError> {
     if count == 0 {
         return Err(MetadataError::Unexpected {
             message: "create count must be positive".into(),
@@ -254,60 +329,67 @@ fn create_streams(
     }
     let first = state.next_stream_id;
     for stream_id in first..first + count as u64 {
-        state.streams.insert(
+        state.put_stream(StreamRow {
             stream_id,
-            StreamRow {
-                stream_id,
-                epoch: -1,
-                start_offset: 0,
-                end_offset: 0,
-                state: StreamState::Closed,
-                node_id: -1,
-            },
-        );
+            epoch: -1,
+            start_offset: 0,
+            end_offset: 0,
+            state: StreamState::Closed,
+            node_id: -1,
+        });
     }
     state.next_stream_id = first + count as u64;
     Ok(MetadataResult::Id(first))
 }
 
-/// Pick the registered node with the lowest `(opening + placed) / slots` score
-/// (×1000 for integer arithmetic), tie-breaking on lowest `node_id`. A CLOSED
-/// stream with `epoch == -1` and `node_id != -1` is already placed. OPENED
-/// streams and CLOSED streams with `epoch != -1` (post-close) are idempotent
-/// re-place attempts. Returns [`MetadataError::NodeEpochMismatch`] when no
-/// registered node has `slots >= 1` (closest existing "no node" variant).
+/// A stream that is OPENED, or CLOSED on a live node, keeps its node.
+/// Otherwise it goes to the requested node, or to the least loaded one.
 fn place_stream(
     state: &mut MetadataState,
     stream_id: u64,
+    requested: Option<i32>,
 ) -> Result<MetadataResult, MetadataError> {
     let stream = require_stream(state, stream_id)?;
 
-    if stream.node_id != -1 {
+    let owner_live = state
+        .nodes
+        .get(&stream.node_id)
+        .is_some_and(|node| !node.fenced);
+    if stream.state == StreamState::Opened || owner_live {
         return Ok(MetadataResult::Id(stream.node_id as u64));
     }
-    if stream.state != StreamState::Closed || stream.epoch != -1 {
-        return Err(MetadataError::Unexpected {
-            message: format!(
-                "stream {stream_id} cannot be placed in state {:?} epoch {}",
-                stream.state, stream.epoch
-            ),
-        });
-    }
 
+    let winner = match requested {
+        Some(node_id) => state
+            .nodes
+            .get(&node_id)
+            .is_some_and(|node| node.slots >= 1 && !node.fenced)
+            .then_some(node_id),
+        None => least_loaded(state),
+    };
+    let Some(winner) = winner else {
+        return Err(MetadataError::NoLiveNode {
+            message: format!("no live node with slots can take stream {stream_id}"),
+        });
+    };
+
+    state.put_stream(StreamRow {
+        node_id: winner,
+        ..stream
+    });
+    Ok(MetadataResult::Id(winner as u64))
+}
+
+/// The live registered node with the lowest `(opening + placed) / slots`
+/// score (×1000 for integer arithmetic), tie-breaking on lowest `node_id`.
+fn least_loaded(state: &MetadataState) -> Option<i32> {
     let mut winner: Option<(i32, u64)> = None;
     for (node_id, node) in state.nodes.iter() {
-        if node.slots < 1 {
+        if node.slots < 1 || node.fenced {
             continue;
         }
-        let opening_count = state
-            .opening_by_node
-            .range((*node_id, 0)..=(*node_id, u64::MAX))
-            .count() as u64;
-        let placed_count = state
-            .placed_by_node
-            .range((*node_id, 0)..=(*node_id, u64::MAX))
-            .count() as u64;
-        let score = (opening_count + placed_count) * 1000 / node.slots as u64;
+        let streams = state.streams_by_node.get(node_id).copied().unwrap_or(0);
+        let score = streams * 1000 / node.slots as u64;
         match winner {
             None => winner = Some((*node_id, score)),
             Some((best_id, best_score))
@@ -318,22 +400,7 @@ fn place_stream(
             _ => {}
         }
     }
-    let Some((winner, _)) = winner else {
-        return Err(MetadataError::NodeEpochMismatch {
-            node_id: -1,
-            message: "no registered nodes with slots >= 1 for stream placement".into(),
-        });
-    };
-
-    state.streams.insert(
-        stream_id,
-        StreamRow {
-            node_id: winner,
-            ..stream
-        },
-    );
-    state.placed_by_node.insert((winner, stream_id), ());
-    Ok(MetadataResult::Id(winner as u64))
+    winner.map(|(node_id, _)| node_id)
 }
 
 fn require_stream(state: &MetadataState, stream_id: u64) -> Result<StreamRow, MetadataError> {
@@ -347,11 +414,9 @@ fn require_stream(state: &MetadataState, stream_id: u64) -> Result<StreamRow, Me
 fn open_stream(
     state: &mut MetadataState,
     node_id: i32,
-    node_epoch: i64,
     stream_id: u64,
     epoch: i64,
 ) -> Result<MetadataResult, MetadataError> {
-    node_epoch_check(state, node_id, node_epoch)?;
     let stream = require_stream(state, stream_id)?;
 
     if stream.epoch > epoch {
@@ -384,9 +449,8 @@ fn open_stream(
         node_id,
         ..stream
     };
-    state.streams.insert(stream_id, opened);
-    state.placed_by_node.remove(&(stream.node_id, stream_id));
-    state.opening_by_node.insert((node_id, stream_id), ());
+    state.put_stream(opened);
+    state.epochs.insert((stream_id, epoch), stream.end_offset);
     Ok(MetadataResult::Stream(opened.to_stream_metadata()))
 }
 
@@ -417,13 +481,12 @@ fn require_opened_stream(
 fn trim_stream(
     state: &mut MetadataState,
     node_id: i32,
-    node_epoch: i64,
     stream_id: u64,
     epoch: i64,
     new_start_offset: u64,
 ) -> Result<MetadataResult, MetadataError> {
-    node_epoch_check(state, node_id, node_epoch)?;
     let stream = require_opened_stream(state, stream_id, epoch)?;
+    check_owner(state, &stream, node_id)?;
     if new_start_offset < stream.start_offset {
         return Err(MetadataError::Unexpected {
             message: format!(
@@ -440,13 +503,22 @@ fn trim_stream(
             ),
         });
     }
-    state.streams.insert(
-        stream_id,
-        StreamRow {
-            start_offset: new_start_offset,
-            ..stream
-        },
-    );
+    state.put_stream(StreamRow {
+        start_offset: new_start_offset,
+        ..stream
+    });
+
+    let covered: Vec<i64> = state
+        .stream_epochs(stream_id)
+        .into_iter()
+        .take_while(|(_, start)| *start <= new_start_offset)
+        .map(|(epoch, _)| epoch)
+        .collect();
+    if let Some((_, older)) = covered.split_last() {
+        for epoch in older {
+            state.epochs.remove(&(stream_id, *epoch));
+        }
+    }
     Ok(MetadataResult::Unit)
 }
 
@@ -456,16 +528,15 @@ fn trim_stream(
 fn close_stream(
     state: &mut MetadataState,
     node_id: i32,
-    node_epoch: i64,
     stream_id: u64,
     epoch: i64,
 ) -> Result<MetadataResult, MetadataError> {
-    node_epoch_check(state, node_id, node_epoch)?;
     let stream = require_stream(state, stream_id)?;
 
     if stream.state == StreamState::Closed && stream.epoch == epoch {
         return Ok(MetadataResult::Unit);
     }
+    check_owner(state, &stream, node_id)?;
     if stream.state != StreamState::Opened {
         return Err(MetadataError::Unexpected {
             message: format!("stream {stream_id} is not opened"),
@@ -482,19 +553,15 @@ fn close_stream(
         });
     }
 
-    state.streams.insert(
-        stream_id,
-        StreamRow {
-            state: StreamState::Closed,
-            ..stream
-        },
-    );
-    state.opening_by_node.remove(&(stream.node_id, stream_id));
+    state.put_stream(StreamRow {
+        state: StreamState::Closed,
+        ..stream
+    });
     Ok(MetadataResult::Unit)
 }
 
 /// Record a pending ownership move. The stream must be OPENED on `from_node`
-/// and the target must be a registered node with capacity. Re-requesting the
+/// and the target must be a live node with capacity. Re-requesting the
 /// same move is idempotent.
 fn transfer_stream(
     state: &mut MetadataState,
@@ -521,11 +588,11 @@ fn transfer_stream(
         });
     }
     match state.nodes.get(&to_node) {
-        Some(node) if node.slots >= 1 => {}
+        Some(node) if node.slots >= 1 && !node.fenced => {}
         _ => {
             return Err(MetadataError::NodeEpochMismatch {
                 node_id: to_node,
-                message: format!("transfer target {to_node} is not a registered node with slots"),
+                message: format!("transfer target {to_node} is not a live node with slots"),
             });
         }
     }
@@ -572,13 +639,10 @@ fn complete_transfer(
         });
     }
 
-    state.streams.insert(
-        stream_id,
-        StreamRow {
-            node_id: pending.to_node,
-            ..stream
-        },
-    );
+    state.put_stream(StreamRow {
+        node_id: pending.to_node,
+        ..stream
+    });
     state.pending_transfers.remove(&stream_id);
     Ok(MetadataResult::Unit)
 }
@@ -590,14 +654,13 @@ fn complete_transfer(
 fn delete_stream(
     state: &mut MetadataState,
     node_id: i32,
-    node_epoch: i64,
     stream_id: u64,
     epoch: i64,
 ) -> Result<MetadataResult, MetadataError> {
-    node_epoch_check(state, node_id, node_epoch)?;
     let Some(stream) = state.streams.get(&stream_id).copied() else {
         return Ok(MetadataResult::Unit); // idempotent
     };
+    check_owner(state, &stream, node_id)?;
     if stream.state != StreamState::Closed {
         return Err(MetadataError::StreamNotClosed { stream_id });
     }
@@ -612,9 +675,11 @@ fn delete_stream(
         });
     }
 
-    state.streams.remove(&stream_id);
-    remove_placed_stream(state, stream_id);
+    state.remove_stream(stream_id);
     state.pending_transfers.remove(&stream_id);
+    for (epoch, _) in state.stream_epochs(stream_id) {
+        state.epochs.remove(&(stream_id, epoch));
+    }
 
     let keys: Vec<_> = state
         .stream_objects
@@ -629,18 +694,6 @@ fn delete_stream(
     Ok(MetadataResult::Unit)
 }
 
-fn remove_placed_stream(state: &mut MetadataState, stream_id: u64) {
-    let keys: Vec<_> = state
-        .placed_by_node
-        .keys()
-        .filter(|(_, sid)| *sid == stream_id)
-        .copied()
-        .collect();
-    for key in keys {
-        state.placed_by_node.remove(&key);
-    }
-}
-
 /// Bounds one log row.
 const MAX_ALLOCATE_PRODUCER_IDS: u32 = 4096;
 
@@ -648,11 +701,8 @@ const MAX_ALLOCATE_PRODUCER_IDS: u32 = 4096;
 /// the returned first id and are never reclaimed.
 fn allocate_producer_ids(
     state: &mut MetadataState,
-    node_id: i32,
-    node_epoch: i64,
     count: u32,
 ) -> Result<MetadataResult, MetadataError> {
-    node_epoch_check(state, node_id, node_epoch)?;
     if count == 0 {
         return Err(MetadataError::Unexpected {
             message: "producer id count must be positive".into(),
@@ -670,13 +720,10 @@ fn allocate_producer_ids(
 
 fn prepare_object(
     state: &mut MetadataState,
-    node_id: i32,
-    node_epoch: i64,
     count: u32,
     ttl_ms: i64,
     now_ms: i64,
 ) -> Result<MetadataResult, MetadataError> {
-    node_epoch_check(state, node_id, node_epoch)?;
     if count == 0 {
         return Err(MetadataError::Unexpected {
             message: "prepare count must be positive".into(),
@@ -733,13 +780,10 @@ fn advance_end_offset(
             ),
         });
     }
-    state.streams.insert(
-        stream_id,
-        StreamRow {
-            end_offset,
-            ..stream
-        },
-    );
+    state.put_stream(StreamRow {
+        end_offset,
+        ..stream
+    });
     Ok(())
 }
 
@@ -852,11 +896,9 @@ fn redundant_commit_check(
 fn commit_stream_set_object(
     state: &mut MetadataState,
     node_id: i32,
-    node_epoch: i64,
     request: &CommitStreamSetObjectRequest,
     now_ms: i64,
 ) -> Result<MetadataResult, MetadataError> {
-    node_epoch_check(state, node_id, node_epoch)?;
     redundant_commit_check(state, request)?;
 
     let compact = !request.compacted_object_ids.is_empty();
@@ -954,12 +996,9 @@ fn commit_stream_set_object(
 
 fn compact_stream_object(
     state: &mut MetadataState,
-    node_id: i32,
-    node_epoch: i64,
     request: &CompactStreamObjectRequest,
     now_ms: i64,
 ) -> Result<MetadataResult, MetadataError> {
-    node_epoch_check(state, node_id, node_epoch)?;
     let stream_id = request.stream_id;
 
     if request.object_id != NOOP_OBJECT_ID
@@ -1140,6 +1179,20 @@ fn delete_kv(state: &mut MetadataState, key: &str) -> Result<MetadataResult, Met
     Ok(MetadataResult::Value(removed))
 }
 
+fn put_kv_if_matches(
+    state: &mut MetadataState,
+    key: &str,
+    expected: &bytes::Bytes,
+    value: &bytes::Bytes,
+) -> Result<MetadataResult, MetadataError> {
+    match state.kv.get(key) {
+        Some(current) if current == expected => put_kv(state, key, value),
+        _ => Err(MetadataError::Redundant {
+            message: format!("kv key {key} missing or value mismatch"),
+        }),
+    }
+}
+
 fn delete_kv_if_matches(
     state: &mut MetadataState,
     key: &str,
@@ -1163,6 +1216,7 @@ fn delete_kv_if_matches(
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use im::OrdMap;
     use s3stream::ObjectStreamRange;
 
     const NODE_1: i32 = 1;
@@ -1185,6 +1239,7 @@ mod tests {
         apply(
             state,
             &MetadataCommand::RegisterNode {
+                wal: String::new(),
                 node_id,
                 node_epoch,
                 http_address: String::new(),
@@ -1195,8 +1250,29 @@ mod tests {
         .unwrap();
     }
 
+    /// Any registered, unfenced node, for commands whose proposer the test
+    /// is not about.
+    fn live(state: &MetadataState) -> Proposer {
+        let node = state
+            .nodes
+            .values()
+            .find(|node| !node.fenced)
+            .expect("a live node");
+        Proposer::new(node.node_id, node.epoch)
+    }
+
     fn place(state: &mut MetadataState, stream_id: u64) -> i32 {
-        match apply(state, &MetadataCommand::PlaceStream { stream_id }).unwrap() {
+        let proposer = live(state);
+        match apply(
+            state,
+            &MetadataCommand::PlaceStream {
+                proposer,
+                stream_id,
+                node_id: None,
+            },
+        )
+        .unwrap()
+        {
             MetadataResult::Id(node_id) => node_id as i32,
             other => panic!("unexpected result {other:?}"),
         }
@@ -1206,8 +1282,7 @@ mod tests {
         match apply(
             state,
             &MetadataCommand::CreateStream {
-                node_id,
-                node_epoch,
+                proposer: Proposer::new(node_id, node_epoch),
             },
         )
         .unwrap()
@@ -1227,8 +1302,8 @@ mod tests {
         apply(
             state,
             &MetadataCommand::OpenStream {
-                node_id,
-                node_epoch,
+                proposer: Proposer::new(node_id, node_epoch),
+
                 stream_id,
                 epoch,
             },
@@ -1245,8 +1320,8 @@ mod tests {
         apply(
             state,
             &MetadataCommand::CloseStream {
-                node_id,
-                node_epoch,
+                proposer: Proposer::new(node_id, node_epoch),
+
                 stream_id,
                 epoch,
             },
@@ -1257,8 +1332,8 @@ mod tests {
         match apply(
             state,
             &MetadataCommand::PrepareObject {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 count,
                 ttl_ms,
                 now_ms,
@@ -1277,8 +1352,7 @@ mod tests {
         let err = apply(
             &mut state,
             &MetadataCommand::CreateStream {
-                node_id: 3,
-                node_epoch: 1,
+                proposer: Proposer::new(3, 1),
             },
         )
         .unwrap_err();
@@ -1286,8 +1360,7 @@ mod tests {
         let err = apply(
             &mut state,
             &MetadataCommand::CreateStream {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1 + 1,
+                proposer: Proposer::new(NODE_1, EPOCH_1 + 1),
             },
         )
         .unwrap_err();
@@ -1301,20 +1374,33 @@ mod tests {
         let err = apply(
             &mut state,
             &MetadataCommand::CreateStream {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
             },
         )
         .unwrap_err();
         assert_eq!(err.code(), 5);
-        let err = apply(
+
+        let reregistered = apply(
             &mut state,
             &MetadataCommand::RegisterNode {
+                wal: String::new(),
                 node_id: NODE_1,
                 node_epoch: EPOCH_1,
                 http_address: String::new(),
                 slots: 1,
                 protocol_addresses: Default::default(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            reregistered,
+            MetadataResult::Id((EPOCH_1 + 6) as u64),
+            "an older requested epoch gets one past the stored epoch"
+        );
+        let err = apply(
+            &mut state,
+            &MetadataCommand::CreateStream {
+                proposer: Proposer::new(NODE_1, EPOCH_1 + 5),
             },
         )
         .unwrap_err();
@@ -1333,6 +1419,7 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::RegisterNode {
+                wal: String::new(),
                 node_id: NODE_1,
                 node_epoch: EPOCH_1,
                 http_address: "http://n1:9090".into(),
@@ -1356,6 +1443,7 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::RegisterNode {
+                wal: String::new(),
                 node_id: NODE_1,
                 node_epoch: EPOCH_1 + 1,
                 http_address: String::new(),
@@ -1375,6 +1463,7 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::RegisterNode {
+                wal: String::new(),
                 node_id: NODE_1,
                 node_epoch: EPOCH_1 + 2,
                 http_address: String::new(),
@@ -1402,8 +1491,8 @@ mod tests {
             apply(
                 state,
                 &MetadataCommand::AllocateProducerIds {
-                    node_id: NODE_1,
-                    node_epoch: EPOCH_1,
+                    proposer: Proposer::new(NODE_1, EPOCH_1),
+
                     count,
                 },
             )
@@ -1422,8 +1511,8 @@ mod tests {
         let err = apply(
             &mut state,
             &MetadataCommand::AllocateProducerIds {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1 + 1,
+                proposer: Proposer::new(NODE_1, EPOCH_1 + 1),
+
                 count: 1,
             },
         )
@@ -1503,8 +1592,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::CompactStreamObject {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 request: CompactStreamObjectRequest {
                     object_id,
                     object_size: 10,
@@ -1524,8 +1613,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::DeleteStream {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 stream_id,
                 epoch: 1,
             },
@@ -1535,8 +1624,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::DeleteStream {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 stream_id,
                 epoch: 1,
             },
@@ -1546,6 +1635,78 @@ mod tests {
         assert_eq!(destroyed, vec![(object_id, CompactOperations::Delete)]);
         assert!(state.stream_objects.is_empty());
         assert!(state.stream_object_ids.is_empty());
+    }
+
+    fn commit(state: &mut MetadataState, stream_id: u64, epoch: u64, start: u64, end: u64) {
+        let object_id = prepare(state, 1, 60_000, 0);
+        apply(
+            state,
+            &MetadataCommand::CommitStreamSetObject {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
+                request: CommitStreamSetObjectRequest {
+                    object_id,
+                    object_size: 64,
+                    attributes: 0,
+                    stream_ranges: vec![ObjectStreamRange {
+                        stream_id,
+                        epoch,
+                        start_offset: start,
+                        end_offset: end,
+                        size: 64,
+                    }],
+                    stream_objects: vec![],
+                    compacted_object_ids: vec![],
+                },
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn epochs_record_where_each_open_starts() {
+        let mut state = setup();
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
+        commit(&mut state, stream_id, 1, 0, 8);
+        close(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 3).unwrap();
+        commit(&mut state, stream_id, 3, 8, 12);
+        assert_eq!(state.stream_epochs(stream_id), [(1, 0), (3, 8)]);
+
+        let trim = |state: &mut MetadataState, offset| {
+            apply(
+                state,
+                &MetadataCommand::TrimStream {
+                    proposer: Proposer::new(NODE_1, EPOCH_1),
+
+                    stream_id,
+                    epoch: 3,
+                    new_start_offset: offset,
+                },
+            )
+            .unwrap();
+        };
+        trim(&mut state, 7);
+        assert_eq!(state.stream_epochs(stream_id), [(1, 0), (3, 8)]);
+        trim(&mut state, 8);
+        assert_eq!(state.stream_epochs(stream_id), [(3, 8)]);
+
+        close(&mut state, NODE_1, EPOCH_1, stream_id, 3).unwrap();
+        apply(
+            &mut state,
+            &MetadataCommand::DeleteStream {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
+                stream_id,
+                epoch: 3,
+            },
+        )
+        .unwrap();
+        assert!(state.stream_epochs(stream_id).is_empty());
     }
 
     #[test]
@@ -1593,8 +1754,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::CommitStreamSetObject {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 request: request.clone(),
                 now_ms: 1,
             },
@@ -1606,8 +1767,8 @@ mod tests {
         let err = apply(
             &mut state,
             &MetadataCommand::CommitStreamSetObject {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 request,
                 now_ms: 2,
             },
@@ -1644,8 +1805,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::CompactStreamObject {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 request: request.clone(),
                 now_ms: 1,
             },
@@ -1654,8 +1815,8 @@ mod tests {
         let err = apply(
             &mut state,
             &MetadataCommand::CompactStreamObject {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 request,
                 now_ms: 2,
             },
@@ -1675,8 +1836,8 @@ mod tests {
         let err = apply(
             &mut state,
             &MetadataCommand::CompactStreamObject {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 request: CompactStreamObjectRequest {
                     object_id,
                     object_size: 10,
@@ -1718,6 +1879,7 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::CleanDestroyedObjects {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
                 object_ids: vec![1, 2],
             },
         )
@@ -1733,7 +1895,10 @@ mod tests {
         prepare(&mut state, 1, 10_000, 0);
         let result = apply(
             &mut state,
-            &MetadataCommand::ExpirePreparedObjects { now_ms: 200 },
+            &MetadataCommand::ExpirePreparedObjects {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                now_ms: 200,
+            },
         )
         .unwrap();
         assert_eq!(result, MetadataResult::Count(2));
@@ -1743,13 +1908,14 @@ mod tests {
 
     #[test]
     fn kv_put_get_delete_and_put_if_absent() {
-        let mut state = MetadataState::new();
+        let mut state = setup();
         let hello = Bytes::from_static(b"hello");
         let world = Bytes::from_static(b"world");
 
         let result = apply(
             &mut state,
             &MetadataCommand::PutKv {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
                 key: "k".into(),
                 value: hello.clone(),
             },
@@ -1761,6 +1927,7 @@ mod tests {
         let result = apply(
             &mut state,
             &MetadataCommand::PutKvIfAbsent {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
                 key: "k".into(),
                 value: world.clone(),
             },
@@ -1770,6 +1937,7 @@ mod tests {
         let result = apply(
             &mut state,
             &MetadataCommand::PutKvIfAbsent {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
                 key: "k2".into(),
                 value: world.clone(),
             },
@@ -1777,12 +1945,20 @@ mod tests {
         .unwrap();
         assert_eq!(result, MetadataResult::Value(Some(world.clone())));
 
-        let result = apply(&mut state, &MetadataCommand::DeleteKv { key: "k".into() }).unwrap();
+        let result = apply(
+            &mut state,
+            &MetadataCommand::DeleteKv {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                key: "k".into(),
+            },
+        )
+        .unwrap();
         assert_eq!(result, MetadataResult::Value(Some(hello)));
         assert!(state.kv.get("k").is_none());
         let result = apply(
             &mut state,
             &MetadataCommand::DeleteKv {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
                 key: "missing".into(),
             },
         )
@@ -1792,12 +1968,13 @@ mod tests {
 
     #[test]
     fn kv_delete_if_matches_and_rejects_mismatch() {
-        let mut state = MetadataState::new();
+        let mut state = setup();
         let hello = Bytes::from_static(b"hello");
         let world = Bytes::from_static(b"world");
         apply(
             &mut state,
             &MetadataCommand::PutKv {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
                 key: "k".into(),
                 value: hello.clone(),
             },
@@ -1808,6 +1985,7 @@ mod tests {
             apply(
                 &mut state,
                 &MetadataCommand::DeleteKvIfMatches {
+                    proposer: Proposer::new(NODE_1, EPOCH_1),
                     key: "k".into(),
                     expected: world.clone(),
                 },
@@ -1820,6 +1998,7 @@ mod tests {
         let result = apply(
             &mut state,
             &MetadataCommand::DeleteKvIfMatches {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
                 key: "k".into(),
                 expected: hello.clone(),
             },
@@ -1832,6 +2011,7 @@ mod tests {
             apply(
                 &mut state,
                 &MetadataCommand::DeleteKvIfMatches {
+                    proposer: Proposer::new(NODE_1, EPOCH_1),
                     key: "k".into(),
                     expected: world,
                 },
@@ -1839,6 +2019,67 @@ mod tests {
             .unwrap_err()
             .is_redundant()
         );
+    }
+
+    #[test]
+    fn put_kv_if_matches_swaps_only_the_expected_value() {
+        let mut state = setup();
+        let hello = Bytes::from_static(b"hello");
+        let world = Bytes::from_static(b"world!");
+
+        assert!(
+            apply(
+                &mut state,
+                &MetadataCommand::PutKvIfMatches {
+                    proposer: Proposer::new(NODE_1, EPOCH_1),
+                    key: "k".into(),
+                    expected: hello.clone(),
+                    value: world.clone(),
+                },
+            )
+            .unwrap_err()
+            .is_redundant()
+        );
+        assert!(state.kv.get("k").is_none());
+
+        apply(
+            &mut state,
+            &MetadataCommand::PutKv {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                key: "k".into(),
+                value: hello.clone(),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            apply(
+                &mut state,
+                &MetadataCommand::PutKvIfMatches {
+                    proposer: Proposer::new(NODE_1, EPOCH_1),
+                    key: "k".into(),
+                    expected: world.clone(),
+                    value: world.clone(),
+                },
+            )
+            .unwrap_err()
+            .is_redundant()
+        );
+        assert_eq!(state.kv.get("k"), Some(&hello));
+
+        let result = apply(
+            &mut state,
+            &MetadataCommand::PutKvIfMatches {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                key: "k".into(),
+                expected: hello,
+                value: world.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result, MetadataResult::Value(Some(world.clone())));
+        assert_eq!(state.kv.get("k"), Some(&world));
+        assert_eq!(state.kv_bytes, ("k".len() + world.len()) as u64);
     }
 
     /// Determinism over a scripted random command sequence.
@@ -1857,24 +2098,23 @@ mod tests {
             for i in 0..200 {
                 let command = match next() % 4 {
                     0 => MetadataCommand::CreateStream {
-                        node_id: NODE_1,
-                        node_epoch: EPOCH_1,
+                        proposer: Proposer::new(NODE_1, EPOCH_1),
                     },
                     1 => MetadataCommand::OpenStream {
-                        node_id: NODE_1,
-                        node_epoch: EPOCH_1,
+                        proposer: Proposer::new(NODE_1, EPOCH_1),
+
                         stream_id: next() % 20,
                         epoch: (next() % 5) as i64,
                     },
                     2 => MetadataCommand::CloseStream {
-                        node_id: NODE_1,
-                        node_epoch: EPOCH_1,
+                        proposer: Proposer::new(NODE_1, EPOCH_1),
+
                         stream_id: next() % 20,
                         epoch: (next() % 5) as i64,
                     },
                     _ => MetadataCommand::PrepareObject {
-                        node_id: NODE_1,
-                        node_epoch: EPOCH_1,
+                        proposer: Proposer::new(NODE_1, EPOCH_1),
+
                         count: 1 + (next() % 3) as u32,
                         ttl_ms: 1000,
                         now_ms: i,
@@ -1907,9 +2147,7 @@ mod tests {
         let derived_placed: Vec<(i32, u64)> = state
             .streams
             .iter()
-            .filter(|(_, row)| {
-                row.state == StreamState::Closed && row.epoch == -1 && row.node_id != -1
-            })
+            .filter(|(_, row)| row.state == StreamState::Closed && row.node_id != -1)
             .map(|(id, row)| (row.node_id, *id))
             .collect();
         let mut indexed_placed: Vec<(i32, u64)> = state.placed_by_node.keys().copied().collect();
@@ -1917,6 +2155,19 @@ mod tests {
         let mut derived_placed = derived_placed;
         derived_placed.sort_unstable();
         assert_eq!(indexed_placed, derived_placed, "placed_by_node");
+
+        let mut derived_counts: OrdMap<i32, u64> = OrdMap::new();
+        for (node_id, _) in derived_opening.iter().chain(&derived_placed) {
+            *derived_counts.entry(*node_id).or_default() += 1;
+        }
+        assert_eq!(state.streams_by_node, derived_counts, "streams_by_node");
+
+        for (stream_id, _) in state.epochs.keys() {
+            assert!(
+                state.streams.contains_key(stream_id),
+                "epochs of {stream_id}"
+            );
+        }
 
         assert_eq!(
             state.prepared.len(),
@@ -1983,38 +2234,63 @@ mod tests {
             prop_oneof![
                 node.clone()
                     .prop_map(|(n, e)| MetadataCommand::CreateStream {
-                        node_id: n,
-                        node_epoch: e
+                        proposer: Proposer::new(n, e)
                     }),
                 stream_id
                     .clone()
-                    .prop_map(|s| MetadataCommand::PlaceStream { stream_id: s }),
+                    .prop_map(|s| MetadataCommand::PlaceStream {
+                        proposer: Proposer::new(NODE_1, EPOCH_1),
+                        stream_id: s,
+                        node_id: None
+                    }),
+                (node.clone(), 0i64..2).prop_map(|((n, e), bump)| {
+                    MetadataCommand::RegisterNode {
+                        node_id: n,
+                        node_epoch: e + bump,
+                        http_address: String::new(),
+                        slots: 1,
+                        protocol_addresses: Default::default(),
+                        wal: String::new(),
+                    }
+                }),
+                node.clone().prop_map(|(n, e)| MetadataCommand::Heartbeat {
+                    proposer: Proposer::new(n, e),
+                }),
+                (node.clone(), node.clone(), 0u64..4).prop_map(|((p, pe), (n, e), h)| {
+                    MetadataCommand::FenceNode {
+                        proposer: Proposer::new(p, pe),
+                        node_id: n,
+                        node_epoch: e,
+                        heartbeats: h,
+                    }
+                }),
                 (node.clone(), stream_id.clone(), epoch.clone()).prop_map(|((n, ne), s, e)| {
                     MetadataCommand::OpenStream {
-                        node_id: n,
-                        node_epoch: ne,
+                        proposer: Proposer::new(n, ne),
+
                         stream_id: s,
                         epoch: e,
                     }
                 }),
                 (node.clone(), stream_id.clone(), epoch.clone()).prop_map(|((n, ne), s, e)| {
                     MetadataCommand::CloseStream {
-                        node_id: n,
-                        node_epoch: ne,
+                        proposer: Proposer::new(n, ne),
+
                         stream_id: s,
                         epoch: e,
                     }
                 }),
                 (node.clone(), stream_id.clone(), epoch.clone()).prop_map(|((n, ne), s, e)| {
                     MetadataCommand::DeleteStream {
-                        node_id: n,
-                        node_epoch: ne,
+                        proposer: Proposer::new(n, ne),
+
                         stream_id: s,
                         epoch: e,
                     }
                 }),
                 (stream_id.clone(), 1i32..3, 1i32..3).prop_map(|(s, from, to)| {
                     MetadataCommand::TransferStream {
+                        proposer: Proposer::new(NODE_1, EPOCH_1),
                         stream_id: s,
                         from_node: from,
                         to_node: to,
@@ -2022,26 +2298,27 @@ mod tests {
                 }),
                 (stream_id.clone(), epoch.clone()).prop_map(|(s, e)| {
                     MetadataCommand::CompleteTransfer {
+                        proposer: Proposer::new(NODE_1, EPOCH_1),
                         stream_id: s,
                         epoch: e,
                     }
                 }),
                 (node.clone(), 1u32..4).prop_map(|((n, ne), c)| MetadataCommand::CreateStreams {
-                    node_id: n,
-                    node_epoch: ne,
+                    proposer: Proposer::new(n, ne),
+
                     count: c,
                 }),
                 (node.clone(), 1u32..4).prop_map(|((n, ne), c)| {
                     MetadataCommand::AllocateProducerIds {
-                        node_id: n,
-                        node_epoch: ne,
+                        proposer: Proposer::new(n, ne),
+
                         count: c,
                     }
                 }),
                 (node.clone(), 1u32..3, 0i64..100).prop_map(|((n, ne), c, now)| {
                     MetadataCommand::PrepareObject {
-                        node_id: n,
-                        node_epoch: ne,
+                        proposer: Proposer::new(n, ne),
+
                         count: c,
                         ttl_ms: 50,
                         now_ms: now,
@@ -2056,8 +2333,8 @@ mod tests {
                 )
                     .prop_map(|((n, ne), s, e, obj, end)| {
                         MetadataCommand::CommitStreamSetObject {
-                            node_id: n,
-                            node_epoch: ne,
+                            proposer: Proposer::new(n, ne),
+
                             request: CommitStreamSetObjectRequest {
                                 object_id: obj,
                                 object_size: 64,
@@ -2077,8 +2354,8 @@ mod tests {
                     }),
                 (node.clone(), stream_id, epoch, 0u64..8).prop_map(|((n, ne), s, e, obj)| {
                     MetadataCommand::CompactStreamObject {
-                        node_id: n,
-                        node_epoch: ne,
+                        proposer: Proposer::new(n, ne),
+
                         request: CompactStreamObjectRequest {
                             object_id: obj,
                             object_size: 10,
@@ -2093,22 +2370,45 @@ mod tests {
                         now_ms: 1,
                     }
                 }),
-                (0i64..200).prop_map(|now| MetadataCommand::ExpirePreparedObjects { now_ms: now }),
-                proptest::collection::vec(0u64..8, 0..3)
-                    .prop_map(|ids| MetadataCommand::CleanDestroyedObjects { object_ids: ids }),
+                (0i64..200).prop_map(|now| MetadataCommand::ExpirePreparedObjects {
+                    proposer: Proposer::new(NODE_1, EPOCH_1),
+                    now_ms: now
+                }),
+                proptest::collection::vec(0u64..8, 0..3).prop_map(|ids| {
+                    MetadataCommand::CleanDestroyedObjects {
+                        proposer: Proposer::new(NODE_1, EPOCH_1),
+                        object_ids: ids,
+                    }
+                }),
                 ("[a-c]{1,2}", proptest::collection::vec(any::<u8>(), 0..4)).prop_map(|(k, v)| {
                     MetadataCommand::PutKv {
+                        proposer: Proposer::new(NODE_1, EPOCH_1),
                         key: k,
                         value: Bytes::from(v),
                     }
                 }),
-                "[a-c]{1,2}".prop_map(|k| MetadataCommand::DeleteKv { key: k }),
+                "[a-c]{1,2}".prop_map(|k| MetadataCommand::DeleteKv {
+                    proposer: Proposer::new(NODE_1, EPOCH_1),
+                    key: k
+                }),
                 ("[a-c]{1,2}", proptest::collection::vec(any::<u8>(), 0..4)).prop_map(|(k, v)| {
                     MetadataCommand::DeleteKvIfMatches {
+                        proposer: Proposer::new(NODE_1, EPOCH_1),
                         key: k,
                         expected: Bytes::from(v),
                     }
                 }),
+                (
+                    "[a-c]{1,2}",
+                    proptest::collection::vec(any::<u8>(), 0..4),
+                    proptest::collection::vec(any::<u8>(), 0..4)
+                )
+                    .prop_map(|(k, e, v)| MetadataCommand::PutKvIfMatches {
+                        proposer: Proposer::new(NODE_1, EPOCH_1),
+                        key: k,
+                        expected: Bytes::from(e),
+                        value: Bytes::from(v),
+                    }),
             ]
         }
 
@@ -2175,6 +2475,276 @@ mod tests {
         assert_eq!(state, after_first);
     }
 
+    fn heartbeat(
+        state: &mut MetadataState,
+        node_id: i32,
+        node_epoch: i64,
+    ) -> Result<MetadataResult, MetadataError> {
+        apply(
+            state,
+            &MetadataCommand::Heartbeat {
+                proposer: Proposer::new(node_id, node_epoch),
+            },
+        )
+    }
+
+    /// A live node fences `node_id` as it currently stands.
+    fn fence(
+        state: &mut MetadataState,
+        node_id: i32,
+        node_epoch: i64,
+    ) -> Result<MetadataResult, MetadataError> {
+        let heartbeats = state.nodes.get(&node_id).map_or(0, |node| node.heartbeats);
+        let proposer = live(state);
+        apply(
+            state,
+            &MetadataCommand::FenceNode {
+                proposer,
+                node_id,
+                node_epoch,
+                heartbeats,
+            },
+        )
+    }
+
+    #[test]
+    fn heartbeats_count_per_node() {
+        let mut state = setup();
+        let before = state.nodes[&NODE_2].heartbeats;
+
+        heartbeat(&mut state, NODE_2, EPOCH_2).unwrap();
+        heartbeat(&mut state, NODE_2, EPOCH_2).unwrap();
+
+        assert_eq!(state.nodes[&NODE_2].heartbeats, before + 2);
+        assert!(heartbeat(&mut state, NODE_2, EPOCH_2 - 1).is_err());
+    }
+
+    #[test]
+    fn fenced_nodes_cannot_write_until_they_register_anew() {
+        let mut state = setup();
+        fence(&mut state, NODE_2, EPOCH_2).unwrap();
+
+        assert!(heartbeat(&mut state, NODE_2, EPOCH_2).is_err());
+        assert!(
+            apply(
+                &mut state,
+                &MetadataCommand::CreateStream {
+                    proposer: Proposer::new(NODE_2, EPOCH_2),
+                },
+            )
+            .is_err()
+        );
+
+        let reregistered = apply(
+            &mut state,
+            &MetadataCommand::RegisterNode {
+                wal: String::new(),
+                node_id: NODE_2,
+                node_epoch: EPOCH_2,
+                http_address: String::new(),
+                slots: 1,
+                protocol_addresses: Default::default(),
+            },
+        )
+        .unwrap();
+        assert_eq!(reregistered, MetadataResult::Id((EPOCH_2 + 1) as u64));
+        assert!(!state.nodes[&NODE_2].fenced);
+        heartbeat(&mut state, NODE_2, EPOCH_2 + 1).unwrap();
+
+        assert!(matches!(
+            fence(&mut state, NODE_2, EPOCH_2),
+            Err(MetadataError::Redundant { .. })
+        ));
+    }
+
+    #[test]
+    fn registration_keeps_the_wal_unless_replaced() {
+        let mut state = MetadataState::new();
+        let register_wal = |state: &mut MetadataState, epoch: i64, wal: &str| {
+            apply(
+                state,
+                &MetadataCommand::RegisterNode {
+                    wal: wal.to_owned(),
+                    node_id: NODE_1,
+                    node_epoch: epoch,
+                    http_address: String::new(),
+                    slots: 1,
+                    protocol_addresses: Default::default(),
+                },
+            )
+            .unwrap();
+        };
+
+        register_wal(&mut state, EPOCH_1, "2@s3://wal/one");
+        register_wal(&mut state, EPOCH_1, "");
+        assert_eq!(state.nodes[&NODE_1].wal, "2@s3://wal/one");
+
+        register_wal(&mut state, EPOCH_1 + 1, "2@s3://wal/two");
+        assert_eq!(state.nodes[&NODE_1].wal, "2@s3://wal/two");
+    }
+
+    #[test]
+    fn streams_of_fenced_nodes_are_placed_on_live_nodes() {
+        let mut state = setup();
+        let placed = create(&mut state, NODE_1, EPOCH_1);
+        let opened = create(&mut state, NODE_1, EPOCH_1);
+        assert_eq!(place(&mut state, placed), NODE_1);
+        open(&mut state, NODE_1, EPOCH_1, opened, 0).unwrap();
+        close(&mut state, NODE_1, EPOCH_1, opened, 0).unwrap();
+
+        fence(&mut state, NODE_1, EPOCH_1).unwrap();
+
+        assert_eq!(place(&mut state, placed), NODE_2);
+        assert_eq!(place(&mut state, opened), NODE_2);
+        assert!(!state.placed_by_node.contains_key(&(NODE_1, placed)));
+        assert!(state.placed_by_node.contains_key(&(NODE_2, placed)));
+        assert!(state.placed_by_node.contains_key(&(NODE_2, opened)));
+
+        let fresh = create(&mut state, NODE_2, EPOCH_2);
+        assert_eq!(place(&mut state, fresh), NODE_2);
+    }
+
+    #[test]
+    fn placement_honours_a_requested_live_node() {
+        let mut state = setup();
+        let place_on = |state: &mut MetadataState, stream_id, node_id| {
+            apply(
+                state,
+                &MetadataCommand::PlaceStream {
+                    proposer: Proposer::new(NODE_1, EPOCH_1),
+                    stream_id,
+                    node_id: Some(node_id),
+                },
+            )
+        };
+
+        let requested = create(&mut state, NODE_1, EPOCH_1);
+        assert_eq!(
+            place_on(&mut state, requested, NODE_2).unwrap(),
+            MetadataResult::Id(NODE_2 as u64)
+        );
+        assert_eq!(
+            place_on(&mut state, requested, NODE_1).unwrap(),
+            MetadataResult::Id(NODE_2 as u64),
+            "a stream on a live node keeps it"
+        );
+
+        fence(&mut state, NODE_2, EPOCH_2).unwrap();
+        let refused = create(&mut state, NODE_1, EPOCH_1);
+        for node_id in [NODE_2, 99] {
+            let err = place_on(&mut state, refused, node_id).unwrap_err();
+            assert!(matches!(err, MetadataError::NoLiveNode { .. }), "{err}");
+        }
+    }
+
+    #[test]
+    fn opened_streams_keep_their_node_when_placed() {
+        let mut state = setup();
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 0).unwrap();
+
+        fence(&mut state, NODE_1, EPOCH_1).unwrap();
+
+        assert_eq!(place(&mut state, stream_id), NODE_1);
+        assert_eq!(state.streams[&stream_id].state, StreamState::Opened);
+    }
+
+    #[test]
+    fn closed_streams_stay_on_their_live_node() {
+        let mut state = setup();
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+        open(&mut state, NODE_2, EPOCH_2, stream_id, 0).unwrap();
+        close(&mut state, NODE_2, EPOCH_2, stream_id, 0).unwrap();
+
+        assert_eq!(place(&mut state, stream_id), NODE_2);
+        assert!(state.placed_by_node.contains_key(&(NODE_2, stream_id)));
+    }
+
+    #[test]
+    fn completing_a_transfer_moves_the_placement() {
+        let mut state = setup();
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 0).unwrap();
+        apply(
+            &mut state,
+            &MetadataCommand::TransferStream {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                stream_id,
+                from_node: NODE_1,
+                to_node: NODE_2,
+            },
+        )
+        .unwrap();
+        close(&mut state, NODE_1, EPOCH_1, stream_id, 0).unwrap();
+        assert_eq!(place(&mut state, stream_id), NODE_1);
+
+        apply(
+            &mut state,
+            &MetadataCommand::CompleteTransfer {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                stream_id,
+                epoch: 0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.placed_by_node.keys().copied().collect::<Vec<_>>(),
+            vec![(NODE_2, stream_id)]
+        );
+    }
+
+    #[test]
+    fn registration_does_not_count_as_a_heartbeat() {
+        let mut state = setup();
+        heartbeat(&mut state, NODE_2, EPOCH_2).unwrap();
+
+        register_with_slots(&mut state, NODE_2, EPOCH_2, 3);
+
+        assert_eq!(state.nodes[&NODE_2].heartbeats, 1);
+        assert_eq!(state.nodes[&NODE_2].slots, 3);
+    }
+
+    #[test]
+    fn node_loads_follow_their_streams_and_drive_placement() {
+        let mut state = setup();
+        let streams: Vec<u64> = (0..3)
+            .map(|_| create(&mut state, NODE_1, EPOCH_1))
+            .collect();
+
+        let placed: Vec<i32> = streams.iter().map(|id| place(&mut state, *id)).collect();
+        assert_eq!(placed, [NODE_1, NODE_2, NODE_1]);
+        assert_eq!(
+            state.streams_by_node,
+            OrdMap::from(vec![(NODE_1, 2u64), (NODE_2, 1)])
+        );
+
+        open(&mut state, NODE_1, EPOCH_1, streams[0], 0).unwrap();
+        close(&mut state, NODE_1, EPOCH_1, streams[0], 0).unwrap();
+        assert_eq!(
+            state.streams_by_node,
+            OrdMap::from(vec![(NODE_1, 2u64), (NODE_2, 1)])
+        );
+
+        apply(
+            &mut state,
+            &MetadataCommand::DeleteStream {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                stream_id: streams[0],
+                epoch: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.streams_by_node,
+            OrdMap::from(vec![(NODE_1, 1u64), (NODE_2, 1)])
+        );
+
+        let next = create(&mut state, NODE_1, EPOCH_1);
+        assert_eq!(place(&mut state, next), NODE_1);
+        assert_indexes_consistent(&state);
+    }
+
     #[test]
     fn place_open_close_delete_keeps_indexes_balanced() {
         let mut state = setup();
@@ -2188,14 +2758,14 @@ mod tests {
         assert_eq!(state.opening_by_node.len(), 1);
 
         close(&mut state, NODE_1, EPOCH_1, stream_id, 1).unwrap();
-        assert_eq!(state.placed_by_node.len(), 0);
+        assert_eq!(state.placed_by_node.len(), 1);
         assert_eq!(state.opening_by_node.len(), 0);
 
         apply(
             &mut state,
             &MetadataCommand::DeleteStream {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 stream_id,
                 epoch: 1,
             },
@@ -2220,20 +2790,33 @@ mod tests {
     #[test]
     fn placing_nonexistent_stream_errors() {
         let mut state = setup();
-        let err = apply(&mut state, &MetadataCommand::PlaceStream { stream_id: 999 }).unwrap_err();
+        let err = apply(
+            &mut state,
+            &MetadataCommand::PlaceStream {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                stream_id: 999,
+                node_id: None,
+            },
+        )
+        .unwrap_err();
         assert_eq!(err.code(), 1);
     }
 
     #[test]
-    fn placement_without_registered_nodes_errors() {
+    fn placement_without_nodes_with_slots_errors() {
         let mut state = MetadataState::new();
-        let stream_id = {
-            register(&mut state, NODE_1, EPOCH_1);
-            create(&mut state, NODE_1, EPOCH_1)
-        };
-        state.nodes.remove(&NODE_1);
-        let err = apply(&mut state, &MetadataCommand::PlaceStream { stream_id }).unwrap_err();
-        assert_eq!(err.code(), 5);
+        register_with_slots(&mut state, NODE_1, EPOCH_1, 0);
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+        let err = apply(
+            &mut state,
+            &MetadataCommand::PlaceStream {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                stream_id,
+                node_id: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, MetadataError::NoLiveNode { .. }), "{err}");
     }
 
     #[test]
@@ -2260,6 +2843,7 @@ mod tests {
         apply(
             state,
             &MetadataCommand::TransferStream {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
                 stream_id,
                 from_node,
                 to_node,
@@ -2274,7 +2858,11 @@ mod tests {
     ) -> Result<MetadataResult, MetadataError> {
         apply(
             state,
-            &MetadataCommand::CompleteTransfer { stream_id, epoch },
+            &MetadataCommand::CompleteTransfer {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                stream_id,
+                epoch,
+            },
         )
     }
 
@@ -2361,7 +2949,10 @@ mod tests {
         assert_eq!(row.node_id, NODE_2);
         assert_eq!(row.state, StreamState::Closed);
         assert!(state.pending_transfers.is_empty());
-        assert!(state.placed_by_node.is_empty());
+        assert_eq!(
+            state.placed_by_node.keys().copied().collect::<Vec<_>>(),
+            vec![(NODE_2, stream_id)]
+        );
 
         // Redundant completion.
         assert!(
@@ -2386,8 +2977,8 @@ mod tests {
         apply(
             &mut state,
             &MetadataCommand::DeleteStream {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 stream_id,
                 epoch: 1,
             },
@@ -2403,8 +2994,8 @@ mod tests {
         let result = apply(
             &mut state,
             &MetadataCommand::CreateStreams {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 count: 3,
             },
         )
@@ -2426,8 +3017,8 @@ mod tests {
         let err = apply(
             &mut state,
             &MetadataCommand::CreateStreams {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 count: 0,
             },
         )
@@ -2436,8 +3027,8 @@ mod tests {
         let err = apply(
             &mut state,
             &MetadataCommand::CreateStreams {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1,
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+
                 count: MAX_CREATE_STREAMS + 1,
             },
         )
@@ -2446,13 +3037,164 @@ mod tests {
         let err = apply(
             &mut state,
             &MetadataCommand::CreateStreams {
-                node_id: NODE_1,
-                node_epoch: EPOCH_1 + 1,
+                proposer: Proposer::new(NODE_1, EPOCH_1 + 1),
+
                 count: 1,
             },
         )
         .unwrap_err();
         assert_eq!(err.code(), 5);
         assert_eq!(state, before);
+    }
+
+    #[test]
+    fn a_fenced_node_cannot_fence_or_write() {
+        let mut state = setup();
+        fence(&mut state, NODE_1, EPOCH_1).unwrap();
+        let before = state.clone();
+
+        let fenced = Proposer::new(NODE_1, EPOCH_1);
+        for command in [
+            MetadataCommand::FenceNode {
+                proposer: fenced,
+                node_id: NODE_2,
+                node_epoch: EPOCH_2,
+                heartbeats: state.nodes[&NODE_2].heartbeats,
+            },
+            MetadataCommand::PutKv {
+                proposer: fenced,
+                key: "k".into(),
+                value: Bytes::from_static(b"v"),
+            },
+            MetadataCommand::SetNodeSlots {
+                proposer: fenced,
+                node_id: NODE_2,
+                slots: 5,
+            },
+        ] {
+            let err = apply(&mut state, &command).unwrap_err();
+            assert_eq!(err.code(), 5, "{command:?}");
+        }
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn a_fence_only_lands_on_the_node_the_proposer_saw() {
+        let mut state = setup();
+        let seen = state.nodes[&NODE_2].heartbeats;
+        heartbeat(&mut state, NODE_2, EPOCH_2).unwrap();
+
+        let stale = apply(
+            &mut state,
+            &MetadataCommand::FenceNode {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                node_id: NODE_2,
+                node_epoch: EPOCH_2,
+                heartbeats: seen,
+            },
+        );
+        assert!(matches!(stale, Err(MetadataError::Redundant { .. })));
+        assert!(!state.nodes[&NODE_2].fenced);
+
+        fence(&mut state, NODE_2, EPOCH_2).unwrap();
+        assert!(state.nodes[&NODE_2].fenced);
+    }
+
+    #[test]
+    fn a_node_leaving_fences_itself_whatever_heartbeats_landed() {
+        let mut state = setup();
+        let seen = state.nodes[&NODE_2].heartbeats;
+        heartbeat(&mut state, NODE_2, EPOCH_2).unwrap();
+
+        apply(
+            &mut state,
+            &MetadataCommand::FenceNode {
+                proposer: Proposer::new(NODE_2, EPOCH_2),
+                node_id: NODE_2,
+                node_epoch: EPOCH_2,
+                heartbeats: seen,
+            },
+        )
+        .unwrap();
+
+        assert!(state.nodes[&NODE_2].fenced);
+    }
+
+    #[test]
+    fn only_the_owner_closes_trims_or_deletes_until_it_is_fenced() {
+        let mut state = setup();
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 0).unwrap();
+        let trim = |state: &mut MetadataState, node_id, node_epoch| {
+            apply(
+                state,
+                &MetadataCommand::TrimStream {
+                    proposer: Proposer::new(node_id, node_epoch),
+                    stream_id,
+                    epoch: 0,
+                    new_start_offset: 0,
+                },
+            )
+        };
+
+        let err = close(&mut state, NODE_2, EPOCH_2, stream_id, 0).unwrap_err();
+        assert!(matches!(err, MetadataError::StreamFenced { .. }), "{err}");
+        let err = trim(&mut state, NODE_2, EPOCH_2).unwrap_err();
+        assert!(matches!(err, MetadataError::StreamFenced { .. }), "{err}");
+        trim(&mut state, NODE_1, EPOCH_1).unwrap();
+
+        fence(&mut state, NODE_1, EPOCH_1).unwrap();
+        close(&mut state, NODE_2, EPOCH_2, stream_id, 0).unwrap();
+        apply(
+            &mut state,
+            &MetadataCommand::DeleteStream {
+                proposer: Proposer::new(NODE_2, EPOCH_2),
+                stream_id,
+                epoch: 0,
+            },
+        )
+        .unwrap();
+        assert!(!state.streams.contains_key(&stream_id));
+    }
+
+    #[test]
+    fn slots_change_without_touching_the_registration() {
+        let mut state = setup();
+        apply(
+            &mut state,
+            &MetadataCommand::SetNodeSlots {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                node_id: NODE_2,
+                slots: 4,
+            },
+        )
+        .unwrap();
+
+        let node = &state.nodes[&NODE_2];
+        assert_eq!((node.slots, node.epoch), (4, EPOCH_2));
+        let unknown = apply(
+            &mut state,
+            &MetadataCommand::SetNodeSlots {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                node_id: 99,
+                slots: 1,
+            },
+        );
+        assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn transfers_never_target_a_fenced_node() {
+        let mut state = setup();
+        let stream_id = create(&mut state, NODE_1, EPOCH_1);
+        open(&mut state, NODE_1, EPOCH_1, stream_id, 0).unwrap();
+        fence(&mut state, NODE_2, EPOCH_2).unwrap();
+
+        let err = transfer(&mut state, stream_id, NODE_1, NODE_2).unwrap_err();
+        assert!(
+            matches!(err, MetadataError::NodeEpochMismatch { .. }),
+            "{err}"
+        );
+        assert!(state.pending_transfers.is_empty());
     }
 }

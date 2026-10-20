@@ -36,7 +36,7 @@ async fn run(service: Arc<S3StreamService>, views: Arc<ViewPublisher>, node_id: 
     loop {
         let view = views.load();
         process(&service, &view, node_id, &mut incoming).await;
-        let _ = tokio::time::timeout(RETRY_TICK, views.wait_applied(view.applied_index + 1)).await;
+        views.wait_past(view.applied_index, RETRY_TICK).await;
     }
 }
 
@@ -67,7 +67,7 @@ async fn process(
             .streams
             .get(&stream_id)
             .is_some_and(|row| row.node_id == node_id && row.state == StreamState::Closed);
-        if owned && let Err(error) = service.ensure_open(stream_id).await {
+        if owned && let Err(error) = service.streams().ensure_open(stream_id).await {
             tracing::debug!(%error, stream_id, "transfer pre-warm open failed");
         }
     }
@@ -79,21 +79,13 @@ async fn release_and_complete(service: &S3StreamService, view: &MetadataView, st
     let Some(row) = view.state.streams.get(&stream_id).copied() else {
         return;
     };
-    let node = service.node();
+    let node = service.streams().node();
     let epoch = match row.state {
         StreamState::Closed => row.epoch,
         StreamState::Opened if row.node_id == node.node_id() => {
             match service.release_for_transfer(stream_id).await {
                 Ok(Some(epoch)) => epoch,
-                Ok(None) => {
-                    // Opened in metadata but not held by this process, so seal
-                    // it directly at the current epoch.
-                    if let Err(error) = node.close_stream(stream_id, row.epoch).await {
-                        tracing::warn!(%error, stream_id, "transfer close failed");
-                        return;
-                    }
-                    row.epoch
-                }
+                Ok(None) => return,
                 Err(error) => {
                     tracing::warn!(%error, stream_id, "transfer release failed");
                     return;

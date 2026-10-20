@@ -26,10 +26,7 @@ fn config(dir: &Path, node_epoch: i64) -> ServerConfig {
         node_epoch,
         addr: loopback(),
         admin_addr: None,
-        kafka: Some(KafkaConfig {
-            listen: loopback(),
-            advertise: None,
-        }),
+        kafka: KafkaConfig::new(loopback()),
         meta_backend: MetaBackend::parse(&format!("sqlite:{}", dir.join("meta.db").display()))
             .unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
@@ -47,7 +44,7 @@ async fn broker(dir: &Path, node_epoch: i64) -> (PicoServer, String) {
     let server = picomq_runtime::start(config(dir, node_epoch))
         .await
         .unwrap();
-    let bootstrap = server.kafka_addr().unwrap().to_string();
+    let bootstrap = server.kafka_addr().to_string();
     (server, bootstrap)
 }
 

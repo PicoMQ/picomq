@@ -2,9 +2,10 @@ import { asClientError, ClientError } from './error'
 import { parseSafeSeq, sleep } from './util'
 import { toEnvelope, type RecordEnvelope } from './record'
 import { RetryPolicy } from './retry'
-import type { AppendInput, CallOptions, ProducerAck, ProducerRef } from './types'
+import type { AppendInput, PartitionOptions, ProducerAck, ProducerRef } from './types'
 
 export interface ProducerConfig {
+  partition?: number
   epoch?: number
   lingerMs?: number
   maxBatchRecords?: number
@@ -19,11 +20,12 @@ export interface ProducerClient {
     name: string,
     records: AppendInput[],
     producer: ProducerRef,
-    options?: CallOptions,
+    options?: PartitionOptions,
   ): Promise<ProducerAck>
 }
 
 interface ResolvedConfig {
+  partition: number | undefined
   epoch: number
   lingerMs: number
   maxBatchRecords: number
@@ -35,6 +37,7 @@ interface ResolvedConfig {
 
 function resolveConfig(config: ProducerConfig = {}): ResolvedConfig {
   return {
+    partition: config.partition,
     epoch: config.epoch ?? 0,
     lingerMs: config.lingerMs ?? 5,
     maxBatchRecords: config.maxBatchRecords ?? 500,
@@ -258,14 +261,22 @@ export class Producer {
     id: string,
     seq: number,
   ): Promise<number> {
+    const partition = this.config.partition
+    const options = partition === undefined ? {} : { partition }
+
     let attempt = 0
     for (;;) {
       try {
-        const ack = await client.appendAs(name, records, {
-          id,
-          epoch: this.config.epoch,
-          seq,
-        })
+        const ack = await client.appendAs(
+          name,
+          records,
+          {
+            id,
+            epoch: this.config.epoch,
+            seq,
+          },
+          options,
+        )
         if (ack.duplicate) {
           return parseSafeSeq(ack.ack.next, 'next') - records.length
         }

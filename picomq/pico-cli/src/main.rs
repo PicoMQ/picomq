@@ -114,16 +114,40 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
                 server.local_addr(),
                 server.base_url()
             );
-            if let Some(kafka) = server.kafka_addr() {
-                println!("kafka on {kafka}");
-            }
+            println!("kafka on {}", server.kafka_addr());
             if let Some(admin) = server.admin_addr() {
                 println!("admin on http://{admin}");
             }
-            tokio::signal::ctrl_c().await?;
-            println!("shutting down");
+            let mut fenced = server.fenced();
+            let code = tokio::select! {
+                signal = shutdown_signal() => {
+                    signal?;
+                    println!("shutting down");
+                    0
+                }
+                _ = fenced.wait_for(|fenced| *fenced) => {
+                    eprintln!("this node left the cluster, shutting down");
+                    1
+                }
+            };
             server.shutdown().await;
-            Ok(0)
+            Ok(code)
         }
     }
+}
+
+/// Ctrl-C, or SIGTERM from a container runtime or process manager.
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => signal,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }

@@ -358,7 +358,8 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 
 		groups, err := client.ListGroups(ctx)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(groups).To(ContainElement(GroupSummary{Group: group, State: "Stable"}))
+		Expect(groups).To(ContainElement(group))
+		Expect(errorCode(client.DeleteGroup(ctx, group))).To(Equal("conflict"))
 
 		Expect(client.LeaveGroup(ctx, group, joined.MemberID, "")).To(Succeed())
 
@@ -366,6 +367,10 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(described.State).To(Equal("Empty"))
 		Expect(errorCode(client.Heartbeat(ctx, group, fence))).To(Equal("unknown_member"))
+
+		Expect(client.DeleteGroup(ctx, group)).To(Succeed())
+		_, err = client.DescribeGroup(ctx, group)
+		Expect(errorCode(err)).To(Equal("not_found"))
 
 		shared := "go-shared-" + run
 		config := GroupConfig{SessionTimeout: 2 * time.Second, HeartbeatInterval: 100 * time.Millisecond}
@@ -621,13 +626,11 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(described.State).To(Equal("Stable"))
 
-		var listed []GroupSummary
 		for _, client := range clients {
 			groups, err := client.ListGroups(ctx)
 			Expect(err).NotTo(HaveOccurred())
-			listed = append(listed, groups...)
+			Expect(groups).To(ContainElement(group), "every node lists every group")
 		}
-		Expect(listed).To(ContainElement(GroupSummary{Group: group, State: "Stable"}), "each node lists the groups it coordinates")
 
 		Expect(clients[1].LeaveGroup(ctx, group, joined.MemberID, "")).To(Succeed())
 

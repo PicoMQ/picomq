@@ -7,7 +7,8 @@ use crate::record::{
     PicoRecord, SequencedRecord, decode_batch_read, encode_batch_append, encode_json_read,
 };
 use crate::wire::{
-    WireRequest, header_i64, header_string, header_u64, stream_path, truthy, urlencode,
+    WireRequest, header_i64, header_string, header_u64, partition_path, push_partition,
+    stream_path, truthy, urlencode,
 };
 
 pub use crate::wire::Producer;
@@ -22,6 +23,7 @@ pub const H_EXPIRES_AT: &str = "Pico-Expires-At";
 pub const H_CLOSED: &str = "Pico-Closed";
 pub const H_SCHEMA: &str = "Pico-Schema";
 pub const H_SCHEMA_VALIDATE: &str = "Pico-Schema-Validate";
+pub const H_PARTITIONS: &str = "Pico-Partitions";
 pub const H_UP_TO_DATE: &str = "Pico-Up-To-Date";
 pub const H_CURSOR: &str = "Pico-Cursor";
 pub const H_PRODUCER_ID: &str = "Pico-Producer-Id";
@@ -31,7 +33,6 @@ pub const H_EXPECTED_SEQ: &str = "Pico-Expected-Seq";
 pub const H_RECEIVED_SEQ: &str = "Pico-Received-Seq";
 /// Record key for a single-record append; batch bodies carry keys inline.
 pub const H_KEY: &str = "Pico-Key";
-/// The stream's Kafka topic alias (create request and metadata responses).
 pub const H_KAFKA_TOPIC: &str = "Pico-Kafka-Topic";
 pub const CT_BATCH_JSON: &str = "application/vnd.picomq.batch+json";
 pub const CT_BATCH_BINARY: &str = "application/vnd.picomq.batch";
@@ -45,6 +46,7 @@ pub const Q_FORMAT: &str = "format";
 pub const Q_LIVE: &str = "live";
 pub const Q_PREFIX: &str = "prefix";
 pub const Q_LIMIT: &str = "limit";
+pub use crate::wire::Q_PARTITION;
 pub const Q_START_AFTER: &str = "start_after";
 pub const Q_CURSOR: &str = "cursor";
 pub const FORMAT_JSON: &str = "json";
@@ -63,6 +65,9 @@ pub const E_MATCH_FAILED: &str = "match_failed";
 pub const E_CONFLICT: &str = "conflict";
 pub const E_CLOSED: &str = "closed";
 pub const E_DURABILITY: &str = "durability";
+pub const E_INTERNAL: &str = "internal";
+pub const E_TIMEOUT: &str = "timeout";
+pub const E_UNAVAILABLE: &str = "unavailable";
 pub const E_UNAUTHENTICATED: &str = "unauthenticated";
 pub const E_PERMISSION_DENIED: &str = "permission_denied";
 pub const E_COORDINATOR_UNAVAILABLE: &str = "coordinator_unavailable";
@@ -129,8 +134,9 @@ pub fn error_kind(status: u16, code: &str, closed: bool) -> ErrorKind {
 pub struct StreamEntry {
     pub name: String,
     pub content_type: Option<String>,
-    pub start_seq: u64,
-    pub next_seq: u64,
+    pub partitions: u32,
+    pub start_seq: Option<u64>,
+    pub next_seq: Option<u64>,
     pub closed: bool,
     pub ttl_seconds: Option<u64>,
     pub expires_at: Option<String>,
@@ -153,8 +159,13 @@ impl Listing {
                 if let Some(content_type) = &entry.content_type {
                     node.insert("content_type".into(), json!(content_type));
                 }
-                node.insert("start_seq".into(), json!(entry.start_seq));
-                node.insert("next_seq".into(), json!(entry.next_seq));
+                node.insert("partitions".into(), json!(entry.partitions));
+                if let Some(start_seq) = entry.start_seq {
+                    node.insert("start_seq".into(), json!(start_seq));
+                }
+                if let Some(next_seq) = entry.next_seq {
+                    node.insert("next_seq".into(), json!(next_seq));
+                }
                 node.insert("closed".into(), json!(entry.closed));
                 if let Some(ttl) = entry.ttl_seconds {
                     node.insert("ttl".into(), json!(ttl));
@@ -180,8 +191,9 @@ impl Listing {
                     .map(|node| StreamEntry {
                         name: node["name"].as_str().unwrap_or_default().to_owned(),
                         content_type: node["content_type"].as_str().map(str::to_owned),
-                        start_seq: node["start_seq"].as_u64().unwrap_or(0),
-                        next_seq: node["next_seq"].as_u64().unwrap_or(0),
+                        partitions: node["partitions"].as_u64().unwrap_or(1) as u32,
+                        start_seq: node["start_seq"].as_u64(),
+                        next_seq: node["next_seq"].as_u64(),
                         closed: node["closed"].as_bool().unwrap_or(false),
                         ttl_seconds: node["ttl"].as_u64(),
                         expires_at: node["expires_at"].as_str().map(str::to_owned),
@@ -229,7 +241,6 @@ pub struct CreateRequest<'a> {
     pub closed: bool,
     pub schema: Option<&'a str>,
     pub schema_validate: bool,
-    pub kafka_topic: Option<&'a str>,
 }
 
 impl<'a> CreateRequest<'a> {
@@ -242,7 +253,6 @@ impl<'a> CreateRequest<'a> {
             closed: false,
             schema: None,
             schema_validate: false,
-            kafka_topic: None,
         }
     }
 
@@ -254,7 +264,6 @@ impl<'a> CreateRequest<'a> {
             .flag(H_CLOSED, self.closed)
             .header_opt(H_SCHEMA, self.schema)
             .flag(H_SCHEMA_VALIDATE, self.schema_validate)
-            .header_opt(H_KAFKA_TOPIC, self.kafka_topic)
     }
 }
 
@@ -280,6 +289,7 @@ impl CreateResponse {
 #[derive(Debug, Clone)]
 pub struct AppendRequest<'a> {
     pub stream: &'a str,
+    pub partition: Option<u32>,
     pub records: &'a [PicoRecord],
     pub producer: Option<Producer<'a>>,
     pub match_seq: Option<u64>,
@@ -290,6 +300,7 @@ impl<'a> AppendRequest<'a> {
     pub fn new(stream: &'a str, records: &'a [PicoRecord]) -> Self {
         Self {
             stream,
+            partition: None,
             records,
             producer: None,
             match_seq: None,
@@ -298,7 +309,8 @@ impl<'a> AppendRequest<'a> {
     }
 
     pub fn encode(&self) -> WireRequest {
-        let mut request = WireRequest::new(Method::POST, stream_path(self.stream), &[200]);
+        let path = partition_path(self.stream, self.partition);
+        let mut request = WireRequest::new(Method::POST, path, &[200]);
         if !self.records.is_empty() {
             request = request
                 .header("content-type", CT_BATCH_BINARY)
@@ -342,13 +354,14 @@ impl AppendResponse {
 #[derive(Debug, Clone, Copy)]
 pub struct TrimRequest<'a> {
     pub stream: &'a str,
+    pub partition: Option<u32>,
     pub seq: u64,
 }
 
 impl TrimRequest<'_> {
     pub fn encode(&self) -> WireRequest {
-        WireRequest::new(Method::POST, stream_path(self.stream), &[200])
-            .header(H_TRIM_SEQ, self.seq.to_string())
+        let path = partition_path(self.stream, self.partition);
+        WireRequest::new(Method::POST, path, &[200]).header(H_TRIM_SEQ, self.seq.to_string())
     }
 }
 
@@ -368,17 +381,20 @@ impl TrimResponse {
 #[derive(Debug, Clone, Copy)]
 pub struct HeadRequest<'a> {
     pub stream: &'a str,
+    pub partition: Option<u32>,
 }
 
 impl HeadRequest<'_> {
     pub fn encode(&self) -> WireRequest {
-        WireRequest::new(Method::HEAD, stream_path(self.stream), &[200, 404])
+        let path = partition_path(self.stream, self.partition);
+        WireRequest::new(Method::HEAD, path, &[200, 404])
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeadResponse {
     pub content_type: Option<String>,
+    pub partitions: u32,
     pub start_seq: Option<u64>,
     pub next_seq: Option<u64>,
     pub closed: bool,
@@ -395,6 +411,7 @@ impl HeadResponse {
         }
         Some(Self {
             content_type: header_string(headers, "content-type"),
+            partitions: header_u64(headers, H_PARTITIONS).unwrap_or(1) as u32,
             start_seq: header_u64(headers, H_START_SEQ),
             next_seq: header_u64(headers, H_NEXT_SEQ),
             closed: truthy(headers, H_CLOSED),
@@ -409,6 +426,7 @@ impl HeadResponse {
 #[derive(Debug, Clone)]
 pub struct ReadRequest<'a> {
     pub stream: &'a str,
+    pub partition: Option<u32>,
     pub seq: &'a str,
     pub format: &'static str,
     pub count: u64,
@@ -420,6 +438,7 @@ impl<'a> ReadRequest<'a> {
     pub fn new(stream: &'a str, seq: &'a str) -> Self {
         Self {
             stream,
+            partition: None,
             seq,
             format: FORMAT_BINARY,
             count: 0,
@@ -443,6 +462,7 @@ impl<'a> ReadRequest<'a> {
         if let Some(live) = self.live {
             query.push_str(&format!("&{Q_LIVE}={live}"));
         }
+        push_partition(&mut query, self.partition);
         let ok: &'static [u16] = if self.live.is_some() {
             &[200, 204]
         } else {
@@ -593,15 +613,28 @@ mod tests {
     #[test]
     fn listing_round_trip() {
         let listing = Listing {
-            streams: vec![StreamEntry {
-                name: "/a".to_owned(),
-                content_type: Some("application/json".to_owned()),
-                start_seq: 1,
-                next_seq: 5,
-                closed: false,
-                ttl_seconds: Some(60),
-                expires_at: Some("2026-01-01T00:00:00Z".to_owned()),
-            }],
+            streams: vec![
+                StreamEntry {
+                    name: "/a".to_owned(),
+                    content_type: Some("application/json".to_owned()),
+                    partitions: 1,
+                    start_seq: Some(1),
+                    next_seq: Some(5),
+                    closed: false,
+                    ttl_seconds: Some(60),
+                    expires_at: Some("2026-01-01T00:00:00Z".to_owned()),
+                },
+                StreamEntry {
+                    name: "/orders".to_owned(),
+                    content_type: None,
+                    partitions: 3,
+                    start_seq: None,
+                    next_seq: None,
+                    closed: false,
+                    ttl_seconds: None,
+                    expires_at: None,
+                },
+            ],
             has_more: true,
         };
         assert_eq!(Listing::decode(&listing.encode()).unwrap(), listing);

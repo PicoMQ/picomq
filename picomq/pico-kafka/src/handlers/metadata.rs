@@ -1,16 +1,21 @@
-use kafka_protocol::messages::MetadataRequest;
+use kafka_protocol::messages::describe_cluster_response::{
+    DescribeClusterBroker, DescribeClusterResponse,
+};
 use kafka_protocol::messages::metadata_response::{
     MetadataResponse, MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
 };
+use kafka_protocol::messages::{DescribeClusterRequest, MetadataRequest};
 use kafka_protocol::protocol::{Decodable, StrBytes};
-use picomq_server::{CreateCommand, OwnershipService, alias};
+use picomq_server::record::leader_epoch;
+use picomq_server::topic::is_kafka_name;
+use picomq_server::{CreateCommand, OwnershipService, Topic, partition_log};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_address, broker_id, encode_response,
-    is_internal_topic, new_topic_id, parse_host_port, service_error_code, topic_name, topic_uuid,
+    NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_id, brokers, encode_response, is_internal_topic,
+    service_error_code, topic_name, topic_uuid,
 };
 use crate::handlers::topics::KAFKA_CREATED_CT;
 use crate::handlers::{HandlerError, HandlerOutcome};
@@ -24,47 +29,44 @@ pub async fn handle(
     let request = MetadataRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
 
-    let mut brokers = Vec::new();
-    let view = ctx.views.load();
-    for node_id in view.state.nodes.keys() {
-        let Some(host) = broker_address(&view.state, *node_id) else {
-            continue;
-        };
-        let (host, port) = parse_host_port(host);
-        brokers.push(
+    let brokers = brokers(&ctx.views.load().state, false)
+        .into_iter()
+        .map(|broker| {
             MetadataResponseBroker::default()
-                .with_node_id(broker_id(*node_id))
-                .with_host(StrBytes::from(host))
-                .with_port(port)
-                .with_rack(None),
-        );
-    }
+                .with_node_id(broker_id(broker.id))
+                .with_host(StrBytes::from(broker.host))
+                .with_port(broker.port)
+                .with_rack(None)
+        })
+        .collect();
 
-    let requested: Vec<String> = match &request.topics {
-        Some(topics) if !topics.is_empty() => topics
-            .iter()
-            .filter_map(|topic| topic.name.as_ref().map(|name| name.to_string()))
-            .collect(),
-        _ => ctx
-            .service
-            .list_topics()
-            .into_iter()
-            .map(|(topic, _)| topic)
-            .collect(),
+    let requested: Option<Vec<String>> = match &request.topics {
+        None => None,
+        Some(topics) if topics.is_empty() && req.api_version == 0 => None,
+        Some(topics) => Some(
+            topics
+                .iter()
+                .filter_map(|topic| topic.name.as_ref().map(|name| name.to_string()))
+                .collect(),
+        ),
     };
 
-    let mut response_topics = Vec::with_capacity(requested.len());
-    for topic in requested {
-        let stream = match resolve_or_create(ctx, &topic, request.allow_auto_topic_creation).await {
-            Ok(stream) => stream,
-            Err(code) => {
-                response_topics.push(topic_error(&topic, code));
-                continue;
+    let mut response_topics = Vec::new();
+    match requested {
+        None => {
+            for topic in ctx.topics.kafka_topics() {
+                response_topics.push(build_topic(ctx, &topic, req.api_version).await);
             }
-        };
-        match build_topic(ctx, &topic, &stream, req.api_version).await {
-            Ok(response_topic) => response_topics.push(response_topic),
-            Err(code) => response_topics.push(topic_error(&topic, code)),
+        }
+        Some(names) => {
+            for name in names {
+                response_topics.push(
+                    match resolve_or_create(ctx, &name, request.allow_auto_topic_creation).await {
+                        Ok(topic) => build_topic(ctx, &topic, req.api_version).await,
+                        Err(code) => topic_error(&name, code),
+                    },
+                );
+            }
         }
     }
 
@@ -82,77 +84,115 @@ pub async fn handle(
 
 async fn resolve_or_create(
     ctx: &BrokerContext,
-    topic: &str,
+    name: &str,
     auto_create: bool,
-) -> Result<String, i16> {
-    if !alias::is_valid_topic(topic) {
+) -> Result<Topic, i16> {
+    if !is_kafka_name(name) {
         return Err(UNKNOWN_TOPIC_OR_PARTITION);
     }
-    if let Some(stream) = ctx
-        .service
-        .lookup_by_topic(topic)
+    if let Some(topic) = ctx
+        .topics
+        .get_kafka(name)
         .await
         .map_err(|error| service_error_code(&error))?
     {
-        return Ok(stream);
+        return Ok(topic);
     }
     if !auto_create {
         return Err(UNKNOWN_TOPIC_OR_PARTITION);
     }
-    let stream = alias::stream_name_for_topic(topic);
-    ctx.service
-        .create(
-            CreateCommand::with_external_id(&stream, KAFKA_CREATED_CT, new_topic_id())
-                .with_kafka_topic(topic),
-        )
+
+    ctx.topics
+        .create(CreateCommand::new(name, KAFKA_CREATED_CT))
         .await
-        .map_err(|error| service_error_code(&error))?;
-    Ok(stream)
+        .map(|created| created.meta.topic)
+        .map_err(|error| service_error_code(&error))
 }
 
 async fn build_topic(
     ctx: &BrokerContext,
-    topic: &str,
-    name: &str,
+    topic: &Topic,
     api_version: i16,
-) -> Result<MetadataResponseTopic, i16> {
-    let meta = ctx
-        .service
-        .describe(name)
-        .await
-        .map_err(|error| service_error_code(&error))?
-        .ok_or(UNKNOWN_TOPIC_OR_PARTITION)?;
-    let owner = ctx
-        .ownership
-        .owner_of(name)
-        .await
-        .map_err(|error| service_error_code(&error))?;
-    let leader = owner.owner_node_id.unwrap_or(ctx.node_id);
-    let mut partition = MetadataResponsePartition::default()
-        .with_partition_index(0)
-        .with_leader_id(broker_id(leader))
-        .with_replica_nodes(vec![broker_id(leader)])
-        .with_isr_nodes(vec![broker_id(leader)])
-        .with_offline_replicas(Vec::new())
-        .with_error_code(NO_ERROR);
-    if api_version >= 7 {
-        partition = partition.with_leader_epoch(-1);
+) -> MetadataResponseTopic {
+    let name = topic.name.kafka().unwrap_or_default();
+
+    let mut partitions = Vec::with_capacity(topic.partitions as usize);
+    for index in 0..topic.partitions {
+        let owner = match partition_log(topic, index) {
+            Ok(log) => ctx.ownership.owner_of(&log).await,
+            Err(error) => Err(error),
+        };
+        let owner = match owner {
+            Ok(owner) => owner,
+            Err(error) => return topic_error(name, service_error_code(&error)),
+        };
+
+        let leader = broker_id(owner.owner_node_id.unwrap_or(ctx.node_id));
+        let mut partition = MetadataResponsePartition::default()
+            .with_partition_index(index as i32)
+            .with_leader_id(leader)
+            .with_replica_nodes(vec![leader])
+            .with_isr_nodes(vec![leader])
+            .with_offline_replicas(Vec::new())
+            .with_error_code(NO_ERROR);
+        if api_version >= 7 {
+            partition =
+                partition.with_leader_epoch(u64::try_from(owner.epoch).map_or(-1, leader_epoch));
+        }
+        partitions.push(partition);
     }
-    let mut response_topic = MetadataResponseTopic::default()
-        .with_error_code(NO_ERROR)
-        .with_name(Some(topic_name(topic)))
-        .with_is_internal(is_internal_topic(topic))
-        .with_partitions(vec![partition]);
-    if api_version >= 10 {
-        response_topic = response_topic.with_topic_id(topic_uuid(meta.external_id));
+
+    let topic_id = if api_version >= 10 {
+        topic_uuid(topic.id.0)
     } else {
-        response_topic = response_topic.with_topic_id(Uuid::nil());
-    }
-    Ok(response_topic)
+        Uuid::nil()
+    };
+
+    MetadataResponseTopic::default()
+        .with_error_code(NO_ERROR)
+        .with_name(Some(topic_name(name)))
+        .with_is_internal(is_internal_topic(name))
+        .with_topic_id(topic_id)
+        .with_partitions(partitions)
 }
 
 fn topic_error(topic: &str, code: i16) -> MetadataResponseTopic {
     MetadataResponseTopic::default()
         .with_error_code(code)
         .with_name(Some(topic_name(topic)))
+}
+
+pub async fn describe_cluster(
+    ctx: &BrokerContext,
+    req: &RequestContext,
+    body: &[u8],
+) -> Result<HandlerOutcome, HandlerError> {
+    let mut body = bytes::Bytes::copy_from_slice(body);
+    let request = DescribeClusterRequest::decode(&mut body, req.api_version)
+        .map_err(|error| HandlerError::Protocol(error.to_string()))?;
+
+    let brokers = brokers(&ctx.views.load().state, request.include_fenced_brokers)
+        .into_iter()
+        .map(|broker| {
+            DescribeClusterBroker::default()
+                .with_broker_id(broker_id(broker.id))
+                .with_host(StrBytes::from(broker.host))
+                .with_port(broker.port)
+                .with_rack(None)
+                .with_is_fenced(broker.fenced)
+        })
+        .collect();
+
+    let response = DescribeClusterResponse::default()
+        .with_error_code(NO_ERROR)
+        .with_endpoint_type(request.endpoint_type)
+        .with_cluster_id(StrBytes::from(ctx.cluster_id.clone()))
+        .with_controller_id(broker_id(ctx.node_id))
+        .with_brokers(brokers)
+        .with_cluster_authorized_operations(i32::MIN);
+    Ok(HandlerOutcome::Response(encode_response(
+        req.correlation_id,
+        req.api_version,
+        &response,
+    )))
 }

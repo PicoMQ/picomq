@@ -5,7 +5,10 @@ use serde_json::{Map, Value, json};
 
 use crate::error::{CodecError, ErrorKind, WireError};
 use crate::mime::{is_json, mime_of};
-use crate::wire::{WireRequest, header_string, header_u64, stream_path, truthy, urlencode};
+use crate::wire::{
+    WireRequest, header_string, header_u64, partition_path, push_partition, stream_path, truthy,
+    urlencode,
+};
 
 pub use crate::wire::Producer;
 
@@ -19,6 +22,7 @@ pub const H_STREAM_SCHEMA_VALIDATE: &str = "Stream-Schema-Validate";
 pub const H_STREAM_CURSOR: &str = "Stream-Cursor";
 pub const H_STREAM_SSE_DATA_ENCODING: &str = "Stream-SSE-Data-Encoding";
 pub const H_STREAM_SEQ: &str = "Stream-Seq";
+pub const H_STREAM_PARTITIONS: &str = "Stream-Partitions";
 pub const H_PRODUCER_ID: &str = "Producer-Id";
 pub const H_PRODUCER_EPOCH: &str = "Producer-Epoch";
 pub const H_PRODUCER_SEQ: &str = "Producer-Seq";
@@ -27,6 +31,7 @@ pub const H_PRODUCER_RECEIVED_SEQ: &str = "Producer-Received-Seq";
 pub const Q_OFFSET: &str = "offset";
 pub const Q_LIVE: &str = "live";
 pub const Q_CURSOR: &str = "cursor";
+pub use crate::wire::Q_PARTITION;
 pub const LIVE_LONG_POLL: &str = "long-poll";
 pub const LIVE_SSE: &str = "sse";
 pub const OFFSET_BEGINNING: &str = "-1";
@@ -219,6 +224,7 @@ impl CreateResponse {
 #[derive(Debug, Clone)]
 pub struct AppendRequest<'a> {
     pub stream: &'a str,
+    pub partition: Option<u32>,
     pub content_type: &'a str,
     pub body: Bytes,
     pub stream_seq: Option<&'a str>,
@@ -230,6 +236,7 @@ impl<'a> AppendRequest<'a> {
     pub fn new(stream: &'a str, content_type: &'a str, body: Bytes) -> Self {
         Self {
             stream,
+            partition: None,
             content_type,
             body,
             stream_seq: None,
@@ -239,7 +246,8 @@ impl<'a> AppendRequest<'a> {
     }
 
     pub fn encode(&self) -> WireRequest {
-        let mut request = WireRequest::new(Method::POST, stream_path(self.stream), &[200, 204])
+        let path = partition_path(self.stream, self.partition);
+        let mut request = WireRequest::new(Method::POST, path, &[200, 204])
             .header("content-type", self.content_type)
             .body(self.body.clone());
         if let Some(producer) = &self.producer {
@@ -276,17 +284,20 @@ impl AppendResponse {
 #[derive(Debug, Clone, Copy)]
 pub struct HeadRequest<'a> {
     pub stream: &'a str,
+    pub partition: Option<u32>,
 }
 
 impl HeadRequest<'_> {
     pub fn encode(&self) -> WireRequest {
-        WireRequest::new(Method::HEAD, stream_path(self.stream), &[200, 404])
+        let path = partition_path(self.stream, self.partition);
+        WireRequest::new(Method::HEAD, path, &[200, 404])
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeadResponse {
     pub content_type: Option<String>,
+    pub partitions: u32,
     pub next_offset: Option<String>,
     pub closed: bool,
     pub ttl_seconds: Option<u64>,
@@ -301,6 +312,7 @@ impl HeadResponse {
         }
         Some(Self {
             content_type: header_string(headers, "content-type"),
+            partitions: header_u64(headers, H_STREAM_PARTITIONS).unwrap_or(1) as u32,
             next_offset: header_string(headers, H_STREAM_NEXT_OFFSET),
             closed: truthy(headers, H_STREAM_CLOSED),
             ttl_seconds: header_u64(headers, H_STREAM_TTL),
@@ -313,6 +325,7 @@ impl HeadResponse {
 #[derive(Debug, Clone)]
 pub struct ReadRequest<'a> {
     pub stream: &'a str,
+    pub partition: Option<u32>,
     pub offset: &'a str,
     pub live: Option<&'static str>,
     pub cursor: Option<&'a str>,
@@ -322,6 +335,7 @@ impl<'a> ReadRequest<'a> {
     pub fn new(stream: &'a str, offset: &'a str) -> Self {
         Self {
             stream,
+            partition: None,
             offset,
             live: None,
             cursor: None,
@@ -336,6 +350,7 @@ impl<'a> ReadRequest<'a> {
         if let Some(cursor) = self.cursor {
             query.push_str(&format!("&{Q_CURSOR}={}", urlencode(cursor)));
         }
+        push_partition(&mut query, self.partition);
         WireRequest::new(
             Method::GET,
             format!("{}{query}", stream_path(self.stream)),

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use kafka_protocol::messages::BrokerId;
 use kafka_protocol::messages::fetch_request::{FetchPartition, FetchTopic};
 use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
 use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
@@ -8,7 +9,9 @@ use kafka_protocol::messages::{
     ApiKey, ApiVersionsRequest, ApiVersionsResponse, FetchRequest, MetadataRequest, ProduceRequest,
     RequestHeader, ResponseHeader, TopicName,
 };
-use kafka_protocol::protocol::{Decodable, Encodable, StrBytes, encode_request_header_into_buffer};
+use kafka_protocol::protocol::{
+    Decodable, Encodable, HeaderVersion, StrBytes, encode_request_header_into_buffer,
+};
 use kafka_protocol::records::{
     Compression, NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, NO_SEQUENCE, Record,
     RecordBatchEncoder, RecordEncodeOptions, TimestampType,
@@ -24,6 +27,10 @@ fn tn(name: &str) -> TopicName {
 }
 
 async fn test_broker() -> BrokerContext {
+    broker_with(None).await
+}
+
+async fn broker_with(registry: Option<Arc<dyn picomq_schema::SchemaStore>>) -> BrokerContext {
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
@@ -43,7 +50,7 @@ async fn test_broker() -> BrokerContext {
         views,
         object_storage,
         wal_storage,
-        None,
+        registry,
     )
     .await
     .unwrap();
@@ -68,6 +75,10 @@ fn encode_request<T: Encodable>(
 }
 
 fn kafka_batch(payload: &[u8]) -> Bytes {
+    timed_batch(payload, 1)
+}
+
+fn timed_batch(payload: &[u8], timestamp: i64) -> Bytes {
     let records = vec![Record {
         transactional: false,
         control: false,
@@ -78,7 +89,7 @@ fn kafka_batch(payload: &[u8]) -> Bytes {
         timestamp_type: TimestampType::Creation,
         offset: 0,
         sequence: NO_SEQUENCE,
-        timestamp: 1,
+        timestamp,
         key: None,
         value: Some(Bytes::copy_from_slice(payload)),
         headers: Default::default(),
@@ -121,6 +132,49 @@ async fn api_versions_handler_lists_supported_apis() {
             .iter()
             .any(|api| api.api_key == ApiKey::Metadata as i16)
     );
+
+    let produce = response
+        .api_keys
+        .iter()
+        .find(|api| api.api_key == ApiKey::Produce as i16)
+        .unwrap();
+    assert_eq!(produce.min_version, 0);
+}
+
+#[tokio::test]
+async fn advertised_produce_versions_below_three_are_still_refused() {
+    let broker = test_broker().await;
+
+    let mut req = BytesMut::new();
+    let header = RequestHeader::default()
+        .with_request_api_key(ApiKey::Produce as i16)
+        .with_request_api_version(2)
+        .with_correlation_id(1);
+    encode_request_header_into_buffer(&mut req, &header).unwrap();
+
+    assert!(dispatch(&broker, &req).await.is_err());
+}
+
+#[tokio::test]
+async fn future_api_versions_request_gets_the_supported_range() {
+    let broker = test_broker().await;
+
+    let mut req = BytesMut::new();
+    let header = RequestHeader::default()
+        .with_request_api_key(ApiKey::ApiVersions as i16)
+        .with_request_api_version(99)
+        .with_correlation_id(1);
+    encode_request_header_into_buffer(&mut req, &header).unwrap();
+    ApiVersionsRequest::default().encode(&mut req, 3).unwrap();
+
+    let mut buf = response_body(&broker, &req).await;
+    ResponseHeader::decode(&mut buf, 0).unwrap();
+    let response = ApiVersionsResponse::decode(&mut buf, 0).unwrap();
+
+    assert_eq!(response.error_code, 35);
+    assert_eq!(response.api_keys.len(), 1);
+    assert_eq!(response.api_keys[0].api_key, ApiKey::ApiVersions as i16);
+    assert_eq!(response.api_keys[0].max_version, 4);
 }
 
 async fn resolve(outcome: HandlerOutcome) -> HandlerOutcome {
@@ -135,6 +189,17 @@ async fn response_body(broker: &BrokerContext, req: &[u8]) -> Bytes {
         HandlerOutcome::Response(frame) => frame.0,
         _ => panic!("expected response"),
     }
+}
+
+async fn call<Request: Encodable, Response: Decodable + HeaderVersion>(
+    broker: &BrokerContext,
+    api_key: ApiKey,
+    version: i16,
+    request: &Request,
+) -> Response {
+    let mut buf = response_body(broker, &encode_request(api_key, version, 1, request)).await;
+    ResponseHeader::decode(&mut buf, Response::header_version(version)).unwrap();
+    Response::decode(&mut buf, version).unwrap()
 }
 
 #[tokio::test]
@@ -264,6 +329,151 @@ async fn metadata_create_produce_and_fetch_roundtrip() {
     ResponseHeader::decode(&mut buf, 1).unwrap();
     let oor = FetchResponse::decode(&mut buf, 13).unwrap();
     assert_eq!(oor.responses[0].partitions[0].error_code, 1);
+}
+
+async fn metadata_topics(
+    broker: &BrokerContext,
+    version: i16,
+    topics: Option<Vec<MetadataRequestTopic>>,
+) -> Vec<String> {
+    use kafka_protocol::messages::MetadataResponse;
+
+    let request = encode_request(
+        ApiKey::Metadata,
+        version,
+        1,
+        &MetadataRequest::default().with_topics(topics),
+    );
+
+    let mut body = response_body(broker, &request).await;
+    ResponseHeader::decode(&mut body, ApiKey::Metadata.response_header_version(version)).unwrap();
+
+    MetadataResponse::decode(&mut body, version)
+        .unwrap()
+        .topics
+        .iter()
+        .filter_map(|topic| topic.name.as_ref().map(|name| name.0.to_string()))
+        .collect()
+}
+
+#[tokio::test]
+async fn metadata_empty_topic_list_means_all_topics_only_at_v0() {
+    let broker = test_broker().await;
+
+    let named = Some(vec![
+        MetadataRequestTopic::default().with_name(Some(tn("listed"))),
+    ]);
+    assert_eq!(metadata_topics(&broker, 12, named).await, ["listed"]);
+
+    assert_eq!(metadata_topics(&broker, 0, Some(vec![])).await, ["listed"]);
+    assert_eq!(metadata_topics(&broker, 1, None).await, ["listed"]);
+
+    assert!(metadata_topics(&broker, 1, Some(vec![])).await.is_empty());
+    assert!(metadata_topics(&broker, 12, Some(vec![])).await.is_empty());
+}
+
+#[tokio::test]
+async fn produce_rejects_a_batch_with_a_bad_crc() {
+    use kafka_protocol::messages::ProduceResponse;
+
+    let broker = test_broker().await;
+
+    let create = Some(vec![
+        MetadataRequestTopic::default().with_name(Some(tn("checked"))),
+    ]);
+    metadata_topics(&broker, 12, create).await;
+
+    let mut batch = BytesMut::from(&kafka_batch(b"value")[..]);
+    batch[17] ^= 0xff;
+
+    let produce = encode_request(
+        ApiKey::Produce,
+        10,
+        2,
+        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
+            TopicProduceData::default()
+                .with_name(tn("checked"))
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(0)
+                        .with_records(Some(batch.freeze())),
+                ]),
+        ]),
+    );
+
+    let mut buf = response_body(&broker, &produce).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let response = ProduceResponse::decode(&mut buf, 10).unwrap();
+
+    assert_eq!(response.responses[0].partition_responses[0].error_code, 2);
+}
+
+async fn produce_at(broker: &BrokerContext, topic: &str, timestamp: i64) {
+    let produce = encode_request(
+        ApiKey::Produce,
+        10,
+        1,
+        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
+            TopicProduceData::default()
+                .with_name(tn(topic))
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(0)
+                        .with_records(Some(timed_batch(b"value", timestamp))),
+                ]),
+        ]),
+    );
+
+    response_body(broker, &produce).await;
+}
+
+async fn offset_for(broker: &BrokerContext, topic: &str, timestamp: i64) -> (i64, i64) {
+    use kafka_protocol::messages::ListOffsetsRequest;
+    use kafka_protocol::messages::ListOffsetsResponse;
+    use kafka_protocol::messages::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
+
+    let request = encode_request(
+        ApiKey::ListOffsets,
+        7,
+        1,
+        &ListOffsetsRequest::default()
+            .with_replica_id(BrokerId(-1))
+            .with_topics(vec![
+                ListOffsetsTopic::default()
+                    .with_name(tn(topic))
+                    .with_partitions(vec![
+                        ListOffsetsPartition::default()
+                            .with_partition_index(0)
+                            .with_timestamp(timestamp),
+                    ]),
+            ]),
+    );
+
+    let mut buf = response_body(broker, &request).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let response = ListOffsetsResponse::decode(&mut buf, 7).unwrap();
+    let partition = &response.topics[0].partitions[0];
+
+    (partition.offset, partition.timestamp)
+}
+
+#[tokio::test]
+async fn list_offsets_resolves_timestamps_like_kafka() {
+    let broker = test_broker().await;
+
+    let create = Some(vec![
+        MetadataRequestTopic::default().with_name(Some(tn("timed"))),
+    ]);
+    metadata_topics(&broker, 12, create).await;
+
+    for timestamp in [10, 30, 20] {
+        produce_at(&broker, "timed", timestamp).await;
+    }
+
+    assert_eq!(offset_for(&broker, "timed", 0).await, (0, 10));
+    assert_eq!(offset_for(&broker, "timed", 20).await, (1, 30));
+    assert_eq!(offset_for(&broker, "timed", 31).await, (-1, -1));
+    assert_eq!(offset_for(&broker, "timed", -3).await, (1, 30));
 }
 
 #[tokio::test]
@@ -429,16 +639,8 @@ async fn find_coordinator_probe_creates_nothing() {
     assert_eq!(found.error_code, 0);
     assert_eq!(found.node_id.0, 1);
 
-    // hex("probe") under the reserved namespace: no stream may exist.
-    let stream = "/_sys/groups/70726f6265";
-    assert!(
-        broker
-            .service
-            .lookup_stream_id(stream)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    let group_log = picomq_server::GroupCoordinator::log("probe");
+    assert!(broker.views.load().state.get_kv(&group_log.key()).is_none());
 
     let fetch = encode_request(
         ApiKey::OffsetFetch,
@@ -457,14 +659,7 @@ async fn find_coordinator_probe_creates_nothing() {
     let fetched = OffsetFetchResponse::decode(&mut buf, 7).unwrap();
     assert_eq!(fetched.error_code, 0);
     assert_eq!(fetched.topics[0].partitions[0].committed_offset, -1);
-    assert!(
-        broker
-            .service
-            .lookup_stream_id(stream)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(broker.views.load().state.get_kv(&group_log.key()).is_none());
 }
 
 /// Join, rebalance, fencing, and expiry across two members.
@@ -806,7 +1001,7 @@ async fn classic_group_lifecycle_and_offset_replay() {
 
     let broker = test_broker().await;
     broker
-        .service
+        .topics
         .create(picomq_server::CreateCommand::new(
             "/events",
             "application/octet-stream",
@@ -946,7 +1141,7 @@ async fn classic_group_lifecycle_and_offset_replay() {
     assert_eq!(fetched.error_code, 0);
     let partition = &fetched.topics[0].partitions[0];
     assert_eq!(partition.committed_offset, 42);
-    assert_eq!(partition.committed_leader_epoch, -1);
+    assert_eq!(partition.committed_leader_epoch, 3);
     assert_eq!(partition.metadata.as_ref().unwrap().as_str(), "checkpoint");
 
     let leave = encode_request(
@@ -992,30 +1187,7 @@ async fn create_topics_binds_picomq_schema_and_validates_produce() {
         .await
         .unwrap();
 
-    let (sink, views) = LocalSink::new();
-    let sink: Arc<dyn CommandSink> = Arc::new(sink);
-    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(20));
-    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(21));
-    let node = PicoNode::start(
-        NodeConfig {
-            node_id: 1,
-            node_epoch: 1,
-            http_address: "http://127.0.0.1:4021".into(),
-            protocol_addresses: std::collections::BTreeMap::from([(
-                picomq_kafka::PROTOCOL_NAME.to_owned(),
-                "127.0.0.1:19093".to_owned(),
-            )]),
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        Some(Arc::new(registry)),
-    )
-    .await
-    .unwrap();
-    let broker = BrokerContext::new(&node);
+    let broker = broker_with(Some(Arc::new(registry))).await;
 
     let create_req = encode_request(
         ApiKey::CreateTopics,
@@ -1044,8 +1216,8 @@ async fn create_topics_binds_picomq_schema_and_validates_produce() {
     assert_eq!(created.topics[0].error_code, 0);
     assert_eq!(
         broker
-            .service
-            .head("/orders")
+            .topics
+            .get("/orders")
             .await
             .unwrap()
             .unwrap()
@@ -1091,4 +1263,1040 @@ async fn create_topics_binds_picomq_schema_and_validates_produce() {
     ResponseHeader::decode(&mut buf, 1).unwrap();
     let produced = ProduceResponse::decode(&mut buf, 10).unwrap();
     assert_eq!(produced.responses[0].partition_responses[0].error_code, 0);
+}
+
+#[tokio::test]
+async fn partitioned_topics_create_produce_fetch_and_grow() {
+    use kafka_protocol::messages::create_partitions_request::CreatePartitionsTopic;
+    use kafka_protocol::messages::create_topics_request::CreatableTopic;
+    use kafka_protocol::messages::{
+        CreatePartitionsRequest, CreatePartitionsResponse, CreateTopicsRequest,
+        CreateTopicsResponse, FetchResponse, ProduceResponse,
+    };
+
+    let broker = test_broker().await;
+
+    let create = encode_request(
+        ApiKey::CreateTopics,
+        5,
+        1,
+        &CreateTopicsRequest::default()
+            .with_timeout_ms(5000)
+            .with_topics(vec![
+                CreatableTopic::default()
+                    .with_name(tn("parted"))
+                    .with_num_partitions(3)
+                    .with_replication_factor(1),
+            ]),
+    );
+    let mut buf = response_body(&broker, &create).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let created = CreateTopicsResponse::decode(&mut buf, 5).unwrap();
+    assert_eq!(created.topics[0].error_code, 0);
+    assert_eq!(created.topics[0].num_partitions, 3);
+
+    let produce = encode_request(
+        ApiKey::Produce,
+        10,
+        2,
+        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
+            TopicProduceData::default()
+                .with_name(tn("parted"))
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(2)
+                        .with_records(Some(kafka_batch(b"two"))),
+                    PartitionProduceData::default()
+                        .with_index(3)
+                        .with_records(Some(kafka_batch(b"none"))),
+                ]),
+        ]),
+    );
+    let mut buf = response_body(&broker, &produce).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let produced = ProduceResponse::decode(&mut buf, 10).unwrap();
+    let results = &produced.responses[0].partition_responses;
+    assert_eq!((results[0].index, results[0].error_code), (2, 0));
+    assert_eq!((results[1].index, results[1].error_code), (3, 3));
+
+    let fetch = encode_request(
+        ApiKey::Fetch,
+        12,
+        3,
+        &FetchRequest::default()
+            .with_max_wait_ms(0)
+            .with_min_bytes(1)
+            .with_topics(vec![
+                FetchTopic::default()
+                    .with_topic(tn("parted"))
+                    .with_partitions(vec![
+                        FetchPartition::default()
+                            .with_partition(0)
+                            .with_fetch_offset(0),
+                        FetchPartition::default()
+                            .with_partition(2)
+                            .with_fetch_offset(0),
+                    ]),
+            ]),
+    );
+    let mut buf = response_body(&broker, &fetch).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let fetched = FetchResponse::decode(&mut buf, 12).unwrap();
+    let partitions = &fetched.responses[0].partitions;
+    assert_eq!(
+        (partitions[0].partition_index, partitions[0].high_watermark),
+        (0, 0)
+    );
+    assert_eq!(
+        (partitions[1].partition_index, partitions[1].high_watermark),
+        (2, 1)
+    );
+
+    let grow = |count: i32| {
+        encode_request(
+            ApiKey::CreatePartitions,
+            3,
+            4,
+            &CreatePartitionsRequest::default()
+                .with_timeout_ms(5000)
+                .with_topics(vec![
+                    CreatePartitionsTopic::default()
+                        .with_name(tn("parted"))
+                        .with_count(count)
+                        .with_assignments(None),
+                ]),
+        )
+    };
+    for (count, code) in [(5, 0), (4, 37), (5, 37)] {
+        let mut buf = response_body(&broker, &grow(count)).await;
+        ResponseHeader::decode(&mut buf, 1).unwrap();
+        let grown = CreatePartitionsResponse::decode(&mut buf, 3).unwrap();
+        assert_eq!(grown.results[0].error_code, code, "grow to {count}");
+    }
+
+    let topic = broker.topics.get("/parted").await.unwrap().unwrap();
+    assert_eq!(topic.partitions, 5);
+}
+
+async fn create_topics(
+    broker: &BrokerContext,
+    topics: Vec<kafka_protocol::messages::create_topics_request::CreatableTopic>,
+    validate_only: bool,
+) -> kafka_protocol::messages::CreateTopicsResponse {
+    use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse};
+
+    let request = encode_request(
+        ApiKey::CreateTopics,
+        5,
+        1,
+        &CreateTopicsRequest::default()
+            .with_timeout_ms(5000)
+            .with_validate_only(validate_only)
+            .with_topics(topics),
+    );
+
+    let mut buf = response_body(broker, &request).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    CreateTopicsResponse::decode(&mut buf, 5).unwrap()
+}
+
+async fn create_partitions(
+    broker: &BrokerContext,
+    topic: kafka_protocol::messages::create_partitions_request::CreatePartitionsTopic,
+    validate_only: bool,
+) -> (i16, Option<String>) {
+    use kafka_protocol::messages::{CreatePartitionsRequest, CreatePartitionsResponse};
+
+    let request = encode_request(
+        ApiKey::CreatePartitions,
+        3,
+        1,
+        &CreatePartitionsRequest::default()
+            .with_timeout_ms(5000)
+            .with_validate_only(validate_only)
+            .with_topics(vec![topic]),
+    );
+
+    let mut buf = response_body(broker, &request).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let result = CreatePartitionsResponse::decode(&mut buf, 3)
+        .unwrap()
+        .results
+        .remove(0);
+    (
+        result.error_code,
+        result.error_message.map(|message| message.to_string()),
+    )
+}
+
+fn creatable(
+    name: &str,
+    partitions: i32,
+    replication: i16,
+    assignments: &[(i32, &[i32])],
+) -> kafka_protocol::messages::create_topics_request::CreatableTopic {
+    use kafka_protocol::messages::create_topics_request::{
+        CreatableReplicaAssignment, CreatableTopic,
+    };
+
+    CreatableTopic::default()
+        .with_name(tn(name))
+        .with_num_partitions(partitions)
+        .with_replication_factor(replication)
+        .with_assignments(
+            assignments
+                .iter()
+                .map(|(index, brokers)| {
+                    CreatableReplicaAssignment::default()
+                        .with_partition_index(*index)
+                        .with_broker_ids(brokers.iter().map(|id| BrokerId(*id)).collect())
+                })
+                .collect(),
+        )
+}
+
+#[tokio::test]
+async fn create_topics_checks_partitions_replicas_and_assignments() {
+    let broker = test_broker().await;
+
+    let created = create_topics(
+        &broker,
+        vec![
+            creatable("defaulted", -1, -1, &[]),
+            creatable("zero", 0, 1, &[]),
+            creatable("replicated", 1, 3, &[]),
+            creatable("manual", -1, -1, &[(0, &[1]), (1, &[1])]),
+            creatable("manual-factor", -1, 1, &[(0, &[1])]),
+            creatable("manual-count", 2, -1, &[(0, &[1])]),
+            creatable("gap", -1, -1, &[(1, &[1])]),
+            creatable("copies", -1, -1, &[(0, &[1, 1])]),
+            creatable("unregistered", -1, -1, &[(0, &[7])]),
+        ],
+        false,
+    )
+    .await;
+
+    let outcomes: Vec<(String, i16, i32)> = created
+        .topics
+        .iter()
+        .map(|topic| {
+            (
+                topic.name.to_string(),
+                topic.error_code,
+                topic.num_partitions,
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        vec![
+            ("defaulted".to_owned(), 0, 1),
+            ("zero".to_owned(), 37, -1),
+            ("replicated".to_owned(), 38, -1),
+            ("manual".to_owned(), 0, 2),
+            ("manual-factor".to_owned(), 38, -1),
+            ("manual-count".to_owned(), 37, -1),
+            ("gap".to_owned(), 39, -1),
+            ("copies".to_owned(), 39, -1),
+            ("unregistered".to_owned(), 39, -1),
+        ]
+    );
+    assert!(
+        created.topics[1..]
+            .iter()
+            .filter(|topic| topic.error_code != 0)
+            .all(|topic| topic.error_message.is_some())
+    );
+    assert!(broker.topics.get("/zero").await.unwrap().is_none());
+    assert_eq!(
+        broker
+            .topics
+            .get("/manual")
+            .await
+            .unwrap()
+            .unwrap()
+            .partitions,
+        2
+    );
+}
+
+#[tokio::test]
+async fn create_topics_validate_only_creates_nothing() {
+    let broker = test_broker().await;
+    create_topics(&broker, vec![creatable("existing", 1, 1, &[])], false).await;
+
+    let validated = create_topics(
+        &broker,
+        vec![
+            creatable("dry", 4, 1, &[]),
+            creatable("existing", 1, 1, &[]),
+        ],
+        true,
+    )
+    .await;
+
+    assert_eq!(validated.topics[0].error_code, 0);
+    assert_eq!(validated.topics[0].num_partitions, 4);
+    assert_eq!(validated.topics[1].error_code, 36);
+    assert!(broker.topics.get("/dry").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn excessive_partition_requests_are_policy_violations() {
+    use kafka_protocol::messages::create_partitions_request::CreatePartitionsTopic;
+
+    let broker = test_broker().await;
+
+    let created = create_topics(
+        &broker,
+        vec![
+            creatable("half", 6000, 1, &[]),
+            creatable("other", 6000, 1, &[]),
+        ],
+        false,
+    )
+    .await;
+    for topic in &created.topics {
+        assert_eq!(topic.error_code, 44);
+        assert_eq!(
+            topic.error_message.as_deref(),
+            Some("Excessively large number of partitions per request.")
+        );
+    }
+    assert!(broker.topics.get("/half").await.unwrap().is_none());
+
+    create_topics(&broker, vec![creatable("small", 1, 1, &[])], false).await;
+    let (code, _) = create_partitions(
+        &broker,
+        CreatePartitionsTopic::default()
+            .with_name(tn("small"))
+            .with_count(10_002)
+            .with_assignments(None),
+        false,
+    )
+    .await;
+    assert_eq!(code, 44);
+}
+
+#[tokio::test]
+async fn create_partitions_validates_assignments_and_dry_runs() {
+    use kafka_protocol::messages::create_partitions_request::{
+        CreatePartitionsAssignment, CreatePartitionsTopic,
+    };
+
+    let broker = test_broker().await;
+    create_topics(&broker, vec![creatable("grown", 1, 1, &[])], false).await;
+
+    let assigned = |brokers: &[&[i32]]| {
+        Some(
+            brokers
+                .iter()
+                .map(|ids| {
+                    CreatePartitionsAssignment::default()
+                        .with_broker_ids(ids.iter().map(|id| BrokerId(*id)).collect())
+                })
+                .collect(),
+        )
+    };
+    let grow = |count: i32, assignments| {
+        CreatePartitionsTopic::default()
+            .with_name(tn("grown"))
+            .with_count(count)
+            .with_assignments(assignments)
+    };
+
+    assert_eq!(create_partitions(&broker, grow(3, None), true).await.0, 0);
+    assert_eq!(
+        broker
+            .topics
+            .get("/grown")
+            .await
+            .unwrap()
+            .unwrap()
+            .partitions,
+        1
+    );
+
+    let (code, message) = create_partitions(&broker, grow(3, assigned(&[&[1]])), false).await;
+    assert_eq!(code, 39);
+    assert!(message.unwrap().contains("Attempted to add 2"));
+
+    let (code, _) = create_partitions(&broker, grow(2, assigned(&[&[7]])), false).await;
+    assert_eq!(code, 39);
+
+    let (code, _) = create_partitions(&broker, grow(3, assigned(&[&[1], &[1]])), false).await;
+    assert_eq!(code, 0);
+    assert_eq!(
+        broker
+            .topics
+            .get("/grown")
+            .await
+            .unwrap()
+            .unwrap()
+            .partitions,
+        3
+    );
+}
+
+#[tokio::test]
+async fn offsets_and_commits_address_partitions_past_zero() {
+    use kafka_protocol::messages::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
+    use kafka_protocol::messages::offset_commit_request::{
+        OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+    };
+    use kafka_protocol::messages::offset_fetch_request::OffsetFetchRequestTopic;
+    use kafka_protocol::messages::{
+        GroupId, ListOffsetsRequest, ListOffsetsResponse, OffsetCommitRequest,
+        OffsetCommitResponse, OffsetFetchRequest, OffsetFetchResponse,
+    };
+    use kafka_protocol::protocol::HeaderVersion;
+
+    let broker = test_broker().await;
+    create_topics(&broker, vec![creatable("spread", 3, 1, &[])], false).await;
+
+    let produce = encode_request(
+        ApiKey::Produce,
+        10,
+        2,
+        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
+            TopicProduceData::default()
+                .with_name(tn("spread"))
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(2)
+                        .with_records(Some(kafka_batch(b"first"))),
+                ]),
+        ]),
+    );
+    response_body(&broker, &produce).await;
+    response_body(&broker, &produce).await;
+
+    let list = encode_request(
+        ApiKey::ListOffsets,
+        7,
+        3,
+        &ListOffsetsRequest::default()
+            .with_replica_id(BrokerId(-1))
+            .with_topics(vec![
+                ListOffsetsTopic::default()
+                    .with_name(tn("spread"))
+                    .with_partitions(
+                        [0, 2, 3]
+                            .into_iter()
+                            .map(|index| {
+                                ListOffsetsPartition::default()
+                                    .with_partition_index(index)
+                                    .with_timestamp(-1)
+                            })
+                            .collect(),
+                    ),
+            ]),
+    );
+    let mut buf = response_body(&broker, &list).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let listed = ListOffsetsResponse::decode(&mut buf, 7).unwrap();
+    let latest: Vec<(i32, i16, i64)> = listed.topics[0]
+        .partitions
+        .iter()
+        .map(|p| (p.partition_index, p.error_code, p.offset))
+        .collect();
+    assert_eq!(latest, vec![(0, 0, 0), (2, 0, 2), (3, 3, -1)]);
+
+    let commit = encode_request(
+        ApiKey::OffsetCommit,
+        7,
+        4,
+        &OffsetCommitRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("spread-readers")))
+            .with_generation_id_or_member_epoch(-1)
+            .with_topics(vec![
+                OffsetCommitRequestTopic::default()
+                    .with_name(tn("spread"))
+                    .with_partitions(vec![
+                        OffsetCommitRequestPartition::default()
+                            .with_partition_index(2)
+                            .with_committed_offset(1),
+                    ]),
+            ]),
+    );
+    let mut buf = response_body(&broker, &commit).await;
+    ResponseHeader::decode(&mut buf, OffsetCommitResponse::header_version(7)).unwrap();
+    let committed = OffsetCommitResponse::decode(&mut buf, 7).unwrap();
+    assert_eq!(committed.topics[0].partitions[0].error_code, 0);
+
+    let fetch = encode_request(
+        ApiKey::OffsetFetch,
+        7,
+        5,
+        &OffsetFetchRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("spread-readers")))
+            .with_topics(Some(vec![
+                OffsetFetchRequestTopic::default()
+                    .with_name(tn("spread"))
+                    .with_partition_indexes(vec![0, 2]),
+            ])),
+    );
+    let mut buf = response_body(&broker, &fetch).await;
+    ResponseHeader::decode(&mut buf, OffsetFetchResponse::header_version(7)).unwrap();
+    let fetched = OffsetFetchResponse::decode(&mut buf, 7).unwrap();
+    let positions: Vec<(i32, i64)> = fetched.topics[0]
+        .partitions
+        .iter()
+        .map(|p| (p.partition_index, p.committed_offset))
+        .collect();
+    assert_eq!(positions, vec![(0, -1), (2, 1)]);
+}
+
+async fn describe_configs(
+    broker: &BrokerContext,
+    resource_type: i8,
+    name: &str,
+    keys: Option<&[&str]>,
+) -> kafka_protocol::messages::describe_configs_response::DescribeConfigsResult {
+    use kafka_protocol::messages::describe_configs_request::DescribeConfigsResource;
+    use kafka_protocol::messages::{DescribeConfigsRequest, DescribeConfigsResponse};
+
+    let request = DescribeConfigsRequest::default().with_resources(vec![
+        DescribeConfigsResource::default()
+            .with_resource_type(resource_type)
+            .with_resource_name(StrBytes::from(name.to_owned()))
+            .with_configuration_keys(keys.map(|keys| {
+                keys.iter()
+                    .map(|key| StrBytes::from((*key).to_owned()))
+                    .collect()
+            })),
+    ]);
+    let response: DescribeConfigsResponse =
+        call(broker, ApiKey::DescribeConfigs, 4, &request).await;
+    response.results.into_iter().next().unwrap()
+}
+
+async fn alter_config(
+    broker: &BrokerContext,
+    topic: &str,
+    name: &str,
+    operation: i8,
+    value: Option<&str>,
+    validate_only: bool,
+) -> i16 {
+    use kafka_protocol::messages::incremental_alter_configs_request::{
+        AlterConfigsResource, AlterableConfig,
+    };
+    use kafka_protocol::messages::{
+        IncrementalAlterConfigsRequest, IncrementalAlterConfigsResponse,
+    };
+
+    let request = IncrementalAlterConfigsRequest::default()
+        .with_validate_only(validate_only)
+        .with_resources(vec![
+            AlterConfigsResource::default()
+                .with_resource_type(2)
+                .with_resource_name(StrBytes::from(topic.to_owned()))
+                .with_configs(vec![
+                    AlterableConfig::default()
+                        .with_name(StrBytes::from(name.to_owned()))
+                        .with_config_operation(operation)
+                        .with_value(value.map(|value| StrBytes::from(value.to_owned()))),
+                ]),
+        ]);
+    let response: IncrementalAlterConfigsResponse =
+        call(broker, ApiKey::IncrementalAlterConfigs, 1, &request).await;
+    response.responses[0].error_code
+}
+
+#[tokio::test]
+async fn topic_configs_describe_and_change_the_schema_binding() {
+    let registry = picomq_schema::Registry::new(object_store::memory::InMemory::new());
+    registry
+        .put(
+            "person",
+            picomq_schema::SchemaFormat::Json,
+            Bytes::from_static(br#"{"type": "object"}"#),
+        )
+        .await
+        .unwrap();
+    let broker = broker_with(Some(Arc::new(registry))).await;
+    broker
+        .topics
+        .create(picomq_server::CreateCommand::new(
+            "/orders",
+            "application/octet-stream",
+        ))
+        .await
+        .unwrap();
+    let schema_of = || async {
+        broker
+            .topics
+            .get("/orders")
+            .await
+            .unwrap()
+            .unwrap()
+            .schema_name
+    };
+
+    let described = describe_configs(&broker, 2, "orders", None).await;
+    assert_eq!(described.error_code, 0);
+    let names: Vec<_> = described.configs.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["cleanup.policy", "retention.ms", "retention.bytes"]);
+    assert!(described.configs.iter().all(|config| config.read_only));
+
+    assert_eq!(
+        alter_config(&broker, "orders", "pico.schema", 0, Some("person"), true).await,
+        0
+    );
+    assert_eq!(schema_of().await, None);
+
+    assert_eq!(
+        alter_config(&broker, "orders", "pico.schema", 0, Some("person"), false).await,
+        0
+    );
+    assert_eq!(schema_of().await.as_deref(), Some("person"));
+
+    let described = describe_configs(&broker, 2, "orders", Some(&["pico.schema"])).await;
+    assert_eq!(described.configs.len(), 1);
+    let schema = &described.configs[0];
+    assert_eq!(schema.value.as_deref(), Some("person"));
+    assert_eq!(schema.config_source, 1);
+    assert!(!schema.read_only);
+
+    assert_eq!(
+        alter_config(&broker, "orders", "retention.ms", 0, Some("1000"), false).await,
+        40
+    );
+    assert_eq!(
+        alter_config(
+            &broker,
+            "orders",
+            "pico.schema.validate",
+            0,
+            Some("maybe"),
+            false
+        )
+        .await,
+        40
+    );
+    assert_eq!(
+        alter_config(&broker, "missing", "pico.schema", 0, Some("person"), false).await,
+        3
+    );
+
+    assert_eq!(
+        alter_config(&broker, "orders", "pico.schema", 1, None, false).await,
+        0
+    );
+    assert_eq!(schema_of().await, None);
+
+    assert_eq!(
+        describe_configs(&broker, 2, "missing", None)
+            .await
+            .error_code,
+        3
+    );
+    let own = describe_configs(&broker, 4, "1", None).await;
+    assert_eq!(own.error_code, 0);
+    assert!(own.configs.is_empty());
+    assert_eq!(describe_configs(&broker, 4, "2", None).await.error_code, 42);
+}
+
+#[tokio::test]
+async fn delete_records_checks_offsets_and_times_out_before_upload() {
+    use kafka_protocol::messages::delete_records_request::{
+        DeleteRecordsPartition, DeleteRecordsTopic,
+    };
+    use kafka_protocol::messages::{DeleteRecordsRequest, DeleteRecordsResponse};
+
+    let broker = test_broker().await;
+    broker
+        .topics
+        .create(picomq_server::CreateCommand::new(
+            "/logs",
+            "application/octet-stream",
+        ))
+        .await
+        .unwrap();
+
+    let delete = |topic: &str, offset: i64| {
+        DeleteRecordsRequest::default()
+            .with_timeout_ms(200)
+            .with_topics(vec![
+                DeleteRecordsTopic::default()
+                    .with_name(tn(topic))
+                    .with_partitions(vec![
+                        DeleteRecordsPartition::default()
+                            .with_partition_index(0)
+                            .with_offset(offset),
+                    ]),
+            ])
+    };
+    let result = |response: DeleteRecordsResponse| {
+        let partition = &response.topics[0].partitions[0];
+        (partition.error_code, partition.low_watermark)
+    };
+
+    let response = call(&broker, ApiKey::DeleteRecords, 2, &delete("logs", -1)).await;
+    assert_eq!(result(response), (0, 0));
+
+    let response = call(&broker, ApiKey::DeleteRecords, 2, &delete("logs", 5)).await;
+    assert_eq!(result(response), (1, -1));
+
+    let response = call(&broker, ApiKey::DeleteRecords, 2, &delete("missing", 0)).await;
+    assert_eq!(result(response).0, 3);
+
+    let produce = encode_request(
+        ApiKey::Produce,
+        10,
+        2,
+        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
+            TopicProduceData::default()
+                .with_name(tn("logs"))
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(0)
+                        .with_records(Some(kafka_batch(b"one"))),
+                ]),
+        ]),
+    );
+    response_body(&broker, &produce).await;
+
+    let response = call(&broker, ApiKey::DeleteRecords, 2, &delete("logs", -1)).await;
+    assert_eq!(result(response), (7, -1));
+}
+
+#[tokio::test]
+async fn offset_delete_and_delete_groups_respect_members() {
+    use kafka_protocol::messages::offset_delete_request::{
+        OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
+    };
+    use kafka_protocol::messages::{
+        ConsumerProtocolSubscription, DeleteGroupsRequest, DeleteGroupsResponse, GroupId,
+        OffsetDeleteRequest, OffsetDeleteResponse,
+    };
+    use picomq_server::{
+        CommittedOffset, CreateCommand, JoinInput, JoinProtocol, Membership, OffsetCommit,
+        Partition,
+    };
+
+    let broker = test_broker().await;
+    let mut committed = Vec::new();
+    for name in ["/events", "/other"] {
+        let topic = broker
+            .topics
+            .create(CreateCommand::new(name, "application/octet-stream"))
+            .await
+            .unwrap()
+            .meta
+            .topic;
+        committed.push(OffsetCommit {
+            partition: Partition::new(topic.id, 0),
+            value: CommittedOffset {
+                position: 3,
+                leader_epoch: None,
+                metadata: None,
+            },
+        });
+    }
+    broker
+        .groups
+        .commit_offsets("workers", None, &committed)
+        .await
+        .unwrap();
+
+    let mut subscription = BytesMut::new();
+    subscription.extend_from_slice(&0i16.to_be_bytes());
+    ConsumerProtocolSubscription::default()
+        .with_topics(vec![StrBytes::from_static_str("events")])
+        .encode(&mut subscription, 0)
+        .unwrap();
+    let member = broker
+        .groups
+        .join(JoinInput {
+            group_id: "workers".to_owned(),
+            member_id: String::new(),
+            instance_id: None,
+            client_id: "test".to_owned(),
+            membership: Membership::Client {
+                protocol_type: "consumer".to_owned(),
+                protocols: vec![JoinProtocol {
+                    name: "range".to_owned(),
+                    metadata: subscription.freeze(),
+                }],
+            },
+            session_timeout_ms: 10_000,
+            rebalance_timeout_ms: 2_000,
+            require_known_member_id: false,
+        })
+        .await;
+    assert!(member.result.is_ok());
+
+    let partition = |index| OffsetDeleteRequestPartition::default().with_partition_index(index);
+    let request = OffsetDeleteRequest::default()
+        .with_group_id(GroupId(StrBytes::from_static_str("workers")))
+        .with_topics(vec![
+            OffsetDeleteRequestTopic::default()
+                .with_name(tn("events"))
+                .with_partitions(vec![partition(0)]),
+            OffsetDeleteRequestTopic::default()
+                .with_name(tn("other"))
+                .with_partitions(vec![partition(0), partition(4)]),
+            OffsetDeleteRequestTopic::default()
+                .with_name(tn("missing"))
+                .with_partitions(vec![partition(0)]),
+        ]);
+    let deleted: OffsetDeleteResponse = call(&broker, ApiKey::OffsetDelete, 0, &request).await;
+    assert_eq!(deleted.error_code, 0);
+    let codes: Vec<Vec<i16>> = deleted
+        .topics
+        .iter()
+        .map(|topic| topic.partitions.iter().map(|p| p.error_code).collect())
+        .collect();
+    assert_eq!(codes, [vec![86], vec![0, 3], vec![3]]);
+
+    let remaining = broker.groups.fetch_offsets("workers", None).await.unwrap();
+    assert_eq!(
+        remaining.keys().copied().collect::<Vec<_>>(),
+        [committed[0].partition]
+    );
+
+    let delete = |groups: &[&'static str]| {
+        DeleteGroupsRequest::default().with_groups_names(
+            groups
+                .iter()
+                .map(|group| GroupId(StrBytes::from_static_str(group)))
+                .collect(),
+        )
+    };
+    let response: DeleteGroupsResponse = call(
+        &broker,
+        ApiKey::DeleteGroups,
+        2,
+        &delete(&["workers", "ghost"]),
+    )
+    .await;
+    let codes: Vec<i16> = response.results.iter().map(|r| r.error_code).collect();
+    assert_eq!(codes, [68, 69]);
+
+    broker
+        .groups
+        .leave("workers", &[(member.member_id.clone(), None)])
+        .await;
+    let response: DeleteGroupsResponse =
+        call(&broker, ApiKey::DeleteGroups, 2, &delete(&["workers"])).await;
+    assert_eq!(response.results[0].error_code, 0);
+    assert!(
+        broker
+            .groups
+            .fetch_offsets("workers", None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn describe_cluster_lists_this_node() {
+    use kafka_protocol::messages::{DescribeClusterRequest, DescribeClusterResponse};
+
+    let broker = test_broker().await;
+    let response: DescribeClusterResponse = call(
+        &broker,
+        ApiKey::DescribeCluster,
+        2,
+        &DescribeClusterRequest::default().with_include_fenced_brokers(true),
+    )
+    .await;
+
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.cluster_id.as_str(), "picomq");
+    assert_eq!(response.controller_id.0, 1);
+    assert_eq!(response.brokers.len(), 1);
+    let node = &response.brokers[0];
+    assert_eq!(node.broker_id.0, 1);
+    assert_eq!(node.host.as_str(), "127.0.0.1");
+    assert_eq!(node.port, 19092);
+    assert!(!node.is_fenced);
+}
+
+#[tokio::test]
+async fn leader_epochs_are_reported_and_fence_stale_requests() {
+    use kafka_protocol::messages::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
+    use kafka_protocol::messages::offset_for_leader_epoch_request::{
+        OffsetForLeaderPartition, OffsetForLeaderTopic,
+    };
+    use kafka_protocol::messages::{
+        FetchResponse, ListOffsetsRequest, ListOffsetsResponse, MetadataResponse,
+        OffsetForLeaderEpochRequest, OffsetForLeaderEpochResponse, ProduceResponse,
+    };
+
+    let broker = test_broker().await;
+    broker
+        .topics
+        .create(picomq_server::CreateCommand::new(
+            "/events",
+            "application/octet-stream",
+        ))
+        .await
+        .unwrap();
+    let produce = ProduceRequest::default().with_acks(1).with_topic_data(vec![
+        TopicProduceData::default()
+            .with_name(tn("events"))
+            .with_partition_data(vec![
+                PartitionProduceData::default()
+                    .with_index(0)
+                    .with_records(Some(kafka_batch(b"one"))),
+            ]),
+    ]);
+    let produced: ProduceResponse = call(&broker, ApiKey::Produce, 10, &produce).await;
+    assert_eq!(produced.responses[0].partition_responses[0].error_code, 0);
+
+    let topic = broker.topics.get("/events").await.unwrap().unwrap();
+    let epoch = broker.topics.watermarks(&topic, 0).await.unwrap().epoch as i32;
+
+    let metadata: MetadataResponse = call(
+        &broker,
+        ApiKey::Metadata,
+        12,
+        &MetadataRequest::default().with_topics(Some(vec![
+            MetadataRequestTopic::default().with_name(Some(tn("events"))),
+        ])),
+    )
+    .await;
+    assert_eq!(metadata.topics[0].partitions[0].leader_epoch, epoch);
+
+    let fetch = |current: i32| {
+        FetchRequest::default()
+            .with_max_wait_ms(0)
+            .with_max_bytes(1 << 20)
+            .with_topics(vec![
+                FetchTopic::default()
+                    .with_topic(tn("events"))
+                    .with_partitions(vec![
+                        FetchPartition::default()
+                            .with_partition(0)
+                            .with_current_leader_epoch(current)
+                            .with_fetch_offset(0)
+                            .with_partition_max_bytes(1 << 20),
+                    ]),
+            ])
+    };
+    for (current, code) in [(epoch - 1, 74), (epoch + 1, 75), (-1, 0)] {
+        let fetched: FetchResponse = call(&broker, ApiKey::Fetch, 12, &fetch(current)).await;
+        assert_eq!(
+            fetched.responses[0].partitions[0].error_code, code,
+            "{current}"
+        );
+    }
+    let fetched: FetchResponse = call(&broker, ApiKey::Fetch, 12, &fetch(epoch)).await;
+    let records = fetched.responses[0].partitions[0].records.clone().unwrap();
+    assert_eq!(&records[12..16], &epoch.to_be_bytes());
+
+    let list = |timestamp: i64, current: i32| {
+        ListOffsetsRequest::default()
+            .with_replica_id(BrokerId(-1))
+            .with_topics(vec![
+                ListOffsetsTopic::default()
+                    .with_name(tn("events"))
+                    .with_partitions(vec![
+                        ListOffsetsPartition::default()
+                            .with_partition_index(0)
+                            .with_current_leader_epoch(current)
+                            .with_timestamp(timestamp),
+                    ]),
+            ])
+    };
+    for (timestamp, current, expected) in [
+        (-2, -1, (0, 0, epoch)),
+        (-1, epoch, (0, 1, epoch)),
+        (0, -1, (0, 0, epoch)),
+        (-1, epoch - 1, (74, -1, -1)),
+    ] {
+        let listed: ListOffsetsResponse =
+            call(&broker, ApiKey::ListOffsets, 7, &list(timestamp, current)).await;
+        let partition = &listed.topics[0].partitions[0];
+        assert_eq!(
+            (
+                partition.error_code,
+                partition.offset,
+                partition.leader_epoch
+            ),
+            expected,
+            "{timestamp} at {current}"
+        );
+    }
+
+    let end = |current: i32, wanted: i32| {
+        OffsetForLeaderEpochRequest::default()
+            .with_replica_id(BrokerId(-1))
+            .with_topics(vec![
+                OffsetForLeaderTopic::default()
+                    .with_topic(tn("events"))
+                    .with_partitions(vec![
+                        OffsetForLeaderPartition::default()
+                            .with_partition(0)
+                            .with_current_leader_epoch(current)
+                            .with_leader_epoch(wanted),
+                    ]),
+            ])
+    };
+    for (current, wanted, expected) in [
+        (epoch, epoch, (0, epoch, 1)),
+        (-1, -1, (0, -1, -1)),
+        (epoch + 1, epoch, (75, -1, -1)),
+    ] {
+        let ended: OffsetForLeaderEpochResponse = call(
+            &broker,
+            ApiKey::OffsetForLeaderEpoch,
+            4,
+            &end(current, wanted),
+        )
+        .await;
+        let partition = &ended.topics[0].partitions[0];
+        assert_eq!(
+            (
+                partition.error_code,
+                partition.leader_epoch,
+                partition.end_offset
+            ),
+            expected,
+            "{wanted} at {current}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn create_topics_refuses_compaction() {
+    use kafka_protocol::messages::create_topics_request::{CreatableTopic, CreatableTopicConfig};
+    use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse};
+
+    let broker = broker_with(None).await;
+    let create = |name: &'static str, policy: &'static str| {
+        encode_request(
+            ApiKey::CreateTopics,
+            5,
+            1,
+            &CreateTopicsRequest::default()
+                .with_timeout_ms(5_000)
+                .with_topics(vec![
+                    CreatableTopic::default()
+                        .with_name(tn(name))
+                        .with_num_partitions(1)
+                        .with_replication_factor(1)
+                        .with_configs(vec![
+                            CreatableTopicConfig::default()
+                                .with_name(StrBytes::from_static_str("cleanup.policy"))
+                                .with_value(Some(StrBytes::from_static_str(policy))),
+                        ]),
+                ]),
+        )
+    };
+
+    let mut buf = response_body(&broker, &create("state", "compact")).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let refused = CreateTopicsResponse::decode(&mut buf, 5).unwrap();
+    assert_eq!(refused.topics[0].error_code, 40);
+    assert!(broker.topics.get("/state").await.unwrap().is_none());
+
+    let mut buf = response_body(&broker, &create("events", "delete")).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let created = CreateTopicsResponse::decode(&mut buf, 5).unwrap();
+    assert_eq!(created.topics[0].error_code, 0);
 }

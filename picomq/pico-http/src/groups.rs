@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Router;
@@ -8,28 +9,29 @@ use axum::response::Response;
 use axum::routing::{get, post, put};
 use picomq_auth::{Audience, Authorizer, Operation};
 use picomq_protocol::groups::{
-    self as wire, AssignmentResponse, CommitRequest, GroupListing, GroupSummary, HeartbeatRequest,
-    JoinRequest, JoinResponse, OffsetsResponse, Q_GENERATION, Q_INSTANCE_ID, Q_STREAM,
+    self as wire, AssignmentResponse, CommitRequest, GroupListing, HeartbeatRequest, JoinRequest,
+    JoinResponse, OffsetsResponse, Q_GENERATION, Q_INSTANCE_ID, Q_STREAM,
 };
 use picomq_protocol::pico::{
-    CT_JSON, E_BAD_REQUEST, E_CAPACITY_EXCEEDED, E_COORDINATOR_UNAVAILABLE, E_DURABILITY, E_FENCED,
-    E_ILLEGAL_GENERATION, E_INCONSISTENT_PROTOCOL, E_NOT_FOUND, E_REBALANCE_IN_PROGRESS,
-    E_UNKNOWN_MEMBER,
+    CT_JSON, E_BAD_REQUEST, E_CAPACITY_EXCEEDED, E_CONFLICT, E_COORDINATOR_UNAVAILABLE,
+    E_DURABILITY, E_FENCED, E_ILLEGAL_GENERATION, E_INCONSISTENT_PROTOCOL, E_NOT_FOUND,
+    E_REBALANCE_IN_PROGRESS, E_UNKNOWN_MEMBER,
 };
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{
     CommittedOffset, GroupCoordinator, GroupDescription, GroupError, JoinInput, Joined,
-    MemberFence, MemberRole, Membership, OffsetCommit,
+    MemberFence, MemberRole, Membership, OffsetCommit, Partition, Topic, Topics,
 };
 
 use crate::auth::{Caller, authenticate};
 use crate::http::{base_response, query_param, query_params, set_header};
-use crate::pico::error;
+use crate::pico::{error, service_error_response};
 use crate::route::{RoutingMode, owner_redirect};
 
 #[derive(Clone)]
 pub struct GroupState {
     pub groups: Arc<GroupCoordinator>,
+    pub topics: Arc<Topics>,
     pub ownership: Arc<dyn OwnershipService>,
     pub mode: RoutingMode,
     pub authorizer: Option<Arc<Authorizer>>,
@@ -38,7 +40,7 @@ pub struct GroupState {
 pub fn router(state: GroupState, max_request_size: usize) -> Router {
     Router::new()
         .route("/_groups", get(list))
-        .route("/_groups/{group}", get(describe))
+        .route("/_groups/{group}", get(describe).delete(remove))
         .route("/_groups/{group}/members", post(join))
         .route(
             "/_groups/{group}/members/{member}",
@@ -68,7 +70,7 @@ impl GroupState {
             self.ownership.as_ref(),
             self.mode,
             uri,
-            &GroupCoordinator::stream_name(group),
+            &GroupCoordinator::log(group),
         )
         .await
     }
@@ -96,7 +98,16 @@ impl GroupState {
         }
     }
 
-    fn allow(
+    /// A cluster-wide group operation: listing, describing, deleting.
+    fn allow_admin(&self, caller: &Option<Caller>, op: Operation) -> Result<(), Box<Response>> {
+        let (Some(authorizer), Some(caller)) = (&self.authorizer, caller) else {
+            return Ok(());
+        };
+        caller.authorize(authorizer, op, None)
+    }
+
+    /// `op` on every stream the request names. Naming none needs nothing.
+    fn allow_streams(
         &self,
         caller: &Option<Caller>,
         op: Operation,
@@ -105,9 +116,6 @@ impl GroupState {
         let (Some(authorizer), Some(caller)) = (&self.authorizer, caller) else {
             return Ok(());
         };
-        if streams.is_empty() {
-            return caller.authorize(authorizer, op, None);
-        }
         streams
             .iter()
             .try_for_each(|stream| caller.authorize(authorizer, op, Some(stream)))
@@ -120,6 +128,40 @@ impl GroupState {
                 .is_ok(),
             _ => true,
         }
+    }
+
+    async fn topic(&self, name: &str) -> Result<Option<Topic>, Box<Response>> {
+        match self.topics.get(name).await {
+            Ok(Some(topic)) if topic.partitions > 1 => Err(Box::new(error(
+                400,
+                E_BAD_REQUEST,
+                &format!(
+                    "{name} has {} partitions, groups over HTTP need one",
+                    topic.partitions
+                ),
+                None,
+            ))),
+            Ok(topic) => Ok(topic),
+            Err(e) => Err(Box::new(service_error_response(e))),
+        }
+    }
+
+    async fn partitions(&self, names: &[String]) -> Result<Vec<Partition>, Box<Response>> {
+        let mut partitions = Vec::with_capacity(names.len());
+
+        for name in names {
+            let Some(topic) = self.topic(name).await? else {
+                return Err(Box::new(error(
+                    404,
+                    E_NOT_FOUND,
+                    &format!("no such stream {name}"),
+                    None,
+                )));
+            };
+            partitions.push(Partition::new(topic.id, 0));
+        }
+
+        Ok(partitions)
     }
 
     async fn member_streams(
@@ -136,7 +178,7 @@ impl GroupState {
             .subscription(group, member)
             .await
             .map_err(|error| Box::new(group_error(error)))?;
-        self.allow(caller, Operation::Read, &subscription)
+        self.allow_streams(caller, Operation::Read, &subscription)
     }
 }
 
@@ -145,19 +187,10 @@ async fn list(State(state): State<GroupState>, headers: HeaderMap) -> Response {
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow(&caller, Operation::StreamInspect, &[]) {
+    if let Err(response) = state.allow_admin(&caller, Operation::StreamInspect) {
         return *response;
     }
-    let groups = state
-        .groups
-        .list()
-        .await
-        .into_iter()
-        .map(|group| GroupSummary {
-            group: group.group_id,
-            state: group.state.as_str().to_owned(),
-        })
-        .collect();
+    let groups = state.groups.list();
     ok(GroupListing { groups }.encode())
 }
 
@@ -171,7 +204,7 @@ async fn describe(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow(&caller, Operation::StreamInspect, &[]) {
+    if let Err(response) = state.allow_admin(&caller, Operation::StreamInspect) {
         return *response;
     }
     if let Some(response) = state.redirect(&uri, &group).await {
@@ -179,6 +212,28 @@ async fn describe(
     }
     match state.groups.describe(&group).await {
         Ok(described) => ok(description(&state, &caller, described).encode()),
+        Err(error) => group_error(error),
+    }
+}
+
+async fn remove(
+    State(state): State<GroupState>,
+    Path(group): Path<String>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    let caller = match state.admit(&headers).await {
+        Ok(caller) => caller,
+        Err(response) => return *response,
+    };
+    if let Err(response) = state.allow_admin(&caller, Operation::DeleteGroup) {
+        return *response;
+    }
+    if let Some(response) = state.redirect(&uri, &group).await {
+        return response;
+    }
+    match state.groups.delete(&group).await {
+        Ok(()) => no_content(),
         Err(error) => group_error(error),
     }
 }
@@ -202,8 +257,16 @@ async fn join(
         Ok(subscription) => subscription,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow(&caller, Operation::Read, &subscription) {
+    if let Err(response) = state.allow_streams(&caller, Operation::Read, &subscription) {
         return *response;
+    }
+    let mut subscribed = Vec::with_capacity(subscription.len());
+    for name in subscription {
+        match state.topic(&name).await {
+            Ok(Some(topic)) => subscribed.push(topic.name.spelling().to_owned()),
+            Ok(None) => subscribed.push(name),
+            Err(response) => return *response,
+        }
     }
     if let Some(response) = state.redirect(&uri, &request.group).await {
         return response;
@@ -215,7 +278,7 @@ async fn join(
             member_id: request.member_id.unwrap_or_default(),
             instance_id: request.instance_id,
             client_id: request.client_id.unwrap_or_else(|| "pico".to_owned()),
-            membership: Membership::Subscribed(subscription),
+            membership: Membership::Subscribed(subscribed),
             session_timeout_ms: request
                 .session_timeout_ms
                 .map_or(wire::DEFAULT_SESSION_TIMEOUT_MS as i32, saturating_i32),
@@ -360,17 +423,22 @@ async fn commit(
         Ok(streams) => streams,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow(&caller, Operation::Read, &streams) {
+    if let Err(response) = state.allow_streams(&caller, Operation::Read, &streams) {
         return *response;
     }
+    let partitions = match state.partitions(&streams).await {
+        Ok(partitions) => partitions,
+        Err(response) => return *response,
+    };
     let commits: Vec<OffsetCommit> = request
         .offsets
         .into_values()
-        .zip(streams)
-        .map(|(offset, stream)| OffsetCommit {
-            stream,
+        .zip(partitions)
+        .map(|(offset, partition)| OffsetCommit {
+            partition,
             value: CommittedOffset {
                 position: offset.position,
+                leader_epoch: None,
                 metadata: offset.metadata,
             },
         })
@@ -408,39 +476,51 @@ async fn fetch(
         Ok(requested) => requested,
         Err(response) => return *response,
     };
-    if !requested.is_empty()
-        && let Err(response) = state.allow(&caller, Operation::Read, &requested)
-    {
+    if let Err(response) = state.allow_streams(&caller, Operation::Read, &requested) {
         return *response;
     }
+    let partitions = match state.partitions(&requested).await {
+        Ok(partitions) => partitions,
+        Err(response) => return *response,
+    };
     if let Some(response) = state.redirect(&uri, &group).await {
         return response;
     }
+
     let offsets = match state
         .groups
         .fetch_offsets(
             &group,
-            (!requested.is_empty()).then_some(requested.as_slice()),
+            (!requested.is_empty()).then_some(partitions.as_slice()),
         )
         .await
     {
         Ok(offsets) => offsets,
         Err(error) => return group_error(error),
     };
-    let offsets = offsets
-        .into_iter()
-        .filter(|(stream, _)| state.allowed(&caller, stream))
-        .map(|(stream, value)| {
-            (
-                state.strip(&caller, &stream).to_owned(),
-                wire::CommittedOffset {
-                    position: value.position,
-                    metadata: value.metadata,
-                },
-            )
-        })
-        .collect();
-    ok(OffsetsResponse { offsets }.encode())
+
+    let mut named = BTreeMap::new();
+    for (partition, value) in offsets {
+        let Ok(Some(topic)) = state.topics.by_id(&partition.topic).await else {
+            continue;
+        };
+        if topic.partitions > 1 {
+            continue;
+        }
+
+        let stream = topic.name.spelling();
+        if !state.allowed(&caller, stream) {
+            continue;
+        }
+        named.insert(
+            state.strip(&caller, stream).to_owned(),
+            wire::CommittedOffset {
+                position: value.position,
+                metadata: value.metadata,
+            },
+        );
+    }
+    ok(OffsetsResponse { offsets: named }.encode())
 }
 
 fn description(
@@ -521,8 +601,10 @@ fn group_error(err: GroupError) -> Response {
         GroupError::InvalidRequest | GroupError::MemberIdRequired => (400, E_BAD_REQUEST),
         GroupError::Storage => (500, E_DURABILITY),
         GroupError::GroupNotFound => (404, E_NOT_FOUND),
+        GroupError::NonEmpty => (409, E_CONFLICT),
         GroupError::CapacityExceeded => (429, E_CAPACITY_EXCEEDED),
         GroupError::FencedInstance => (403, E_FENCED),
+        GroupError::Superseded => (409, E_CONFLICT),
     };
     error(status, code, &err.to_string(), None)
 }

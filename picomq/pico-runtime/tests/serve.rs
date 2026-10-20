@@ -22,10 +22,7 @@ fn config(dir: &Path, protocol: HttpProtocol, node_epoch: i64) -> ServerConfig {
         addr: loopback(),
         admin_addr: Some(loopback()),
         http_protocol: protocol,
-        kafka: Some(KafkaConfig {
-            listen: loopback(),
-            advertise: None,
-        }),
+        kafka: KafkaConfig::new(loopback()),
         meta_backend: MetaBackend::parse(&format!("sqlite:{}", dir.join("meta.db").display()))
             .unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
@@ -154,7 +151,7 @@ async fn kafka_listener_runs_alongside_each_http_protocol() {
         let server = picomq_runtime::start(config(dir.path(), protocol, 1))
             .await
             .unwrap();
-        let kafka_addr = server.kafka_addr().expect("kafka listener bound");
+        let kafka_addr = server.kafka_addr();
 
         let body = kafka_api_versions(kafka_addr).await;
         assert_eq!(&body[..4], &77i32.to_be_bytes());
@@ -183,26 +180,21 @@ async fn kafka_listener_runs_alongside_each_http_protocol() {
     }
 }
 
-/// `kafka: None` opens no Kafka socket and does not register a Kafka
-/// address for the node.
 #[tokio::test]
-async fn kafka_listener_can_be_disabled() {
+async fn liveness_settings_are_validated() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = config(dir.path(), HttpProtocol::Pico, 1);
-    config.kafka = None;
-    let server = picomq_runtime::start(config).await.unwrap();
-    assert!(server.kafka_addr().is_none());
 
-    let http = reqwest::Client::new();
-    let created = http
-        .put(format!("http://{}/streams/orders", server.local_addr()))
-        .header("Content-Type", "text/plain")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(created.status(), 201);
+    let mut silent = config(dir.path(), HttpProtocol::Pico, 1);
+    silent.heartbeat_interval = Duration::ZERO;
+    let mut impatient = config(dir.path(), HttpProtocol::Pico, 1);
+    impatient.node_timeout = impatient.heartbeat_interval;
 
-    server.shutdown().await;
+    for refused in [silent, impatient] {
+        assert!(matches!(
+            picomq_runtime::start(refused).await,
+            Err(RuntimeError::Liveness { .. })
+        ));
+    }
 }
 
 #[tokio::test]
@@ -230,10 +222,7 @@ async fn kafka_non_loopback_bind_refused_regardless_of_auth() {
     let dir = tempfile::tempdir().unwrap();
     let mut refused = config(dir.path(), HttpProtocol::Pico, 1);
     refused.auth_mode = AuthMode::Required;
-    refused.kafka = Some(KafkaConfig {
-        listen: SocketAddr::from(([0, 0, 0, 0], 0)),
-        advertise: None,
-    });
+    refused.kafka = KafkaConfig::new(SocketAddr::from(([0, 0, 0, 0], 0)));
     assert!(matches!(
         picomq_runtime::start(refused).await,
         Err(RuntimeError::InsecureBind { .. })

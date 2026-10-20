@@ -76,6 +76,10 @@ impl ViewPublisher {
             .expect("publisher dropped");
         self.load()
     }
+
+    pub async fn wait_past(&self, index: u64, timeout: std::time::Duration) {
+        let _ = tokio::time::timeout(timeout, self.wait_applied(index + 1)).await;
+    }
 }
 
 impl Default for ViewPublisher {

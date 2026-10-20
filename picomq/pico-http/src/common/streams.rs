@@ -3,11 +3,12 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use bytes::Bytes;
 use picomq_auth::Operation;
-use picomq_server::{StreamConfig, UpdateStreamCommand};
+use picomq_server::{Topic, UpdateTopicCommand};
 use serde_json::{Value, json};
 
-use super::{CommonState, gate, service_error};
+use super::{CommonState, service_error};
 use crate::route::route;
 
 pub const STREAM_CONFIG_PATH_PREFIX: &str = "/_streams";
@@ -23,23 +24,28 @@ async fn get_config(
     uri: Uri,
     headers: HeaderMap,
 ) -> Response {
-    let name = format!("/{name}");
-    if let Err(response) = gate(
-        state.authorizer.as_deref(),
-        &headers,
-        Operation::StreamInspect,
-        Some(&name),
+    let name = match state
+        .admit_stream(&headers, Operation::Head, &format!("/{name}"))
+        .await
+    {
+        Ok(name) => name,
+        Err(response) => return *response,
+    };
+    if let Some(response) = route(
+        state.ownership.as_ref(),
+        &state.topics,
+        state.mode,
+        &method,
+        &uri,
+        &name,
+        Some(0),
     )
     .await
     {
-        return *response;
-    }
-    if let Some(response) = route(state.ownership.as_ref(), state.mode, &method, &uri, &name).await
-    {
         return response;
     }
-    match state.service.stream_config(&name).await {
-        Ok(Some(config)) => Json(config_json(&config)).into_response(),
+    match state.topics.get(&name).await {
+        Ok(Some(topic)) => Json(config_json(&topic)).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => service_error(error),
     }
@@ -51,23 +57,31 @@ async fn patch_config(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Bytes,
 ) -> Response {
-    let name = format!("/{name}");
-    if let Err(response) = gate(
-        state.authorizer.as_deref(),
-        &headers,
-        Operation::Create,
-        Some(&name),
+    let name = match state
+        .admit_stream(&headers, Operation::Create, &format!("/{name}"))
+        .await
+    {
+        Ok(name) => name,
+        Err(response) => return *response,
+    };
+    if let Some(response) = route(
+        state.ownership.as_ref(),
+        &state.topics,
+        state.mode,
+        &method,
+        &uri,
+        &name,
+        Some(0),
     )
     .await
     {
-        return *response;
-    }
-    if let Some(response) = route(state.ownership.as_ref(), state.mode, &method, &uri, &name).await
-    {
         return response;
     }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return bad_request("expected a JSON object");
+    };
     let Some(obj) = body.as_object() else {
         return bad_request("expected a JSON object");
     };
@@ -82,32 +96,29 @@ async fn patch_config(
         Some(Value::Bool(v)) => Some(*v),
         Some(_) => return bad_request("schemaValidate must be a boolean"),
     };
-    let kafka_topic = match obj.get("kafkaTopic") {
-        None => None,
-        Some(Value::Null) => Some(None),
-        Some(Value::String(s)) if !s.is_empty() => Some(Some(s.clone())),
-        Some(_) => return bad_request("kafkaTopic must be a non-empty string or null"),
-    };
+    if obj.contains_key("kafkaTopic") {
+        return bad_request("kafkaTopic is derived from the stream name and cannot be set");
+    }
     match state
-        .service
-        .update_stream(UpdateStreamCommand {
+        .topics
+        .update(UpdateTopicCommand {
             name,
             schema_name,
             schema_validate,
-            kafka_topic,
         })
         .await
     {
-        Ok(config) => Json(config_json(&config)).into_response(),
+        Ok(topic) => Json(config_json(&topic)).into_response(),
         Err(error) => service_error(error),
     }
 }
 
-fn config_json(config: &StreamConfig) -> Value {
+fn config_json(topic: &Topic) -> Value {
     json!({
-        "schema": config.schema_name,
-        "schemaValidate": config.schema_validate,
-        "kafkaTopic": config.kafka_topic,
+        "schema": topic.schema_name,
+        "schemaValidate": topic.schema_validate,
+        "kafkaTopic": topic.name.kafka(),
+        "partitions": topic.partitions,
     })
 }
 

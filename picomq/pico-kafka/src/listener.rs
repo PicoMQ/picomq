@@ -66,10 +66,6 @@ async fn to_reply(mut result: Result<HandlerOutcome, HandlerError>) -> Reply {
                 warn!(%message, "closing connection: invalid kafka request");
                 Reply::Close
             }
-            Err(HandlerError::Service(error)) => {
-                warn!(?error, "closing connection: kafka handler service error");
-                Reply::Close
-            }
         };
     }
 }

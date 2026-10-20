@@ -83,7 +83,7 @@ var _ = ginkgo.Describe("SSE subscriptions", func() {
 	ginkgo.It("caps the initial reconnect delay", func() {
 		client, err := NewPico("http://127.0.0.1:4437")
 		Expect(err).NotTo(HaveOccurred())
-		subscription := newSubscription(context.Background(), client.core, "events", "0", SubscribeOptions{ReconnectDelay: time.Second, MaxReconnectDelay: time.Millisecond})
+		subscription := newSubscription(context.Background(), client.core, "events", nil, "0", SubscribeOptions{ReconnectDelay: time.Second, MaxReconnectDelay: time.Millisecond})
 		started := time.Now()
 		Expect(subscription.recover(errors.New("dropped"))).To(Succeed())
 		Expect(time.Since(started)).To(BeNumerically("<", 100*time.Millisecond))

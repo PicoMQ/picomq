@@ -15,11 +15,10 @@ pico serve \
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--node-id` | `1` | Stable identity in the cluster. Must be unique per node. |
-| `--node-epoch` | current time in ms | Fencing token for this process. Leave unset so every restart gets a higher one. |
 | `--cluster-id` | `picomq` | Reported in the admin API, useful when running several clusters. |
 | `--slots` | `1` | Placement weight registered at startup. A node with `4` slots takes four times the streams of a node with `1`. |
 
-The node id is the one value worth care. Reusing an id for a different machine is safe only after the old one is gone, since the epoch of the new process fences the old.
+The node id is the one value worth care. Each start registers the id at a higher epoch, which fences the process before it: if that one is still running somewhere, it stops. Two machines sharing an id therefore take turns instead of serving together, so give every node its own.
 
 ## Listeners
 
@@ -30,16 +29,24 @@ The node id is the one value worth care. Reusing an id for a different machine i
 | `--no-admin` | off | Disables the admin listener entirely. |
 | `--http-address` | `http://{listen}` | The public URL other nodes redirect clients to. |
 | `--kafka-listen` | `127.0.0.1:9092` | The Kafka listener. |
-| `--no-kafka` | off | Disables the Kafka listener. |
 | `--kafka-advertise` | `{kafka-listen}` | The Kafka address registered in metadata and returned to clients. |
 | `--backlog` | `1024` | Listener accept queue depth. |
-| `--shutdown-drain-sec` | `0` | How long to fail readiness before closing listeners on shutdown. |
+| `--shutdown-drain-sec` | `0` | How long to fail readiness on shutdown before ending live reads and handing off, see [Failover](/docs/design/failover#clean-shutdown). |
 
-`--protocol` is a global flag rather than a serve flag. It selects the HTTP protocol the stream listener speaks, `pico` or `ds`. Kafka is a separate listener and is covered on the [Kafka protocol](/docs/kafka) page.
+`--protocol` is a global flag rather than a serve flag. It selects the HTTP protocol the stream listener speaks, `pico` or `ds`. Kafka is a separate listener that is always on, covered on the [Kafka protocol](/docs/kafka) page.
 
 `--http-address` and `--kafka-advertise` matter in any multi-node deployment. Both are registered in the metadata state and handed to clients verbatim, in redirects for HTTP and in metadata responses for Kafka, so they must be addresses clients can actually reach, not bind addresses. The defaults only work single-node on localhost.
 
 Binding an unauthenticated listener to anything but loopback fails startup unless `--insecure-allow-remote` deliberately opts out for deployments that bring their own network boundary. For the HTTP listeners, `--auth required` is the authenticated alternative. The Kafka listener has no authentication, so exposing it always takes the explicit opt-out.
+
+## Liveness
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--heartbeat-interval-sec` | `5` | How often the node heartbeats through the metadata log. |
+| `--node-timeout-sec` | `30` | How long a node may stay silent before it is fenced and its streams fail over. |
+
+The timeout must be greater than the interval, and startup refuses anything else. The lease holder counts the timeout in its own heartbeats, so with the defaults a node is fenced after `6` of them pass without one of its own. How this works is in [Failover](/docs/design/failover), and choosing the values in [Tuning](/docs/operations/tuning#failover).
 
 ## Metadata
 
@@ -47,15 +54,15 @@ Binding an unauthenticated listener to anything but loopback fails startup unles
 
 ```bash
 --meta-url sqlite::memory:                        # tests, throwaway
---meta-url sqlite:./data/meta.db                  # single node
---meta-url postgres://user:pass@host:5432/picomq  # cluster
+--meta-url sqlite:./data/meta.db                  # single node, the default
+--meta-url postgres://user:pass@host:5432/picomq  # cluster, postgresql:// works too
 ```
 
 SQLite is a file, so it works for exactly one node. Every multi-node cluster needs Postgres, and all nodes must point at the same database, which is what makes them one cluster.
 
 ## Storage
 
-`--storage` is the data bucket in the form `bucket-id@uri`. The bucket id is the engine's internal identifier and any stable value works, and the URI selects the backend.
+`--storage` is the data bucket in the form `bucket-id@uri`, `-2@file://./objects` by default. The bucket id is the engine's internal identifier and any stable value works, and the URI selects the backend.
 
 ```bash
 --storage=-2@file://./objects                # local filesystem
@@ -75,6 +82,8 @@ S3 credentials come from the standard `AWS_*` environment variables. Compatible 
 | absent | The data bucket, under the next bucket id |
 | `id@s3://...` | Its own bucket, for a different storage class or lifecycle rules |
 | `postgres://...` | Tables in a Postgres database |
+
+Every node in a cluster must keep its WAL the same way. When a node dies, another node takes over its WAL, and that only works between WALs of the same kind: object storage the other node can reach, or the same Postgres database. A `file://` WAL can only be taken over on the same host, so it suits a single node. See [Write-ahead log](/docs/design/wal#takeover).
 
 `--schema-registry` points at a store of named schemas that streams bind and optionally validate against. Unset by default, covered in [Schemas](/docs/schemas).
 
@@ -120,10 +129,10 @@ Three things make this setup effective:
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--auth` | `off` | `required` gates every request on both listeners. `off` allows loopback binds only. |
-| `--insecure-allow-remote` | off | Permit non-loopback binds with auth off. |
+| `--auth` | `off` | `required` gates every request on the stream and admin listeners. `off` allows loopback binds only. |
+| `--insecure-allow-remote` | off | Permit non-loopback binds that are unauthenticated: the Kafka listener always, and the HTTP listeners when auth is off. |
 | `--auth-bootstrap-token` | none | Root token in wire form, seeded at startup. Idempotent across restarts. |
-| `--auth-bootstrap-token-file` | none | Read the bootstrap token from a file instead, keeping it out of process listings. |
+| `--auth-bootstrap-token-file` | none | Read the bootstrap token from a file instead, keeping it out of process listings. Not with `--auth-bootstrap-token`. |
 
 A different token under an already-stored bootstrap id fails startup rather than silently rotating a live credential. Bootstrap, token issuance, and client credentials are covered in [Authentication](/docs/operations/auth).
 
