@@ -109,10 +109,10 @@ describe('Stream handle', () => {
   it('binds the stream name for api calls', async () => {
     const api = fakeApi([])
     const stream = new Stream(api, '/s')
-    await stream.create('text/plain')
+    await stream.create({ contentType: 'text/plain' })
     await stream.head()
     await stream.delete()
-    expect(api.create).toHaveBeenCalledWith('/s', 'text/plain', undefined, undefined)
+    expect(api.create).toHaveBeenCalledWith('/s', { contentType: 'text/plain' })
     expect(api.head).toHaveBeenCalledWith('/s', undefined)
     expect(api.delete).toHaveBeenCalledWith('/s', undefined)
   })

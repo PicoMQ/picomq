@@ -74,7 +74,7 @@ describe.runIf(up)('live pico cluster', () => {
 
   it('rejects unauthenticated writes when auth is required', async () => {
     const name = `${base}/denied`
-    await node1.stream(name).create(CT)
+    await node1.stream(name).create({ contentType: CT })
     await expect(anon.append(name, ['nope'])).rejects.toMatchObject({
       kind: 'unauthenticated',
       status: 401,
@@ -83,7 +83,7 @@ describe.runIf(up)('live pico cluster', () => {
 
   it('follows a cross-node 307 and keeps the bearer token', async () => {
     const name = `${base}/owned`
-    expect(await node1.stream(name).create(CT)).toBe(true)
+    expect(await node1.stream(name).create({ contentType: CT })).toBe(true)
     const { owner, other } = await locate(name)
 
     const ack = await other.append(name, ['from-other-node'])
@@ -100,7 +100,7 @@ describe.runIf(up)('live pico cluster', () => {
 
   it('creates on node 2 and reads through a redirect from the non-owner', async () => {
     const name = `${base}/other-owner`
-    await node2.stream(name).create(CT)
+    await node2.stream(name).create({ contentType: CT })
     await node2.append(name, ['seed'])
     const { other } = await locate(name)
 
@@ -111,7 +111,7 @@ describe.runIf(up)('live pico cluster', () => {
 
   it('produces through the non-owner and keeps sequence', async () => {
     const name = `${base}/producer`
-    await node1.stream(name).create(CT)
+    await node1.stream(name).create({ contentType: CT })
     const { other } = await locate(name)
     const producer = other.stream(name).producer('cluster-writer', { lingerMs: 0, maxInflight: 2 })
     expect(await producer.sendDurable('a')).toBe(0)
@@ -127,7 +127,7 @@ describe.runIf(up)('live pico cluster', () => {
 
   it('drives one group membership through both nodes', { timeout: 20_000 }, async () => {
     const stream = `${base}/group-a`
-    await node1.create(stream, CT)
+    await node1.create(stream, { contentType: CT })
     const group = `cluster-ops-${base.slice(9)}`
 
     const joined = await node1.joinGroup(group, [stream], {
@@ -153,7 +153,7 @@ describe.runIf(up)('live pico cluster', () => {
 
   it('rebalances when the second member joins via the node2 node', { timeout: 30_000 }, async () => {
     const streams = ['a', 'b', 'c', 'd'].map((s) => `${base}/gm/${s}`)
-    for (const name of streams) await node1.create(name, CT)
+    for (const name of streams) await node1.create(name, { contentType: CT })
     const group = `cluster-shared-${base.slice(9)}`
     const config = { sessionTimeoutMs: 2000, heartbeatIntervalMs: 100 }
 

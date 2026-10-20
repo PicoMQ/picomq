@@ -5,6 +5,8 @@ export type {
   CallOptions,
   ClientConfig,
   CommittedOffset,
+  ConfigUpdate,
+  CreateOptions,
   GroupAssignment,
   GroupDescription,
   GroupMembership,
@@ -18,15 +20,18 @@ export type {
   ProducerAck,
   ProducerRef,
   Protocol,
+  PutSchemaOptions,
   ReadLimits,
   ReadPage,
   RecordsOptions,
+  Schema,
   SseEvent,
   StreamApi,
   StreamInfo,
   StreamListing,
   StreamRecord,
   SubscribeOptions,
+  TopicConfig,
 } from './types'
 
 export type { RecordEnvelope } from './record'

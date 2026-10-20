@@ -56,6 +56,59 @@ export interface StreamInfo {
   closed: boolean
   ttlSeconds?: number
   expiresAt?: string
+  retentionMs?: number
+  retentionBytes?: number
+  schema?: string
+  kafkaTopic?: string
+}
+
+/**
+ * A new topic's settings. Unset fields take the server's defaults: one
+ * partition, application/octet-stream, no expiry, unlimited retention, and
+ * no schema.
+ */
+export interface CreateOptions extends CallOptions {
+  contentType?: string
+  partitions?: number
+  ttlSeconds?: number
+  expiresAt?: string
+  retentionMs?: number
+  retentionBytes?: number
+  schema?: string
+  schemaValidate?: boolean
+  closed?: boolean
+}
+
+/** A topic's settings as `/_streams` reports them. */
+export interface TopicConfig {
+  schema?: string
+  schemaValidate: boolean
+  kafkaTopic?: string
+  partitions: number
+  retentionMs?: number
+  retentionBytes?: number
+}
+
+/**
+ * A change to a topic's settings. An absent field is left alone and `null`
+ * removes the setting. `partitions` grows the topic and never shrinks it.
+ */
+export interface ConfigUpdate {
+  schema?: string | null
+  schemaValidate?: boolean
+  retentionMs?: number | null
+  retentionBytes?: number | null
+  partitions?: number
+}
+
+export interface PutSchemaOptions extends CallOptions {
+  /** Without one, the server takes the format from the name's extension. */
+  contentType?: string
+}
+
+export interface Schema {
+  contentType?: string
+  body: Uint8Array
 }
 
 export interface AppendAck {
@@ -159,12 +212,7 @@ export interface StreamApi {
   beginning(): string
   now(): string
   stream(name: string): Stream
-  create(
-    name: string,
-    contentType: string,
-    ttlSeconds?: number,
-    options?: CallOptions,
-  ): Promise<boolean>
+  create(name: string, options?: CreateOptions): Promise<boolean>
   head(name: string, options?: PartitionOptions): Promise<StreamInfo | null>
   append(name: string, records: AppendInput[], options?: AppendOptions): Promise<AppendAck>
   read(
@@ -178,5 +226,10 @@ export interface StreamApi {
   list(prefix: string, limit?: number, options?: CallOptions): Promise<StreamListing>
   close(name: string, options?: CallOptions): Promise<string>
   delete(name: string, options?: CallOptions): Promise<boolean>
+  config(name: string, options?: CallOptions): Promise<TopicConfig | null>
+  updateConfig(name: string, update: ConfigUpdate, options?: CallOptions): Promise<TopicConfig>
+  putSchema(name: string, body: Uint8Array | string, options?: PutSchemaOptions): Promise<void>
+  getSchema(name: string, options?: CallOptions): Promise<Schema | null>
+  deleteSchema(name: string, options?: CallOptions): Promise<boolean>
   closeTransport(): Promise<void>
 }

@@ -1,6 +1,7 @@
 import { ClientError, type ErrorKind } from '../error'
 import { base64Decode, parseOptionalUint, retryableError } from '../util'
 import { toEnvelopes, type RecordEnvelope } from '../record'
+import { Control, createHeaders, readSettings } from '../control'
 import { RetryPolicy } from '../retry'
 import { PicoStream } from '../stream'
 import {
@@ -18,6 +19,7 @@ import {
   CT_JSON,
   H_CLOSED,
   H_EXPIRES_AT,
+  H_KAFKA_TOPIC,
   H_NEXT_SEQ,
   H_PARTITIONS,
   H_PRODUCER_EPOCH,
@@ -34,6 +36,8 @@ import type {
   AppendInput,
   AppendOptions,
   CallOptions,
+  ConfigUpdate,
+  CreateOptions,
   GroupAssignment,
   GroupDescription,
   GroupMembership,
@@ -46,21 +50,25 @@ import type {
   PartitionOptions,
   ProducerAck,
   ProducerRef,
+  PutSchemaOptions,
   Protocol,
   ReadLimits,
   ReadPage,
+  Schema,
   SseEvent,
   StreamApi,
   StreamInfo,
   StreamListing,
   StreamRecord,
   SubscribeOptions,
+  TopicConfig,
 } from '../types'
 
 export class PicoClient implements StreamApi {
   private readonly http: Http
   private readonly baseUrl: string
   private readonly retry: RetryPolicy
+  private readonly control: Control
 
   constructor(
     endpoint: string,
@@ -71,6 +79,7 @@ export class PicoClient implements StreamApi {
     this.baseUrl = endpoint.replace(/\/+$/, '')
     this.http = new Http(this.baseUrl, token, http2)
     this.retry = retry
+    this.control = new Control(this.http, this.baseUrl, retry)
   }
 
   async closeTransport(): Promise<void> {
@@ -95,14 +104,9 @@ export class PicoClient implements StreamApi {
     return new PicoStream(this, name)
   }
 
-  async create(
-    name: string,
-    contentType: string,
-    ttlSeconds?: number,
-    options?: CallOptions,
-  ): Promise<boolean> {
+  async create(name: string, options?: CreateOptions): Promise<boolean> {
     return this.retry.run(
-      () => this.createOnce(name, contentType, ttlSeconds, options?.signal),
+      () => this.createOnce(name, options),
       retryableError,
       options?.signal,
     )
@@ -217,6 +221,26 @@ export class PicoClient implements StreamApi {
       options?.signal,
     )
   }
+  config(name: string, options?: CallOptions): Promise<TopicConfig | null> {
+    return this.control.config(name, options)
+  }
+
+  updateConfig(name: string, update: ConfigUpdate, options?: CallOptions): Promise<TopicConfig> {
+    return this.control.updateConfig(name, update, options)
+  }
+
+  putSchema(name: string, body: Uint8Array | string, options?: PutSchemaOptions): Promise<void> {
+    return this.control.putSchema(name, body, options)
+  }
+
+  getSchema(name: string, options?: CallOptions): Promise<Schema | null> {
+    return this.control.getSchema(name, options)
+  }
+
+  deleteSchema(name: string, options?: CallOptions): Promise<boolean> {
+    return this.control.deleteSchema(name, options)
+  }
+
 
   async joinGroup(
     group: string,
@@ -404,18 +428,14 @@ export class PicoClient implements StreamApi {
     )
   }
 
-  private async createOnce(
-    name: string,
-    contentType: string,
-    ttlSeconds: number | undefined,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    const headers: { [key: string]: string } = { 'Content-Type': contentType }
-    if (ttlSeconds !== undefined) {
-      headers[H_TTL] = String(ttlSeconds)
-    }
+  private async createOnce(name: string, options?: CreateOptions): Promise<boolean> {
     const response = await expectPico(
-      await this.http.send({ method: 'PUT', url: this.url(name), headers, signal }),
+      await this.http.send({
+        method: 'PUT',
+        url: this.url(name),
+        headers: createHeaders('Pico', options),
+        signal: options?.signal,
+      }),
       [200, 201],
     )
     return response.status === 201
@@ -450,6 +470,9 @@ export class PicoClient implements StreamApi {
     if (ttlSeconds !== undefined) info.ttlSeconds = ttlSeconds
     const expiresAt = header(response, H_EXPIRES_AT)
     if (expiresAt !== undefined) info.expiresAt = expiresAt
+    readSettings(response, 'Pico', info)
+    const kafkaTopic = header(response, H_KAFKA_TOPIC)
+    if (kafkaTopic !== undefined) info.kafkaTopic = kafkaTopic
     return info
   }
 
