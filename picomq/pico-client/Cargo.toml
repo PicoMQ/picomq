@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 description = "PicoMQ client: the Pico protocol and Durable Streams over HTTP"
 repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 picomq-protocol = { workspace = true }

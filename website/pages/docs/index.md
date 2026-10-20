@@ -39,9 +39,9 @@ PicoMQ is a durable stream server. Clients create named streams, append records,
 
 PicoMQ treats a stream as a small, disposable unit. Streams are named like URL paths, created with one request, and cost nothing while idle. A deployment can hold ten streams or millions, one per order, per session, per device, or per job.
 
-Object storage is what makes that granularity economical. Every record ends up there, so durability never depends on a node and an idle stream is a registry entry plus its objects. The write-ahead log sits in object storage or in Postgres. Coordination goes through a SQL database. There is no consensus protocol and no broker disks.
+Object storage is what makes that granularity economical. Every record ends up there, so durability never depends on a node and an idle stream is a few metadata entries plus its objects. The write-ahead log sits in object storage or in Postgres. Coordination goes through a SQL database. There is no consensus protocol and no broker disks.
 
-The structure follows from that. A node can be stopped and replaced at any time because it holds no unique state. Adding capacity is starting another process. Losing a node causes a few seconds of rerouting, not a data rebalance.
+The structure follows from that. A node can be stopped and replaced at any time because it holds no unique state. Adding capacity is starting another process. A stopping node hands its streams to the others in about a second, and a crashed one has them moved after a timeout. Neither moves any data.
 
 ## Features
 
@@ -50,8 +50,10 @@ The structure follows from that. A node can be stopped and replaced at any time 
 - **Runs inside Postgres.** The [extension](/docs/operations/deployment/postgres) starts a node as a background worker, with the metadata log and the WAL in the same database.
 - **Three wire protocols.** The native Pico protocol, the Durable Streams open protocol, and the Kafka wire protocol for standard Kafka clients. Same engine underneath.
 - **HTTP or Kafka, your choice.** Create with `PUT`, append with `POST`, read with `GET`, tail with long polling or SSE. Or point any Kafka producer or consumer at the node. Both see the same streams.
+- **Partitions and consumer groups.** Topics can have many partitions, and one group coordinator serves Kafka and HTTP consumer groups.
+- **Automatic failover.** A dead node is detected, fenced, and its streams moved to live nodes with its buffered records recovered. See [Failover](/docs/design/failover).
 - **Live stream transfer.** Ownership of a stream moves between nodes without losing writes, with seconds of handoff.
-- **Fencing everywhere.** Node epochs and stream epochs keep zombie processes from corrupting anything.
+- **Fencing everywhere.** Node epochs, stream epochs, and WAL reservations keep zombie processes from corrupting anything.
 - **One binary.** `pico` is the server, the client, the admin CLI, and the benchmark tool. The admin dashboard is embedded in it.
 
 ## Use cases

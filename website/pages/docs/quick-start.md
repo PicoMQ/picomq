@@ -110,7 +110,7 @@ curl -X POST -H 'Content-Type: text/plain' -d 'order-1' \
 curl 'http://localhost:4437/streams/orders?seq=0'
 ```
 
-Appends return the assigned sequence in the `Pico-Next-Seq` header. Reads accept `seq=now` to start at the tail, `live=long-poll` to wait for the next record, and `live=sse` to keep the response open as an event stream.
+Appends return the sequence of their first record in the `Pico-Start-Seq` header, and the next free one in `Pico-Next-Seq`. Reads accept `seq=now` to start at the tail, `live=long-poll` to wait for the next record, and `live=sse` to keep the response open as an event stream.
 
 == Durable Streams
 
