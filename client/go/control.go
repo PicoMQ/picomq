@@ -279,5 +279,9 @@ func expectControl(response *http.Response, expected ...int) ([]byte, error) {
 	case 409:
 		kind = ErrorConflict
 	}
-	return nil, &ClientError{Kind: kind, Status: response.StatusCode, Code: "http_" + strconv.Itoa(response.StatusCode), Message: message}
+	code := string(kind)
+	if kind == ErrorOther {
+		code = "http_" + strconv.Itoa(response.StatusCode)
+	}
+	return nil, &ClientError{Kind: kind, Status: response.StatusCode, Code: code, Message: message}
 }

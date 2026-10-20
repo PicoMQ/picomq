@@ -167,8 +167,9 @@ async function expectControl(response: Response, expected: number[]): Promise<Re
     404: 'not_found',
     409: 'conflict',
   }
-  const code = `http_${response.status}`
-  throw new ClientError(kinds[response.status] ?? 'other', message || code, {
+  const kind = kinds[response.status]
+  const code = kind ?? `http_${response.status}`
+  throw new ClientError(kind ?? 'other', message || code, {
     status: response.status,
     code,
   })

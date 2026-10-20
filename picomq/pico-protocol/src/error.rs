@@ -44,19 +44,23 @@ impl WireError {
             .ok()
             .and_then(|node| node["error"].as_str().map(str::to_owned))
             .or_else(|| Some(body.to_owned()).filter(|body| !body.is_empty()));
-        let kind = match status {
-            400 => ErrorKind::BadRequest,
-            401 => ErrorKind::Unauthenticated,
-            403 => ErrorKind::PermissionDenied,
-            404 => ErrorKind::NotFound,
-            409 => ErrorKind::Conflict,
-            _ => ErrorKind::Other,
+        let (kind, code) = match status {
+            400 => (ErrorKind::BadRequest, "bad_request"),
+            401 => (ErrorKind::Unauthenticated, "unauthenticated"),
+            403 => (ErrorKind::PermissionDenied, "permission_denied"),
+            404 => (ErrorKind::NotFound, "not_found"),
+            409 => (ErrorKind::Conflict, "conflict"),
+            _ => (ErrorKind::Other, ""),
         };
 
         Self {
             status,
             kind,
-            code: format!("http_{status}"),
+            code: if code.is_empty() {
+                format!("http_{status}")
+            } else {
+                code.to_owned()
+            },
             message,
             next: None,
         }
