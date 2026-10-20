@@ -45,7 +45,12 @@ pub async fn run(target: &Target) -> anyhow::Result<Vec<Outcome>> {
 
         let expected = scenario.run(&clients, &kafka, &topic).await;
         let actual = scenario.run(&clients, &picomq, &topic).await;
-        let mismatch = scenario.compare().mismatch(&expected, &actual);
+        let tooling = clients.take_tooling_failures();
+        let mismatch = if tooling.is_empty() {
+            scenario.compare().mismatch(&expected, &actual)
+        } else {
+            Some(format!("tooling failed:\n{}", tooling.join("\n")))
+        };
 
         outcomes.push(Outcome {
             case: scenario.name().to_owned(),

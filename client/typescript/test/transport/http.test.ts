@@ -17,7 +17,7 @@ describe('Http', () => {
       .mockResolvedValueOnce(new Response('ok', { status: 200 }))
     vi.stubGlobal('fetch', fetch)
 
-    const http = new Http('secret')
+    const http = new Http('http://a.test', 'secret')
     const response = await http.send({ method: 'GET', url: 'http://a.test/x' })
     expect(response.status).toBe(200)
     expect(fetch).toHaveBeenCalledTimes(2)
@@ -33,7 +33,7 @@ describe('Http', () => {
       .mockResolvedValueOnce(new Response('ok', { status: 200 }))
     vi.stubGlobal('fetch', fetch)
 
-    const http = new Http('secret')
+    const http = new Http('http://a.test', 'secret')
     await http.send({ method: 'GET', url: 'http://a.test/x' })
     const headers = fetch.mock.calls[1]![1]!.headers as Headers
     expect(headers.get('authorization')).toBe('Bearer secret')
@@ -49,7 +49,7 @@ describe('Http', () => {
       .mockResolvedValueOnce(new Response('ok', { status: 200 }))
     vi.stubGlobal('fetch', fetch)
 
-    const http = new Http()
+    const http = new Http('http://a.test')
     await http.send({ method: 'GET', url: 'http://a.test/orders?partition=1&seq=0' })
     await http.send({ method: 'GET', url: 'http://a.test/orders?partition=1&seq=5' })
     expect(String(fetch.mock.calls[2]![0])).toBe('http://b.test/orders?partition=1&seq=5')
@@ -69,17 +69,31 @@ describe('Http', () => {
       .mockResolvedValueOnce(new Response(null, { status: 404 }))
     vi.stubGlobal('fetch', fetch)
 
-    const http = new Http()
+    const http = new Http('http://a.test')
     await http.send({ method: 'DELETE', url: 'http://a.test/orders' })
     await http.send({ method: 'HEAD', url: 'http://a.test/orders' })
     expect(String(fetch.mock.calls[2]![0])).toBe('http://a.test/orders')
+  })
+
+  it('keeps an owner path prefix for learned routes', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(redirect(307, 'https://gw.test/node2/orders?seq=0'))
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }))
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }))
+    vi.stubGlobal('fetch', fetch)
+
+    const http = new Http('https://gw.test/node1/')
+    await http.send({ method: 'GET', url: 'https://gw.test/node1/orders?seq=0' })
+    await http.send({ method: 'GET', url: 'https://gw.test/node1/orders?seq=7' })
+    expect(String(fetch.mock.calls[2]![0])).toBe('https://gw.test/node2/orders?seq=7')
   })
 
   it('fails after too many redirects', async () => {
     const fetch = vi.fn().mockResolvedValue(redirect(307, 'http://a.test/loop'))
     vi.stubGlobal('fetch', fetch)
 
-    const http = new Http()
+    const http = new Http('http://a.test')
     await expect(http.send({ method: 'GET', url: 'http://a.test/x' })).rejects.toMatchObject({
       code: 'too_many_redirects',
     })
@@ -91,7 +105,7 @@ describe('Http', () => {
       vi.fn().mockRejectedValue(new TypeError('fetch failed')),
     )
 
-    const http = new Http()
+    const http = new Http('http://a.test')
     await expect(http.send({ method: 'GET', url: 'http://a.test/x' })).rejects.toMatchObject({
       kind: 'transport',
     })

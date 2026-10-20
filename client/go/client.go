@@ -117,7 +117,7 @@ func newCore(protocol Protocol, endpoint string, options ...Option) (*coreClient
 			cfg.httpClient = &http.Client{Transport: transport}
 		}
 	}
-	return &coreClient{protocol: protocol, baseURL: base, http: cfg.httpClient, token: cfg.token, retry: cfg.retry, ownedTransport: owned, routes: newRoutes()}, nil
+	return &coreClient{protocol: protocol, baseURL: base, http: cfg.httpClient, token: cfg.token, retry: cfg.retry, ownedTransport: owned, routes: newRoutes(base)}, nil
 }
 
 func (c *PicoClient) Protocol() Protocol           { return ProtocolPico }
@@ -171,7 +171,11 @@ func (c *coreClient) send(ctx context.Context, request wireRequest) (*http.Respo
 	if err != nil {
 		return nil, err
 	}
-	current := c.routes.resolve(start).String()
+	key, keyed := c.routes.key(start)
+	current := start.String()
+	if keyed {
+		current = c.routes.resolve(key, start).String()
+	}
 	visited := map[string]struct{}{}
 	for hop := 0; hop <= maxRedirects; hop++ {
 		if _, ok := visited[current]; ok {
@@ -197,12 +201,14 @@ func (c *coreClient) send(ctx context.Context, request wireRequest) (*http.Respo
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			c.routes.forget(req.URL.Path)
+			if keyed {
+				c.routes.forget(key)
+			}
 			return nil, &ClientError{Kind: ErrorTransport, Code: "transport", Message: err.Error(), Cause: err}
 		}
 		if response.StatusCode != http.StatusTemporaryRedirect && response.StatusCode != http.StatusPermanentRedirect {
-			if request.method == http.MethodDelete && response.StatusCode < http.StatusMultipleChoices {
-				c.routes.forget(req.URL.Path)
+			if keyed && request.method == http.MethodDelete && response.StatusCode < http.StatusMultipleChoices {
+				c.routes.forget(key)
 			}
 			return response, nil
 		}
@@ -227,7 +233,9 @@ func (c *coreClient) send(ctx context.Context, request wireRequest) (*http.Respo
 		if base.Scheme == "https" && next.Scheme == "http" {
 			return nil, &ClientError{Kind: ErrorInvalidResponse, Code: "unsafe_redirect", Message: "ownership redirect cannot downgrade from HTTPS to HTTP"}
 		}
-		c.routes.learn(base, next)
+		if keyed {
+			c.routes.learn(key, next)
+		}
 		current = next.String()
 	}
 	panic("unreachable")

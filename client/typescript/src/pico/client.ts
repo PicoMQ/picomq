@@ -69,7 +69,7 @@ export class PicoClient implements StreamApi {
     retry: RetryPolicy = RetryPolicy.none(),
   ) {
     this.baseUrl = endpoint.replace(/\/+$/, '')
-    this.http = new Http(token, http2)
+    this.http = new Http(this.baseUrl, token, http2)
     this.retry = retry
   }
 

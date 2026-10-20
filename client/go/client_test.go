@@ -238,6 +238,33 @@ var _ = ginkgo.Describe("Pico client", func() {
 		Expect(redirects.Load()).To(BeEquivalentTo(4))
 	})
 
+	ginkgo.It("keeps an owner's path prefix for learned routes", func() {
+		owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/node2/orders" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Pico-Next-Seq", "7")
+		}))
+		defer owner.Close()
+		var redirects atomic.Int32
+		entry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			redirects.Add(1)
+			path := strings.TrimPrefix(r.URL.Path, "/node1")
+			http.Redirect(w, r, owner.URL+"/node2"+path, http.StatusTemporaryRedirect)
+		}))
+		defer entry.Close()
+
+		client, err := NewPico(entry.URL + "/node1")
+		Expect(err).NotTo(HaveOccurred())
+		for i := 0; i < 3; i++ {
+			info, err := client.Head(context.Background(), "orders")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Next).To(Equal("7"))
+		}
+		Expect(redirects.Load()).To(BeEquivalentTo(1))
+	})
+
 	ginkgo.It("preserves context cancellation", func() {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 		defer server.Close()

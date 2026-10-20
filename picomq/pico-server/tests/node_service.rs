@@ -2411,3 +2411,59 @@ async fn a_metadata_outage_is_reported_as_unavailable() {
 
     node.close().await;
 }
+
+/// A Kafka batch whose records all carry `timestamp_ms` as their create time.
+fn timed_batch(timestamp_ms: i64, values: &[&[u8]]) -> Vec<u8> {
+    let records: Vec<LogRecord> = values
+        .iter()
+        .map(|v| LogRecord::value(Bytes::copy_from_slice(v)))
+        .collect();
+    let mut batch = encode_batch(0, -1, timestamp_ms, &records).to_vec();
+    batch[21..23].copy_from_slice(&0i16.to_be_bytes());
+    let crc = crc32c::crc32c(&batch[21..]);
+    batch[17..21].copy_from_slice(&crc.to_be_bytes());
+    batch
+}
+
+#[tokio::test]
+async fn timestamp_lookups_skip_records_trimmed_inside_a_batch() {
+    let (sink, views) = LocalSink::new();
+    let engine = s3stream::Config {
+        wal_upload_interval_ms: 100,
+        ..Default::default()
+    };
+    let node = start_engine(1, Arc::new(sink), views, engine).await;
+    let topics = node.topics();
+    topics
+        .create(create("/topics/timed", "application/octet-stream"))
+        .await
+        .unwrap();
+    produce(
+        &topics,
+        "/topics/timed",
+        Bytes::from(timed_batch(100, &[b"a", b"b"])),
+    )
+    .await
+    .unwrap();
+    let topic = topics.get("/topics/timed").await.unwrap().unwrap();
+    let start = topics
+        .delete_records(&topic, 0, 1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert_eq!(start, 1);
+
+    let found = topics
+        .record_at_or_after(&topic, 0, 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.offset.record_offset(), 1);
+    let newest = topics
+        .record_with_max_timestamp(&topic, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(newest.offset.record_offset(), 1);
+
+    node.close().await;
+}

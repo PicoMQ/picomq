@@ -54,7 +54,7 @@ impl PicoClient {
             http,
             base_url: endpoint.trim_end_matches('/').to_owned(),
             retry,
-            routes: Arc::default(),
+            routes: Arc::new(Routes::new(endpoint)),
         }
     }
 
@@ -423,7 +423,10 @@ pub(crate) async fn send(
     builder: reqwest::RequestBuilder,
 ) -> Result<Response> {
     let mut request = builder.build()?;
-    routes.resolve(request.url_mut());
+    let key = routes.key(request.url());
+    if let Some(key) = &key {
+        routes.resolve(key, request.url_mut());
+    }
     let deleting = request.method() == reqwest::Method::DELETE;
     for _ in 0..MAX_REDIRECT_HOPS {
         let base = request.url().clone();
@@ -431,14 +434,19 @@ pub(crate) async fn send(
         let response = match http.execute(request).await {
             Ok(response) => response,
             Err(error) => {
-                routes.forget(base.path());
+                if let Some(key) = &key {
+                    routes.forget(key);
+                }
                 return Err(error.into());
             }
         };
         let status = response.status().as_u16();
         if status != 307 && status != 308 {
-            if deleting && response.status().is_success() {
-                routes.forget(base.path());
+            if deleting
+                && response.status().is_success()
+                && let Some(key) = &key
+            {
+                routes.forget(key);
             }
             return Ok(response);
         }
@@ -450,7 +458,9 @@ pub(crate) async fn send(
                 "redirect_without_location",
             ));
         };
-        routes.learn(&base, &target);
+        if let Some(key) = &key {
+            routes.learn(key, &target);
+        }
         let mut next = retry.expect("bodies are Bytes, always clonable");
         *next.url_mut() = target;
         request = next;

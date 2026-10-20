@@ -37,7 +37,7 @@ impl DsClient {
             http,
             base_url: endpoint.trim_end_matches('/').to_owned(),
             retry,
-            routes: Routes::default(),
+            routes: Routes::new(endpoint),
         }
     }
 
