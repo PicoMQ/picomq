@@ -1,6 +1,6 @@
 # Postgres extension
 
-`pico` runs inside Postgres as a background worker. The worker is the same node that `pico serve` starts: HTTP, Kafka, and admin listeners, the ownership router, the stream service, and the engine. The database holds the metadata log and the [WAL](/docs/design/wal). The only external dependency is an object store.
+`pico` runs inside Postgres as a background worker. The worker is the same node that `pico serve` starts: HTTP, Kafka, and admin listeners, the ownership router, topics and consumer groups, and the engine. The database holds the metadata log and the [WAL](/docs/design/wal). The only external dependency is an object store.
 
 <div class="pico-diagram">
 <svg viewBox="0 0 720 420" width="720" role="img" aria-label="Clients connect to pico's listeners on ports 4437, 9090, and 9092. The pico background worker runs inside the Postgres postmaster next to regular backends, writes metadata and the WAL to the same database over a local socket, and writes data objects to object storage. A standby replicates the database and starts its own worker only on promotion.">
@@ -20,7 +20,7 @@
   <rect x="220" y="130" width="280" height="120" class="box-accent"/>
   <text x="360" y="154" text-anchor="middle" class="label">pico worker</text>
   <text x="360" y="174" text-anchor="middle" class="sub">listeners 4437, 9090, 9092</text>
-  <text x="360" y="192" text-anchor="middle" class="sub">router, stream service</text>
+  <text x="360" y="192" text-anchor="middle" class="sub">router, topics, groups</text>
   <text x="360" y="210" text-anchor="middle" class="sub">s3stream engine</text>
   <text x="360" y="234" text-anchor="middle" class="sub">tokio runtime, pico.threads</text>
   <rect x="220" y="300" width="280" height="76" class="box"/>
@@ -118,14 +118,14 @@ All settings have `postmaster` context. A change takes a restart. They are set i
 | `pico.database_url` | empty | `--meta-url` | Full connection URL, replacing `pico.database` and `pico.role`. Superuser only. |
 | `pico.listen` | `127.0.0.1:4437` | `--listen` | HTTP stream listener. |
 | `pico.admin_listen` | `127.0.0.1:9090` | `--admin-listen` | Admin API and dashboard. Empty disables it. |
-| `pico.kafka_listen` | `127.0.0.1:9092` | `--kafka-listen` | Kafka listener. Empty disables it. |
+| `pico.kafka_listen` | `127.0.0.1:9092` | `--kafka-listen` | Kafka listener, always on. Empty means the default. |
 | `pico.advertised_url` | `http://{listen}` | `--http-address` | URL other nodes redirect clients to. |
 | `pico.kafka_advertise` | `{kafka_listen}` | `--kafka-advertise` | Address returned in Kafka metadata. |
 | `pico.cluster_id` | `picomq` | `--cluster-id` | Cluster identifier. |
 | `pico.node_id` | `1` | `--node-id` | Node identity, unique per node. |
 | `pico.auth` | `off` | `--auth` | `off` or `required`. |
 | `pico.auth_bootstrap_token` | empty | `--auth-bootstrap-token` | Root token seeded at startup. Superuser only. |
-| `pico.insecure_allow_remote` | `off` | `--insecure-allow-remote` | Permit non-loopback listeners with auth off. |
+| `pico.insecure_allow_remote` | `off` | `--insecure-allow-remote` | Permit non-loopback binds that are unauthenticated: the Kafka listener always, and the HTTP listeners when auth is off. |
 | `pico.schema_registry` | empty | `--schema-registry` | Bucket URI for the schema registry. |
 | `pico.wal_cache_mb` | `64` | `--wal-cache-size` | Memory for records not yet packed into objects. Minimum 16. |
 | `pico.wal_upload_interval_ms` | `0` | `--wal-upload-interval-ms` | Upload buffered records at least this often. `0` uploads by size only. |
@@ -134,6 +134,7 @@ All settings have `postmaster` context. A change takes a restart. They are set i
 | `pico.log` | `warn` | `RUST_LOG` | Tracing filter for pico's log lines. |
 
 - The upload threshold is not a setting. It is `2/5` of `pico.wal_cache_mb`, the ratio the engine clamps to.
+- Liveness is not a setting either. The worker heartbeats every `5` seconds and is fenced after `30` seconds of silence, the [`pico serve` defaults](/docs/operations/configuration#liveness).
 - The worker connects over the first entry of `unix_socket_directories`, as the server's OS user unless `pico.role` is set, under the same `pg_hba.conf` rules as any local connection.
 - A server with no filesystem socket needs `pico.database_url`.
 
@@ -166,8 +167,9 @@ pico.auth_bootstrap_token = 'pk_...'
 | Standby promoted | Starts with the replicated metadata and WAL. See [Write-ahead log](/docs/design/wal#recovery) |
 | `pico.storage` unset | Logs `pico: not starting`, exits, not restarted |
 | Start fails | Logs the error, Postgres restarts it after 5 seconds |
+| Fenced, or its WAL taken over | Logs `pico: this node left the cluster, restarting` as an error, Postgres restarts it after 5 seconds, and it rejoins at a new epoch |
 | `SIGTERM` during start | Exits, not restarted |
-| Fast or immediate shutdown | Closes listeners, engine gets 2 seconds to finish in-flight work, unacknowledged records recovered from the WAL on next start |
+| Fast or immediate shutdown | Gets 2 seconds to end live reads, close its streams, and [hand them off](/docs/design/failover#clean-shutdown). Logs `pico: shutdown did not finish within 2s` if it runs out, and anything left is recovered from the WAL |
 | Smart shutdown | Waits for the worker as for a client session. Does not complete while pico runs |
 
 The worker is not a session and does not appear in `pg_stat_activity`. Its log lines go to the Postgres log with a `pico:` prefix, filtered by `pico.log`.
@@ -180,7 +182,7 @@ Nodes form a cluster by sharing a metadata database and a bucket. Two Postgres s
 - a distinct `pico.node_id`
 - a reachable `pico.advertised_url`
 
-Its WAL lives in that database too unless `pico.wal` points elsewhere. `pico serve` process nodes join the same way.
+Its WAL lives in that database too unless `pico.wal` points elsewhere. `pico serve` process nodes join the same way, but every node in a cluster must keep its WAL the same way: a node with its WAL in the shared Postgres database cannot take over a node whose WAL is in object storage, or the other way round. See [Write-ahead log](/docs/design/wal#takeover).
 
 ## Compose
 

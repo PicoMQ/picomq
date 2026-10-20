@@ -33,12 +33,23 @@ Spreading load across streams is the third lever, since every stream is an indep
 | --- | --- | --- |
 | `--wal-cache-size` | `200` MiB | Records not yet packed into committed objects. Readers up to this far behind the tail read from memory. |
 | `--block-cache-size` | `100` MiB | Pages of committed objects for cold reads, with readahead. |
-| `--wal-upload-threshold` | `100` MiB | How much WAL accumulates before being packed into committed objects. Clamped to `2/5` of the WAL cache. |
+| `--wal-upload-threshold` | `100` MiB | How much WAL accumulates before being packed into committed objects. Clamped to `2/5` of the WAL cache, so `80` MiB with the defaults. |
 | `--wal-upload-interval-ms` | `0` (off) | Packs buffered WAL periodically even below the threshold. |
 
 The WAL cache is the one to grow on nodes with many consumers slightly behind their producers, since a consumer that falls out of it drops to the block cache and, past that, to object store reads. The block cache matters for replay-heavy workloads, where a larger cache and its readahead keep sequential replays at object store throughput without repeated fetches.
 
-A larger upload threshold produces fewer, larger committed objects, which reads and compaction both prefer. The cost is a longer WAL, which is replayed on open after a crash, so recovery time grows with it. On low-traffic nodes the threshold may take a long time to fill, and enabling the upload interval keeps the WAL short and recovery fast anyway.
+A larger upload threshold produces fewer, larger committed objects, which reads and compaction both prefer. The cost is a longer WAL, which is replayed after a crash, by the restarted node or by failover, so recovery time grows with it. On low-traffic nodes the threshold may take a long time to fill, and enabling the upload interval keeps the WAL short and recovery fast anyway.
+
+## Failover
+
+`--heartbeat-interval-sec` and `--node-timeout-sec` decide how fast a dead node's streams move, see [Failover](/docs/design/failover).
+
+| Shorter timeout | Longer timeout |
+| --- | --- |
+| A crashed node's streams move sooner | A long GC pause, network blip, or slow disk never fences a healthy node |
+| A node that stalls briefly may be fenced, and restarts | Partitions on a dead node are unavailable for longer |
+
+The defaults, `5` and `30` seconds, favour staying up through stalls. A clean shutdown is unaffected by either, since the node hands off on its own. Every heartbeat is one metadata command, so a shorter interval adds load on the metadata database in proportion to the node count.
 
 ## Object store spend
 

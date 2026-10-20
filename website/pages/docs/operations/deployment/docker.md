@@ -14,25 +14,29 @@ Durability follows the storage. With `file://` the data is as durable as that di
 
 ## Cluster
 
-Each node needs a unique `--node-id`, the shared Postgres URL, the shared bucket, and a `--http-address` that clients and other nodes can reach. Binding beyond loopback requires either auth or an explicit `--insecure-allow-remote` opt-out. Here each node gets `--auth required` and the shared bootstrap token, which is idempotent across nodes and restarts (see [Authentication](/docs/operations/auth)).
+Each node needs a unique `--node-id`, the shared Postgres URL, the shared bucket, and a `--http-address` that clients and other nodes can reach. Binding beyond loopback requires either auth or an explicit `--insecure-allow-remote` opt-out. Here each node gets `--auth required` and the shared bootstrap token, which is idempotent across nodes and restarts (see [Authentication](/docs/operations/auth)). The Kafka listener has no auth, so exposing it takes the opt-out and its own advertised address.
 
 ```bash
 pico serve --node-id 1 --listen 0.0.0.0:4437 \
     --http-address http://node1.internal:4437 \
+    --kafka-listen 0.0.0.0:9092 --kafka-advertise node1.internal:9092 \
+    --insecure-allow-remote \
     --auth required --auth-bootstrap-token-file /run/secrets/pico-root \
     --meta-url postgres://user:pass@pg:5432/picomq \
     --storage=-2@s3://picomq?region=us-east-1
 ```
 
+Every node keeps its WAL the same way, all in the bucket or all in Postgres, so any node can take over a dead node's WAL. See [Configuration](/docs/operations/configuration#storage).
+
 Routing shapes what sits in front of the nodes. Clients are redirected to a stream's owner with its advertised address, so clients must be able to reach every node directly and follow redirects. A load balancer works fine as the entry point for creates and first requests, but it should not be the only reachable address, since redirects bypass it by design.
 
 ## Images and compose
 
-Two images are published to GitHub Container Registry on every merge.
+Two images are published to GitHub Container Registry for every release.
 
 | Image | Tags | Contents |
 | --- | --- | --- |
-| `ghcr.io/picomq/picomq` | `latest`, version, commit SHA | The `pico` binary with the dashboard embedded |
+| `ghcr.io/picomq/picomq` | `latest`, version, major.minor, commit SHA | The `pico` binary with the dashboard embedded |
 | `ghcr.io/picomq/picomq-pg` | `pg16`, `pg17`, `pg18`, version and SHA per major | Postgres with the [pico extension](/docs/operations/deployment/postgres) preloaded |
 
 The repository has two compose harnesses. `harness/aio` is self-contained, starting Postgres and RustFS alongside one or two nodes, auth off by default (`PICO_AUTH=required` in `.env` turns it on with a known dev bootstrap token). `harness/byo` has the same layout against an existing Postgres and object store, configured through `.env`, runs with auth required, and refuses to start without a bootstrap token.
@@ -40,29 +44,40 @@ The repository has two compose harnesses. `harness/aio` is self-contained, start
 ```bash
 cd harness/aio && cp .env.example .env
 docker compose up --build                            # 1 node
+docker compose -f compose.lite.yml up --build        # 1 node, SQLite and local files, no Postgres or RustFS
 docker compose -f compose.cluster.yml up --build     # 2 nodes
+docker compose -f compose.cluster.yml -f compose.pgwal.yml up --build   # 2 nodes, WAL in Postgres
 docker compose -f compose.extension.yml up --build   # pico inside Postgres, with a standby
 ```
 
 ## Health and readiness
 
-The admin listener exposes two probes. `/health` answers whenever the process is up, suitable as a liveness check. `/ready` reports `true` only when the node is serving and its registration has been applied to the metadata state, which is the signal to start routing traffic to it.
+The admin listener exposes two probes. `/health` answers whenever the process is up, suitable as a liveness check. `/ready` reports ready only when the node is serving, its registration has been applied to the metadata state, and it is not fenced, which is the signal to route traffic to it.
 
-`--shutdown-drain-sec` makes shutdown orchestration-friendly: for that many seconds the node fails `/ready` while still serving, giving a load balancer time to move traffic before the listeners close.
+`--shutdown-drain-sec` makes shutdown orchestration-friendly: for that many seconds the node fails `/ready` while still serving, giving a load balancer time to move traffic before the node hands off. The orchestrator's stop timeout must cover the drain plus a few seconds for the handoff, or the node is killed first and its streams wait for the node timeout instead.
 
 ## Restarts and upgrades
 
-Restarting a node is safe at any moment. Acknowledged data is in object storage, and the new process registers at a higher epoch, which fences anything the old one left in flight. Streams the node owned come back in one of two ways: the restarted node reopens them on demand, or if the node stays down, their next request lands on any node, finds them closed, and revives them there.
+Restarting a node is safe at any moment. Acknowledged data is durable in the WAL, and the new process registers at a higher epoch, which fences anything the old one left in flight. What happens to the node's streams depends on how it stopped. The mechanism is in [Failover](/docs/design/failover).
 
-Upgrades are rolling restarts, one node at a time, waiting for `/ready` between nodes. For a planned drain, transfer the node's streams away first so clients see a controlled handoff instead of a recovery.
+| The node | Its streams | Clients see |
+| --- | --- | --- |
+| Gets `SIGTERM` | Move to live nodes about a second after the drain | Live reads end with `503`, other requests are redirected |
+| Crashes or loses its network | Move after `--node-timeout-sec`, once its WAL is recovered | Retryable errors until then |
+| Is fenced while still running | Move as for a crash. The node exits with code `1` | The same |
+
+A node that exits with code `1` should be restarted by the orchestrator, and rejoins at a new epoch.
+
+Upgrades are rolling restarts, one node at a time, waiting for `/ready` between nodes. Moving chosen streams first with a transfer is still possible, but no longer needed for a clean handoff.
 
 ```bash
-pico admin set-slots 1 --slots 0        # stop new placements on node 1
 pico admin transfer /streams/orders --to-node 2 --wait
 ```
 
-Setting slots to `0` excludes a node from future placements without touching what it already serves, which makes the transfer list stable while draining.
+If the metadata database becomes unreachable, nodes keep serving the streams they hold and nobody is fenced. Creates and other metadata changes return `503` until it is back.
 
 ## Growing the cluster
 
-Adding a node is starting one with a new id against the same database and bucket. It registers itself, begins taking new placements weighted by its slots, and existing streams stay where they are until transferred. Removing a node is the drain above followed by stopping the process. The metadata row for a departed node remains, it simply never holds streams again.
+Adding a node is starting one with a new id against the same database and bucket. It registers itself, begins taking new placements weighted by its slots, and existing streams stay where they are until transferred.
+
+Removing a node is stopping it. Setting its slots to `0` first, `pico admin set-slots 1 --slots 0`, keeps new placements off it while it drains. The metadata row of a departed node remains with `fenced: true` and never holds streams again.

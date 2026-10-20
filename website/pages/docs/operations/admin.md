@@ -9,15 +9,13 @@ Reads cost nothing. They are answered from the node's in-memory metadata view, n
 | Method and path | What it does |
 | --- | --- |
 | `GET /health` | Liveness, answers whenever the process is up. |
-| `GET /ready` | Readiness, `true` once the node is serving and registered. |
-| `GET /admin/cluster` | Cluster overview: identity, applied index, stream and object counts, destruction backlog, lease holder, pending transfers. |
-| `GET /admin/nodes` | Every registered node with epoch, address, slots, and stream counts. |
-| `GET /admin/streams/{name}` | One stream: owner, state, epoch, offsets, content type, pending transfer. |
-| `POST /admin/transfer` | Start a stream transfer, body `{"stream": name, "toNode": id}`. |
+| `GET /ready` | Readiness: `200` when ready, `503` when not, with `ready`, `serving`, `registered`, `fenced`, `appliedIndex`, and `nodeId`. |
+| `GET /admin/cluster` | Cluster overview: identity and epoch, `registered` and `fenced`, applied index, stream and object counts, destruction backlog, KV size, snapshot stats, lease holder, pending transfers. |
+| `GET /admin/nodes` | Every registered node with `nodeEpoch`, `advertisedAddress`, `slots`, `openingCount`, `placedCount`, `local`, and `fenced`. |
+| `GET /admin/streams/{name}` | One partition: owner, state, epoch, offsets, content type, Kafka name, pending transfer. `?partition=` on topics with several. |
+| `POST /admin/transfer` | Start a transfer, body `{"stream": name, "partition": n, "toNode": id}`. `202`, completion is asynchronous. |
 | `POST /admin/nodes/{id}` | Update a node's placement slots, body `{"slots": n}`. |
-| `GET /admin/tokens` | List token records visible to the caller, with a `count`, informational only. |
-| `POST /admin/tokens` | Issue a token narrowed from the caller's scope. |
-| `DELETE /admin/tokens/{id}` | Revoke a token, effective on the next request. |
+| `/admin/tokens` | The token control plane, covered in [Authentication](/docs/operations/auth#issuing-tokens). |
 
 Errors come back as JSON with an `error` message and a meaningful status, so a rejected transfer says why, not just that it failed.
 
@@ -26,6 +24,8 @@ Because the metadata state is replicated, any node's admin API describes the who
 ## Interpreting the numbers
 
 The applied index is the cluster's logical clock, the position of the last metadata command this node has applied. It grows with all activity, including background work, so steady growth on an idle-looking cluster is normal. Two nodes briefly showing different values just means one is a moment behind on the log.
+
+A node is ready once it is serving and registered, and never while it is fenced. A fenced node stops on its own, see [Failover](/docs/design/failover), and its row keeps `fenced: true` until the node restarts and registers again. A row that stays fenced means that node is gone, and its streams have already moved.
 
 The destruction backlog is the number of objects marked for deletion that the cleaner has not yet processed. It should hover near zero, and sustained growth means cleanup is not keeping up or the lease holder is unhealthy. The lease holder field says which node currently runs that maintenance.
 
