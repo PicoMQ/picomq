@@ -99,12 +99,22 @@ async fn patch_config(
     if obj.contains_key("kafkaTopic") {
         return bad_request("kafkaTopic is derived from the stream name and cannot be set");
     }
+    let retention_ms = match limit(obj.get("retentionMs")) {
+        Ok(limit) => limit,
+        Err(()) => return bad_request("retentionMs must be a positive integer or null"),
+    };
+    let retention_bytes = match limit(obj.get("retentionBytes")) {
+        Ok(limit) => limit,
+        Err(()) => return bad_request("retentionBytes must be a positive integer or null"),
+    };
     match state
         .topics
         .update(UpdateTopicCommand {
             name,
             schema_name,
             schema_validate,
+            retention_ms,
+            retention_bytes,
         })
         .await
     {
@@ -119,7 +129,18 @@ fn config_json(topic: &Topic) -> Value {
         "schemaValidate": topic.schema_validate,
         "kafkaTopic": topic.name.kafka(),
         "partitions": topic.partitions,
+        "retentionMs": topic.retention.ms,
+        "retentionBytes": topic.retention.bytes,
     })
+}
+
+/// A retention limit in a PATCH body: absent leaves it, `null` removes it.
+fn limit(value: Option<&Value>) -> Result<Option<Option<u64>>, ()> {
+    match value {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(value) => value.as_u64().map(|limit| Some(Some(limit))).ok_or(()),
+    }
 }
 
 fn bad_request(message: &str) -> Response {

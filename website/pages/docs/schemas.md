@@ -80,14 +80,7 @@ A stream binds a schema by name as part of its create. The name must exist in th
 | Durable Streams | `Stream-Schema: {name}` | `Stream-Schema-Validate: true` |
 | Kafka | Topic config `pico.schema={name}` on `CreateTopics` | `pico.schema.validate=true` |
 
-After create, both fields can be changed through the topic config routes, on the stream listener of either HTTP protocol. This also covers topics created over Kafka.
-
-| Method and path | What it does |
-| --- | --- |
-| `GET /_streams/{topic}` | Returns `{ "schema", "schemaValidate", "partitions", "kafkaTopic" }`. `404` when the topic is absent. Needs `head` |
-| `PATCH /_streams/{topic}` | Updates `schema`, `schemaValidate`, or both. `"schema": null` clears the bind and turns validation off. Needs `create` |
-
-`kafkaTopic` follows from the topic name and cannot be changed. In a cluster these routes follow the ownership of partition `0`, redirecting with a `307` like topic reads and writes.
+After create, both can be changed with `PATCH /_streams/{topic}`, the topic config route described in the [HTTP API](/docs/api#topic-config). `"schema": null` clears the bind and turns validation off, and `schemaValidate` alone toggles validation.
 
 Inspect returns the bound name, in `Pico-Schema` on the Pico protocol and `Stream-Schema` on Durable Streams, so a client can discover which schema to decode with.
 

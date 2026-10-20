@@ -107,6 +107,7 @@ impl Topics {
             closed_by: None,
             schema_name: command.schema_name.clone(),
             schema_validate: command.schema_validate,
+            retention: command.retention,
         };
 
         let stored = self
@@ -319,6 +320,12 @@ impl Topics {
             }
             if topic.schema_name.is_none() {
                 topic.schema_validate = false;
+            }
+            if let Some(ms) = command.retention_ms {
+                topic.retention.ms = ms;
+            }
+            if let Some(bytes) = command.retention_bytes {
+                topic.retention.bytes = bytes;
             }
             topic
         })
@@ -698,6 +705,50 @@ impl Topics {
         })
     }
 
+    /// Runs on every node: trims the partitions this node owns down to their
+    /// topic's retention. Topics without retention are skipped.
+    pub fn spawn_retention_sweep(self: &Arc<Self>, tick: Duration) -> tokio::task::JoinHandle<()> {
+        const PAGE: usize = 256;
+        let topics = self.clone();
+
+        tokio::spawn(async move {
+            let mut cursor: Option<String> = None;
+            loop {
+                tokio::time::sleep(tick).await;
+
+                let page =
+                    topics
+                        .views
+                        .load()
+                        .state
+                        .list_kv_page(TOPIC_PREFIX, cursor.as_deref(), PAGE);
+                cursor = page.last().map(|(key, _)| key.clone());
+
+                let now = now_ms();
+                for (_, value) in page {
+                    let Ok(topic) = Topic::decode(&value) else {
+                        continue;
+                    };
+                    if topic.retention.is_unlimited() {
+                        continue;
+                    }
+                    for index in 0..topic.partitions {
+                        let Ok(log) = partition_log(&topic, index) else {
+                            continue;
+                        };
+                        if let Err(error) = topics
+                            .service
+                            .apply_retention(&log, topic.retention, now)
+                            .await
+                        {
+                            tracing::debug!(%error, topic = %topic.name, index, "retention trim failed");
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     fn existing(
         &self,
         existing: Topic,
@@ -1021,6 +1072,7 @@ fn config_matches(topic: &Topic, command: &CreateCommand) -> bool {
         && topic.closed == command.closed
         && topic.schema_name == command.schema_name
         && topic.schema_validate == command.schema_validate
+        && topic.retention == command.retention
 }
 
 fn producer_reject(

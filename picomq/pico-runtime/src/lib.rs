@@ -74,6 +74,7 @@ pub struct PicoServer {
     lifecycle: tokio::task::JoinHandle<()>,
     token_expiry: tokio::task::JoinHandle<()>,
     ttl_sweep: tokio::task::JoinHandle<()>,
+    retention_sweep: tokio::task::JoinHandle<()>,
     failover: tokio::task::JoinHandle<()>,
     compaction_check: tokio::task::JoinHandle<()>,
     /// Kept alive for the process lifetime: dropping it aborts the log's
@@ -216,6 +217,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         .topics()
         .spawn_ttl_sweep(lease.leadership(), LIFECYCLE_TICK);
     let failover = node.spawn_failover(lease.leadership(), LIFECYCLE_TICK);
+    let retention_sweep = node.topics().spawn_retention_sweep(LIFECYCLE_TICK);
     let compaction_check = node
         .service()
         .streams()
@@ -255,6 +257,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         lifecycle,
         token_expiry,
         ttl_sweep,
+        retention_sweep,
         failover,
         compaction_check,
         sink,
@@ -455,6 +458,7 @@ impl PicoServer {
         self.lifecycle.abort();
         self.token_expiry.abort();
         self.ttl_sweep.abort();
+        self.retention_sweep.abort();
         self.failover.abort();
         self.compaction_check.abort();
         self.server.shutdown().await;

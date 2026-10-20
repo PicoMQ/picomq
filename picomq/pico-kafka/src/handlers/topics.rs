@@ -10,7 +10,7 @@ use kafka_protocol::messages::delete_topics_response::{
 use kafka_protocol::messages::{CreateTopicsRequest, DeleteTopicsRequest};
 use kafka_protocol::protocol::{Decodable, StrBytes};
 use picomq_server::topic::is_kafka_name;
-use picomq_server::{CreateCommand, MAX_NEW_PARTITIONS};
+use picomq_server::{CreateCommand, MAX_NEW_PARTITIONS, Retention};
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
@@ -27,6 +27,8 @@ pub(crate) const KAFKA_CREATED_CT: &str = "application/octet-stream";
 
 pub const SCHEMA_CONFIG: &str = "pico.schema";
 pub const SCHEMA_VALIDATE_CONFIG: &str = "pico.schema.validate";
+pub const RETENTION_MS_CONFIG: &str = "retention.ms";
+pub const RETENTION_BYTES_CONFIG: &str = "retention.bytes";
 
 pub async fn create(
     ctx: &BrokerContext,
@@ -81,10 +83,12 @@ async fn create_topic(
     let (partitions, owners) = partitions(ctx, topic)?;
     let (schema_name, schema_validate) = schema_configs(&topic.configs)?;
     cleanup_policy(&topic.configs)?;
+    let retention = retention_configs(&topic.configs)?;
 
     let mut command = CreateCommand {
         partitions,
         owners,
+        retention,
         ..CreateCommand::new(&name, KAFKA_CREATED_CT)
     };
     if let Some(schema_name) = schema_name {
@@ -294,6 +298,36 @@ fn schema_configs(configs: &[CreatableTopicConfig]) -> Result<(Option<String>, b
         }
     }
     Ok((schema_name, schema_validate))
+}
+
+fn retention_configs(configs: &[CreatableTopicConfig]) -> Result<Retention, Failure> {
+    let mut retention = Retention::default();
+    for config in configs {
+        let Some(value) = config.value.as_ref().map(|value| value.as_str()) else {
+            continue;
+        };
+        match config.name.as_str() {
+            RETENTION_MS_CONFIG => retention.ms = retention_limit(RETENTION_MS_CONFIG, value)?,
+            RETENTION_BYTES_CONFIG => {
+                retention.bytes = retention_limit(RETENTION_BYTES_CONFIG, value)?
+            }
+            _ => {}
+        }
+    }
+
+    Ok(retention)
+}
+
+/// A Kafka retention value: `-1` is unlimited, anything else must be positive.
+pub fn retention_limit(name: &str, value: &str) -> Result<Option<u64>, Failure> {
+    match value.parse::<i64>() {
+        Ok(-1) => Ok(None),
+        Ok(limit) if limit > 0 => Ok(Some(limit as u64)),
+        _ => Err((
+            INVALID_CONFIG,
+            Some(format!("{name} must be -1 or a positive number")),
+        )),
+    }
 }
 
 /// PicoMQ never compacts, so a topic that asks for compaction is refused

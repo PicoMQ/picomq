@@ -5,6 +5,7 @@ use bytes::Bytes;
 use crate::error::{ErrorKind, ServiceError};
 use crate::record::LogRecord;
 pub use crate::record::StreamRecord;
+use crate::retention::Retention;
 use crate::topic::Topic;
 
 pub const MAX_NEW_PARTITIONS: u32 = 10_000;
@@ -155,6 +156,7 @@ pub struct CreateCommand {
     pub initial_records: Vec<LogRecord>,
     pub schema_name: Option<String>,
     pub schema_validate: bool,
+    pub retention: Retention,
 }
 
 impl CreateCommand {
@@ -170,6 +172,7 @@ impl CreateCommand {
             initial_records: Vec::new(),
             schema_name: None,
             schema_validate: false,
+            retention: Retention::default(),
         }
     }
 
@@ -184,6 +187,7 @@ impl CreateCommand {
     }
 
     pub fn validate(&self) -> Result<(), ServiceError> {
+        self.retention.validate()?;
         if self.ttl_seconds.is_some() && self.expires_at_ms.is_some() {
             return Err(ServiceError::with_message(
                 ErrorKind::BadRequest,
@@ -226,11 +230,27 @@ pub struct UpdateTopicCommand {
     pub name: String,
     pub schema_name: Option<Option<String>>,
     pub schema_validate: Option<bool>,
+    /// `Some(None)` removes the limit.
+    pub retention_ms: Option<Option<u64>>,
+    pub retention_bytes: Option<Option<u64>>,
 }
 
 impl UpdateTopicCommand {
+    /// Whether the command changes nothing.
+    pub fn is_empty(&self) -> bool {
+        self.schema_name.is_none()
+            && self.schema_validate.is_none()
+            && self.retention_ms.is_none()
+            && self.retention_bytes.is_none()
+    }
+
     pub fn validate(&self) -> Result<(), ServiceError> {
-        if self.schema_name.is_none() && self.schema_validate.is_none() {
+        Retention {
+            ms: self.retention_ms.flatten(),
+            bytes: self.retention_bytes.flatten(),
+        }
+        .validate()?;
+        if self.is_empty() {
             return Err(ServiceError::with_message(
                 ErrorKind::BadRequest,
                 None,

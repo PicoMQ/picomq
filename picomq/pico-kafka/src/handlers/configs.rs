@@ -17,7 +17,10 @@ use crate::handlers::common::{
     Failure, INVALID_CONFIG, INVALID_REQUEST, NO_ERROR, encode_response, resolve_topic,
     service_failure,
 };
-use crate::handlers::topics::{SCHEMA_CONFIG, SCHEMA_VALIDATE_CONFIG};
+use crate::handlers::topics::{
+    RETENTION_BYTES_CONFIG, RETENTION_MS_CONFIG, SCHEMA_CONFIG, SCHEMA_VALIDATE_CONFIG,
+    retention_limit,
+};
 use crate::handlers::{HandlerError, HandlerOutcome};
 
 const TOPIC: i8 = 2;
@@ -137,29 +140,49 @@ async fn configs(
 
 fn topic_configs(topic: &Topic) -> Vec<DescribeConfigsResourceResult> {
     let mut configs = vec![
-        config("cleanup.policy", "delete", DEFAULT_CONFIG, LIST),
-        config("retention.ms", "-1", DEFAULT_CONFIG, LONG),
-        config("retention.bytes", "-1", DEFAULT_CONFIG, LONG),
+        config("cleanup.policy", "delete", DEFAULT_CONFIG, LIST, true),
+        retention_config(RETENTION_MS_CONFIG, topic.retention.ms),
+        retention_config(RETENTION_BYTES_CONFIG, topic.retention.bytes),
     ];
 
     if let Some(schema) = &topic.schema_name {
-        configs.push(config(SCHEMA_CONFIG, schema, DYNAMIC_TOPIC_CONFIG, STRING));
+        configs.push(config(
+            SCHEMA_CONFIG,
+            schema,
+            DYNAMIC_TOPIC_CONFIG,
+            STRING,
+            false,
+        ));
         configs.push(config(
             SCHEMA_VALIDATE_CONFIG,
             &topic.schema_validate.to_string(),
             DYNAMIC_TOPIC_CONFIG,
             BOOLEAN,
+            false,
         ));
     }
 
     configs
 }
 
-fn config(name: &str, value: &str, source: i8, kind: i8) -> DescribeConfigsResourceResult {
+fn retention_config(name: &str, limit: Option<u64>) -> DescribeConfigsResourceResult {
+    match limit {
+        Some(limit) => config(name, &limit.to_string(), DYNAMIC_TOPIC_CONFIG, LONG, false),
+        None => config(name, "-1", DEFAULT_CONFIG, LONG, false),
+    }
+}
+
+fn config(
+    name: &str,
+    value: &str,
+    source: i8,
+    kind: i8,
+    read_only: bool,
+) -> DescribeConfigsResourceResult {
     DescribeConfigsResourceResult::default()
         .with_name(StrBytes::from(name.to_owned()))
         .with_value(Some(StrBytes::from(value.to_owned())))
-        .with_read_only(source != DYNAMIC_TOPIC_CONFIG)
+        .with_read_only(read_only)
         .with_config_source(source)
         .with_is_sensitive(false)
         .with_config_type(kind)
@@ -201,6 +224,14 @@ async fn change(
                 })?);
             }
             (SCHEMA_VALIDATE_CONFIG, DELETE, _) => command.schema_validate = Some(false),
+            (RETENTION_MS_CONFIG, SET, Some(value)) => {
+                command.retention_ms = Some(retention_limit(RETENTION_MS_CONFIG, value)?)
+            }
+            (RETENTION_MS_CONFIG, DELETE, _) => command.retention_ms = Some(None),
+            (RETENTION_BYTES_CONFIG, SET, Some(value)) => {
+                command.retention_bytes = Some(retention_limit(RETENTION_BYTES_CONFIG, value)?)
+            }
+            (RETENTION_BYTES_CONFIG, DELETE, _) => command.retention_bytes = Some(None),
             (name, _, _) => {
                 return Err((
                     INVALID_CONFIG,
@@ -210,7 +241,7 @@ async fn change(
         }
     }
 
-    if command.schema_name.is_none() && command.schema_validate.is_none() {
+    if command.is_empty() {
         return Ok(());
     }
     command.validate().map_err(service_failure)?;

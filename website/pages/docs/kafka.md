@@ -67,12 +67,12 @@ Not supported: transactions and control batches, which are rejected, the KIP-848
 | Config | Value | Changeable |
 | --- | --- | --- |
 | `cleanup.policy` | `delete` | No |
-| `retention.ms` | `-1` | No |
-| `retention.bytes` | `-1` | No |
+| `retention.ms` | The topic's limit, `-1` when unlimited | Yes |
+| `retention.bytes` | The topic's limit, `-1` when unlimited | Yes |
 | `pico.schema` | The bound [schema](/docs/schemas) | Yes |
 | `pico.schema.validate` | Whether produce is validated against it | Yes |
 
-`retention.ms` is `-1` because PicoMQ does not delete records by age. A topic's TTL expires the whole topic once nothing appends to it or reads it for that long, and `DeleteRecords` trims explicitly. The `pico.schema` configs appear only when a schema is bound, and can also be set on `CreateTopics`. Changing any other config fails with `INVALID_CONFIG`.
+Both retention configs can be set on `CreateTopics` too, and `-1` removes a limit. Retention goes by when PicoMQ wrote the data, not by record timestamps, so it matches Kafka's `LogAppendTime` topics, see [Retention](/docs/design/streams#retention). The `pico.schema` configs appear only when a schema is bound, and can also be set on `CreateTopics`. Changing any other config fails with `INVALID_CONFIG`.
 
 PicoMQ does not compact topics, so `CreateTopics` refuses `cleanup.policy=compact` with `INVALID_CONFIG` instead of creating a topic that would never compact. This rules out Kafka Connect and Kafka Streams state stores, which need compacted topics. Broker resources describe no configs.
 

@@ -343,3 +343,38 @@ async fn a_dead_node_fails_over_and_committed_offsets_survive() {
             .any(|leader| *leader == 2)
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn retention_trims_expired_data_in_every_partition() {
+    let harness = cluster();
+    let topic = unique("retained");
+    let created = harness
+        .admin()
+        .create_topics(
+            [&NewTopic::new(&topic, 4, TopicReplication::Fixed(1)).set("retention.ms", "2000")],
+            &AdminOptions::new(),
+        )
+        .await
+        .unwrap();
+    created[0].as_ref().unwrap();
+    produce_range(&harness, &topic, 0..20).await;
+
+    let client: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", &harness.bootstrap)
+        .create()
+        .unwrap();
+    eventually("every partition to expire", Duration::from_secs(60), || {
+        let watermarks: Vec<_> = (0..4)
+            .filter_map(|partition| {
+                client
+                    .fetch_watermarks(&topic, partition, Duration::from_secs(5))
+                    .ok()
+            })
+            .collect();
+        watermarks.len() == 4
+            && watermarks.iter().map(|(_, high)| high).sum::<i64>() == 20
+            && watermarks.iter().all(|(low, high)| low == high)
+    })
+    .await;
+}

@@ -57,6 +57,7 @@ Creates a single-partition topic, with no body. `201` when created, `200` when i
 | `Content-Type` | Stored as the topic's content type. Defaults to `application/octet-stream` |
 | `Pico-TTL` | Seconds without appends or reads after which the whole topic expires |
 | `Pico-Expires-At` | A fixed time at which the topic expires. Not with `Pico-TTL` |
+| `Pico-Retention-Ms`, `Pico-Retention-Bytes` | Keep each partition's data for at most this many milliseconds, or this many bytes. See [Retention](/docs/design/streams#retention) |
 | `Pico-Closed` | `true` creates the topic already sealed |
 | `Pico-Schema` | Binds a registered [schema](/docs/schemas) by name |
 | `Pico-Schema-Validate` | `true` validates appends against the bound schema. Defaults to `false` |
@@ -126,6 +127,7 @@ Returns the topic's metadata in headers with no body, or `404`.
 | `Pico-Partitions` | Number of partitions |
 | `Pico-Start-Seq`, `Pico-Next-Seq` | The partition's readable range. On a topic with several partitions, only with `?partition=` |
 | `Pico-TTL`, `Pico-Expires-At` | Expiry settings, when set |
+| `Pico-Retention-Ms`, `Pico-Retention-Bytes` | Retention limits, when set |
 | `Pico-Closed` | `true` when sealed |
 | `Pico-Schema` | The bound schema, when set |
 | `Pico-Kafka-Topic` | The topic's Kafka name, when it has one |
@@ -153,7 +155,16 @@ GET /_streams/{topic}
 PATCH /_streams/{topic}
 ```
 
-Reads a topic's config and changes its schema bind. Both routes, and schema registration under `/_schemas/{name}`, are covered in [Schemas](/docs/schemas#bind).
+Reads and changes a topic's config. Both routes serve either HTTP protocol, and cover topics created over Kafka too. In a cluster they follow the ownership of partition `0`.
+
+| Field | `GET` | `PATCH` |
+| --- | --- | --- |
+| `schema`, `schemaValidate` | The bound schema and whether appends are validated | Changes the bind, see [Schemas](/docs/schemas#bind) |
+| `retentionMs`, `retentionBytes` | The retention limits, `null` when unlimited | Sets a limit, or removes it with `null`. A limit must be positive |
+| `partitions` | The partition count | Not changeable |
+| `kafkaTopic` | The Kafka name | Not changeable, it follows from the topic name |
+
+`GET` needs `head` on the topic and `PATCH` needs `create`. Errors are `{"error": "<message>"}`.
 
 ## Consumer groups
 

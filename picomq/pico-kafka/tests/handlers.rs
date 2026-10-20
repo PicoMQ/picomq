@@ -1838,7 +1838,8 @@ async fn topic_configs_describe_and_change_the_schema_binding() {
     assert_eq!(described.error_code, 0);
     let names: Vec<_> = described.configs.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["cleanup.policy", "retention.ms", "retention.bytes"]);
-    assert!(described.configs.iter().all(|config| config.read_only));
+    let read_only: Vec<_> = described.configs.iter().map(|c| c.read_only).collect();
+    assert_eq!(read_only, [true, false, false]);
 
     assert_eq!(
         alter_config(&broker, "orders", "pico.schema", 0, Some("person"), true).await,
@@ -1860,7 +1861,7 @@ async fn topic_configs_describe_and_change_the_schema_binding() {
     assert!(!schema.read_only);
 
     assert_eq!(
-        alter_config(&broker, "orders", "retention.ms", 0, Some("1000"), false).await,
+        alter_config(&broker, "orders", "segment.bytes", 0, Some("1000"), false).await,
         40
     );
     assert_eq!(
@@ -2299,4 +2300,105 @@ async fn create_topics_refuses_compaction() {
     ResponseHeader::decode(&mut buf, 1).unwrap();
     let created = CreateTopicsResponse::decode(&mut buf, 5).unwrap();
     assert_eq!(created.topics[0].error_code, 0);
+}
+
+#[tokio::test]
+async fn topic_configs_set_describe_and_remove_retention() {
+    let broker = test_broker().await;
+    broker
+        .topics
+        .create(picomq_server::CreateCommand::new(
+            "/events",
+            "application/octet-stream",
+        ))
+        .await
+        .unwrap();
+    let retention = || async {
+        broker
+            .topics
+            .get("/events")
+            .await
+            .unwrap()
+            .unwrap()
+            .retention
+    };
+
+    assert_eq!(
+        alter_config(&broker, "events", "retention.ms", 0, Some("60000"), false).await,
+        0
+    );
+    assert_eq!(
+        alter_config(&broker, "events", "retention.bytes", 0, Some("4096"), false).await,
+        0
+    );
+    assert_eq!(retention().await.ms, Some(60_000));
+    assert_eq!(retention().await.bytes, Some(4096));
+
+    let described = describe_configs(&broker, 2, "events", Some(&["retention.ms"])).await;
+    let config = &described.configs[0];
+    assert_eq!(config.value.as_deref(), Some("60000"));
+    assert_eq!(config.config_source, 1);
+    assert!(!config.read_only);
+
+    assert_eq!(
+        alter_config(&broker, "events", "retention.ms", 0, Some("0"), false).await,
+        40
+    );
+    assert_eq!(
+        alter_config(&broker, "events", "retention.ms", 1, None, false).await,
+        0
+    );
+    assert_eq!(
+        alter_config(&broker, "events", "retention.bytes", 0, Some("-1"), false).await,
+        0
+    );
+    assert_eq!(retention().await, picomq_server::Retention::default());
+
+    let described = describe_configs(&broker, 2, "events", Some(&["retention.ms"])).await;
+    assert_eq!(described.configs[0].value.as_deref(), Some("-1"));
+    assert_eq!(described.configs[0].config_source, 5);
+}
+
+#[tokio::test]
+async fn create_topics_takes_retention() {
+    use kafka_protocol::messages::create_topics_request::{CreatableTopic, CreatableTopicConfig};
+    use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse};
+
+    let broker = test_broker().await;
+    let create = |name: &'static str, retention: &'static str| {
+        encode_request(
+            ApiKey::CreateTopics,
+            5,
+            1,
+            &CreateTopicsRequest::default()
+                .with_timeout_ms(5_000)
+                .with_topics(vec![
+                    CreatableTopic::default()
+                        .with_name(tn(name))
+                        .with_num_partitions(1)
+                        .with_replication_factor(1)
+                        .with_configs(vec![
+                            CreatableTopicConfig::default()
+                                .with_name(StrBytes::from_static_str("retention.ms"))
+                                .with_value(Some(StrBytes::from_static_str(retention))),
+                        ]),
+                ]),
+        )
+    };
+
+    let mut buf = response_body(&broker, &create("kept", "3600000")).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    assert_eq!(
+        CreateTopicsResponse::decode(&mut buf, 5).unwrap().topics[0].error_code,
+        0
+    );
+    let topic = broker.topics.get("/kept").await.unwrap().unwrap();
+    assert_eq!(topic.retention.ms, Some(3_600_000));
+
+    let mut buf = response_body(&broker, &create("bad", "0")).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    assert_eq!(
+        CreateTopicsResponse::decode(&mut buf, 5).unwrap().topics[0].error_code,
+        40
+    );
 }

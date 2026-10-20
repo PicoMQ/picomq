@@ -8,8 +8,9 @@ use crate::codec::{
     get_u32, put_opt_i64, put_opt_str, put_str,
 };
 use crate::error::{ErrorKind, ServiceError};
+use crate::retention::Retention;
 
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const MAX_KAFKA_NAME_LEN: usize = 249;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +105,7 @@ pub struct Topic {
     pub closed_by: Option<ClosedBy>,
     pub schema_name: Option<String>,
     pub schema_validate: bool,
+    pub retention: Retention,
 }
 
 impl Topic {
@@ -154,6 +156,8 @@ impl Topic {
         }
         put_opt_str(&mut buf, self.schema_name.as_deref());
         buf.put_u8(self.schema_validate as u8);
+        put_opt_i64(&mut buf, self.retention.ms.map(|ms| ms as i64));
+        put_opt_i64(&mut buf, self.retention.bytes.map(|bytes| bytes as i64));
         buf.freeze()
     }
 
@@ -179,6 +183,10 @@ impl Topic {
         };
         let schema_name = get_opt_str(&mut buf)?;
         let schema_validate = get_u8(&mut buf)? == 1;
+        let retention = Retention {
+            ms: get_opt_i64(&mut buf)?.map(|ms| ms as u64),
+            bytes: get_opt_i64(&mut buf)?.map(|bytes| bytes as u64),
+        };
         expect_end(buf, "topic")?;
 
         Ok(Self {
@@ -193,6 +201,7 @@ impl Topic {
             closed_by,
             schema_name,
             schema_validate,
+            retention,
         })
     }
 }
@@ -228,6 +237,10 @@ mod tests {
             }),
             schema_name: Some("orders".into()),
             schema_validate: true,
+            retention: Retention {
+                ms: Some(86_400_000),
+                bytes: Some(1 << 30),
+            },
         }
     }
 

@@ -27,10 +27,10 @@ use picomq_protocol::pico::{
     E_SCHEMA_VIOLATION, E_SEQUENCE_GAP, E_TIMEOUT, E_UNAVAILABLE, ErrorBody, FORMAT_BINARY,
     FORMAT_JSON, FORMAT_RAW, H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT, H_KAFKA_TOPIC,
     H_KEY, H_MATCH_SEQ, H_NEXT_SEQ, H_PARTITIONS, H_PRODUCER_EPOCH, H_PRODUCER_ID, H_PRODUCER_SEQ,
-    H_RECEIVED_SEQ, H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL,
-    H_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, Listing, Q_BYTES, Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT,
-    Q_LIVE, Q_PREFIX, Q_SEQ, Q_START_AFTER, SEQ_NOW, StreamEntry, sse_control_event,
-    sse_data_event,
+    H_RECEIVED_SEQ, H_RETENTION_BYTES, H_RETENTION_MS, H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ,
+    H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, Listing, Q_BYTES,
+    Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT, Q_LIVE, Q_PREFIX, Q_SEQ, Q_START_AFTER, SEQ_NOW,
+    StreamEntry, sse_control_event, sse_data_event,
 };
 use picomq_protocol::record::{
     PicoRecord, SequencedRecord, decode_batch_append, decode_json_append, encode_batch_read,
@@ -39,7 +39,7 @@ use picomq_protocol::record::{
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{
     AppendCommand, CreateCommand, ErrorKind, LogOffsets, LogRecord, OffsetToken, ReadResult,
-    ServiceError, StreamRecord, Topic, Topics,
+    Retention, ServiceError, StreamRecord, Topic, Topics,
 };
 
 use crate::auth::Permit;
@@ -239,6 +239,14 @@ impl PicoFrontend {
         if ttl_seconds.is_some() && expires_at_ms.is_some() {
             return Err(bad_request("Pico-TTL and Pico-Expires-At both set"));
         }
+        let retention = Retention {
+            ms: parse_strict_u64_header(headers, H_RETENTION_MS, "invalid Pico-Retention-Ms")?,
+            bytes: parse_strict_u64_header(
+                headers,
+                H_RETENTION_BYTES,
+                "invalid Pico-Retention-Bytes",
+            )?,
+        };
 
         let content_type = header_str(headers, header::CONTENT_TYPE.as_str())
             .filter(|v| !v.is_empty())
@@ -254,6 +262,7 @@ impl PicoFrontend {
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned),
                 schema_validate: truthy(headers, H_SCHEMA_VALIDATE),
+                retention,
                 ..CreateCommand::new(name, content_type.clone())
             })
             .await?;
@@ -715,7 +724,8 @@ fn options() -> Response {
         &mut response,
         "Access-Control-Allow-Headers",
         "content-type, authorization, If-None-Match, Pico-Match-Seq, Pico-Trim-Seq, Pico-TTL, \
-         Pico-Expires-At, Pico-Closed, Pico-Producer-Id, Pico-Producer-Epoch, Pico-Producer-Seq",
+         Pico-Expires-At, Pico-Retention-Ms, Pico-Retention-Bytes, Pico-Closed, Pico-Producer-Id, \
+         Pico-Producer-Epoch, Pico-Producer-Seq",
     );
     set_header(
         &mut response,
@@ -835,6 +845,12 @@ fn write_meta(response: &mut Response, topic: &Topic, offsets: Option<&LogOffset
     }
     if let Some(schema_name) = &topic.schema_name {
         set_header(response, H_SCHEMA, schema_name);
+    }
+    if let Some(ms) = topic.retention.ms {
+        set_header(response, H_RETENTION_MS, &ms.to_string());
+    }
+    if let Some(bytes) = topic.retention.bytes {
+        set_header(response, H_RETENTION_BYTES, &bytes.to_string());
     }
     if let Some(kafka) = topic.name.kafka() {
         set_header(response, H_KAFKA_TOPIC, kafka);

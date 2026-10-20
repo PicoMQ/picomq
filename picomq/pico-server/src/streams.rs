@@ -208,6 +208,22 @@ impl Streams {
         })
     }
 
+    /// Trims a stream this node owns but does not hold open, through the
+    /// metadata alone. A concurrent open moves the epoch and fails the trim.
+    pub async fn trim_closed(
+        &self,
+        stream_id: u64,
+        epoch: i64,
+        new_start_offset: u64,
+    ) -> Result<(), ServiceError> {
+        self.node
+            .stream_manager()
+            .trim_stream(stream_id, epoch.max(0) as u64, new_start_offset)
+            .await?;
+
+        Ok(())
+    }
+
     pub fn held(&self, stream_id: u64) -> Option<Arc<dyn Stream>> {
         self.open.lock().unwrap().get(&stream_id).cloned()
     }

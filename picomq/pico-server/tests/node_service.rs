@@ -11,7 +11,7 @@ use picomq_server::ownership::OwnershipService as _;
 use picomq_server::record::encode_batch;
 use picomq_server::{
     AppendBatchResult, AppendCommand, CreateCommand, ErrorKind, Log, LogRecord, MAX_NEW_PARTITIONS,
-    NodeConfig, OffsetToken, PicoNode, ServiceError, Topic, Topics, partition_log,
+    NodeConfig, OffsetToken, PicoNode, Retention, ServiceError, Topic, Topics, partition_log,
 };
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait, StreamState};
 
@@ -2464,6 +2464,96 @@ async fn timestamp_lookups_skip_records_trimmed_inside_a_batch() {
         .unwrap()
         .unwrap();
     assert_eq!(newest.offset.record_offset(), 1);
+
+    node.close().await;
+}
+
+/// A node that uploads its WAL every 100 ms, so appends reach objects quickly.
+async fn uploading_node() -> PicoNode {
+    let (sink, views) = LocalSink::new();
+    let engine = s3stream::Config {
+        wal_upload_interval_ms: 100,
+        ..Default::default()
+    };
+    start_engine(1, Arc::new(sink), views, engine).await
+}
+
+/// Appends `value`, then waits until the stream holds `objects` objects.
+async fn append_object(node: &PicoNode, name: &str, value: &[u8], objects: usize) -> u64 {
+    let topics = node.topics();
+    topics
+        .append(name, 0, append(&[value], "text/plain"))
+        .await
+        .unwrap();
+    let log = log_of(&topics, name).await;
+    let stream_id = node.service().stream_id(&log).unwrap().unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while node.views().load().state.object_spans(stream_id).len() < objects {
+        assert!(tokio::time::Instant::now() < deadline, "no upload");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    stream_id
+}
+
+#[tokio::test]
+async fn retention_trims_a_closed_partition_without_reopening_it() {
+    let node = uploading_node().await;
+    let retention = Retention {
+        ms: Some(1_000),
+        bytes: None,
+    };
+    node.topics()
+        .create(CreateCommand {
+            retention,
+            ..create("/kept", "text/plain")
+        })
+        .await
+        .unwrap();
+    let stream_id = append_object(&node, "/kept", b"old", 1).await;
+    node.service()
+        .release_for_transfer(stream_id)
+        .await
+        .unwrap();
+    let log = log_of(&node.topics(), "/kept").await;
+
+    node.service()
+        .apply_retention(&log, retention, picomq_common::now_ms() + 60_000)
+        .await
+        .unwrap();
+
+    let row = node.views().load().state.streams[&stream_id];
+    assert_eq!(row.state, StreamState::Closed);
+    assert_eq!(row.start_offset, row.end_offset);
+    assert!(node.service().streams().held(stream_id).is_none());
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn retention_bytes_keeps_the_newest_object_of_an_open_partition() {
+    let node = uploading_node().await;
+    node.topics()
+        .create(create("/sized", "text/plain"))
+        .await
+        .unwrap();
+    append_object(&node, "/sized", b"first", 1).await;
+    let stream_id = append_object(&node, "/sized", b"second", 2).await;
+    let spans = node.views().load().state.object_spans(stream_id);
+    let retention = Retention {
+        ms: None,
+        bytes: Some(spans[1].bytes),
+    };
+    let log = log_of(&node.topics(), "/sized").await;
+
+    node.service()
+        .apply_retention(&log, retention, picomq_common::now_ms())
+        .await
+        .unwrap();
+
+    let row = node.views().load().state.streams[&stream_id];
+    assert_eq!(row.state, StreamState::Opened);
+    assert_eq!(row.start_offset, spans[0].end_offset);
 
     node.close().await;
 }

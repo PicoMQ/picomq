@@ -4,7 +4,7 @@ Records land in object storage and stay there until something says otherwise, so
 
 ## Where garbage comes from
 
-Trimming a stream advances its start offset. Objects that fall entirely below the new start hold nothing readable and are marked for destruction. An object that straddles the boundary is kept, since it still holds live records past the trim point.
+Trimming a stream advances its start offset, whether by an explicit trim, `DeleteRecords`, or [retention](/docs/design/streams#retention). The trim itself marks the stream's single-stream objects that end below the new start for destruction. Its data inside stream-set objects is dropped when the node's compaction next rewrites them. An object that straddles the boundary is kept, since it still holds live records past the trim point.
 
 <div class="pico-diagram">
 <svg viewBox="0 20 660 190" width="660" role="img" aria-label="A trim to offset 900 destroys the object entirely below it and keeps the object straddling the boundary.">

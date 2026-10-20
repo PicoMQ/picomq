@@ -84,6 +84,14 @@ paths:
           in: header
           description: Absolute expiry time (RFC 3339 or unix ms). Not with Pico-TTL.
           schema: { type: string }
+        - name: Pico-Retention-Ms
+          in: header
+          description: Keep each partition's data for at most this many milliseconds, by write time.
+          schema: { type: integer, minimum: 1 }
+        - name: Pico-Retention-Bytes
+          in: header
+          description: Keep at most this many bytes of each partition, the newest.
+          schema: { type: integer, minimum: 1 }
         - name: Pico-Closed
           in: header
           description: Create the stream already sealed.
@@ -339,7 +347,7 @@ paths:
           description: No such stream.
     patch:
       tags: [stream-config]
-      summary: Update a topic's schema bind
+      summary: Update a topic's schema bind or retention
       operationId: patchStreamConfig
       requestBody:
         required: true
@@ -350,6 +358,8 @@ paths:
               properties:
                 schema: { type: [string, "null"] }
                 schemaValidate: { type: boolean }
+                retentionMs: { type: [integer, "null"], minimum: 1 }
+                retentionBytes: { type: [integer, "null"], minimum: 1 }
       responses:
         "200":
           description: Updated config.
@@ -1177,6 +1187,8 @@ components:
         schemaValidate: { type: boolean }
         partitions: { type: integer }
         kafkaTopic: { type: [string, "null"], description: Follows from the name. Read only. }
+        retentionMs: { type: [integer, "null"], minimum: 1, description: Null when unlimited. }
+        retentionBytes: { type: [integer, "null"], minimum: 1, description: Null when unlimited. }
     Offsets:
       type: object
       additionalProperties:

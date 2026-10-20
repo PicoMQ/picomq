@@ -5,12 +5,13 @@ use std::time::Duration;
 use bytes::Bytes;
 use picomq_common::now_ms;
 use picomq_metadata::{MetadataKvClient, ViewPublisher};
-use s3stream::{AppendContext, FetchContext, PendingAppend, RecordBatch, Stream};
+use s3stream::{AppendContext, FetchContext, PendingAppend, RecordBatch, Stream, StreamState};
 
 use crate::error::{ErrorKind, ServiceError};
 use crate::log::{Log, LogEntry, ProducerDecision, validate_producer};
 use crate::producer::{self, Admission};
 use crate::record::{self, BatchHeader, LogRecord};
+use crate::retention::Retention;
 use crate::streams::Streams;
 use crate::types::{
     AppendBatchResult, BatchReadResult, LogOffsets, LogRead, NumericProducer, OffsetToken,
@@ -631,6 +632,43 @@ impl S3StreamService {
         }
 
         Ok(live_start_offset(stream.as_ref()))
+    }
+
+    /// Trims a log this node owns down to what `retention` keeps. An open
+    /// stream is trimmed through the engine, a closed one through metadata.
+    pub async fn apply_retention(
+        &self,
+        log: &Log,
+        retention: Retention,
+        now_ms: i64,
+    ) -> Result<(), ServiceError> {
+        let Some(entry) = self.entry(&log.key())? else {
+            return Ok(());
+        };
+        let view = self.views.load();
+        let Some(row) = view.state.streams.get(&entry.stream_id).copied() else {
+            return Ok(());
+        };
+        if row.node_id != self.streams.node().node_id() {
+            return Ok(());
+        }
+
+        let spans = view.state.object_spans(entry.stream_id);
+        let Some(start) = retention.start_offset(&spans, now_ms) else {
+            return Ok(());
+        };
+        if start <= row.start_offset {
+            return Ok(());
+        }
+
+        match row.state {
+            StreamState::Opened => self.trim(log, start).await.map(|_| ()),
+            StreamState::Closed => {
+                self.streams
+                    .trim_closed(row.stream_id, row.epoch, start)
+                    .await
+            }
+        }
     }
 
     pub fn notify_closed(&self, log: &Log) {
