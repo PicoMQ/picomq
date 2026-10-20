@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use http::{HeaderMap, Method};
 
-use crate::wire::{WireRequest, control_path, header_string};
+use crate::wire::{WireRequest, header_string, stream_path};
 
 pub const SCHEMAS_PATH_PREFIX: &str = "/_schemas";
 
@@ -14,13 +14,9 @@ pub struct PutSchemaRequest<'a> {
 
 impl PutSchemaRequest<'_> {
     pub fn encode(&self) -> WireRequest {
-        WireRequest::new(
-            Method::PUT,
-            control_path(SCHEMAS_PATH_PREFIX, self.name),
-            &[204],
-        )
-        .header_opt("content-type", self.content_type)
-        .body(self.body.clone())
+        WireRequest::new(Method::PUT, schema_path(self.name), &[204])
+            .header_opt("content-type", self.content_type)
+            .body(self.body.clone())
     }
 }
 
@@ -31,11 +27,7 @@ pub struct GetSchemaRequest<'a> {
 
 impl GetSchemaRequest<'_> {
     pub fn encode(&self) -> WireRequest {
-        WireRequest::new(
-            Method::GET,
-            control_path(SCHEMAS_PATH_PREFIX, self.name),
-            &[200, 404],
-        )
+        WireRequest::new(Method::GET, schema_path(self.name), &[200, 404])
     }
 }
 
@@ -61,28 +53,35 @@ pub struct DeleteSchemaRequest<'a> {
 
 impl DeleteSchemaRequest<'_> {
     pub fn encode(&self) -> WireRequest {
-        WireRequest::new(
-            Method::DELETE,
-            control_path(SCHEMAS_PATH_PREFIX, self.name),
-            &[204, 404],
-        )
+        WireRequest::new(Method::DELETE, schema_path(self.name), &[204, 404])
     }
+}
+
+fn schema_path(name: &str) -> String {
+    format!("{SCHEMAS_PATH_PREFIX}{}", stream_path(name))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn delete_path(name: &str) -> String {
+        DeleteSchemaRequest { name }.encode().path_and_query
+    }
+
     #[test]
     fn names_are_escaped_per_segment() {
-        let wire = DeleteSchemaRequest {
-            name: "team/orders#v2 final.json",
-        }
-        .encode();
-
         assert_eq!(
-            wire.path_and_query,
+            delete_path("team/orders#v2 final.json"),
             "/_schemas/team/orders%23v2%20final.json"
         );
+        assert_eq!(delete_path("a%41"), "/_schemas/a%2541");
+    }
+
+    #[test]
+    fn only_one_leading_slash_is_dropped() {
+        assert_eq!(delete_path("orders"), "/_schemas/orders");
+        assert_eq!(delete_path("/orders"), "/_schemas/orders");
+        assert_eq!(delete_path("//orders"), "/_schemas//orders");
     }
 }

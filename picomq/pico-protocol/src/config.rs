@@ -4,7 +4,7 @@ use serde_json::{Map, Value, json};
 
 use crate::error::CodecError;
 use crate::json::{json_body, json_request, object, string};
-use crate::wire::{WireRequest, control_path};
+use crate::wire::{WireRequest, stream_path};
 
 pub const STREAMS_PATH_PREFIX: &str = "/_streams";
 
@@ -53,11 +53,8 @@ pub struct ConfigRequest<'a> {
 
 impl ConfigRequest<'_> {
     pub fn encode(&self) -> WireRequest {
-        WireRequest::new(
-            Method::GET,
-            control_path(STREAMS_PATH_PREFIX, self.stream),
-            &[200, 404],
-        )
+        let path = format!("{STREAMS_PATH_PREFIX}{}", stream_path(self.stream));
+        WireRequest::new(Method::GET, path, &[200, 404])
     }
 }
 
@@ -91,12 +88,8 @@ impl ConfigUpdate {
         if let Some(partitions) = self.partitions {
             body.insert("partitions".into(), json!(partitions));
         }
-        json_request(
-            Method::PATCH,
-            control_path(STREAMS_PATH_PREFIX, &self.stream),
-            body,
-            &[200],
-        )
+        let path = format!("{STREAMS_PATH_PREFIX}{}", stream_path(&self.stream));
+        json_request(Method::PATCH, path, body, &[200])
     }
 
     pub fn decode(stream: String, body: &[u8]) -> Result<Self, CodecError> {

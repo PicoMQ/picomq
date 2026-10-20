@@ -77,6 +77,42 @@ describe('topic settings', () => {
     )
   })
 
+  it('escapes names on data routes as on control routes', async () => {
+    const fetch = vi.fn().mockImplementation(async () => new Response(null, { status: 404 }))
+    vi.stubGlobal('fetch', fetch)
+    const client = new PicoClient('http://example.test')
+
+    await client.head('/streams/a%41 #1')
+    await client.config('/streams/a%41 #1')
+
+    expect(fetch.mock.calls[0]![0]).toBe('http://example.test/streams/a%2541%20%231')
+    expect(fetch.mock.calls[1]![0]).toBe('http://example.test/_streams/streams/a%2541%20%231')
+  })
+
+  it('drops only one leading slash', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 404 }))
+    vi.stubGlobal('fetch', fetch)
+    const client = new PicoClient('http://example.test')
+
+    await client.config('/orders')
+    await client.config('//orders')
+
+    expect(fetch.mock.calls[0]![0]).toBe('http://example.test/_streams/orders')
+    expect(fetch.mock.calls[1]![0]).toBe('http://example.test/_streams//orders')
+  })
+
+  it('refuses dot segments without sending a request', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetch)
+    const client = new PicoClient('http://example.test')
+
+    for (const name of ['..', '../orders', 'a/./b', 'a/..']) {
+      await expect(client.deleteSchema(name)).rejects.toMatchObject({ kind: 'bad_request' })
+      await expect(client.delete(name)).rejects.toMatchObject({ kind: 'bad_request' })
+    }
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('decodes control errors and missing topics and schemas', async () => {
     const fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) =>
       init.method === 'PATCH'

@@ -41,7 +41,7 @@ func (c *DurableStreamsClient) DeleteSchema(ctx context.Context, name string) (b
 
 func (c *coreClient) config(ctx context.Context, name string) (config *TopicConfig, err error) {
 	err = c.run(ctx, func() error {
-		response, callErr := c.send(ctx, wireRequest{method: http.MethodGet, url: c.controlURL("/_streams", name)})
+		response, callErr := c.control(ctx, http.MethodGet, "/_streams", name, nil, nil)
 		if callErr != nil {
 			return callErr
 		}
@@ -66,7 +66,7 @@ func (c *coreClient) updateConfig(ctx context.Context, name string, update Confi
 	if err != nil {
 		return TopicConfig{}, err
 	}
-	response, err := c.send(ctx, wireRequest{method: http.MethodPatch, url: c.controlURL("/_streams", name), headers: http.Header{"Content-Type": {"application/json"}}, body: payload})
+	response, err := c.control(ctx, http.MethodPatch, "/_streams", name, http.Header{"Content-Type": {"application/json"}}, payload)
 	if err != nil {
 		return TopicConfig{}, err
 	}
@@ -82,7 +82,7 @@ func (c *coreClient) putSchema(ctx context.Context, name, contentType string, bo
 	if contentType != "" {
 		headers.Set("Content-Type", contentType)
 	}
-	response, err := c.send(ctx, wireRequest{method: http.MethodPut, url: c.controlURL("/_schemas", name), headers: headers, body: body})
+	response, err := c.control(ctx, http.MethodPut, "/_schemas", name, headers, body)
 	if err != nil {
 		return err
 	}
@@ -92,7 +92,7 @@ func (c *coreClient) putSchema(ctx context.Context, name, contentType string, bo
 
 func (c *coreClient) getSchema(ctx context.Context, name string) (schema *Schema, err error) {
 	err = c.run(ctx, func() error {
-		response, callErr := c.send(ctx, wireRequest{method: http.MethodGet, url: c.controlURL("/_schemas", name)})
+		response, callErr := c.control(ctx, http.MethodGet, "/_schemas", name, nil, nil)
 		if callErr != nil {
 			return callErr
 		}
@@ -113,7 +113,7 @@ func (c *coreClient) getSchema(ctx context.Context, name string) (schema *Schema
 }
 
 func (c *coreClient) deleteSchema(ctx context.Context, name string) (bool, error) {
-	response, err := c.send(ctx, wireRequest{method: http.MethodDelete, url: c.controlURL("/_schemas", name)})
+	response, err := c.control(ctx, http.MethodDelete, "/_schemas", name, nil, nil)
 	if err != nil {
 		return false, err
 	}
@@ -123,8 +123,8 @@ func (c *coreClient) deleteSchema(ctx context.Context, name string) (bool, error
 	return response.StatusCode == http.StatusNoContent, nil
 }
 
-func (c *coreClient) controlURL(root, name string) string {
-	return c.streamURL(root+"/"+strings.TrimLeft(name, "/"), nil)
+func (c *coreClient) control(ctx context.Context, method, root, name string, headers http.Header, body []byte) (*http.Response, error) {
+	return c.send(ctx, wireRequest{method: method, url: c.pathURL(root+namePath(name), nil), headers: headers, body: body})
 }
 
 func expectControl(response *http.Response, expected ...int) ([]byte, error) {

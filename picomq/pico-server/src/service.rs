@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use picomq_common::now_ms;
+use picomq_metadata::state::StreamRow;
 use picomq_metadata::{MetadataKvClient, ViewPublisher};
 use s3stream::{AppendContext, FetchContext, PendingAppend, RecordBatch, Stream, StreamState};
 
@@ -615,23 +616,7 @@ impl S3StreamService {
 
         let entry = self.require_entry(&key)?;
         let stream = self.streams.ensure_open(entry.stream_id).await?;
-        let committed_end = self
-            .views
-            .load()
-            .state
-            .get_stream(entry.stream_id)
-            .map(|m| m.end_offset)
-            .unwrap_or(0);
-
-        let lower = live_start_offset(stream.as_ref());
-        let clamped = new_start_offset
-            .max(lower)
-            .min(stream.confirm_offset().min(committed_end));
-        if clamped > lower {
-            stream.trim(clamped).await?;
-        }
-
-        Ok(live_start_offset(stream.as_ref()))
+        self.trim_open(stream.as_ref(), new_start_offset).await
     }
 
     pub async fn apply_retention(
@@ -640,32 +625,74 @@ impl S3StreamService {
         retention: Retention,
         now_ms: i64,
     ) -> Result<(), ServiceError> {
-        let Some(entry) = self.entry(&log.key())? else {
+        let key = log.key();
+        let Some(entry) = self.entry(&key)? else {
             return Ok(());
         };
-        let view = self.views.load();
-        let Some(row) = view.state.streams.get(&entry.stream_id).copied() else {
-            return Ok(());
-        };
-        if row.node_id != self.streams.node().node_id() {
+        if self
+            .retention_start(entry.stream_id, retention, now_ms)
+            .is_none()
+        {
             return Ok(());
         }
 
-        let spans = view.state.object_spans(entry.stream_id);
-        let Some(start) = retention.start_offset(&spans, now_ms) else {
+        let gate = self.gate_of(&key);
+        let _op = gate.op.lock().await;
+        let Some((row, start)) = self.retention_start(entry.stream_id, retention, now_ms) else {
             return Ok(());
         };
-        if start <= row.start_offset {
-            return Ok(());
-        }
 
-        match (row.state, u64::try_from(row.epoch)) {
-            (StreamState::Opened, _) => self.trim(log, start).await.map(|_| ()),
-            (StreamState::Closed, Ok(epoch)) => {
+        match (
+            self.streams.held(row.stream_id),
+            row.state,
+            u64::try_from(row.epoch),
+        ) {
+            (Some(stream), _, _) => self.trim_open(stream.as_ref(), start).await.map(drop),
+            (None, StreamState::Closed, Ok(epoch)) => {
                 self.streams.trim_closed(row.stream_id, epoch, start).await
             }
-            (StreamState::Closed, Err(_)) => Ok(()),
+            (None, _, _) => Ok(()),
         }
+    }
+
+    async fn trim_open(
+        &self,
+        stream: &dyn Stream,
+        new_start_offset: u64,
+    ) -> Result<u64, ServiceError> {
+        let committed_end = self
+            .views
+            .load()
+            .state
+            .get_stream(stream.stream_id())
+            .map(|m| m.end_offset)
+            .unwrap_or(0);
+
+        let lower = live_start_offset(stream);
+        let clamped = new_start_offset
+            .max(lower)
+            .min(stream.confirm_offset().min(committed_end));
+        if clamped > lower {
+            stream.trim(clamped).await?;
+        }
+
+        Ok(live_start_offset(stream))
+    }
+
+    fn retention_start(
+        &self,
+        stream_id: u64,
+        retention: Retention,
+        now_ms: i64,
+    ) -> Option<(StreamRow, u64)> {
+        let view = self.views.load();
+        let row = view.state.streams.get(&stream_id).copied()?;
+        if row.node_id != self.streams.node().node_id() {
+            return None;
+        }
+
+        let start = retention.start_offset(&view.state.object_spans(stream_id), now_ms)?;
+        (start > row.start_offset).then_some((row, start))
     }
 
     pub fn notify_closed(&self, log: &Log) {

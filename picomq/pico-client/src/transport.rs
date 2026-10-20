@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use picomq_protocol::{WireError, WireRequest};
+use picomq_protocol::{WireError, WireRequest, check_path};
 use reqwest::Response;
 use reqwest::header::HeaderMap;
 
@@ -26,6 +26,11 @@ impl Transport {
     }
 
     pub(crate) async fn call(&self, wire: WireRequest, decode: Decode) -> Result<Response> {
+        check_path(&wire.path_and_query).map_err(|error| {
+            ClientError::new(0, ErrorKind::BadRequest, "bad_request")
+                .with_message(Some(error.message))
+        })?;
+
         let ok = wire.ok;
         let response = send(
             &self.http,

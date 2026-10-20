@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -95,6 +96,43 @@ var _ = ginkgo.Describe("topic settings", func() {
 		Expect(bodies[0]["retentionMs"]).To(Equal(float64(1)))
 		Expect(bodies[1]).To(HaveKeyWithValue("retentionMs", BeNil()))
 		Expect(bodies[2]).To(HaveKeyWithValue("retentionMs", BeNil()))
+	})
+
+	ginkgo.It("drops only one leading slash", func() {
+		paths := make(chan string, 2)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths <- r.URL.EscapedPath()
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = client.Config(context.Background(), "/orders")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = client.Config(context.Background(), "//orders")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(<-paths).To(Equal("/_streams/orders"))
+		Expect(<-paths).To(Equal("/_streams//orders"))
+	})
+
+	ginkgo.It("refuses dot segments without sending a request", func() {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
+		client, err := NewPico(server.URL)
+		Expect(err).NotTo(HaveOccurred())
+
+		for _, name := range []string{"..", "../orders", "a/./b", "a/.."} {
+			_, err := client.DeleteSchema(context.Background(), name)
+			Expect(IsKind(err, ErrorBadRequest)).To(BeTrue(), name)
+			_, err = client.Delete(context.Background(), name)
+			Expect(IsKind(err, ErrorBadRequest)).To(BeTrue(), name)
+		}
+		Expect(calls.Load()).To(BeZero())
 	})
 
 	ginkgo.It("escapes schema names in the path", func() {

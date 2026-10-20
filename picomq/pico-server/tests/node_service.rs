@@ -2533,6 +2533,84 @@ async fn retention_trims_a_closed_partition_without_reopening_it() {
 }
 
 #[tokio::test]
+async fn retention_does_not_reopen_a_partition_released_while_it_waited() {
+    let node = uploading_node().await;
+    let retention = Retention {
+        ms: Some(1_000),
+        bytes: None,
+    };
+    node.topics()
+        .create(CreateCommand {
+            retention,
+            ..create("/moving", "text/plain")
+        })
+        .await
+        .unwrap();
+    let stream_id = append_object(&node, "/moving", b"old", 1).await;
+    let log = log_of(&node.topics(), "/moving").await;
+    let service = node.service();
+
+    let held = service.begin_append(&log).await.unwrap();
+    let release = tokio::spawn({
+        let service = service.clone();
+        async move { service.release_for_transfer(stream_id).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let trim = tokio::spawn({
+        let service = service.clone();
+        let log = log.clone();
+        async move {
+            service
+                .apply_retention(&log, retention, picomq_common::now_ms() + 60_000)
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(held);
+
+    release.await.unwrap().unwrap();
+    trim.await.unwrap().unwrap();
+
+    let row = node.views().load().state.streams[&stream_id];
+    assert_eq!(row.state, StreamState::Closed);
+    assert_eq!(row.start_offset, row.end_offset);
+    assert!(service.streams().held(stream_id).is_none());
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn retention_with_nothing_expired_does_not_wait_on_appends() {
+    let node = uploading_node().await;
+    let retention = Retention {
+        ms: Some(60_000),
+        bytes: None,
+    };
+    node.topics()
+        .create(CreateCommand {
+            retention,
+            ..create("/fresh", "text/plain")
+        })
+        .await
+        .unwrap();
+    append_object(&node, "/fresh", b"new", 1).await;
+    let log = log_of(&node.topics(), "/fresh").await;
+    let service = node.service();
+
+    let held = service.begin_append(&log).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        service.apply_retention(&log, retention, picomq_common::now_ms()),
+    )
+    .await
+    .expect("retention waited on the append gate")
+    .unwrap();
+    drop(held);
+
+    node.close().await;
+}
+
+#[tokio::test]
 async fn retention_bytes_keeps_the_newest_object_of_an_open_partition() {
     let node = uploading_node().await;
     node.topics()

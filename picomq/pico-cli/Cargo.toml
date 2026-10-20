@@ -17,6 +17,7 @@ picomq-auth = { workspace = true }
 picomq-http = { workspace = true }
 picomq-runtime = { workspace = true }
 picomq-client = { workspace = true }
+picomq-protocol = { workspace = true }
 bytes = { workspace = true }
 hdrhistogram = { workspace = true }
 serde_json = { workspace = true }

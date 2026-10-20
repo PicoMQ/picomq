@@ -37,6 +37,12 @@ export class Http {
   }
 
   async send(req: HttpRequest): Promise<Response> {
+    const path = rawPath(req.url)
+    if (path.split('/').some((segment) => segment === '.' || segment === '..')) {
+      const message = `${path} has a . or .. segment, which a URL cannot carry`
+      throw new ClientError('bad_request', message, { code: 'bad_request' })
+    }
+
     await this.ensureFetch()
     const fetch = this.fetch!
     const key = this.routes.key(req.url)
@@ -134,6 +140,14 @@ export function truthy(response: Response, name: string): boolean {
 
 export function urlencode(value: string): string {
   return encodeURIComponent(value)
+}
+
+function rawPath(url: string): string {
+  return url.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, '').split(/[?#]/)[0] ?? ''
+}
+
+export function namePath(name: string): string {
+  return `/${name.replace(/^\//, '').split('/').map(urlencode).join('/')}`
 }
 
 export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {

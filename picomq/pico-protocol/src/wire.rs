@@ -1,6 +1,8 @@
 use bytes::Bytes;
 use http::{HeaderMap, Method};
 
+use crate::error::CodecError;
+
 #[derive(Debug, Clone)]
 pub struct WireRequest {
     pub method: Method,
@@ -57,21 +59,28 @@ pub struct Producer<'a> {
     pub seq: u64,
 }
 
-pub(crate) fn stream_path(name: &str) -> String {
-    if name.starts_with('/') {
-        name.to_owned()
-    } else {
-        format!("/{name}")
+pub fn stream_path(name: &str) -> String {
+    let name = name.strip_prefix('/').unwrap_or(name);
+    let mut path = String::with_capacity(name.len() + 1);
+    for segment in name.split('/') {
+        path.push('/');
+        path.push_str(&urlencode(segment));
     }
+    path
 }
 
-pub(crate) fn control_path(root: &str, name: &str) -> String {
-    let segments: Vec<String> = name
-        .trim_start_matches('/')
+pub fn check_path(path_and_query: &str) -> Result<(), CodecError> {
+    let path = path_and_query.split('?').next().unwrap_or_default();
+    if path
         .split('/')
-        .map(urlencode)
-        .collect();
-    format!("{root}/{}", segments.join("/"))
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(CodecError::new(format!(
+            "{path} has a . or .. segment, which a URL cannot carry"
+        )));
+    }
+
+    Ok(())
 }
 
 pub const Q_PARTITION: &str = "partition";
@@ -120,4 +129,19 @@ pub(crate) fn header_i64(headers: &HeaderMap, name: &str) -> Option<i64> {
 
 pub(crate) fn truthy(headers: &HeaderMap, name: &str) -> bool {
     header_str(headers, name).is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paths_with_dot_segments_are_refused() {
+        for path in ["/..", "/../orders", "/a/./b?x=1", "/_schemas/a/.."] {
+            assert!(check_path(path).is_err(), "{path}");
+        }
+        for path in ["/a..b", "/.orders", "//orders", "/a?seq=..", "/"] {
+            assert!(check_path(path).is_ok(), "{path}");
+        }
+    }
 }

@@ -8,6 +8,7 @@ import { PicoStream } from '../stream'
 import {
   header,
   Http,
+  namePath,
   toArrayBuffer,
   truthy,
   urlencode,
@@ -705,7 +706,7 @@ export class PicoClient implements StreamApi {
     expected: number[],
     signal?: AbortSignal,
   ): Promise<Response> {
-    const request: HttpRequest = { method, url: this.url(path, query), signal }
+    const request: HttpRequest = { method, url: `${this.baseUrl}${path}${query}`, signal }
     if (body !== undefined) {
       request.headers = { 'Content-Type': CT_JSON }
       request.body = JSON.stringify(body)
@@ -715,7 +716,7 @@ export class PicoClient implements StreamApi {
   }
 
   private url(name: string, query = '', partition?: number): string {
-    const path = name.startsWith('/') ? name : `/${name}`
+    const path = namePath(name)
     if (partition !== undefined) {
       query += `${query === '' ? '?' : '&'}partition=${partition}`
     }

@@ -5,7 +5,7 @@ import { Control } from '../control'
 import { createHeaders, readSettings } from '../settings'
 import { RetryPolicy } from '../retry'
 import { Stream } from '../stream'
-import { header, Http, toArrayBuffer, truthy, urlencode } from '../transport/http'
+import { header, Http, namePath, toArrayBuffer, truthy, urlencode } from '../transport/http'
 import { subscribeLoop } from '../transport/subscribe'
 import {
   H_DS_PRODUCER_EPOCH,
@@ -322,7 +322,7 @@ export class DsClient implements StreamApi {
   }
 
   private url(name: string, query = '', partition?: number): string {
-    const path = name.startsWith('/') ? name : `/${name}`
+    const path = namePath(name)
     if (partition !== undefined) {
       query += `${query === '' ? '?' : '&'}partition=${partition}`
     }

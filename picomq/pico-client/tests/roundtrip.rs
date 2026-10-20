@@ -200,6 +200,46 @@ async fn settings(protocol: Protocol) {
     assert_eq!(client.config(name).await.unwrap(), Some(config));
     assert!(client.config("/streams/nope").await.unwrap().is_none());
 
+    let dotted = "//streams/settings";
+    assert!(
+        client
+            .create(dotted, &CreateOptions::new("text/plain"))
+            .await
+            .unwrap()
+    );
+    let grown = ConfigUpdate {
+        stream: dotted.to_owned(),
+        partitions: Some(2),
+        ..Default::default()
+    };
+    assert_eq!(client.update_config(&grown).await.unwrap().partitions, 2);
+    assert_eq!(client.config(name).await.unwrap().unwrap().partitions, 3);
+
+    let escaped = "/streams/a%41 #1";
+    assert!(
+        client
+            .create(escaped, &CreateOptions::new("text/plain"))
+            .await
+            .unwrap()
+    );
+    assert!(client.head(escaped, None).await.unwrap().is_some());
+    assert!(client.head("/streams/aA #1", None).await.unwrap().is_none());
+    assert_eq!(client.config(escaped).await.unwrap().unwrap().partitions, 1);
+
+    for refused in [
+        client
+            .delete_schema("../streams/settings")
+            .await
+            .unwrap_err(),
+        client
+            .delete("/streams/../streams/settings")
+            .await
+            .unwrap_err(),
+    ] {
+        assert_eq!(refused.kind, ErrorKind::BadRequest);
+    }
+    assert!(client.head(name, None).await.unwrap().is_some());
+
     let shrink = ConfigUpdate {
         stream: name.to_owned(),
         partitions: Some(1),

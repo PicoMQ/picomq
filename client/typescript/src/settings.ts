@@ -24,7 +24,11 @@ export function createHeaders(prefix: 'Pico' | 'Stream', options?: CreateOptions
   return headers
 }
 
-export function readSettings(response: Response, prefix: 'Pico' | 'Stream', info: StreamInfo): void {
+export function readSettings(
+  response: Response,
+  prefix: 'Pico' | 'Stream',
+  info: StreamInfo,
+): void {
   const retentionMs = parseOptionalUint(header(response, `${prefix}-Retention-Ms`))
   if (retentionMs !== undefined) info.retentionMs = retentionMs
   const retentionBytes = parseOptionalUint(header(response, `${prefix}-Retention-Bytes`))

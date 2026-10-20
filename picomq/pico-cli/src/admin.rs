@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
+use picomq_protocol::{check_path, stream_path};
 use serde_json::Value;
 
 use crate::io::note;
@@ -133,7 +134,7 @@ pub async fn run(args: AdminArgs) -> Result<i32, String> {
             }
         }
         AdminCommand::Stream { stream, partition } => {
-            let body = api.get(&stream_path(&stream, partition)).await?;
+            let body = api.get(&admin_stream_path(&stream, partition)).await?;
             if args.json {
                 return print_json(&body);
             }
@@ -216,9 +217,14 @@ impl Api {
         }
     }
 
+    fn url(&self, path: &str) -> Result<String, String> {
+        check_path(path).map_err(|error| error.message)?;
+        Ok(format!("{}{path}", self.base))
+    }
+
     async fn get(&self, path: &str) -> Result<Value, String> {
         let response = self
-            .credentialed(self.http.get(format!("{}{path}", self.base)))
+            .credentialed(self.http.get(self.url(path)?))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -227,7 +233,7 @@ impl Api {
 
     async fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
         let response = self
-            .credentialed(self.http.post(format!("{}{path}", self.base)))
+            .credentialed(self.http.post(self.url(path)?))
             .json(body)
             .send()
             .await
@@ -253,11 +259,11 @@ async fn decode(response: reqwest::Response) -> Result<Value, String> {
     }
 }
 
-fn stream_path(stream: &str, partition: Option<u32>) -> String {
-    let name = stream.strip_prefix('/').unwrap_or(stream);
+fn admin_stream_path(stream: &str, partition: Option<u32>) -> String {
+    let path = format!("/admin/streams{}", stream_path(stream));
     match partition {
-        Some(partition) => format!("/admin/streams/{name}?partition={partition}"),
-        None => format!("/admin/streams/{name}"),
+        Some(partition) => format!("{path}?partition={partition}"),
+        None => path,
     }
 }
 
@@ -271,7 +277,7 @@ async fn await_transfer(
 ) -> Result<(), String> {
     let deadline = Instant::now() + TRANSFER_WAIT_TIMEOUT;
     loop {
-        let body = api.get(&stream_path(stream, partition)).await?;
+        let body = api.get(&admin_stream_path(stream, partition)).await?;
         if body["pendingTransfer"].is_null() && body["nodeId"] == to_node {
             return Ok(());
         }

@@ -36,6 +36,17 @@ impl TopicName {
                 "topic name must not be empty",
             ));
         }
+        if spelling
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+        {
+            return Err(ServiceError::with_message(
+                ErrorKind::BadRequest,
+                None,
+                false,
+                "topic name must not have . or .. segments",
+            ));
+        }
 
         Ok(Self {
             spelling,
@@ -219,6 +230,15 @@ pub fn deadline_of(ttl_seconds: Option<u64>, expires_at_ms: Option<i64>) -> i64 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_refuse_dot_segments() {
+        for name in ["/..", "/a/../b", "./a", "/a/."] {
+            assert!(TopicName::parse(name).is_err(), "{name}");
+        }
+        assert_eq!(TopicName::parse("//orders").unwrap().canonical(), ".orders");
+        assert_eq!(TopicName::parse("/a..b").unwrap().canonical(), "a..b");
+    }
 
     fn topic() -> Topic {
         Topic {

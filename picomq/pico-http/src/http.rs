@@ -49,7 +49,7 @@ pub(crate) fn query_param(uri: &axum::http::Uri, name: &str) -> Option<String> {
     for pair in query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         if key == name {
-            return Some(percent_decode(value));
+            return Some(percent_decode(&value.replace('+', " ")));
         }
     }
     None
@@ -61,33 +61,28 @@ pub(crate) fn query_params(uri: &axum::http::Uri, name: &str) -> Vec<String> {
         .split('&')
         .filter_map(|pair| {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            (key == name).then(|| percent_decode(value))
+            (key == name).then(|| percent_decode(&value.replace('+', " ")))
         })
         .collect()
 }
 
-fn percent_decode(raw: &str) -> String {
-    let mut out = Vec::with_capacity(raw.len());
+pub(crate) fn percent_decode(raw: &str) -> String {
     let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 3 <= bytes.len() => match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
-                Ok(byte) => {
-                    out.push(byte);
-                    i += 3;
-                }
-                Err(_) => {
-                    out.push(b'%');
-                    i += 1;
-                }
-            },
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            byte => {
+        let escaped = (bytes[i] == b'%')
+            .then(|| bytes.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escaped {
+            Some(byte) => {
                 out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
                 i += 1;
             }
         }
@@ -198,4 +193,17 @@ pub(crate) fn etag(
         end.value(),
         suffix
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_reads_escapes_and_keeps_the_rest() {
+        assert_eq!(percent_decode("/orders%23v2%20a"), "/orders#v2 a");
+        assert_eq!(percent_decode("/a%2541+b"), "/a%41+b");
+        assert_eq!(percent_decode("/50%"), "/50%");
+        assert_eq!(percent_decode("/%aé"), "/%aé");
+    }
 }

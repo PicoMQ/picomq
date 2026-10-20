@@ -1,7 +1,7 @@
 import { ClientError, type ErrorKind } from './error'
 import { RetryPolicy } from './retry'
 import { decodeConfig } from './settings'
-import { header, urlencode, type Http } from './transport/http'
+import { header, namePath, type Http } from './transport/http'
 import { retryableError } from './util'
 import type { CallOptions, ConfigUpdate, PutSchemaOptions, Schema, TopicConfig } from './types'
 
@@ -43,7 +43,11 @@ export class Control {
     return decodeConfig(await (await expectControl(response, [200])).json())
   }
 
-  async putSchema(name: string, body: Uint8Array | string, options?: PutSchemaOptions): Promise<void> {
+  async putSchema(
+    name: string,
+    body: Uint8Array | string,
+    options?: PutSchemaOptions,
+  ): Promise<void> {
     const headers: { [key: string]: string } = {}
     if (options?.contentType !== undefined) headers['Content-Type'] = options.contentType
     const response = await this.http.send({
@@ -87,8 +91,7 @@ export class Control {
   }
 
   private url(root: string, name: string): string {
-    const path = name.replace(/^\/+/, '').split('/').map(urlencode).join('/')
-    return `${this.baseUrl}${root}/${path}`
+    return `${this.baseUrl}${root}${namePath(name)}`
   }
 }
 

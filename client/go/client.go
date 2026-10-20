@@ -143,14 +143,18 @@ func (c *coreClient) closeIdleConnections() {
 }
 
 func (c *coreClient) streamURL(name string, query url.Values) string {
+	return c.pathURL(namePath(name), query)
+}
+
+func (c *coreClient) pathURL(path string, query url.Values) string {
 	u := *c.baseURL
-	path := name
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
 	u.Path = strings.TrimRight(c.baseURL.Path, "/") + path
 	u.RawQuery = query.Encode()
 	return u.String()
+}
+
+func namePath(name string) string {
+	return "/" + strings.TrimPrefix(name, "/")
 }
 
 func withPartition(query url.Values, partition *uint32) url.Values {
@@ -175,6 +179,11 @@ func (c *coreClient) send(ctx context.Context, request wireRequest) (*http.Respo
 	start, err := url.Parse(request.url)
 	if err != nil {
 		return nil, err
+	}
+	for _, segment := range strings.Split(start.EscapedPath(), "/") {
+		if segment == "." || segment == ".." {
+			return nil, &ClientError{Kind: ErrorBadRequest, Code: "bad_request", Message: start.EscapedPath() + " has a . or .. segment, which a URL cannot carry"}
+		}
 	}
 	key, keyed := c.routes.key(start)
 	current := start.String()
