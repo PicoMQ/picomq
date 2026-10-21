@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/url"
-	"strconv"
 	"time"
 )
 
@@ -12,20 +11,15 @@ func (c *DurableStreamsClient) Stream(name string) *Stream {
 	return &Stream{client: c, name: name}
 }
 
-func (c *DurableStreamsClient) Create(ctx context.Context, name, contentType string, ttl time.Duration) (created bool, err error) {
+func (c *DurableStreamsClient) Create(ctx context.Context, name string, options CreateOptions) (created bool, err error) {
 	err = c.core.run(ctx, func() error {
-		h := make(http.Header)
-		h.Set("Content-Type", contentType)
-		if ttl > 0 {
-			h.Set("Stream-TTL", strconv.FormatInt(durationSecondsCeil(ttl), 10))
-		}
-		response, e := c.core.send(ctx, wireRequest{method: http.MethodPut, url: c.core.streamURL(name, nil), headers: h})
-		if e != nil {
-			return e
+		response, callErr := c.core.send(ctx, wireRequest{method: http.MethodPut, url: c.core.streamURL(name, nil), headers: options.headers("Stream")})
+		if callErr != nil {
+			return callErr
 		}
 		created = response.StatusCode == http.StatusCreated
-		_, e = expectDS(response, http.StatusOK, http.StatusCreated)
-		return e
+		_, callErr = expectDS(response, http.StatusOK, http.StatusCreated)
+		return callErr
 	})
 	return
 }
@@ -65,6 +59,7 @@ func (c *DurableStreamsClient) head(ctx context.Context, name string, partition 
 			TTL:         time.Duration(headerUint(response.Header, "Stream-TTL")) * time.Second,
 			ExpiresAt:   response.Header.Get("Stream-Expires-At"),
 		}
+		readSettings(response.Header, "Stream", info)
 		return nil
 	})
 	return

@@ -13,9 +13,6 @@ use serde_json::json;
 
 use crate::RoutingMode;
 
-pub use schemas::SCHEMA_PATH_PREFIX;
-pub use streams::STREAM_CONFIG_PATH_PREFIX;
-
 /// The stream config and schema routes beside a protocol listener. They
 /// authenticate like that listener's stream routes.
 #[derive(Clone)]

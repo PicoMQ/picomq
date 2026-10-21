@@ -28,7 +28,7 @@ func main() {
         log.Fatal(err)
     }
     stream := client.Stream("/orders/1042")
-    if _, err := stream.Create(ctx, "application/json", 0); err != nil {
+    if _, err := stream.Create(ctx, picomq.CreateOptions{ContentType: "application/json"}); err != nil {
         log.Fatal(err)
     }
     ack, err := stream.Append(ctx, picomq.AppendRecord{Body: []byte(`{"item":"widget"}`)})
@@ -51,12 +51,29 @@ func main() {
 
 ## Partitions
 
-A topic created over Kafka can have several partitions. `stream.Partition(i)` addresses one, with the same `Head`, `Append`, `Read`, `Records`, and `Subscribe` calls, plus `Trim`, `AppendAs`, and `NewProducer` on Pico.
+On a topic with several partitions, `stream.Partition(i)` addresses one, with the same `Head`, `Append`, `Read`, `Records`, and `Subscribe` calls, plus `Trim`, `AppendAs`, and `NewProducer` on Pico.
 
 ```go
 partition := client.Stream("/orders").Partition(2)
 page, err := partition.Read(ctx, client.Beginning(), picomq.ReadOptions{})
 ```
+
+## Topic settings
+
+`CreateOptions` carries every [topic setting](/docs/api#topic-settings), and zero values take the server's defaults. `Config` reads the settings back and `UpdateConfig` changes them. In a `ConfigUpdate`, a nil field is left alone and a pointer to the zero value removes the setting.
+
+```go
+_, err := client.Create(ctx, "/orders", picomq.CreateOptions{
+    ContentType: "application/json",
+    Partitions:  3,
+    Retention:   24 * time.Hour,
+})
+
+unlimited := time.Duration(0)
+config, err := client.UpdateConfig(ctx, "/orders", picomq.ConfigUpdate{Partitions: 6, Retention: &unlimited})
+```
+
+`PutSchema`, `GetSchema`, and `DeleteSchema` manage the [schema registry](/docs/schemas). All of these work on both protocols.
 
 ## Reads and subscriptions
 

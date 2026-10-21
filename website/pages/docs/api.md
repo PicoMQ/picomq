@@ -7,7 +7,7 @@ OpenAPI spec: <a href="/openapi.yaml" download>openapi.yaml</a>
 ## Conventions
 
 - **Names.** The request path is the topic name, so `/logs/api/prod` addresses that topic. Slashes and dots are the same separator, see [Topics and streams](/docs/design/streams#names).
-- **Partitions.** A topic created over HTTP has one partition. Topics created over Kafka may have more, and every request to such a topic names one with `?partition=N`. Leaving it out is a `400`.
+- **Partitions.** A topic has one partition unless it was created or grown with more. Every request to a topic with several partitions names one with `?partition=N`, and leaving it out is a `400`.
 - **Sequences.** Record offsets within a partition, starting at `0` and stable forever.
 - **Headers.** Custom headers use the `Pico-` prefix.
 - **Redirects.** A request for a partition owned by another node returns `307` with the owner's address in `Location`. Standard HTTP clients drop `Authorization` on cross-origin redirects, so clients follow `307`s themselves and re-attach the credential. `picomq-client` and the CLI do.
@@ -44,24 +44,29 @@ Retrying `409` from a moving partition, `503`, and `504` is safe. How the same f
 
 The config and schema routes, `/_streams` and `/_schemas`, are a control surface and answer errors as `{"error": "<message>"}`, like the admin API.
 
+## Topic settings
+
+A topic's settings are given as headers on create. Some can change later through the [topic config](#topic-config) route, and the rest are fixed for the topic's life.
+
+| Setting | Create header | Config field | After create |
+| --- | --- | --- | --- |
+| Content type | `Content-Type`, default `application/octet-stream` | | Fixed |
+| Partitions | `Pico-Partitions`, default `1` | `partitions` | Grows, never shrinks, by at most `10000` at a time |
+| Expiry | `Pico-TTL`, seconds without appends or reads, or `Pico-Expires-At`, a fixed time. Not both | | Fixed |
+| [Retention](/docs/design/streams#retention) | `Pico-Retention-Ms`, `Pico-Retention-Bytes`, unlimited by default | `retentionMs`, `retentionBytes` | Set, or removed with `null` |
+| [Schema](/docs/schemas#bind) | `Pico-Schema` names a registered schema, `Pico-Schema-Validate: true` validates appends | `schema`, `schemaValidate` | Rebound, or unbound with `null` |
+| Sealed | `Pico-Closed: true` | | Sealed by an append with `Pico-Closed`, never reopened |
+| Kafka name | Follows from the topic name | `kafkaTopic` | Fixed |
+
+Limits must be positive, and a partition count of `0` is a `400`.
+
 ## Create
 
 ```
 PUT /{topic}
 ```
 
-Creates a single-partition topic, with no body. `201` when created, `200` when it already exists with the same settings, `409` when the settings differ.
-
-| Request header | Meaning |
-| --- | --- |
-| `Content-Type` | Stored as the topic's content type. Defaults to `application/octet-stream` |
-| `Pico-TTL` | Seconds without appends or reads after which the whole topic expires |
-| `Pico-Expires-At` | A fixed time at which the topic expires. Not with `Pico-TTL` |
-| `Pico-Closed` | `true` creates the topic already sealed |
-| `Pico-Schema` | Binds a registered [schema](/docs/schemas) by name |
-| `Pico-Schema-Validate` | `true` validates appends against the bound schema. Defaults to `false` |
-
-The response carries the same headers as [Inspect](#inspect).
+Creates a topic with the [settings](#topic-settings) in its headers, with no body. `201` when created, `200` when it already exists with the same settings, `409` when the settings differ. The response carries the same headers as [Inspect](#inspect).
 
 ## Append
 
@@ -126,6 +131,7 @@ Returns the topic's metadata in headers with no body, or `404`.
 | `Pico-Partitions` | Number of partitions |
 | `Pico-Start-Seq`, `Pico-Next-Seq` | The partition's readable range. On a topic with several partitions, only with `?partition=` |
 | `Pico-TTL`, `Pico-Expires-At` | Expiry settings, when set |
+| `Pico-Retention-Ms`, `Pico-Retention-Bytes` | Retention limits, when set |
 | `Pico-Closed` | `true` when sealed |
 | `Pico-Schema` | The bound schema, when set |
 | `Pico-Kafka-Topic` | The topic's Kafka name, when it has one |
@@ -153,7 +159,15 @@ GET /_streams/{topic}
 PATCH /_streams/{topic}
 ```
 
-Reads a topic's config and changes its schema bind. Both routes, and schema registration under `/_schemas/{name}`, are covered in [Schemas](/docs/schemas#bind).
+Reads and changes a topic's settings as JSON, with the config fields from [Topic settings](#topic-settings). Both routes serve either HTTP protocol, and cover topics created over Kafka too. In a cluster they follow the ownership of partition `0`.
+
+```json
+{ "schema": null, "schemaValidate": false, "kafkaTopic": "orders", "partitions": 3, "retentionMs": 604800000, "retentionBytes": null }
+```
+
+- **`GET`** returns every field, with `null` for an unset one. `404` when the topic does not exist.
+- **`PATCH`** takes only the fields to change and returns the result. An absent field is left alone, and `null` removes a setting. A `partitions` that does not grow the topic, or a `kafkaTopic`, is a `400`.
+- **Auth.** `GET` needs `head` on the topic and `PATCH` needs `create`. Errors take the control surface's [shape](#errors).
 
 ## Consumer groups
 
@@ -204,4 +218,4 @@ Group errors use the error format above:
 
 ## Durable Streams
 
-A listener started with `--protocol ds` speaks the Durable Streams open protocol on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers, raw record bodies, plain text errors, and one record per append. Topics created through either HTTP protocol or Kafka are readable through all three.
+A listener started with `--protocol ds` speaks the Durable Streams open protocol on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers, raw record bodies, plain text errors, and one record per append. The [topic settings](#topic-settings) the protocol has no header for are extensions under the same prefix: `Stream-Partitions`, `Stream-Retention-Ms`, `Stream-Retention-Bytes`, `Stream-Schema`, and `Stream-Schema-Validate`. Topics created through either HTTP protocol or Kafka are readable through all three.

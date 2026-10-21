@@ -12,6 +12,7 @@ pub mod ownership;
 pub mod partition;
 pub mod producer;
 pub mod record;
+pub mod retention;
 pub mod service;
 pub mod streams;
 mod timestamps;
@@ -38,6 +39,7 @@ pub use picomq_schema::{
     SchemaStore,
 };
 pub use record::{LogRecord, StreamRecord};
+pub use retention::Retention;
 pub use service::S3StreamService;
 pub use streams::Streams;
 pub use topic::{ClosedBy, Topic, TopicId, TopicName};

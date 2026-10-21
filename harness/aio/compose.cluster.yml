@@ -27,6 +27,7 @@ x-pico: &pico
     PICO_NODE_TIMEOUT_SEC: ${PICO_NODE_TIMEOUT_SEC:-30}
     PICO_AUTH_BOOTSTRAP_TOKEN: ${PICO_AUTH_BOOTSTRAP_TOKEN:-ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY}
     PICO_META_URL: postgres://picomq:picomq@postgres:5432/picomq
+    PICO_SCHEMA_REGISTRY: "3@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true"
     PICO_STORAGE: "-2@s3://picomq?region=us-east-1&endpoint=http://rustfs:9000&pathStyle=true"
     # Local RustFS makes S3 requests free, so batch and commit aggressively.
     # On real S3 keep the 250ms default batchInterval.

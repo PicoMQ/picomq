@@ -88,8 +88,10 @@ pub enum MetadataCommand {
         epoch: i64,
     },
 
-    /// Advances the retention watermark (start offset) of an opened stream.
-    /// Only its owner may trim.
+    /// Advances the start offset of a stream at its current epoch, opened or
+    /// closed, so an idle stream is trimmed without reopening it. Only its
+    /// owner may trim. Stream objects wholly below the new start are marked
+    /// destroyed.
     TrimStream {
         proposer: Proposer,
         stream_id: u64,

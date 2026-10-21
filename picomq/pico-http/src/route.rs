@@ -10,6 +10,8 @@ use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
 
 use picomq_server::ownership::OwnershipService;
+
+use crate::http::percent_decode;
 use picomq_server::{ErrorKind, Log, Topics, partition_log};
 
 use crate::partition;
@@ -97,7 +99,7 @@ pub fn stream_name(uri: &Uri) -> String {
     if path.is_empty() {
         "/".to_owned()
     } else {
-        path.to_owned()
+        percent_decode(path)
     }
 }
 

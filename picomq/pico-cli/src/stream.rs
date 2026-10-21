@@ -1,11 +1,16 @@
 //! Stream commands.
 
+use std::str::FromStr;
 use std::time::Duration;
 
 use clap::{Args, Subcommand, ValueEnum};
-use picomq_client::{ClientConfig, ClientError, ErrorKind, Live, PicoClient, Protocol, ReadLimits};
+use picomq_client::{
+    ClientConfig, ClientError, ConfigUpdate, CreateOptions, ErrorKind, Live, PicoClient, Protocol,
+    ReadLimits, TopicConfig,
+};
 
 use crate::io::{note, print_record, stdin_records};
+use crate::schema::SchemaCommand;
 
 #[derive(Debug, Args)]
 pub struct Endpoint {
@@ -97,15 +102,56 @@ impl ProtocolArg {
 
 #[derive(Debug, Subcommand)]
 pub enum StreamCommand {
-    /// Create a stream (idempotent).
+    /// Create a topic (idempotent with the same settings).
     Create {
         stream: String,
         #[arg(long, default_value = "application/octet-stream")]
         content_type: String,
-        /// Delete records older than this many seconds.
+        /// Number of partitions.
         #[arg(long)]
+        partitions: Option<u32>,
+        /// Expire the topic after this many seconds without reads or appends.
+        #[arg(long, conflicts_with = "expires_at")]
         ttl: Option<u64>,
+        /// Expire the topic at this RFC 3339 time.
+        #[arg(long)]
+        expires_at: Option<String>,
+        /// Keep data written within this many milliseconds.
+        #[arg(long)]
+        retention_ms: Option<u64>,
+        /// Keep at least the newest this many bytes per partition.
+        #[arg(long)]
+        retention_bytes: Option<u64>,
+        /// Bind this registered schema.
+        #[arg(long)]
+        schema: Option<String>,
+        /// Validate appends against the bound schema.
+        #[arg(long, requires = "schema")]
+        schema_validate: bool,
+        /// Create the topic already sealed.
+        #[arg(long)]
+        closed: bool,
     },
+    /// Print a topic's settings.
+    Describe { stream: String },
+    /// Change a topic's settings. `none` removes a setting.
+    Alter {
+        stream: String,
+        /// Grow the topic to this many partitions. Partitions are never removed.
+        #[arg(long)]
+        partitions: Option<u32>,
+        #[arg(long, value_name = "MS|none")]
+        retention_ms: Option<String>,
+        #[arg(long, value_name = "BYTES|none")]
+        retention_bytes: Option<String>,
+        #[arg(long, value_name = "NAME|none")]
+        schema: Option<String>,
+        #[arg(long)]
+        schema_validate: Option<bool>,
+    },
+    /// Register, print, or remove schemas.
+    #[command(subcommand)]
+    Schema(SchemaCommand),
     /// Print a stream's position and metadata.
     Head {
         stream: String,
@@ -176,10 +222,66 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
         StreamCommand::Create {
             stream,
             content_type,
+            partitions,
             ttl,
+            expires_at,
+            retention_ms,
+            retention_bytes,
+            schema,
+            schema_validate,
+            closed,
         } => {
-            let created = client.create(&stream, &content_type, ttl).await?;
+            let options = CreateOptions {
+                partitions,
+                ttl_seconds: ttl,
+                expires_at,
+                retention_ms,
+                retention_bytes,
+                schema,
+                schema_validate,
+                closed,
+                ..CreateOptions::new(content_type)
+            };
+            let created = client.create(&stream, &options).await?;
             note(format!("created={created}"));
+        }
+        StreamCommand::Describe { stream } => {
+            let (Some(head), Some(config)) = (
+                client.head(&stream, None).await?,
+                client.config(&stream).await?,
+            ) else {
+                note("not found");
+                return Ok(1);
+            };
+            println!(
+                "content_type={}",
+                head.content_type.as_deref().unwrap_or("-")
+            );
+            println!("closed={}", head.closed);
+            println!("ttl={}", or_dash(head.ttl_seconds));
+            println!("expires_at={}", head.expires_at.as_deref().unwrap_or("-"));
+            print_config(&config);
+        }
+        StreamCommand::Alter {
+            stream,
+            partitions,
+            retention_ms,
+            retention_bytes,
+            schema,
+            schema_validate,
+        } => {
+            let update = ConfigUpdate {
+                stream,
+                schema: alter_value(schema, "--schema")?,
+                schema_validate,
+                retention_ms: alter_value(retention_ms, "--retention-ms")?,
+                retention_bytes: alter_value(retention_bytes, "--retention-bytes")?,
+                partitions,
+            };
+            print_config(&client.update_config(&update).await?);
+        }
+        StreamCommand::Schema(command) => {
+            return crate::schema::run(client.as_ref(), command).await;
         }
         StreamCommand::Head { stream, partition } => {
             let Some(head) = client.head(&stream, partition).await? else {
@@ -328,4 +430,34 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
     }
 
     Ok(0)
+}
+
+fn print_config(config: &TopicConfig) {
+    println!("partitions={}", config.partitions);
+    println!("retention.ms={}", or_dash(config.retention_ms));
+    println!("retention.bytes={}", or_dash(config.retention_bytes));
+    println!("schema={}", config.schema.as_deref().unwrap_or("-"));
+    println!("schema_validate={}", config.schema_validate);
+    println!(
+        "kafka_topic={}",
+        config.kafka_topic.as_deref().unwrap_or("-")
+    );
+}
+
+fn or_dash(value: Option<u64>) -> String {
+    value.map_or_else(|| "-".to_owned(), |value| value.to_string())
+}
+
+fn alter_value<T: FromStr>(
+    value: Option<String>,
+    flag: &str,
+) -> Result<Option<Option<T>>, ClientError> {
+    match value.as_deref() {
+        None => Ok(None),
+        Some("none") => Ok(Some(None)),
+        Some(raw) => raw.parse().map(|value| Some(Some(value))).map_err(|_| {
+            ClientError::new(0, ErrorKind::BadRequest, "bad_request")
+                .with_message(Some(format!("{flag} takes a value or none, got {raw}")))
+        }),
+    }
 }

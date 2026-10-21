@@ -68,6 +68,10 @@ pub struct PendingTransfer {
 pub struct StreamSetObjectRow {
     pub node_id: i32,
     pub object: s3stream::S3ObjectMetadata,
+    /// Bytes of each of `object.offset_ranges`, in the same order.
+    pub range_sizes: Vec<u64>,
+    /// The latest time any record in the object was written.
+    pub last_write_ms: i64,
 }
 
 /// One committed single-stream object. Stored under a sorted composite key
@@ -76,6 +80,17 @@ pub struct StreamSetObjectRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamObjectRow {
     pub object: s3stream::S3ObjectMetadata,
+    /// The latest time any record in the object was written.
+    pub last_write_ms: i64,
+}
+
+/// One committed object's slice of a stream, as retention sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectSpan {
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub bytes: u64,
+    pub last_write_ms: i64,
 }
 
 /// Composite key for offset-sorted per-stream object indexes. Ordering
@@ -115,9 +130,9 @@ pub struct MetadataState {
     pub prepared: OrdMap<u64, i64>,
     pub prepared_by_deadline: OrdMap<(i64, u64), ()>,
     pub stream_set_objects: OrdMap<u64, StreamSetObjectRow>,
-    /// `(stream_id, range_start, object_id) → range_end`, so offset-range
-    /// lookups are prefix scans instead of full-table walks.
-    pub sso_ranges: OrdMap<StreamOffsetKey, u64>,
+    /// `(stream_id, range_start, object_id) → (range_end, bytes)`, so
+    /// offset-range lookups are prefix scans instead of full-table walks.
+    pub sso_ranges: OrdMap<StreamOffsetKey, (u64, u64)>,
     /// `(node_id, object_id)` index: a node's stream-set objects (recovery
     /// input) as a prefix scan.
     pub sso_by_node: OrdMap<(i32, u64), ()>,

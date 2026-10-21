@@ -4,13 +4,15 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use picomq_common::now_ms;
+use picomq_metadata::state::StreamRow;
 use picomq_metadata::{MetadataKvClient, ViewPublisher};
-use s3stream::{AppendContext, FetchContext, PendingAppend, RecordBatch, Stream};
+use s3stream::{AppendContext, FetchContext, PendingAppend, RecordBatch, Stream, StreamState};
 
 use crate::error::{ErrorKind, ServiceError};
 use crate::log::{Log, LogEntry, ProducerDecision, validate_producer};
 use crate::producer::{self, Admission};
 use crate::record::{self, BatchHeader, LogRecord};
+use crate::retention::Retention;
 use crate::streams::Streams;
 use crate::types::{
     AppendBatchResult, BatchReadResult, LogOffsets, LogRead, NumericProducer, OffsetToken,
@@ -614,15 +616,59 @@ impl S3StreamService {
 
         let entry = self.require_entry(&key)?;
         let stream = self.streams.ensure_open(entry.stream_id).await?;
+        self.trim_open(stream.as_ref(), new_start_offset).await
+    }
+
+    pub async fn apply_retention(
+        &self,
+        log: &Log,
+        retention: Retention,
+        now_ms: i64,
+    ) -> Result<(), ServiceError> {
+        let key = log.key();
+        let Some(entry) = self.entry(&key)? else {
+            return Ok(());
+        };
+        if self
+            .retention_start(entry.stream_id, retention, now_ms)
+            .is_none()
+        {
+            return Ok(());
+        }
+
+        let gate = self.gate_of(&key);
+        let _op = gate.op.lock().await;
+        let Some((row, start)) = self.retention_start(entry.stream_id, retention, now_ms) else {
+            return Ok(());
+        };
+
+        match (
+            self.streams.held(row.stream_id),
+            row.state,
+            u64::try_from(row.epoch),
+        ) {
+            (Some(stream), _, _) => self.trim_open(stream.as_ref(), start).await.map(drop),
+            (None, StreamState::Closed, Ok(epoch)) => {
+                self.streams.trim_closed(row.stream_id, epoch, start).await
+            }
+            (None, _, _) => Ok(()),
+        }
+    }
+
+    async fn trim_open(
+        &self,
+        stream: &dyn Stream,
+        new_start_offset: u64,
+    ) -> Result<u64, ServiceError> {
         let committed_end = self
             .views
             .load()
             .state
-            .get_stream(entry.stream_id)
+            .get_stream(stream.stream_id())
             .map(|m| m.end_offset)
             .unwrap_or(0);
 
-        let lower = live_start_offset(stream.as_ref());
+        let lower = live_start_offset(stream);
         let clamped = new_start_offset
             .max(lower)
             .min(stream.confirm_offset().min(committed_end));
@@ -630,7 +676,23 @@ impl S3StreamService {
             stream.trim(clamped).await?;
         }
 
-        Ok(live_start_offset(stream.as_ref()))
+        Ok(live_start_offset(stream))
+    }
+
+    fn retention_start(
+        &self,
+        stream_id: u64,
+        retention: Retention,
+        now_ms: i64,
+    ) -> Option<(StreamRow, u64)> {
+        let view = self.views.load();
+        let row = view.state.streams.get(&stream_id).copied()?;
+        if row.node_id != self.streams.node().node_id() {
+            return None;
+        }
+
+        let start = retention.start_offset(&view.state.object_spans(stream_id), now_ms)?;
+        (start > row.start_offset).then_some((row, start))
     }
 
     pub fn notify_closed(&self, log: &Log) {

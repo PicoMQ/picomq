@@ -6,7 +6,9 @@ use bytes::Bytes;
 use hdrhistogram::Histogram;
 use hdrhistogram::sync::{Recorder, SyncHistogram};
 use picomq_client::producer::{Pending, Producer, ProducerConfig};
-use picomq_client::{ClientError, DsClient, Live, PicoClient, Protocol, ReadLimits, StreamApi};
+use picomq_client::{
+    ClientError, CreateOptions, DsClient, Live, PicoClient, Protocol, ReadLimits, StreamApi,
+};
 
 use super::{BenchArgs, Counters, Schedule, emit, report_progress};
 use crate::io::note;
@@ -111,7 +113,7 @@ pub(super) async fn run(endpoint: &Target, args: BenchArgs) -> Result<i32, Clien
     for name in &names {
         clients[0]
             .api()
-            .create(name, payload.content_type, None)
+            .create(name, &CreateOptions::new(payload.content_type))
             .await?;
     }
     note(format!(

@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use picomq_protocol::config::{ConfigUpdate, TopicConfig};
+use picomq_protocol::schemas::Schema;
 
 use crate::error::Result;
 
@@ -29,6 +31,32 @@ pub struct StreamInfo {
     pub closed: bool,
     pub ttl_seconds: Option<u64>,
     pub expires_at: Option<String>,
+    pub retention_ms: Option<u64>,
+    pub retention_bytes: Option<u64>,
+    pub schema: Option<String>,
+    pub kafka_topic: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CreateOptions {
+    pub content_type: Option<String>,
+    pub partitions: Option<u32>,
+    pub ttl_seconds: Option<u64>,
+    pub expires_at: Option<String>,
+    pub retention_ms: Option<u64>,
+    pub retention_bytes: Option<u64>,
+    pub schema: Option<String>,
+    pub schema_validate: bool,
+    pub closed: bool,
+}
+
+impl CreateOptions {
+    pub fn new(content_type: impl Into<String>) -> Self {
+        Self {
+            content_type: Some(content_type.into()),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -93,12 +121,7 @@ pub trait StreamApi: Send + Sync {
 
     fn now(&self) -> Result<String>;
 
-    async fn create(
-        &self,
-        name: &str,
-        content_type: &str,
-        ttl_seconds: Option<u64>,
-    ) -> Result<bool>;
+    async fn create(&self, name: &str, options: &CreateOptions) -> Result<bool>;
 
     async fn head(&self, name: &str, partition: Option<u32>) -> Result<Option<StreamInfo>>;
 
@@ -124,4 +147,14 @@ pub trait StreamApi: Send + Sync {
     async fn close(&self, name: &str) -> Result<String>;
 
     async fn delete(&self, name: &str) -> Result<bool>;
+
+    async fn config(&self, name: &str) -> Result<Option<TopicConfig>>;
+
+    async fn update_config(&self, update: &ConfigUpdate) -> Result<TopicConfig>;
+
+    async fn put_schema(&self, name: &str, content_type: Option<&str>, body: Bytes) -> Result<()>;
+
+    async fn get_schema(&self, name: &str) -> Result<Option<Schema>>;
+
+    async fn delete_schema(&self, name: &str) -> Result<bool>;
 }

@@ -43,7 +43,7 @@ type Client interface {
 	Protocol() Protocol
 	Beginning() string
 	Now() (string, error)
-	Create(context.Context, string, string, time.Duration) (bool, error)
+	Create(context.Context, string, CreateOptions) (bool, error)
 	Head(context.Context, string) (*StreamInfo, error)
 	Append(context.Context, string, []AppendRecord) (AppendAck, error)
 	Read(context.Context, string, string, ReadOptions) (ReadPage, error)
@@ -51,6 +51,11 @@ type Client interface {
 	List(context.Context, string, uint64) (StreamListing, error)
 	Close(context.Context, string) (string, error)
 	Delete(context.Context, string) (bool, error)
+	Config(context.Context, string) (*TopicConfig, error)
+	UpdateConfig(context.Context, string, ConfigUpdate) (TopicConfig, error)
+	PutSchema(context.Context, string, string, []byte) error
+	GetSchema(context.Context, string) (*Schema, error)
+	DeleteSchema(context.Context, string) (bool, error)
 }
 
 var (
@@ -138,14 +143,18 @@ func (c *coreClient) closeIdleConnections() {
 }
 
 func (c *coreClient) streamURL(name string, query url.Values) string {
+	return c.pathURL(namePath(name), query)
+}
+
+func (c *coreClient) pathURL(path string, query url.Values) string {
 	u := *c.baseURL
-	path := name
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
 	u.Path = strings.TrimRight(c.baseURL.Path, "/") + path
 	u.RawQuery = query.Encode()
 	return u.String()
+}
+
+func namePath(name string) string {
+	return "/" + strings.TrimPrefix(name, "/")
 }
 
 func withPartition(query url.Values, partition *uint32) url.Values {
@@ -170,6 +179,11 @@ func (c *coreClient) send(ctx context.Context, request wireRequest) (*http.Respo
 	start, err := url.Parse(request.url)
 	if err != nil {
 		return nil, err
+	}
+	for _, segment := range strings.Split(start.EscapedPath(), "/") {
+		if segment == "." || segment == ".." {
+			return nil, &ClientError{Kind: ErrorBadRequest, Code: "bad_request", Message: start.EscapedPath() + " has a . or .. segment, which a URL cannot carry"}
+		}
 	}
 	key, keyed := c.routes.key(start)
 	current := start.String()

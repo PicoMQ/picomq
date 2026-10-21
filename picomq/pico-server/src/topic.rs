@@ -4,12 +4,13 @@ use bytes::{BufMut, Bytes, BytesMut};
 use picomq_common::now_ms;
 
 use crate::codec::{
-    expect_end, expect_version, get_bytes, get_i64, get_opt_i64, get_opt_str, get_str, get_u8,
-    get_u32, put_opt_i64, put_opt_str, put_str,
+    expect_end, expect_version, get_bytes, get_i64, get_opt_i64, get_opt_str, get_opt_u64, get_str,
+    get_u8, get_u32, put_opt_i64, put_opt_str, put_opt_u64, put_str,
 };
 use crate::error::{ErrorKind, ServiceError};
+use crate::retention::Retention;
 
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const MAX_KAFKA_NAME_LEN: usize = 249;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +105,7 @@ pub struct Topic {
     pub closed_by: Option<ClosedBy>,
     pub schema_name: Option<String>,
     pub schema_validate: bool,
+    pub retention: Retention,
 }
 
 impl Topic {
@@ -154,6 +156,8 @@ impl Topic {
         }
         put_opt_str(&mut buf, self.schema_name.as_deref());
         buf.put_u8(self.schema_validate as u8);
+        put_opt_u64(&mut buf, self.retention.ms);
+        put_opt_u64(&mut buf, self.retention.bytes);
         buf.freeze()
     }
 
@@ -179,6 +183,10 @@ impl Topic {
         };
         let schema_name = get_opt_str(&mut buf)?;
         let schema_validate = get_u8(&mut buf)? == 1;
+        let retention = Retention {
+            ms: get_opt_u64(&mut buf)?,
+            bytes: get_opt_u64(&mut buf)?,
+        };
         expect_end(buf, "topic")?;
 
         Ok(Self {
@@ -193,6 +201,7 @@ impl Topic {
             closed_by,
             schema_name,
             schema_validate,
+            retention,
         })
     }
 }
@@ -228,6 +237,10 @@ mod tests {
             }),
             schema_name: Some("orders".into()),
             schema_validate: true,
+            retention: Retention {
+                ms: Some(86_400_000),
+                bytes: Some(1 << 30),
+            },
         }
     }
 

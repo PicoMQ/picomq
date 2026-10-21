@@ -33,7 +33,7 @@ function report({ label, seconds, records, bytes }) {
 
 async function sequentialAppends(count, size) {
   const stream = pico.stream(`${base}/seq`)
-  await stream.create(CT)
+  await stream.create({ contentType: CT })
   const body = payload(size, 'seq')
   return timed(`sequential append (${size}B, 1 rec/req)`, async () => {
     for (let i = 0; i < count; i++) {
@@ -45,7 +45,7 @@ async function sequentialAppends(count, size) {
 
 async function producerRun(name, count, size, config) {
   const stream = pico.stream(`${base}/${name}`)
-  await stream.create(CT)
+  await stream.create({ contentType: CT })
   const producer = stream.producer(`bench-${name}`, config)
   const body = payload(size, name)
   const result = await timed(

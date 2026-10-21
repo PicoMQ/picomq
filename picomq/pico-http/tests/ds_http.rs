@@ -517,3 +517,34 @@ async fn partitions_are_addressed_one_at_a_time() {
     let without_partition = http.get(format!("{url}?offset=-1")).send().await.unwrap();
     assert_eq!(without_partition.status(), 400);
 }
+
+#[tokio::test]
+async fn create_sets_partitions_and_retention() {
+    let server = ds_server().await;
+    let http = client();
+    let url = format!("{}/spread", server.base_url);
+
+    let created = http
+        .put(&url)
+        .header("Content-Type", "text/plain")
+        .header("Stream-Partitions", "3")
+        .header("Stream-Retention-Ms", "60000")
+        .header("Stream-Retention-Bytes", "4096")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+
+    let head = http.head(&url).send().await.unwrap();
+    assert_eq!(head.headers()["Stream-Partitions"], "3");
+    assert_eq!(head.headers()["Stream-Retention-Ms"], "60000");
+    assert_eq!(head.headers()["Stream-Retention-Bytes"], "4096");
+
+    let invalid = http
+        .put(format!("{}/other", server.base_url))
+        .header("Stream-Retention-Bytes", "lots")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), 400);
+}

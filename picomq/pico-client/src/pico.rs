@@ -1,8 +1,7 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use bytes::Bytes;
 use picomq_protocol::WireRequest;
+use picomq_protocol::config::{ConfigUpdate, TopicConfig};
 use picomq_protocol::groups::{
     AssignmentRequest, AssignmentResponse, CommitRequest, DeleteGroupRequest, DescribeRequest,
     FetchOffsetsRequest, GroupDescription, GroupListing, HeartbeatRequest, JoinRequest,
@@ -10,17 +9,20 @@ use picomq_protocol::groups::{
 };
 use picomq_protocol::pico::{
     AppendRequest, AppendResponse, CloseRequest, CloseResponse, CreateRequest, CreateResponse,
-    DeleteRequest, DeleteResponse, HeadRequest, HeadResponse, LIVE_LONG_POLL, ListRequest, Listing,
-    ReadRequest, ReadResponse, SEQ_BEGINNING, TrimRequest, TrimResponse, decode_error,
+    DEFAULT_CT, DeleteRequest, DeleteResponse, HeadRequest, HeadResponse, LIVE_LONG_POLL,
+    ListRequest, Listing, ReadRequest, ReadResponse, SEQ_BEGINNING, TrimRequest, TrimResponse,
+    decode_error,
 };
 use picomq_protocol::record::PicoRecord;
+use picomq_protocol::schemas::Schema;
 use reqwest::Response;
 
-use crate::error::{ClientError, ErrorKind, Result};
+use crate::error::{ClientError, Result};
 use crate::retry::RetryPolicy;
-use crate::routes::Routes;
+use crate::transport::{Transport, default_http, invalid_response};
 use crate::types::{
-    AppendAck, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo, StreamListing,
+    AppendAck, CreateOptions, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo,
+    StreamListing,
 };
 
 pub use picomq_protocol::pico::Producer as ProducerRef;
@@ -34,10 +36,8 @@ pub struct ProducerAck {
 
 #[derive(Clone)]
 pub struct PicoClient {
-    http: reqwest::Client,
-    base_url: String,
+    transport: Transport,
     retry: RetryPolicy,
-    routes: Arc<Routes>,
 }
 
 impl PicoClient {
@@ -51,10 +51,8 @@ impl PicoClient {
 
     pub fn with_http(endpoint: &str, http: reqwest::Client, retry: RetryPolicy) -> Self {
         Self {
-            http,
-            base_url: endpoint.trim_end_matches('/').to_owned(),
+            transport: Transport::new(endpoint, http),
             retry,
-            routes: Arc::new(Routes::new(endpoint)),
         }
     }
 
@@ -190,14 +188,7 @@ impl PicoClient {
     }
 
     async fn call(&self, wire: WireRequest) -> Result<Response> {
-        let ok = wire.ok;
-        let response = send(
-            &self.http,
-            &self.routes,
-            build(&self.http, &self.base_url, wire),
-        )
-        .await?;
-        expect(response, ok).await
+        self.transport.call(wire, decode_error).await
     }
 
     async fn head_once(&self, name: &str, partition: Option<u32>) -> Result<Option<StreamInfo>> {
@@ -219,6 +210,10 @@ impl PicoClient {
             closed: head.closed,
             ttl_seconds: head.ttl_seconds,
             expires_at: head.expires_at,
+            retention_ms: head.retention_ms,
+            retention_bytes: head.retention_bytes,
+            schema: head.schema,
+            kafka_topic: head.kafka_topic,
         }))
     }
 
@@ -286,6 +281,10 @@ impl PicoClient {
                     closed: entry.closed,
                     ttl_seconds: entry.ttl_seconds,
                     expires_at: entry.expires_at,
+                    retention_ms: None,
+                    retention_bytes: None,
+                    schema: None,
+                    kafka_topic: None,
                 })
                 .collect(),
             has_more: listing.has_more,
@@ -309,14 +308,19 @@ impl StreamApi for PicoClient {
         ))
     }
 
-    async fn create(
-        &self,
-        name: &str,
-        content_type: &str,
-        ttl_seconds: Option<u64>,
-    ) -> Result<bool> {
-        let mut request = CreateRequest::new(name, content_type);
-        request.ttl_seconds = ttl_seconds;
+    async fn create(&self, name: &str, options: &CreateOptions) -> Result<bool> {
+        let content_type = options.content_type.as_deref().unwrap_or(DEFAULT_CT);
+        let request = CreateRequest {
+            ttl_seconds: options.ttl_seconds,
+            expires_at: options.expires_at.as_deref(),
+            closed: options.closed,
+            schema: options.schema.as_deref(),
+            schema_validate: options.schema_validate,
+            partitions: options.partitions,
+            retention_ms: options.retention_ms,
+            retention_bytes: options.retention_bytes,
+            ..CreateRequest::new(name, content_type)
+        };
         let response = self.call(request.encode()).await?;
         Ok(CreateResponse::decode(response.status().as_u16(), response.headers()).created)
     }
@@ -376,6 +380,25 @@ impl StreamApi for PicoClient {
         let response = self.call(DeleteRequest { stream: name }.encode()).await?;
         Ok(DeleteResponse::decode(response.status().as_u16()).found)
     }
+    async fn config(&self, name: &str) -> Result<Option<TopicConfig>> {
+        self.retry.run(|| self.transport.config(name)).await
+    }
+
+    async fn update_config(&self, update: &ConfigUpdate) -> Result<TopicConfig> {
+        self.transport.update_config(update).await
+    }
+
+    async fn put_schema(&self, name: &str, content_type: Option<&str>, body: Bytes) -> Result<()> {
+        self.transport.put_schema(name, content_type, body).await
+    }
+
+    async fn get_schema(&self, name: &str) -> Result<Option<Schema>> {
+        self.retry.run(|| self.transport.get_schema(name)).await
+    }
+
+    async fn delete_schema(&self, name: &str) -> Result<bool> {
+        self.transport.delete_schema(name).await
+    }
 }
 
 fn wire_records(records: &[Bytes]) -> Vec<PicoRecord> {
@@ -388,100 +411,4 @@ fn wire_records(records: &[Bytes]) -> Vec<PicoRecord> {
 fn seq_string(seq: Option<u64>) -> String {
     seq.map(|v| v.to_string())
         .unwrap_or_else(|| SEQ_BEGINNING.to_owned())
-}
-
-fn invalid_response(e: picomq_protocol::CodecError) -> ClientError {
-    ClientError::new(0, ErrorKind::Other, "invalid_response").with_message(Some(e.to_string()))
-}
-
-pub(crate) fn default_http() -> Result<reqwest::Client> {
-    crate::http_client(&crate::ClientConfig::default())
-}
-
-pub(crate) fn build(
-    http: &reqwest::Client,
-    base_url: &str,
-    wire: WireRequest,
-) -> reqwest::RequestBuilder {
-    let mut builder = http.request(wire.method, format!("{base_url}{}", wire.path_and_query));
-    for (name, value) in wire.headers {
-        builder = builder.header(name, value);
-    }
-    if !wire.body.is_empty() {
-        builder = builder.body(wire.body);
-    }
-    builder
-}
-
-const MAX_REDIRECT_HOPS: usize = 5;
-
-// Re-issues the request at the Location so every header, including
-// Authorization, rides each redirect hop.
-pub(crate) async fn send(
-    http: &reqwest::Client,
-    routes: &Routes,
-    builder: reqwest::RequestBuilder,
-) -> Result<Response> {
-    let mut request = builder.build()?;
-    let key = routes.key(request.url());
-    if let Some(key) = &key {
-        routes.resolve(key, request.url_mut());
-    }
-    let deleting = request.method() == reqwest::Method::DELETE;
-    for _ in 0..MAX_REDIRECT_HOPS {
-        let base = request.url().clone();
-        let retry = request.try_clone();
-        let response = match http.execute(request).await {
-            Ok(response) => response,
-            Err(error) => {
-                if let Some(key) = &key {
-                    routes.forget(key);
-                }
-                return Err(error.into());
-            }
-        };
-        let status = response.status().as_u16();
-        if status != 307 && status != 308 {
-            if deleting
-                && response.status().is_success()
-                && let Some(key) = &key
-            {
-                routes.forget(key);
-            }
-            return Ok(response);
-        }
-        let Some(target) = header(&response, "location").and_then(|loc| base.join(&loc).ok())
-        else {
-            return Err(ClientError::new(
-                status,
-                ErrorKind::Other,
-                "redirect_without_location",
-            ));
-        };
-        if let Some(key) = &key {
-            routes.learn(key, &target);
-        }
-        let mut next = retry.expect("bodies are Bytes, always clonable");
-        *next.url_mut() = target;
-        request = next;
-    }
-    Err(ClientError::new(0, ErrorKind::Other, "too_many_redirects"))
-}
-
-pub(crate) fn header(response: &Response, name: &str) -> Option<String> {
-    response
-        .headers()
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
-}
-
-pub(crate) async fn expect(response: Response, expected: &[u16]) -> Result<Response> {
-    let status = response.status().as_u16();
-    if expected.contains(&status) {
-        return Ok(response);
-    }
-    let headers = response.headers().clone();
-    let body = response.text().await.unwrap_or_default();
-    Err(decode_error(status, &headers, &body).into())
 }

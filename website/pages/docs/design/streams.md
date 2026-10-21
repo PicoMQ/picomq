@@ -56,7 +56,7 @@ Everything about a topic lives in the metadata KV, part of the replicated state 
 
 Creating a name that exists with the same settings returns the existing topic. Different settings are a conflict. Two nodes racing to create one name settle on the third step, and the loser removes the partitions it made.
 
-Partitions can be added later, never removed, up to `10000` in one step.
+Partitions can be added later, never removed, up to `10000` in one step, through Kafka's `CreatePartitions` or the HTTP [topic config](/docs/api#topic-config). Each new partition gets its log as in step 2, and the topic record is updated last, so a failed grow leaves the topic as it was.
 
 ## Epochs
 
@@ -80,8 +80,23 @@ Two kinds of closing are easy to confuse. **Sealing** a topic is a client action
 | First request for a partition | Its owner opens the internal stream at the next epoch |
 | Release | The owner closes the internal stream, uploading buffered records first. It happens on [transfer](/docs/design/transfers), [shutdown](/docs/design/failover#clean-shutdown), and after a failed append. The next request reopens it at the next epoch |
 | Seal | The topic is marked closed. Appends are refused, reads continue to the end |
+| Retention | Old data is trimmed from each partition and the topic stays, see [Retention](#retention) |
 | TTL | A topic with a TTL expires when nothing appends to it or reads it for that long. One with an expiry time expires at that time. The lease holder deletes expired topics |
 | Delete | The topic, id, log, and index entries are removed, so the name is reusable at once. The owner then destroys each internal stream, and its objects go to [garbage collection](/docs/design/gc) |
+
+## Retention
+
+A topic can limit how much each partition keeps, by age, by size, or both. Unset means unlimited, which is the default.
+
+| Limit | Keeps |
+| --- | --- |
+| `retention.ms` | Data written within that many milliseconds |
+| `retention.bytes` | At least the newest that many bytes |
+
+- **By write time.** Age is when PicoMQ wrote the data, not the timestamps producers put on records. Backfilled data is kept for the full period after it arrives.
+- **Whole objects, oldest first.** Retention drops committed objects, as Kafka drops segments, and stops at the first one it keeps. By age, an object expires once the latest write it holds is older than the limit. By size, the oldest object goes only while the rest still holds at least the limit, so a partition settles between the limit and the limit plus one object. Data still in the WAL never counts.
+- **Enforced by each owner.** Every node sweeps the topics that set retention and trims the partitions it owns. It decides from object metadata alone, never reading data, and trims a closed partition without opening it.
+- **Reclaimed at once.** A trim marks the stream objects below the new start for [garbage collection](/docs/design/gc). Consumers behind the start get `OFFSET_OUT_OF_RANGE` over Kafka.
 
 ## Producers
 

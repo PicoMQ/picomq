@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use picomq_client::{
-    Assignment, CommittedOffset, GroupConfig, GroupMember, JoinRequest, MemberFence, Offsets,
-    PicoClient, StreamApi,
+    Assignment, CommittedOffset, CreateOptions, GroupConfig, GroupMember, JoinRequest, MemberFence,
+    Offsets, PicoClient, StreamApi,
 };
 use picomq_http::HttpProtocol as ServeProtocol;
 use picomq_runtime::{KafkaConfig, MetaBackend, ServerConfig};
@@ -65,7 +65,10 @@ async fn operations_join_commit_fetch_describe_and_leave() {
     let dir = tempfile::tempdir().unwrap();
     let (server, client) = start(dir.path()).await;
     for stream in ["/g/a", "/g/b"] {
-        client.create(stream, "text/plain", None).await.unwrap();
+        client
+            .create(stream, &CreateOptions::new("text/plain"))
+            .await
+            .unwrap();
     }
 
     let joined = client
@@ -156,7 +159,10 @@ async fn members_share_streams_and_follow_rebalances() {
     let (server, client) = start(dir.path()).await;
     let streams = names(&["/m/a", "/m/b", "/m/c", "/m/d"]);
     for stream in &streams {
-        client.create(stream, "text/plain", None).await.unwrap();
+        client
+            .create(stream, &CreateOptions::new("text/plain"))
+            .await
+            .unwrap();
     }
 
     let first = GroupMember::join(Arc::clone(&client), "shared", streams.clone(), config())
@@ -216,7 +222,10 @@ async fn members_share_streams_and_follow_rebalances() {
 async fn expired_member_rejoins_with_a_fresh_id() {
     let dir = tempfile::tempdir().unwrap();
     let (server, client) = start(dir.path()).await;
-    client.create("/x/a", "text/plain", None).await.unwrap();
+    client
+        .create("/x/a", &CreateOptions::new("text/plain"))
+        .await
+        .unwrap();
 
     let member = GroupMember::join(Arc::clone(&client), "expiry", names(&["/x/a"]), config())
         .await

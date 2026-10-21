@@ -27,7 +27,7 @@ func main() {
 		log.Fatal(err)
 	}
 	stream := client.Stream("/orders")
-	_, err = stream.Create(ctx, "application/json", 0)
+	_, err = stream.Create(ctx, picomq.CreateOptions{ContentType: "application/json"})
 	if err != nil {
 		log.Fatal(err)
 	}

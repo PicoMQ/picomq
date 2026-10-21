@@ -3,7 +3,6 @@ package picomq
 import (
 	"context"
 	"io"
-	"time"
 )
 
 type Stream struct {
@@ -28,12 +27,12 @@ func (s *PicoStream) Partition(index uint32) *PicoPartition {
 	return &PicoPartition{client: s.client, name: s.name, index: index}
 }
 
-func (s *Stream) Create(ctx context.Context, contentType string, ttl time.Duration) (bool, error) {
-	return s.client.Create(ctx, s.name, contentType, ttl)
+func (s *Stream) Create(ctx context.Context, options CreateOptions) (bool, error) {
+	return s.client.Create(ctx, s.name, options)
 }
 
-func (s *PicoStream) Create(ctx context.Context, contentType string, ttl time.Duration) (bool, error) {
-	return s.client.Create(ctx, s.name, contentType, ttl)
+func (s *PicoStream) Create(ctx context.Context, options CreateOptions) (bool, error) {
+	return s.client.Create(ctx, s.name, options)
 }
 
 func (s *Stream) Head(ctx context.Context) (*StreamInfo, error) {

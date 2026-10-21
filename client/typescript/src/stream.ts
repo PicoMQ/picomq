@@ -5,6 +5,7 @@ import type {
   AppendInput,
   AppendOptions,
   CallOptions,
+  CreateOptions,
   Live,
   PartitionOptions,
   ProducerAck,
@@ -25,8 +26,8 @@ export class Stream {
     readonly name: string,
   ) {}
 
-  create(contentType: string, ttlSeconds?: number, options?: CallOptions): Promise<boolean> {
-    return this.api.create(this.name, contentType, ttlSeconds, options)
+  create(options?: CreateOptions): Promise<boolean> {
+    return this.api.create(this.name, options)
   }
 
   head(options?: PartitionOptions): Promise<StreamInfo | null> {

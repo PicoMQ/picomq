@@ -68,14 +68,19 @@ paths:
       tags: [streams]
       summary: Create a topic
       description: >
-        Creates a single-partition topic. Idempotent, and takes no body: append
-        with POST. Names may contain slashes, the whole path is the name.
+        Creates a topic, with one partition unless Pico-Partitions asks for more.
+        Idempotent, and takes no body: append with POST. Names may contain
+        slashes, the whole path is the name.
       operationId: createStream
       parameters:
         - name: Content-Type
           in: header
           description: Stored as the stream's content type.
           schema: { type: string, default: application/octet-stream }
+        - name: Pico-Partitions
+          in: header
+          description: Number of partitions. More can be added later through /_streams.
+          schema: { type: integer, minimum: 1, default: 1 }
         - name: Pico-TTL
           in: header
           description: Seconds without appends or reads after which the whole topic expires.
@@ -84,6 +89,14 @@ paths:
           in: header
           description: Absolute expiry time (RFC 3339 or unix ms). Not with Pico-TTL.
           schema: { type: string }
+        - name: Pico-Retention-Ms
+          in: header
+          description: Keep each partition's data for at most this many milliseconds, by write time.
+          schema: { type: integer, minimum: 1 }
+        - name: Pico-Retention-Bytes
+          in: header
+          description: Keep at least the newest this many bytes of each partition, dropping whole objects only while the rest still meets the limit.
+          schema: { type: integer, minimum: 1 }
         - name: Pico-Closed
           in: header
           description: Create the stream already sealed.
@@ -327,7 +340,7 @@ paths:
       operationId: getStreamConfig
       responses:
         "200":
-          description: Schema bind, validation flag, partition count, and Kafka name.
+          description: The topic's settings. Unset ones are null.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TopicConfig" }
@@ -339,7 +352,7 @@ paths:
           description: No such stream.
     patch:
       tags: [stream-config]
-      summary: Update a topic's schema bind
+      summary: Change a topic's settings
       operationId: patchStreamConfig
       requestBody:
         required: true
@@ -350,6 +363,11 @@ paths:
               properties:
                 schema: { type: [string, "null"] }
                 schemaValidate: { type: boolean }
+                retentionMs: { type: [integer, "null"], minimum: 1 }
+                retentionBytes: { type: [integer, "null"], minimum: 1 }
+                partitions:
+                  type: integer
+                  description: Grows the topic to this many partitions, at most 10000 more at a time. Never shrinks it.
       responses:
         "200":
           description: Updated config.
@@ -357,7 +375,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TopicConfig" }
         "400":
-          description: Empty patch, unknown schema, an attempt to set kafkaTopic, or invalid body.
+          description: Empty patch, unknown schema, a partition count that does not grow the topic, an attempt to set kafkaTopic, or invalid body.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MessageError" }
@@ -1175,8 +1193,10 @@ components:
       properties:
         schema: { type: [string, "null"] }
         schemaValidate: { type: boolean }
-        partitions: { type: integer }
+        partitions: { type: integer, minimum: 1 }
         kafkaTopic: { type: [string, "null"], description: Follows from the name. Read only. }
+        retentionMs: { type: [integer, "null"], minimum: 1, description: Null when unlimited. }
+        retentionBytes: { type: [integer, "null"], minimum: 1, description: Null when unlimited. }
     Offsets:
       type: object
       additionalProperties:

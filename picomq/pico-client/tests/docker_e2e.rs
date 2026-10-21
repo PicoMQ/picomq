@@ -12,8 +12,8 @@ use bytes::Bytes;
 use picomq_client::pico::ProducerRef;
 use picomq_client::producer::{Producer, ProducerConfig};
 use picomq_client::{
-    Assignment, ClientConfig, CommittedOffset, ErrorKind, GroupConfig, GroupMember, JoinRequest,
-    Live, MemberFence, Offsets, PicoClient, Protocol, ReadLimits, StreamApi,
+    Assignment, ClientConfig, CommittedOffset, CreateOptions, ErrorKind, GroupConfig, GroupMember,
+    JoinRequest, Live, MemberFence, Offsets, PicoClient, Protocol, ReadLimits, StreamApi,
 };
 
 fn endpoint() -> String {
@@ -75,8 +75,18 @@ async fn read_bodies(client: &PicoClient, name: &str) -> Vec<String> {
 async fn rust_client_lifecycle() {
     let client = pico();
     let name = unique("life");
-    assert!(client.create(&name, "text/plain", None).await.unwrap());
-    assert!(!client.create(&name, "text/plain", None).await.unwrap());
+    assert!(
+        client
+            .create(&name, &CreateOptions::new("text/plain"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !client
+            .create(&name, &CreateOptions::new("text/plain"))
+            .await
+            .unwrap()
+    );
 
     let ack = client
         .append(
@@ -110,7 +120,16 @@ async fn rust_client_lifecycle() {
 async fn rust_client_ttl_and_head() {
     let client = pico();
     let name = unique("ttl");
-    client.create(&name, "text/plain", Some(2)).await.unwrap();
+    client
+        .create(
+            &name,
+            &CreateOptions {
+                ttl_seconds: Some(2),
+                ..CreateOptions::new("text/plain")
+            },
+        )
+        .await
+        .unwrap();
     let head = client.head(&name, None).await.unwrap().unwrap();
     assert_eq!(head.ttl_seconds, Some(2));
 
@@ -132,7 +151,10 @@ async fn rust_client_ttl_and_head() {
 async fn rust_client_gap_duplicate_and_fence() {
     let client = pico();
     let name = unique("gap");
-    client.create(&name, "text/plain", None).await.unwrap();
+    client
+        .create(&name, &CreateOptions::new("text/plain"))
+        .await
+        .unwrap();
 
     let first = client
         .append_as(
@@ -216,7 +238,10 @@ async fn rust_client_gap_duplicate_and_fence() {
 async fn rust_client_session_order() {
     let client = Arc::new(pico());
     let name = unique("order");
-    client.create(&name, "text/plain", None).await.unwrap();
+    client
+        .create(&name, &CreateOptions::new("text/plain"))
+        .await
+        .unwrap();
     let producer = Producer::new(
         Arc::clone(&client),
         &name,
@@ -245,7 +270,10 @@ async fn rust_client_session_order() {
 #[ignore]
 async fn rust_client_concurrent_producers() {
     let name = unique("mp");
-    pico().create(&name, "text/plain", None).await.unwrap();
+    pico()
+        .create(&name, &CreateOptions::new("text/plain"))
+        .await
+        .unwrap();
     let writers = 6;
     let each = 30;
     let mut tasks = Vec::new();
@@ -283,7 +311,10 @@ async fn rust_client_concurrent_producers() {
 async fn rust_and_trait_clients_agree() {
     let boxed = picomq_client::connect_with(Protocol::Pico, &endpoint(), &config()).unwrap();
     let name = unique("trait");
-    boxed.create(&name, "text/plain", None).await.unwrap();
+    boxed
+        .create(&name, &CreateOptions::new("text/plain"))
+        .await
+        .unwrap();
     boxed
         .append(
             &name,
@@ -359,7 +390,10 @@ async fn rust_client_groups_join_commit_describe_leave() {
     let a = unique("ga");
     let b = unique("gb");
     for stream in [&a, &b] {
-        client.create(stream, "text/plain", None).await.unwrap();
+        client
+            .create(stream, &CreateOptions::new("text/plain"))
+            .await
+            .unwrap();
     }
     let group = unique("ops").trim_start_matches('/').to_owned();
 
@@ -451,7 +485,10 @@ async fn rust_client_groups_rebalance_and_expiry() {
     let client = Arc::new(pico());
     let streams = names(&[&unique("ma"), &unique("mb"), &unique("mc"), &unique("md")]);
     for stream in &streams {
-        client.create(stream, "text/plain", None).await.unwrap();
+        client
+            .create(stream, &CreateOptions::new("text/plain"))
+            .await
+            .unwrap();
     }
     let group = unique("shared").trim_start_matches('/').to_owned();
 
@@ -509,7 +546,10 @@ async fn rust_client_groups_rebalance_and_expiry() {
 
     let expiry = unique("expiry").trim_start_matches('/').to_owned();
     let stream = unique("xa");
-    client.create(&stream, "text/plain", None).await.unwrap();
+    client
+        .create(&stream, &CreateOptions::new("text/plain"))
+        .await
+        .unwrap();
 
     let member = GroupMember::join(
         Arc::clone(&client),
@@ -542,7 +582,10 @@ async fn rust_client_groups_follow_cluster_redirects() {
     let follower = pico_at(&other);
 
     let stream = unique("cluster-g");
-    owner.create(&stream, "text/plain", None).await.unwrap();
+    owner
+        .create(&stream, &CreateOptions::new("text/plain"))
+        .await
+        .unwrap();
     let group = unique("cluster-ops").trim_start_matches('/').to_owned();
 
     let joined = owner

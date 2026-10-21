@@ -806,3 +806,111 @@ async fn shutdown_ends_live_reads_instead_of_waiting_on_them() {
     assert_eq!(poll.await.unwrap().unwrap().status(), 503);
     assert!(subscription.bytes().await.is_ok(), "the subscription ended");
 }
+
+#[tokio::test]
+async fn retention_is_set_on_create_and_changed_through_stream_config() {
+    let server = picomq_server().await;
+    let client = reqwest::Client::new();
+    let base = &server.base_url;
+
+    let created = client
+        .put(format!("{base}/retained"))
+        .header("Pico-Retention-Ms", "60000")
+        .header("Pico-Retention-Bytes", "4096")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    assert_eq!(created.headers()["Pico-Retention-Ms"], "60000");
+    let head = client
+        .head(format!("{base}/retained"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.headers()["Pico-Retention-Bytes"], "4096");
+
+    let cleared: Value = client
+        .patch(format!("{base}/_streams/retained"))
+        .json(&serde_json::json!({"retentionMs": null}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cleared["retentionMs"], Value::Null);
+    assert_eq!(cleared["retentionBytes"], 4096);
+
+    let zero = client
+        .put(format!("{base}/other"))
+        .header("Pico-Retention-Ms", "0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(zero.status(), 400);
+    let negative = client
+        .patch(format!("{base}/_streams/retained"))
+        .json(&serde_json::json!({"retentionBytes": -5}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(negative.status(), 400);
+}
+
+#[tokio::test]
+async fn partitions_are_set_on_create_and_grown_through_stream_config() {
+    let server = picomq_server().await;
+    let client = reqwest::Client::new();
+    let base = &server.base_url;
+
+    let created = client
+        .put(format!("{base}/spread"))
+        .header("Pico-Partitions", "2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let head = client.head(format!("{base}/spread")).send().await.unwrap();
+    assert_eq!(head.headers()["Pico-Partitions"], "2");
+
+    let grown: Value = client
+        .patch(format!("{base}/_streams/spread"))
+        .json(&serde_json::json!({"partitions": 4}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(grown["partitions"], 4);
+    let appended = client
+        .post(format!("{base}/spread?partition=3"))
+        .header("Content-Type", "text/plain")
+        .body("new")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(appended.status(), 200);
+
+    for partitions in [
+        serde_json::json!(4),
+        serde_json::json!(3),
+        serde_json::json!(-1),
+    ] {
+        let refused = client
+            .patch(format!("{base}/_streams/spread"))
+            .json(&serde_json::json!({ "partitions": partitions }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 400, "partitions {partitions}");
+    }
+
+    let zero = client
+        .put(format!("{base}/empty"))
+        .header("Pico-Partitions", "0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(zero.status(), 400);
+}

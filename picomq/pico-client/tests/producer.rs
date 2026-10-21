@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use picomq_client::producer::{Producer, ProducerConfig};
-use picomq_client::{ClientConfig, ErrorKind, Live, PicoClient, ReadLimits, StreamApi};
+use picomq_client::{
+    ClientConfig, CreateOptions, ErrorKind, Live, PicoClient, ReadLimits, StreamApi,
+};
 use picomq_http::HttpProtocol as ServeProtocol;
 use picomq_runtime::{KafkaConfig, MetaBackend, ServerConfig};
 
@@ -61,7 +63,7 @@ async fn records_land_in_send_order() {
     let dir = tempfile::tempdir().unwrap();
     let (server, client) = start(dir.path()).await;
     client
-        .create("/streams/ordered", "text/plain", None)
+        .create("/streams/ordered", &CreateOptions::new("text/plain"))
         .await
         .unwrap();
 
@@ -105,7 +107,7 @@ async fn records_are_batched() {
     let dir = tempfile::tempdir().unwrap();
     let (server, client) = start(dir.path()).await;
     client
-        .create("/streams/batched", "text/plain", None)
+        .create("/streams/batched", &CreateOptions::new("text/plain"))
         .await
         .unwrap();
 
@@ -150,7 +152,7 @@ async fn resending_a_batch_applies_it_once() {
     let dir = tempfile::tempdir().unwrap();
     let (server, client) = start(dir.path()).await;
     client
-        .create("/streams/dedupe", "text/plain", None)
+        .create("/streams/dedupe", &CreateOptions::new("text/plain"))
         .await
         .unwrap();
 
@@ -198,7 +200,7 @@ async fn a_batch_out_of_order_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let (server, client) = start(dir.path()).await;
     client
-        .create("/streams/gap", "text/plain", None)
+        .create("/streams/gap", &CreateOptions::new("text/plain"))
         .await
         .unwrap();
 
@@ -250,7 +252,7 @@ async fn a_record_larger_than_the_budget_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let (server, client) = start(dir.path()).await;
     client
-        .create("/streams/budget", "text/plain", None)
+        .create("/streams/budget", &CreateOptions::new("text/plain"))
         .await
         .unwrap();
 
@@ -279,7 +281,7 @@ async fn flush_waits_for_durability() {
     let dir = tempfile::tempdir().unwrap();
     let (server, client) = start(dir.path()).await;
     client
-        .create("/streams/flush", "text/plain", None)
+        .create("/streams/flush", &CreateOptions::new("text/plain"))
         .await
         .unwrap();
 

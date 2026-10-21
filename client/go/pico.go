@@ -12,14 +12,9 @@ import (
 
 func (c *PicoClient) Stream(name string) *PicoStream { return &PicoStream{client: c, name: name} }
 
-func (c *PicoClient) Create(ctx context.Context, name, contentType string, ttl time.Duration) (created bool, err error) {
+func (c *PicoClient) Create(ctx context.Context, name string, options CreateOptions) (created bool, err error) {
 	err = c.core.run(ctx, func() error {
-		headers := make(http.Header)
-		headers.Set("Content-Type", contentType)
-		if ttl > 0 {
-			headers.Set("Pico-TTL", strconv.FormatInt(durationSecondsCeil(ttl), 10))
-		}
-		response, callErr := c.core.send(ctx, wireRequest{method: http.MethodPut, url: c.core.streamURL(name, nil), headers: headers})
+		response, callErr := c.core.send(ctx, wireRequest{method: http.MethodPut, url: c.core.streamURL(name, nil), headers: options.headers("Pico")})
 		if callErr != nil {
 			return callErr
 		}
@@ -59,6 +54,8 @@ func (c *PicoClient) head(ctx context.Context, name string, partition *uint32) (
 			TTL:         time.Duration(headerUint(response.Header, "Pico-TTL")) * time.Second,
 			ExpiresAt:   response.Header.Get("Pico-Expires-At"),
 		}
+		readSettings(response.Header, "Pico", info)
+		info.KafkaTopic = response.Header.Get("Pico-Kafka-Topic")
 		return nil
 	})
 	return

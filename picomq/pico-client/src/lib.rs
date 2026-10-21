@@ -1,5 +1,6 @@
 //! PicoMQ client: the Pico and Durable Streams protocols over HTTP.
 
+mod control;
 pub mod ds;
 pub mod error;
 pub mod group;
@@ -7,19 +8,23 @@ pub mod pico;
 pub mod producer;
 pub mod retry;
 mod routes;
+mod transport;
 pub mod types;
 
 pub use ds::DsClient;
 pub use error::{ClientError, ErrorKind, Result};
 pub use group::{Assignment, GroupConfig, GroupMember};
 pub use pico::PicoClient;
+pub use picomq_protocol::config::{ConfigUpdate, TopicConfig};
 pub use picomq_protocol::groups::{
     CommittedOffset, GroupDescription, JoinRequest, JoinResponse, MemberDescription, MemberFence,
     Offsets,
 };
+pub use picomq_protocol::schemas::Schema;
 pub use retry::RetryPolicy;
 pub use types::{
-    AppendAck, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo, StreamListing,
+    AppendAck, CreateOptions, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo,
+    StreamListing,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -47,7 +52,7 @@ pub fn connect_with(
 
 pub fn http_client(config: &ClientConfig) -> Result<reqwest::Client> {
     // Redirects stay off: reqwest strips Authorization on cross-origin 307s,
-    // so the clients follow ownership redirects themselves (see `pico::send`).
+    // so the clients follow ownership redirects themselves (see `transport::send`).
     let mut builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(65))

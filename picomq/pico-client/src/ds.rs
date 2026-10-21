@@ -1,26 +1,26 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use picomq_protocol::WireRequest;
+use picomq_protocol::config::{ConfigUpdate, TopicConfig};
 use picomq_protocol::ds::{
-    AppendRequest, AppendResponse, CloseRequest, CreateRequest, CreateResponse, DeleteRequest,
-    DeleteResponse, HeadRequest, HeadResponse, LIVE_LONG_POLL, OFFSET_BEGINNING, OFFSET_NOW,
-    ReadRequest, ReadResponse, decode_error,
+    AppendRequest, AppendResponse, CloseRequest, CreateRequest, CreateResponse, DEFAULT_CT,
+    DeleteRequest, DeleteResponse, HeadRequest, HeadResponse, LIVE_LONG_POLL, OFFSET_BEGINNING,
+    OFFSET_NOW, ReadRequest, ReadResponse, decode_error,
 };
+use picomq_protocol::schemas::Schema;
 use reqwest::Response;
 
 use crate::error::{ClientError, Result};
-use crate::pico::{build, default_http, send};
 use crate::retry::RetryPolicy;
-use crate::routes::Routes;
+use crate::transport::{Transport, default_http};
 use crate::types::{
-    AppendAck, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo, StreamListing,
+    AppendAck, CreateOptions, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo,
+    StreamListing,
 };
 
 pub struct DsClient {
-    http: reqwest::Client,
-    base_url: String,
+    transport: Transport,
     retry: RetryPolicy,
-    routes: Routes,
 }
 
 impl DsClient {
@@ -34,22 +34,13 @@ impl DsClient {
 
     pub fn with_http(endpoint: &str, http: reqwest::Client, retry: RetryPolicy) -> Self {
         Self {
-            http,
-            base_url: endpoint.trim_end_matches('/').to_owned(),
+            transport: Transport::new(endpoint, http),
             retry,
-            routes: Routes::new(endpoint),
         }
     }
 
     async fn call(&self, wire: WireRequest) -> Result<Response> {
-        let ok = wire.ok;
-        let response = send(
-            &self.http,
-            &self.routes,
-            build(&self.http, &self.base_url, wire),
-        )
-        .await?;
-        expect(response, ok).await
+        self.transport.call(wire, decode_error).await
     }
 
     async fn head_once(&self, name: &str, partition: Option<u32>) -> Result<Option<StreamInfo>> {
@@ -74,6 +65,10 @@ impl DsClient {
             closed: head.closed,
             ttl_seconds: head.ttl_seconds,
             expires_at: head.expires_at,
+            retention_ms: head.retention_ms,
+            retention_bytes: head.retention_bytes,
+            schema: head.schema,
+            kafka_topic: None,
         }))
     }
 
@@ -128,14 +123,19 @@ impl StreamApi for DsClient {
         Ok(OFFSET_NOW.to_owned())
     }
 
-    async fn create(
-        &self,
-        name: &str,
-        content_type: &str,
-        ttl_seconds: Option<u64>,
-    ) -> Result<bool> {
-        let mut request = CreateRequest::new(name, content_type);
-        request.ttl_seconds = ttl_seconds;
+    async fn create(&self, name: &str, options: &CreateOptions) -> Result<bool> {
+        let content_type = options.content_type.as_deref().unwrap_or(DEFAULT_CT);
+        let request = CreateRequest {
+            ttl_seconds: options.ttl_seconds,
+            expires_at: options.expires_at.as_deref(),
+            closed: options.closed,
+            schema: options.schema.as_deref(),
+            schema_validate: options.schema_validate,
+            partitions: options.partitions,
+            retention_ms: options.retention_ms,
+            retention_bytes: options.retention_bytes,
+            ..CreateRequest::new(name, content_type)
+        };
         let response = self.call(request.encode()).await?;
         Ok(CreateResponse::decode(response.status().as_u16(), response.headers()).created)
     }
@@ -200,14 +200,23 @@ impl StreamApi for DsClient {
         let response = self.call(DeleteRequest { stream: name }.encode()).await?;
         Ok(DeleteResponse::decode(response.status().as_u16()).found)
     }
-}
-
-async fn expect(response: Response, expected: &[u16]) -> Result<Response> {
-    let status = response.status().as_u16();
-    if expected.contains(&status) {
-        return Ok(response);
+    async fn config(&self, name: &str) -> Result<Option<TopicConfig>> {
+        self.retry.run(|| self.transport.config(name)).await
     }
-    let headers = response.headers().clone();
-    let body = response.text().await.unwrap_or_default();
-    Err(decode_error(status, &headers, &body).into())
+
+    async fn update_config(&self, update: &ConfigUpdate) -> Result<TopicConfig> {
+        self.transport.update_config(update).await
+    }
+
+    async fn put_schema(&self, name: &str, content_type: Option<&str>, body: Bytes) -> Result<()> {
+        self.transport.put_schema(name, content_type, body).await
+    }
+
+    async fn get_schema(&self, name: &str) -> Result<Option<Schema>> {
+        self.retry.run(|| self.transport.get_schema(name)).await
+    }
+
+    async fn delete_schema(&self, name: &str) -> Result<bool> {
+        self.transport.delete_schema(name).await
+    }
 }

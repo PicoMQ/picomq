@@ -32,17 +32,45 @@ describe.runIf(up)('live pico server', () => {
   const base = `/it-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
   const CT = 'application/octet-stream'
 
+  it('sets, reads, and changes topic settings and schemas', async () => {
+    const name = `${base}/settings`
+    const schema = `${base.slice(1)}-settings.json`
+    const options = { contentType: 'application/json', partitions: 2, retentionMs: 60000 }
+    expect(await pico.create(name, options)).toBe(true)
+    expect(await pico.head(name)).toMatchObject({ partitions: 2, retentionMs: 60000 })
+
+    await pico.putSchema(schema, '{"type": "object"}')
+    expect(await pico.getSchema(schema)).toMatchObject({ contentType: 'application/schema+json' })
+
+    const config = await pico.updateConfig(name, {
+      schema,
+      retentionMs: null,
+      retentionBytes: 4096,
+      partitions: 3,
+    })
+    expect(config).toMatchObject({ schema, partitions: 3, retentionBytes: 4096 })
+    expect(config.retentionMs).toBeUndefined()
+    expect(await pico.config(name)).toEqual(config)
+    await expect(pico.updateConfig(name, { partitions: 1 })).rejects.toMatchObject({
+      kind: 'bad_request',
+    })
+
+    await pico.updateConfig(name, { schema: null })
+    expect(await pico.deleteSchema(schema)).toBe(true)
+    await pico.delete(name)
+  })
+
   it('creates streams idempotently and reports head', async () => {
     const stream = pico.stream(`${base}/basic`)
-    expect(await stream.create(CT)).toBe(true)
-    expect(await stream.create(CT)).toBe(false)
+    expect(await stream.create({ contentType: CT })).toBe(true)
+    expect(await stream.create({ contentType: CT })).toBe(false)
     const info = await stream.head()
     expect(info).toMatchObject({ name: `${base}/basic`, start: '0', next: '0', closed: false })
   })
 
   it('appends strings, bytes, and headers and reads them back', async () => {
     const stream = pico.stream(`${base}/mixed`)
-    await stream.create(CT)
+    await stream.create({ contentType: CT })
     const ack = await stream.append([
       'one',
       { body: 'two', headers: { kind: 'demo', n: '2' } },
@@ -69,7 +97,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('paginates records() across many pages', async () => {
     const stream = pico.stream(`${base}/paged`)
-    await stream.create(CT)
+    await stream.create({ contentType: CT })
     const total = 53
     await stream.append(Array.from({ length: total }, (_, i) => `r${i}`))
 
@@ -82,7 +110,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('tails live records while a writer appends', { timeout: 20_000 }, async () => {
     const stream = pico.stream(`${base}/tail`)
-    await stream.create(CT)
+    await stream.create({ contentType: CT })
     const controller = new AbortController()
     const seen: string[] = []
 
@@ -107,7 +135,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('subscribes over sse and catches up', { timeout: 20_000 }, async () => {
     const stream = pico.stream(`${base}/sse`)
-    await stream.create(CT)
+    await stream.create({ contentType: CT })
     await stream.append(['a', 'b', 'c'])
 
     const bodies: string[] = []
@@ -123,7 +151,7 @@ describe.runIf(up)('live pico server', () => {
   it('producer assigns strictly ordered seqs across pipelined batches', { timeout: 30_000 }, async () => {
     const name = `${base}/producer`
     const stream = pico.stream(name)
-    await stream.create(CT)
+    await stream.create({ contentType: CT })
 
     const producer = stream.producer('writer-1', { lingerMs: 2, maxInflight: 4 })
     const total = 200
@@ -145,7 +173,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('deduplicates producer batches resent with the same seq', async () => {
     const stream = pico.stream(`${base}/dedupe`)
-    await stream.create(CT)
+    await stream.create({ contentType: CT })
 
     const ref = { id: 'writer-d', epoch: 0, seq: 0 }
     const first = await stream.appendAs(['x', 'y'], ref)
@@ -160,7 +188,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('rejects a producer sequence gap', async () => {
     const stream = pico.stream(`${base}/gap`)
-    await stream.create(CT)
+    await stream.create({ contentType: CT })
     await stream.appendAs(['first'], { id: 'writer-g', epoch: 0, seq: 0 })
     await expect(
       stream.appendAs(['skip'], { id: 'writer-g', epoch: 0, seq: 2 }),
@@ -171,7 +199,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('keeps concurrent producers independent', { timeout: 30_000 }, async () => {
     const stream = pico.stream(`${base}/multi`)
-    await stream.create(CT)
+    await stream.create({ contentType: CT })
     const writers = 4
     const each = 20
     await Promise.all(
@@ -195,7 +223,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('creates with a ttl and expires', { timeout: 20_000 }, async () => {
     const stream = pico.stream(`${base}/ttl`)
-    await stream.create(CT, 2)
+    await stream.create({ contentType: CT, ttlSeconds: 2 })
     expect((await stream.head())!.ttlSeconds).toBe(2)
     const deadline = Date.now() + 15_000
     while (Date.now() < deadline) {
@@ -207,7 +235,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('rejects stale producer epochs', async () => {
     const stream = pico.stream(`${base}/epoch`)
-    await stream.create(CT)
+    await stream.create({ contentType: CT })
 
     await stream.appendAs(['e1'], { id: 'writer-e', epoch: 5, seq: 0 })
     await expect(
@@ -217,7 +245,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('trims, closes, and deletes a stream', { timeout: 20_000 }, async () => {
     const stream = pico.stream(`${base}/lifecycle`)
-    await stream.create(CT)
+    await stream.create({ contentType: CT })
     await stream.append(['0', '1', '2', '3', '4'])
 
     let start = await stream.trim(2)
@@ -259,7 +287,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('aborts long-poll reads promptly', { timeout: 10_000 }, async () => {
     const stream = pico.stream(`${base}/poll`)
-    await stream.create(CT)
+    await stream.create({ contentType: CT })
     const controller = new AbortController()
     setTimeout(() => controller.abort(), 200)
     const started = Date.now()
@@ -271,7 +299,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('joins, commits, fetches, describes, and leaves a group', { timeout: 20_000 }, async () => {
     const streams = [`${base}/g/a`, `${base}/g/b`]
-    for (const name of streams) await pico.create(name, CT)
+    for (const name of streams) await pico.create(name, { contentType: CT })
     const group = `ops-${base.slice(4)}`
 
     const joined = await pico.joinGroup(group, streams, { clientId: 'test', sessionTimeoutMs: 2000 })
@@ -309,7 +337,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('members share streams and follow rebalances', { timeout: 30_000 }, async () => {
     const streams = ['a', 'b', 'c', 'd'].map((s) => `${base}/m/${s}`)
-    for (const name of streams) await pico.create(name, CT)
+    for (const name of streams) await pico.create(name, { contentType: CT })
     const group = `shared-${base.slice(4)}`
 
     const first = await GroupMember.join(pico, group, streams, groupConfig)
@@ -339,7 +367,7 @@ describe.runIf(up)('live pico server', () => {
 
   it('expired member rejoins with a fresh id', { timeout: 20_000 }, async () => {
     const stream = `${base}/x/a`
-    await pico.create(stream, CT)
+    await pico.create(stream, { contentType: CT })
     const group = `expiry-${base.slice(4)}`
 
     const member = await GroupMember.join(pico, group, [stream], groupConfig)

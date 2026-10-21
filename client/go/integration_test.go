@@ -116,7 +116,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		name := fmt.Sprintf("/go-client-tests/%d", time.Now().UnixNano())
 		stream := client.Stream(name)
 		ginkgo.DeferCleanup(func() { _, _ = stream.Delete(context.Background()) })
-		created, err := stream.Create(context.Background(), "application/octet-stream", 0)
+		created, err := stream.Create(context.Background(), CreateOptions{ContentType: "application/octet-stream"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(created).To(BeTrue())
 		ack, err := stream.Append(context.Background(), AppendRecord{Body: []byte("hello"), Headers: map[string][]byte{"source": []byte("go")}})
@@ -150,6 +150,53 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		Expect(bodies).To(ConsistOf([]byte("hello"), []byte("produced")))
 	})
 
+	ginkgo.It("sets, reads, and changes topic settings and schemas on a running Pico server", func() {
+		if os.Getenv("PICOMQ_INTEGRATION") == "" {
+			ginkgo.Skip("set PICOMQ_INTEGRATION=1 to run live tests")
+		}
+		ctx := context.Background()
+		client, err := NewPico(liveEndpoint("PICOMQ_ENDPOINT"), liveOptions()...)
+		Expect(err).NotTo(HaveOccurred())
+		suffix := time.Now().UnixNano()
+		name := fmt.Sprintf("/go-client-tests/settings-%d", suffix)
+		schemaName := fmt.Sprintf("go-settings-%d.json", suffix)
+		ginkgo.DeferCleanup(func() {
+			_, _ = client.Delete(ctx, name)
+			_, _ = client.DeleteSchema(ctx, schemaName)
+		})
+
+		created, err := client.Create(ctx, name, CreateOptions{ContentType: "application/json", Partitions: 2, Retention: time.Minute})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(created).To(BeTrue())
+		info, err := client.Head(ctx, name)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(info.Partitions).To(Equal(uint32(2)))
+		Expect(info.Retention).To(Equal(time.Minute))
+
+		Expect(client.PutSchema(ctx, schemaName, "", []byte(`{"type": "object"}`))).To(Succeed())
+		schema, err := client.GetSchema(ctx, schemaName)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(schema.ContentType).To(Equal("application/schema+json"))
+
+		none, limit := time.Duration(0), uint64(4096)
+		config, err := client.UpdateConfig(ctx, name, ConfigUpdate{Schema: &schemaName, Retention: &none, RetentionBytes: &limit, Partitions: 3})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(config).To(Equal(TopicConfig{Schema: schemaName, KafkaTopic: config.KafkaTopic, Partitions: 3, RetentionBytes: 4096}))
+		read, err := client.Config(ctx, name)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(*read).To(Equal(config))
+
+		_, err = client.UpdateConfig(ctx, name, ConfigUpdate{Partitions: 1})
+		Expect(IsKind(err, ErrorBadRequest)).To(BeTrue())
+
+		unbind := ""
+		_, err = client.UpdateConfig(ctx, name, ConfigUpdate{Schema: &unbind})
+		Expect(err).NotTo(HaveOccurred())
+		deleted, err := client.DeleteSchema(ctx, schemaName)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(deleted).To(BeTrue())
+	})
+
 	ginkgo.It("covers paging, now, trim, close, and producer resume on a running Pico server", func() {
 		if os.Getenv("PICOMQ_INTEGRATION") == "" {
 			ginkgo.Skip("set PICOMQ_INTEGRATION=1 to run live tests")
@@ -160,7 +207,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		name := fmt.Sprintf("/go-client-tests/features-%d", time.Now().UnixNano())
 		stream := client.Stream(name)
 		ginkgo.DeferCleanup(func() { _, _ = stream.Delete(ctx) })
-		_, err = stream.Create(ctx, "application/octet-stream", 0)
+		_, err = stream.Create(ctx, CreateOptions{ContentType: "application/octet-stream"})
 		Expect(err).NotTo(HaveOccurred())
 
 		records := make([]AppendRecord, 10)
@@ -266,7 +313,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		name := fmt.Sprintf("/go-client-tests/sse-%d", time.Now().UnixNano())
 		stream := client.Stream(name)
 		ginkgo.DeferCleanup(func() { _, _ = stream.Delete(ctx) })
-		_, err = stream.Create(ctx, "application/octet-stream", 0)
+		_, err = stream.Create(ctx, CreateOptions{ContentType: "application/octet-stream"})
 		Expect(err).NotTo(HaveOccurred())
 		large := bytes.Repeat([]byte{0xAB}, 256<<10)
 		_, err = stream.Append(ctx, AppendRecord{Body: large})
@@ -310,7 +357,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		streams := make([]string, 0, 4)
 		for _, suffix := range []string{"a", "b", "c", "d"} {
 			name := fmt.Sprintf("/go-client-tests/groups-%s/%s", run, suffix)
-			_, err = client.Create(ctx, name, "application/octet-stream", 0)
+			_, err = client.Create(ctx, name, CreateOptions{ContentType: "application/octet-stream"})
 			Expect(err).NotTo(HaveOccurred())
 			streams = append(streams, name)
 		}
@@ -427,7 +474,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		name := fmt.Sprintf("/go-client-tests/auth-%d", time.Now().UnixNano())
 		anonymous, err := NewPico(endpoint)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = anonymous.Create(ctx, name, "application/octet-stream", 0)
+		_, err = anonymous.Create(ctx, name, CreateOptions{ContentType: "application/octet-stream"})
 		Expect(IsKind(err, ErrorUnauthenticated)).To(BeTrue())
 		_, err = anonymous.Read(ctx, name, "0", ReadOptions{})
 		Expect(IsKind(err, ErrorUnauthenticated)).To(BeTrue())
@@ -437,14 +484,14 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		_ = subscription.Close()
 		wrong, err := NewPico(endpoint, WithToken("not-a-token"))
 		Expect(err).NotTo(HaveOccurred())
-		_, err = wrong.Create(ctx, name, "application/octet-stream", 0)
+		_, err = wrong.Create(ctx, name, CreateOptions{ContentType: "application/octet-stream"})
 		Expect(IsKind(err, ErrorUnauthenticated)).To(BeTrue())
 
 		client, err := NewPico(endpoint, WithToken(liveToken()))
 		Expect(err).NotTo(HaveOccurred())
 		stream := client.Stream(name)
 		ginkgo.DeferCleanup(func() { _, _ = stream.Delete(ctx) })
-		created, err := stream.Create(ctx, "application/octet-stream", 0)
+		created, err := stream.Create(ctx, CreateOptions{ContentType: "application/octet-stream"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(created).To(BeTrue())
 		_, err = stream.Append(ctx, AppendRecord{Body: []byte("secret")})
@@ -480,7 +527,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		}
 		name := fmt.Sprintf("/go-client-tests/cluster-%d", time.Now().UnixNano())
 		ginkgo.DeferCleanup(func() { _, _ = clients[0].Delete(ctx, name) })
-		created, err := clients[0].Create(ctx, name, "application/octet-stream", 0)
+		created, err := clients[0].Create(ctx, name, CreateOptions{ContentType: "application/octet-stream"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(created).To(BeTrue())
 		seed := []AppendRecord{{Body: []byte("r0")}, {Body: []byte("r1")}, {Body: []byte("r2")}}
@@ -594,7 +641,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		streams := make([]string, 0, 4)
 		for _, suffix := range []string{"a", "b", "c", "d"} {
 			name := fmt.Sprintf("/go-client-tests/cluster-groups-%s/%s", run, suffix)
-			_, err := clients[0].Create(ctx, name, "application/octet-stream", 0)
+			_, err := clients[0].Create(ctx, name, CreateOptions{ContentType: "application/octet-stream"})
 			Expect(err).NotTo(HaveOccurred())
 			streams = append(streams, name)
 		}
@@ -685,7 +732,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		name := fmt.Sprintf("/go-client-tests/restart-%d", time.Now().UnixNano())
 		stream := client.Stream(name)
 		ginkgo.DeferCleanup(func() { _, _ = stream.Delete(context.Background()) })
-		_, err = stream.Create(ctx, "application/octet-stream", 0)
+		_, err = stream.Create(ctx, CreateOptions{ContentType: "application/octet-stream"})
 		Expect(err).NotTo(HaveOccurred())
 		const seeded, produced = 3, 80
 		seed := make([]AppendRecord, seeded)
@@ -767,7 +814,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		}
 		name := fmt.Sprintf("/go-client-tests/ds-cluster-%d", time.Now().UnixNano())
 		ginkgo.DeferCleanup(func() { _, _ = clients[0].Delete(ctx, name) })
-		created, err := clients[0].Create(ctx, name, "text/plain", 0)
+		created, err := clients[0].Create(ctx, name, CreateOptions{ContentType: "text/plain"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(created).To(BeTrue())
 		_, err = clients[0].Append(ctx, name, []AppendRecord{{Body: []byte("first"), ContentType: "text/plain"}})
@@ -827,7 +874,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		name := fmt.Sprintf("/go-client-tests/ds-features-%d", time.Now().UnixNano())
 		stream := client.Stream(name)
 		ginkgo.DeferCleanup(func() { _, _ = stream.Delete(ctx) })
-		created, err := stream.Create(ctx, "text/plain", 90*time.Second)
+		created, err := stream.Create(ctx, CreateOptions{ContentType: "text/plain", TTL: 90 * time.Second})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(created).To(BeTrue())
 		info, err := stream.Head(ctx)
@@ -893,7 +940,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		stream := client.Stream(name)
 		ginkgo.DeferCleanup(func() { _, _ = stream.Delete(context.Background()) })
 
-		created, err := stream.Create(context.Background(), "application/octet-stream", 0)
+		created, err := stream.Create(context.Background(), CreateOptions{ContentType: "application/octet-stream"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(created).To(BeTrue())
 		ack, err := stream.Append(context.Background(), AppendRecord{Body: []byte("hello-ds")})

@@ -2420,6 +2420,7 @@ dependencies = [
  "picomq-auth",
  "picomq-client",
  "picomq-http",
+ "picomq-protocol",
  "picomq-runtime",
  "rdkafka",
  "reqwest 0.13.4",

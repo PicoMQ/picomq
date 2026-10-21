@@ -16,7 +16,7 @@ import { connect } from '@picomq/client'
 const pico = connect('pico', 'http://127.0.0.1:4437')
 const stream = pico.stream('/orders/1042')
 
-await stream.create('application/json')
+await stream.create({ contentType: 'application/json' })
 await stream.append([JSON.stringify({ item: 'widget' })])
 
 for await (const record of stream.records()) {
@@ -28,13 +28,25 @@ Records accept `Uint8Array`, `string`, or `{ body, key, headers, timestamp }`. H
 
 ## Partitions
 
-A topic created over Kafka can have several partitions. Calls that address one take a `partition` option: `head`, `append`, `read`, `records`, `subscribe`, `trim`, and producers.
+On a topic with several partitions, calls that address one take a `partition` option: `head`, `append`, `read`, `records`, `subscribe`, `trim`, and producers.
 
 ```ts
 for await (const record of stream.records(pico.beginning(), { partition: 2 })) {
   console.log(record.position)
 }
 ```
+
+## Topic settings
+
+`create` takes every [topic setting](/docs/api#topic-settings) as an option, and unset fields take the server's defaults. `config` reads the settings back and `updateConfig` changes them. In an update, an absent field is left alone and `null` removes the setting.
+
+```ts
+await pico.create('/orders', { contentType: 'application/json', partitions: 3, retentionMs: 86_400_000 })
+
+const config = await pico.updateConfig('/orders', { partitions: 6, retentionMs: null })
+```
+
+`putSchema`, `getSchema`, and `deleteSchema` manage the [schema registry](/docs/schemas). All of these work on both protocols.
 
 ## Producers
 
@@ -87,7 +99,7 @@ Subscriptions reconnect with exponential backoff by default. Tune with `reconnec
 | --- | --- |
 | `token` | Bearer token sent on every request, including each redirect hop |
 | `http2` | Speak cleartext HTTP/2 (h2c) for multiplexed appends. The server must support it |
-| `retry` | `RetryPolicy` for idempotent calls: `create`, `head`, `read`, `list`, `close`, `delete`, `trim`. Plain `append` is never retried, because it has no dedupe key |
+| `retry` | `RetryPolicy` for idempotent calls: `create`, `head`, `read`, `list`, `close`, `delete`, `trim`, `config`, `getSchema`. Plain `append` is never retried, because it has no dedupe key |
 
 The client follows ownership redirects itself and re-attaches the credential on every hop, see the [HTTP API conventions](/docs/api#conventions).
 

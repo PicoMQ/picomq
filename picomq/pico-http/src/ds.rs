@@ -23,11 +23,12 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use picomq_auth::{Audience, Authorizer};
 use picomq_protocol::ds::{
-    H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ,
+    DEFAULT_CT, H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ,
     H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR, H_STREAM_EXPIRES_AT, H_STREAM_NEXT_OFFSET,
-    H_STREAM_PARTITIONS, H_STREAM_SCHEMA, H_STREAM_SCHEMA_VALIDATE, H_STREAM_SEQ,
-    H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL, H_STREAM_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE,
-    OFFSET_NOW, Q_CURSOR, Q_LIVE, Q_OFFSET, SseEncoder, encode_json_array, split_body,
+    H_STREAM_PARTITIONS, H_STREAM_RETENTION_BYTES, H_STREAM_RETENTION_MS, H_STREAM_SCHEMA,
+    H_STREAM_SCHEMA_VALIDATE, H_STREAM_SEQ, H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL,
+    H_STREAM_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, OFFSET_NOW, Q_CURSOR, Q_LIVE, Q_OFFSET,
+    SseEncoder, encode_json_array, split_body,
 };
 use picomq_protocol::mime::{is_json, mime_of};
 use picomq_server::ownership::OwnershipService;
@@ -39,14 +40,14 @@ use picomq_server::{
 
 use crate::http::{
     bad_request, base_response, cursor, etag, format_instant, header_str, parse_instant_header,
-    parse_strict_u64_header, query_param, set_header, truthy,
+    parse_partitions_header, parse_retention_headers, parse_strict_u64_header, query_param,
+    set_header, truthy,
 };
 use crate::partition;
 use crate::route::{RoutingMode, route, stream_name};
 
 const CT_EVENT_STREAM: &str = "text/event-stream";
 const CT_TEXT: &str = "text/plain; charset=utf-8";
-const DEFAULT_CT: &str = "application/octet-stream";
 const CACHE_CATCH_UP: &str = "public, max-age=60, stale-while-revalidate=300";
 const DEFAULT_MAX_CHUNK_SIZE: usize = 64 * 1024;
 const DEFAULT_MAX_REQUEST_SIZE: usize = 32 * 1024 * 1024;
@@ -216,6 +217,10 @@ impl DsFrontend {
             return Err(bad_request("Stream-TTL and Stream-Expires-At both set"));
         }
 
+        let partitions = parse_partitions_header(headers, H_STREAM_PARTITIONS)?;
+        let retention =
+            parse_retention_headers(headers, H_STREAM_RETENTION_MS, H_STREAM_RETENTION_BYTES)?;
+
         let content_type = header_str(headers, header::CONTENT_TYPE.as_str())
             .filter(|v| !v.is_empty())
             .unwrap_or(DEFAULT_CT)
@@ -236,6 +241,8 @@ impl DsFrontend {
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned),
                 schema_validate: truthy(headers, H_STREAM_SCHEMA_VALIDATE),
+                partitions,
+                retention,
                 ..CreateCommand::new(name, content_type)
             })
             .await?;
@@ -350,6 +357,12 @@ impl DsFrontend {
         }
         if let Some(schema_name) = &topic.schema_name {
             set_header(&mut response, H_STREAM_SCHEMA, schema_name);
+        }
+        if let Some(ms) = topic.retention.ms {
+            set_header(&mut response, H_STREAM_RETENTION_MS, &ms.to_string());
+        }
+        if let Some(bytes) = topic.retention.bytes {
+            set_header(&mut response, H_STREAM_RETENTION_BYTES, &bytes.to_string());
         }
         Ok(response)
     }
@@ -638,7 +651,8 @@ fn options() -> Response {
         &mut response,
         "Access-Control-Allow-Headers",
         "content-type, authorization, If-None-Match, Stream-Seq, Stream-TTL, Stream-Expires-At, \
-         Stream-Closed, Producer-Id, Producer-Epoch, Producer-Seq",
+         Stream-Partitions, Stream-Retention-Ms, Stream-Retention-Bytes, Stream-Schema, \
+         Stream-Schema-Validate, Stream-Closed, Producer-Id, Producer-Epoch, Producer-Seq",
     );
     set_header(
         &mut response,
