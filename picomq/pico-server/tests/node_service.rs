@@ -9,6 +9,7 @@ use picomq_metadata::{
 };
 use picomq_server::ownership::OwnershipService as _;
 use picomq_server::record::encode_batch;
+use picomq_server::wal::ObjectWal;
 use picomq_server::{
     AppendBatchResult, AppendCommand, CreateCommand, ErrorKind, Log, LogRecord, MAX_NEW_PARTITIONS,
     NodeConfig, OffsetToken, PicoNode, Retention, ServiceError, Topic, Topics, partition_log,
@@ -33,23 +34,18 @@ async fn start_engine(
         Arc::new(MemoryObjectStorage::new((node_id * 2) as i16));
     let wal_storage: Arc<dyn ObjectStorageTrait> =
         Arc::new(MemoryObjectStorage::new((node_id * 2 + 1) as i16));
-    PicoNode::start(
-        NodeConfig {
-            node_id,
-            node_epoch: 1,
-            http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
-            heartbeat_interval: Duration::from_millis(100),
-            engine,
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        None,
-    )
-    .await
-    .unwrap()
+    let config = NodeConfig {
+        node_id,
+        node_epoch: 1,
+        http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
+        heartbeat_interval: Duration::from_millis(100),
+        engine,
+        ..Default::default()
+    };
+    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+        .await
+        .unwrap()
 }
 
 async fn local_node() -> PicoNode {
@@ -543,21 +539,16 @@ async fn start_shared_node(
     object_storage: Arc<dyn ObjectStorageTrait>,
     wal_storage: Arc<dyn ObjectStorageTrait>,
 ) -> PicoNode {
-    PicoNode::start(
-        NodeConfig {
-            node_id,
-            node_epoch,
-            http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        None,
-    )
-    .await
-    .unwrap()
+    let config = NodeConfig {
+        node_id,
+        node_epoch,
+        http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
+        ..Default::default()
+    };
+    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+        .await
+        .unwrap()
 }
 
 async fn wait_for_view(
@@ -1357,17 +1348,19 @@ async fn append_rejects_schema_invalid_records() {
     let (sink, views) = LocalSink::new();
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
+    let config = NodeConfig {
+        node_id: 1,
+        node_epoch: 1,
+        http_address: "http://127.0.0.1:4010".into(),
+        ..Default::default()
+    };
+    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
     let node = PicoNode::start(
-        NodeConfig {
-            node_id: 1,
-            node_epoch: 1,
-            http_address: "http://127.0.0.1:4010".into(),
-            ..Default::default()
-        },
+        config,
         Arc::new(sink),
         views,
         object_storage,
-        wal_storage,
+        Arc::new(wal),
         Some(Arc::new(Registry::new(InMemory::new()))),
     )
     .await
@@ -2256,14 +2249,10 @@ async fn faulty_node() -> (PicoNode, Arc<AtomicBool>) {
     let (sink, views) = LocalSink::new();
     let fail = Arc::new(AtomicBool::new(false));
     let wal = Faulty {
-        wal: picomq_server::wal::ObjectWal::new(
-            "picomq",
-            "",
-            Arc::new(MemoryObjectStorage::new(1)),
-        ),
+        wal: ObjectWal::new("picomq", "", Arc::new(MemoryObjectStorage::new(1))),
         fail: fail.clone(),
     };
-    let node = PicoNode::start_with_wal(
+    let node = PicoNode::start(
         NodeConfig {
             node_id: 1,
             node_epoch: 1,

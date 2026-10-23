@@ -31,7 +31,7 @@ use crate::streams::Streams;
 use crate::topics::Topics;
 use crate::transfer::TransferWatcher;
 use crate::waiter::StreamWaiterRegistry;
-use crate::wal::{ObjectWal, Wal};
+use crate::wal::Wal;
 
 const DELETED_CLEANUP_TICK: Duration = Duration::from_secs(1);
 
@@ -90,31 +90,10 @@ pub struct PicoNode {
 }
 
 impl PicoNode {
-    /// Starts a node whose WAL lives in object storage.
-    pub async fn start(
-        config: NodeConfig,
-        sink: Arc<dyn CommandSink>,
-        views: Arc<ViewPublisher>,
-        object_storage: Arc<dyn ObjectStorageTrait>,
-        wal_storage: Arc<dyn ObjectStorageTrait>,
-        schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
-    ) -> Result<Self, ServiceError> {
-        let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
-        Self::start_with_wal(
-            config,
-            sink,
-            views,
-            object_storage,
-            Arc::new(wal),
-            schema_registry,
-        )
-        .await
-    }
-
     /// Registers the node, starts its heartbeat, then opens its WAL at the
     /// assigned epoch and recovers it, so a slow recovery never looks like a
     /// silent node.
-    pub async fn start_with_wal(
+    pub async fn start(
         config: NodeConfig,
         sink: Arc<dyn CommandSink>,
         views: Arc<ViewPublisher>,

@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
+use picomq_server::wal::ObjectWal;
 use picomq_server::{
     CommittedOffset, CreateCommand, GroupCoordinator, GroupError, GroupState, JoinInput,
     JoinOutcome, JoinProtocol, Joined, MemberFence, MemberRole, Membership, NodeConfig,
@@ -20,21 +21,16 @@ async fn start_node(
         Arc::new(MemoryObjectStorage::new((node_id * 2) as i16));
     let wal_storage: Arc<dyn ObjectStorageTrait> =
         Arc::new(MemoryObjectStorage::new((node_id * 2 + 1) as i16));
-    PicoNode::start(
-        NodeConfig {
-            node_id,
-            node_epoch: 1,
-            http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        None,
-    )
-    .await
-    .unwrap()
+    let config = NodeConfig {
+        node_id,
+        node_epoch: 1,
+        http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
+        ..Default::default()
+    };
+    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+        .await
+        .unwrap()
 }
 
 fn partition(byte: u8) -> Partition {

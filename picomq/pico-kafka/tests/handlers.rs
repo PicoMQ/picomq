@@ -18,6 +18,7 @@ use kafka_protocol::records::{
 };
 use picomq_kafka::{BrokerContext, HandlerOutcome, KafkaListener, ListenerConfig, dispatch};
 use picomq_metadata::{CommandSink, LocalSink};
+use picomq_server::wal::ObjectWal;
 use picomq_server::{NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 use tokio::net::TcpListener;
@@ -35,25 +36,20 @@ async fn broker_with(registry: Option<Arc<dyn picomq_schema::SchemaStore>>) -> B
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(3));
-    let node = PicoNode::start(
-        NodeConfig {
-            node_id: 1,
-            node_epoch: 1,
-            http_address: "http://127.0.0.1:4001".into(),
-            protocol_addresses: std::collections::BTreeMap::from([(
-                picomq_kafka::PROTOCOL_NAME.to_owned(),
-                "127.0.0.1:19092".to_owned(),
-            )]),
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        registry,
-    )
-    .await
-    .unwrap();
+    let config = NodeConfig {
+        node_id: 1,
+        node_epoch: 1,
+        http_address: "http://127.0.0.1:4001".into(),
+        protocol_addresses: std::collections::BTreeMap::from([(
+            picomq_kafka::PROTOCOL_NAME.to_owned(),
+            "127.0.0.1:19092".to_owned(),
+        )]),
+        ..Default::default()
+    };
+    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
+    let node = PicoNode::start(config, sink, views, object_storage, Arc::new(wal), registry)
+        .await
+        .unwrap();
     BrokerContext::new(&node)
 }
 
