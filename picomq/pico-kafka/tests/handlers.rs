@@ -21,7 +21,11 @@ use picomq_metadata::{CommandSink, LocalSink};
 use picomq_server::wal::ObjectWal;
 use picomq_server::{NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
-use tokio::net::TcpListener;
+use std::net::SocketAddr;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
 
 fn tn(name: &str) -> TopicName {
     TopicName(StrBytes::from(name.to_owned()))
@@ -472,13 +476,7 @@ async fn list_offsets_resolves_timestamps_like_kafka() {
     assert_eq!(offset_for(&broker, "timed", -3).await, (1, 30));
 }
 
-#[tokio::test]
-async fn listener_serves_api_versions() {
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
-
-    let broker = Arc::new(test_broker().await);
+async fn serve(broker: Arc<BrokerContext>) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -493,6 +491,35 @@ async fn listener_serves_api_versions() {
         .await
         .unwrap();
     });
+    (addr, server)
+}
+
+fn framed(req: &[u8]) -> Vec<u8> {
+    let mut frame = (req.len() as i32).to_be_bytes().to_vec();
+    frame.extend_from_slice(req);
+    frame
+}
+
+async fn read_response(client: &mut TcpStream) -> Bytes {
+    let mut len_buf = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut len_buf))
+        .await
+        .expect("no response frame arrived")
+        .unwrap();
+    let mut body = vec![0u8; i32::from_be_bytes(len_buf) as usize];
+    client.read_exact(&mut body).await.unwrap();
+    Bytes::from(body)
+}
+
+fn correlation_id(frame: &Bytes) -> i32 {
+    ResponseHeader::decode(&mut frame.clone(), 0)
+        .unwrap()
+        .correlation_id
+}
+
+#[tokio::test]
+async fn listener_serves_api_versions() {
+    let (addr, server) = serve(Arc::new(test_broker().await)).await;
 
     let req = encode_request(
         ApiKey::ApiVersions,
@@ -503,22 +530,9 @@ async fn listener_serves_api_versions() {
             .with_client_software_version(StrBytes::from_static_str("0.1")),
     );
     let mut client = TcpStream::connect(addr).await.unwrap();
-    let mut sized = BytesMut::new();
-    sized.extend_from_slice(&(req.len() as i32).to_be_bytes());
-    sized.extend_from_slice(&req);
-    client.write_all(&sized).await.unwrap();
+    client.write_all(&framed(&req)).await.unwrap();
 
-    let mut len_buf = [0u8; 4];
-    tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut len_buf))
-        .await
-        .unwrap()
-        .unwrap();
-    let size = i32::from_be_bytes(len_buf) as usize;
-    let mut body = vec![0u8; size];
-    client.read_exact(&mut body).await.unwrap();
-    let mut buf = Bytes::from(body);
-    let header = ResponseHeader::decode(&mut buf, 0).unwrap();
-    assert_eq!(header.correlation_id, 42);
+    assert_eq!(correlation_id(&read_response(&mut client).await), 42);
 
     server.abort();
 }
@@ -527,10 +541,6 @@ async fn listener_serves_api_versions() {
 /// skip its slot instead of wedging every later response.
 #[tokio::test]
 async fn listener_pipeline_survives_acks_zero() {
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
-
     let broker = test_broker().await;
     // Create the topic ahead of time via auto-create metadata.
     let metadata_req = encode_request(
@@ -544,22 +554,7 @@ async fn listener_pipeline_survives_acks_zero() {
             .with_allow_auto_topic_creation(true),
     );
     dispatch(&broker, &metadata_req).await.unwrap();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let broker = Arc::new(broker);
-    let server = tokio::spawn(async move {
-        KafkaListener::new(
-            ListenerConfig {
-                addr,
-                ..Default::default()
-            },
-            broker,
-        )
-        .serve(listener)
-        .await
-        .unwrap();
-    });
+    let (addr, server) = serve(Arc::new(broker)).await;
 
     let produce_req = encode_request(
         ApiKey::Produce,
@@ -585,25 +580,12 @@ async fn listener_pipeline_survives_acks_zero() {
     );
 
     let mut client = TcpStream::connect(addr).await.unwrap();
-    let mut pipelined = BytesMut::new();
-    for req in [&produce_req, &versions_req] {
-        pipelined.extend_from_slice(&(req.len() as i32).to_be_bytes());
-        pipelined.extend_from_slice(req);
-    }
+    let mut pipelined = framed(&produce_req);
+    pipelined.extend_from_slice(&framed(&versions_req));
     client.write_all(&pipelined).await.unwrap();
 
     // The first (and only) response frame must be the ApiVersions reply.
-    let mut len_buf = [0u8; 4];
-    tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut len_buf))
-        .await
-        .expect("pipeline wedged after acks=0 produce")
-        .unwrap();
-    let size = i32::from_be_bytes(len_buf) as usize;
-    let mut body = vec![0u8; size];
-    client.read_exact(&mut body).await.unwrap();
-    let mut buf = Bytes::from(body);
-    let header = ResponseHeader::decode(&mut buf, 0).unwrap();
-    assert_eq!(header.correlation_id, 8);
+    assert_eq!(correlation_id(&read_response(&mut client).await), 8);
 
     server.abort();
 }
@@ -661,87 +643,36 @@ async fn find_coordinator_probe_creates_nothing() {
 /// Join, rebalance, fencing, and expiry across two members.
 #[tokio::test]
 async fn classic_group_two_member_rebalance_and_expiry() {
-    use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
     use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
-    use kafka_protocol::messages::{
-        GroupId, HeartbeatRequest, HeartbeatResponse, JoinGroupRequest, JoinGroupResponse,
-        SyncGroupRequest, SyncGroupResponse,
-    };
-    use kafka_protocol::protocol::HeaderVersion;
 
     let broker = Arc::new(test_broker().await);
-    let group_id = GroupId(StrBytes::from_static_str("pair"));
-    let session_timeout_ms = 2_000;
-
-    let join_req = |member_id: StrBytes, correlation_id| {
-        encode_request(
-            ApiKey::JoinGroup,
-            5,
-            correlation_id,
-            &JoinGroupRequest::default()
-                .with_group_id(group_id.clone())
-                .with_session_timeout_ms(session_timeout_ms)
-                .with_rebalance_timeout_ms(10_000)
-                .with_member_id(member_id)
-                .with_protocol_type(StrBytes::from_static_str("consumer"))
-                .with_protocols(vec![
-                    JoinGroupRequestProtocol::default()
-                        .with_name(StrBytes::from_static_str("range"))
-                        .with_metadata(Bytes::from_static(b"subscription")),
-                ]),
-        )
-    };
-    let decode_join = |mut buf: Bytes| {
-        ResponseHeader::decode(&mut buf, JoinGroupResponse::header_version(5)).unwrap();
-        JoinGroupResponse::decode(&mut buf, 5).unwrap()
-    };
-    let heartbeat_req = |member_id: StrBytes, generation_id, correlation_id| {
-        encode_request(
-            ApiKey::Heartbeat,
-            4,
-            correlation_id,
-            &HeartbeatRequest::default()
-                .with_group_id(group_id.clone())
-                .with_generation_id(generation_id)
-                .with_member_id(member_id),
-        )
-    };
-    let heartbeat_code = |mut buf: Bytes| {
-        ResponseHeader::decode(&mut buf, HeartbeatResponse::header_version(4)).unwrap();
-        HeartbeatResponse::decode(&mut buf, 4).unwrap().error_code
-    };
 
     // Member 1 bootstraps the group and becomes leader of generation 1.
-    let required = decode_join(response_body(&broker, &join_req(StrBytes::default(), 40)).await);
+    let required = decode_join(
+        response_body(
+            &broker,
+            &join_request("pair", StrBytes::default(), b"subscription", 2_000, 40),
+        )
+        .await,
+    );
     assert_eq!(required.error_code, 79);
     let member1 = required.member_id;
-    let joined1 = decode_join(response_body(&broker, &join_req(member1.clone(), 41)).await);
+    let joined1 = decode_join(
+        response_body(
+            &broker,
+            &join_request("pair", member1.clone(), b"subscription", 2_000, 41),
+        )
+        .await,
+    );
     assert_eq!(joined1.error_code, 0);
     assert_eq!(joined1.generation_id, 1);
     assert_eq!(joined1.leader, member1);
 
-    let sync_req = |member_id: StrBytes, generation_id, assignments, correlation_id| {
-        encode_request(
-            ApiKey::SyncGroup,
-            5,
-            correlation_id,
-            &SyncGroupRequest::default()
-                .with_group_id(group_id.clone())
-                .with_generation_id(generation_id)
-                .with_member_id(member_id)
-                .with_protocol_type(Some(StrBytes::from_static_str("consumer")))
-                .with_protocol_name(Some(StrBytes::from_static_str("range")))
-                .with_assignments(assignments),
-        )
-    };
-    let decode_sync = |mut buf: Bytes| {
-        ResponseHeader::decode(&mut buf, SyncGroupResponse::header_version(5)).unwrap();
-        SyncGroupResponse::decode(&mut buf, 5).unwrap()
-    };
     let synced = decode_sync(
         response_body(
             &broker,
-            &sync_req(
+            &sync_request(
+                "pair",
                 member1.clone(),
                 1,
                 vec![
@@ -757,16 +688,28 @@ async fn classic_group_two_member_rebalance_and_expiry() {
     assert_eq!(synced.error_code, 0);
 
     // Member 2's join and the leader's rejoin complete as generation 2.
-    let required = decode_join(response_body(&broker, &join_req(StrBytes::default(), 43)).await);
+    let required = decode_join(
+        response_body(
+            &broker,
+            &join_request("pair", StrBytes::default(), b"subscription", 2_000, 43),
+        )
+        .await,
+    );
     assert_eq!(required.error_code, 79);
     let member2 = required.member_id;
 
     let rejoin_broker = Arc::clone(&broker);
     let rejoin1 = {
-        let req = join_req(member1.clone(), 44);
+        let req = join_request("pair", member1.clone(), b"subscription", 2_000, 44);
         tokio::spawn(async move { response_body(&rejoin_broker, &req).await })
     };
-    let joined2 = decode_join(response_body(&broker, &join_req(member2.clone(), 45)).await);
+    let joined2 = decode_join(
+        response_body(
+            &broker,
+            &join_request("pair", member2.clone(), b"subscription", 2_000, 45),
+        )
+        .await,
+    );
     let rejoined1 = decode_join(rejoin1.await.unwrap());
     assert_eq!(joined2.error_code, 0);
     assert_eq!(rejoined1.error_code, 0);
@@ -781,7 +724,8 @@ async fn classic_group_two_member_rebalance_and_expiry() {
     let synced1 = decode_sync(
         response_body(
             &broker,
-            &sync_req(
+            &sync_request(
+                "pair",
                 member1.clone(),
                 2,
                 vec![
@@ -799,24 +743,267 @@ async fn classic_group_two_member_rebalance_and_expiry() {
     );
     assert_eq!(synced1.error_code, 0);
     assert_eq!(synced1.assignment, Bytes::from_static(b"left"));
-    let synced2 =
-        decode_sync(response_body(&broker, &sync_req(member2.clone(), 2, Vec::new(), 47)).await);
+    let synced2 = decode_sync(
+        response_body(
+            &broker,
+            &sync_request("pair", member2.clone(), 2, Vec::new(), 47),
+        )
+        .await,
+    );
     assert_eq!(synced2.error_code, 0);
     assert_eq!(synced2.assignment, Bytes::from_static(b"right"));
 
     // A heartbeat carrying the previous generation is fenced.
-    let code = heartbeat_code(response_body(&broker, &heartbeat_req(member1.clone(), 1, 48)).await);
+    let code = heartbeat_code(
+        response_body(&broker, &heartbeat_request("pair", member1.clone(), 1, 48)).await,
+    );
     assert_eq!(code, 22);
 
     // Member 2 goes silent. Member 1 keeps heartbeating: first inside the
     // session timeout (fine), then after member 2's session lapses, at which
     // point the coordinator expires it and demands a rebalance.
     tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
-    let code = heartbeat_code(response_body(&broker, &heartbeat_req(member1.clone(), 2, 49)).await);
+    let code = heartbeat_code(
+        response_body(&broker, &heartbeat_request("pair", member1.clone(), 2, 49)).await,
+    );
     assert_eq!(code, 0);
     tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
-    let code = heartbeat_code(response_body(&broker, &heartbeat_req(member1.clone(), 2, 50)).await);
+    let code = heartbeat_code(
+        response_body(&broker, &heartbeat_request("pair", member1.clone(), 2, 50)).await,
+    );
     assert_eq!(code, 27);
+}
+
+fn join_request(
+    group: &str,
+    member_id: StrBytes,
+    metadata: &'static [u8],
+    session_timeout_ms: i32,
+    correlation_id: i32,
+) -> Vec<u8> {
+    use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
+    use kafka_protocol::messages::{GroupId, JoinGroupRequest};
+
+    encode_request(
+        ApiKey::JoinGroup,
+        5,
+        correlation_id,
+        &JoinGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group.to_owned())))
+            .with_session_timeout_ms(session_timeout_ms)
+            .with_rebalance_timeout_ms(10_000)
+            .with_member_id(member_id)
+            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocols(vec![
+                JoinGroupRequestProtocol::default()
+                    .with_name(StrBytes::from_static_str("range"))
+                    .with_metadata(Bytes::from_static(metadata)),
+            ]),
+    )
+}
+
+fn decode_join(mut buf: Bytes) -> kafka_protocol::messages::JoinGroupResponse {
+    use kafka_protocol::messages::JoinGroupResponse;
+
+    ResponseHeader::decode(&mut buf, JoinGroupResponse::header_version(5)).unwrap();
+    JoinGroupResponse::decode(&mut buf, 5).unwrap()
+}
+
+fn sync_request(
+    group: &str,
+    member_id: StrBytes,
+    generation_id: i32,
+    assignments: Vec<kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment>,
+    correlation_id: i32,
+) -> Vec<u8> {
+    use kafka_protocol::messages::{GroupId, SyncGroupRequest};
+
+    encode_request(
+        ApiKey::SyncGroup,
+        5,
+        correlation_id,
+        &SyncGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group.to_owned())))
+            .with_generation_id(generation_id)
+            .with_member_id(member_id)
+            .with_protocol_type(Some(StrBytes::from_static_str("consumer")))
+            .with_protocol_name(Some(StrBytes::from_static_str("range")))
+            .with_assignments(assignments),
+    )
+}
+
+fn decode_sync(mut buf: Bytes) -> kafka_protocol::messages::SyncGroupResponse {
+    use kafka_protocol::messages::SyncGroupResponse;
+
+    ResponseHeader::decode(&mut buf, SyncGroupResponse::header_version(5)).unwrap();
+    SyncGroupResponse::decode(&mut buf, 5).unwrap()
+}
+
+fn heartbeat_request(
+    group: &str,
+    member_id: StrBytes,
+    generation_id: i32,
+    correlation_id: i32,
+) -> Vec<u8> {
+    use kafka_protocol::messages::{GroupId, HeartbeatRequest};
+
+    encode_request(
+        ApiKey::Heartbeat,
+        4,
+        correlation_id,
+        &HeartbeatRequest::default()
+            .with_group_id(GroupId(StrBytes::from(group.to_owned())))
+            .with_generation_id(generation_id)
+            .with_member_id(member_id),
+    )
+}
+
+fn heartbeat_code(mut buf: Bytes) -> i16 {
+    use kafka_protocol::messages::HeartbeatResponse;
+
+    ResponseHeader::decode(&mut buf, HeartbeatResponse::header_version(4)).unwrap();
+    HeartbeatResponse::decode(&mut buf, 4).unwrap().error_code
+}
+
+/// A leader settled alone in generation one, plus a newcomer that holds a
+/// member id but has not joined yet, so a rebalance can be started on demand.
+async fn leader_and_newcomer(broker: &BrokerContext, group: &str) -> (StrBytes, StrBytes) {
+    let required = decode_join(
+        response_body(
+            broker,
+            &join_request(group, StrBytes::default(), b"subscription", 10_000, 1),
+        )
+        .await,
+    );
+    let leader = required.member_id;
+    let joined = decode_join(
+        response_body(
+            broker,
+            &join_request(group, leader.clone(), b"subscription", 10_000, 2),
+        )
+        .await,
+    );
+    assert_eq!(joined.error_code, 0);
+    let synced = decode_sync(
+        response_body(broker, &sync_request(group, leader.clone(), 1, vec![], 3)).await,
+    );
+    assert_eq!(synced.error_code, 0);
+
+    let required = decode_join(
+        response_body(
+            broker,
+            &join_request(group, StrBytes::default(), b"subscription", 10_000, 4),
+        )
+        .await,
+    );
+    (leader, required.member_id)
+}
+
+async fn metadata_seen(broker: &BrokerContext, group: &str, member_id: &str, metadata: &[u8]) {
+    use picomq_server::group::MemberRole;
+
+    loop {
+        let description = broker.groups.describe(group).await.unwrap();
+        let seen = description.members.iter().any(|member| {
+            member.member_id == member_id
+                && matches!(&member.role, MemberRole::Client { metadata: seen, .. } if seen == metadata)
+        });
+        if seen {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// A sync that a newer sync from the same member replaced is answered with
+/// a rebalance in progress, and the newest one carries the assignment.
+#[tokio::test]
+async fn a_superseded_sync_is_answered_with_rebalance_in_progress() {
+    let broker = Arc::new(test_broker().await);
+    let (leader, newcomer) = leader_and_newcomer(&broker, "pair").await;
+
+    let rejoin = {
+        let broker = Arc::clone(&broker);
+        let req = join_request("pair", newcomer.clone(), b"rejoined", 10_000, 10);
+        tokio::spawn(async move { response_body(&broker, &req).await })
+    };
+    metadata_seen(&broker, "pair", &newcomer, b"rejoined").await;
+    let rejoined = decode_join(
+        response_body(
+            &broker,
+            &join_request("pair", leader.clone(), b"subscription", 10_000, 11),
+        )
+        .await,
+    );
+    assert_eq!(rejoined.generation_id, 2);
+    assert_eq!(decode_join(rejoin.await.unwrap()).generation_id, 2);
+
+    let mut first = {
+        let broker = Arc::clone(&broker);
+        let req = sync_request("pair", newcomer.clone(), 2, vec![], 12);
+        tokio::spawn(async move { response_body(&broker, &req).await })
+    };
+    let mut second = {
+        let broker = Arc::clone(&broker);
+        let req = sync_request("pair", newcomer.clone(), 2, vec![], 13);
+        tokio::spawn(async move { response_body(&broker, &req).await })
+    };
+    let first_to_resolve = async {
+        tokio::select! {
+            outcome = &mut first => (outcome, second),
+            outcome = &mut second => (outcome, first),
+        }
+    };
+    let (replaced, surviving) = tokio::time::timeout(Duration::from_secs(2), first_to_resolve)
+        .await
+        .expect("the superseded sync must resolve before the leader syncs");
+    assert_eq!(decode_sync(replaced.unwrap()).error_code, 27);
+
+    let synced = decode_sync(
+        response_body(
+            &broker,
+            &sync_request("pair", leader.clone(), 2, vec![], 14),
+        )
+        .await,
+    );
+    assert_eq!(synced.error_code, 0);
+    assert_eq!(decode_sync(surviving.await.unwrap()).error_code, 0);
+}
+
+/// A duplicate join on a connection must not wedge the responses queued
+/// behind it, and every request on the connection still gets its frame.
+#[tokio::test]
+async fn listener_pipeline_survives_a_superseded_join() {
+    let broker = Arc::new(test_broker().await);
+    let (leader, newcomer) = leader_and_newcomer(&broker, "pair").await;
+    let (addr, server) = serve(Arc::clone(&broker)).await;
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let first = join_request("pair", newcomer.clone(), b"first", 10_000, 20);
+    client.write_all(&framed(&first)).await.unwrap();
+    metadata_seen(&broker, "pair", &newcomer, b"first").await;
+    let second = join_request("pair", newcomer.clone(), b"second", 10_000, 21);
+    client.write_all(&framed(&second)).await.unwrap();
+    metadata_seen(&broker, "pair", &newcomer, b"second").await;
+    let rejoined = decode_join(
+        response_body(
+            &broker,
+            &join_request("pair", leader.clone(), b"subscription", 10_000, 22),
+        )
+        .await,
+    );
+    assert_eq!(rejoined.generation_id, 2);
+
+    let frame = read_response(&mut client).await;
+    assert_eq!(correlation_id(&frame), 20);
+    assert_eq!(decode_join(frame).error_code, 27);
+    let frame = read_response(&mut client).await;
+    assert_eq!(correlation_id(&frame), 21);
+    let joined = decode_join(frame);
+    assert_eq!(joined.error_code, 0);
+    assert_eq!(joined.generation_id, 2);
+
+    server.abort();
 }
 
 /// Static membership: a restarted instance rejoining with its
@@ -825,10 +1012,7 @@ async fn classic_group_two_member_rebalance_and_expiry() {
 #[tokio::test]
 async fn static_membership_rejoin_and_fencing() {
     use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
-    use kafka_protocol::messages::{
-        GroupId, HeartbeatRequest, HeartbeatResponse, JoinGroupRequest, JoinGroupResponse,
-    };
-    use kafka_protocol::protocol::HeaderVersion;
+    use kafka_protocol::messages::{GroupId, JoinGroupRequest};
 
     let broker = test_broker().await;
     let group_id = GroupId(StrBytes::from_static_str("static"));
@@ -853,10 +1037,6 @@ async fn static_membership_rejoin_and_fencing() {
                 ]),
         )
     };
-    let decode_join = |mut buf: Bytes| {
-        ResponseHeader::decode(&mut buf, JoinGroupResponse::header_version(5)).unwrap();
-        JoinGroupResponse::decode(&mut buf, 5).unwrap()
-    };
 
     let required = decode_join(response_body(&broker, &join_req(StrBytes::default(), 60)).await);
     assert_eq!(required.error_code, 79);
@@ -873,21 +1053,8 @@ async fn static_membership_rejoin_and_fencing() {
     assert_eq!(rejoined.generation_id, 2);
 
     // A request using the member id without its instance id is fenced.
-    let heartbeat = encode_request(
-        ApiKey::Heartbeat,
-        4,
-        63,
-        &HeartbeatRequest::default()
-            .with_group_id(group_id)
-            .with_generation_id(rejoined.generation_id)
-            .with_member_id(member),
-    );
-    let mut buf = response_body(&broker, &heartbeat).await;
-    ResponseHeader::decode(&mut buf, HeartbeatResponse::header_version(4)).unwrap();
-    assert_eq!(
-        HeartbeatResponse::decode(&mut buf, 4).unwrap().error_code,
-        82
-    );
+    let heartbeat = heartbeat_request("static", member, rejoined.generation_id, 63);
+    assert_eq!(heartbeat_code(response_body(&broker, &heartbeat).await), 82);
 }
 
 #[tokio::test]
@@ -981,17 +1148,15 @@ async fn connect_shaped_group_passes_foreign_protocols_through() {
 
 #[tokio::test]
 async fn classic_group_lifecycle_and_offset_replay() {
-    use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
     use kafka_protocol::messages::offset_commit_request::{
         OffsetCommitRequestPartition, OffsetCommitRequestTopic,
     };
     use kafka_protocol::messages::offset_fetch_request::OffsetFetchRequestTopic;
     use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
     use kafka_protocol::messages::{
-        FindCoordinatorRequest, FindCoordinatorResponse, GroupId, HeartbeatRequest,
-        HeartbeatResponse, JoinGroupRequest, JoinGroupResponse, LeaveGroupRequest,
+        FindCoordinatorRequest, FindCoordinatorResponse, GroupId, LeaveGroupRequest,
         LeaveGroupResponse, OffsetCommitRequest, OffsetCommitResponse, OffsetFetchRequest,
-        OffsetFetchResponse, SyncGroupRequest, SyncGroupResponse,
+        OffsetFetchResponse,
     };
     use kafka_protocol::protocol::HeaderVersion;
 
@@ -1022,76 +1187,49 @@ async fn classic_group_lifecycle_and_offset_replay() {
     assert_eq!(found.host.as_str(), "127.0.0.1");
     assert_eq!(found.port, 19092);
 
-    let join = |member_id: StrBytes, correlation_id| {
-        encode_request(
-            ApiKey::JoinGroup,
-            5,
+    let join = |member_id, correlation_id| {
+        join_request(
+            "workers",
+            member_id,
+            b"subscription",
+            10_000,
             correlation_id,
-            &JoinGroupRequest::default()
-                .with_group_id(group_id.clone())
-                .with_session_timeout_ms(10_000)
-                .with_rebalance_timeout_ms(10_000)
-                .with_member_id(member_id)
-                .with_protocol_type(StrBytes::from_static_str("consumer"))
-                .with_protocols(vec![
-                    JoinGroupRequestProtocol::default()
-                        .with_name(StrBytes::from_static_str("range"))
-                        .with_metadata(Bytes::from_static(b"subscription")),
-                ]),
         )
     };
-    let mut buf = response_body(&broker, &join(StrBytes::default(), 21)).await;
-    ResponseHeader::decode(&mut buf, JoinGroupResponse::header_version(5)).unwrap();
-    let member_required = JoinGroupResponse::decode(&mut buf, 5).unwrap();
+    let member_required = decode_join(response_body(&broker, &join(StrBytes::default(), 21)).await);
     assert_eq!(member_required.error_code, 79);
     assert!(!member_required.member_id.is_empty());
 
-    let mut buf = response_body(&broker, &join(member_required.member_id.clone(), 22)).await;
-    ResponseHeader::decode(&mut buf, JoinGroupResponse::header_version(5)).unwrap();
-    let joined = JoinGroupResponse::decode(&mut buf, 5).unwrap();
+    let joined =
+        decode_join(response_body(&broker, &join(member_required.member_id.clone(), 22)).await);
     assert_eq!(joined.error_code, 0);
     assert_eq!(joined.generation_id, 1);
     assert_eq!(joined.leader, joined.member_id);
     assert_eq!(joined.members.len(), 1);
 
     let assignment = Bytes::from_static(b"assignment");
-    let sync = encode_request(
-        ApiKey::SyncGroup,
-        5,
+    let sync = sync_request(
+        "workers",
+        joined.member_id.clone(),
+        joined.generation_id,
+        vec![
+            SyncGroupRequestAssignment::default()
+                .with_member_id(joined.member_id.clone())
+                .with_assignment(assignment.clone()),
+        ],
         23,
-        &SyncGroupRequest::default()
-            .with_group_id(group_id.clone())
-            .with_generation_id(joined.generation_id)
-            .with_member_id(joined.member_id.clone())
-            .with_protocol_type(Some(StrBytes::from_static_str("consumer")))
-            .with_protocol_name(Some(StrBytes::from_static_str("range")))
-            .with_assignments(vec![
-                SyncGroupRequestAssignment::default()
-                    .with_member_id(joined.member_id.clone())
-                    .with_assignment(assignment.clone()),
-            ]),
     );
-    let mut buf = response_body(&broker, &sync).await;
-    ResponseHeader::decode(&mut buf, SyncGroupResponse::header_version(5)).unwrap();
-    let synced = SyncGroupResponse::decode(&mut buf, 5).unwrap();
+    let synced = decode_sync(response_body(&broker, &sync).await);
     assert_eq!(synced.error_code, 0);
     assert_eq!(synced.assignment, assignment);
 
-    let heartbeat = encode_request(
-        ApiKey::Heartbeat,
-        4,
+    let heartbeat = heartbeat_request(
+        "workers",
+        joined.member_id.clone(),
+        joined.generation_id,
         24,
-        &HeartbeatRequest::default()
-            .with_group_id(group_id.clone())
-            .with_generation_id(joined.generation_id)
-            .with_member_id(joined.member_id.clone()),
     );
-    let mut buf = response_body(&broker, &heartbeat).await;
-    ResponseHeader::decode(&mut buf, HeartbeatResponse::header_version(4)).unwrap();
-    assert_eq!(
-        HeartbeatResponse::decode(&mut buf, 4).unwrap().error_code,
-        0
-    );
+    assert_eq!(heartbeat_code(response_body(&broker, &heartbeat).await), 0);
 
     let commit = encode_request(
         ApiKey::OffsetCommit,
@@ -2293,6 +2431,58 @@ async fn create_topics_refuses_compaction() {
     assert!(broker.topics.get("/state").await.unwrap().is_none());
 
     let mut buf = response_body(&broker, &create("events", "delete")).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let created = CreateTopicsResponse::decode(&mut buf, 5).unwrap();
+    assert_eq!(created.topics[0].error_code, 0);
+}
+
+/// The `/_` namespace belongs to PicoMQ on every protocol: Kafka answers
+/// with the error real brokers use for an illegal name.
+#[tokio::test]
+async fn create_topics_refuses_the_reserved_namespace() {
+    use kafka_protocol::messages::create_topics_request::CreatableTopic;
+    use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse, MetadataResponse};
+
+    let broker = test_broker().await;
+    let create = |name: &'static str| {
+        encode_request(
+            ApiKey::CreateTopics,
+            5,
+            1,
+            &CreateTopicsRequest::default()
+                .with_timeout_ms(5_000)
+                .with_topics(vec![
+                    CreatableTopic::default()
+                        .with_name(tn(name))
+                        .with_num_partitions(1)
+                        .with_replication_factor(1),
+                ]),
+        )
+    };
+
+    let mut buf = response_body(&broker, &create("_groups.payments")).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let refused = CreateTopicsResponse::decode(&mut buf, 5).unwrap();
+    assert_eq!(refused.topics[0].error_code, 17);
+    assert!(broker.topics.kafka_topics().is_empty());
+
+    let metadata_req = encode_request(
+        ApiKey::Metadata,
+        12,
+        2,
+        &MetadataRequest::default()
+            .with_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(tn("_x"))),
+            ]))
+            .with_allow_auto_topic_creation(true),
+    );
+    let mut buf = response_body(&broker, &metadata_req).await;
+    ResponseHeader::decode(&mut buf, 1).unwrap();
+    let metadata = MetadataResponse::decode(&mut buf, 12).unwrap();
+    assert_eq!(metadata.topics[0].error_code, 17);
+    assert!(broker.topics.kafka_topics().is_empty());
+
+    let mut buf = response_body(&broker, &create("a_b")).await;
     ResponseHeader::decode(&mut buf, 1).unwrap();
     let created = CreateTopicsResponse::decode(&mut buf, 5).unwrap();
     assert_eq!(created.topics[0].error_code, 0);

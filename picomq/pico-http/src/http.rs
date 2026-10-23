@@ -44,29 +44,39 @@ pub(crate) fn truthy(headers: &HeaderMap, name: &str) -> bool {
     header_str(headers, name).is_some_and(|v| v.eq_ignore_ascii_case("true"))
 }
 
-pub(crate) fn query_param(uri: &axum::http::Uri, name: &str) -> Option<String> {
-    let query = uri.query()?;
+pub(crate) fn query_param(
+    uri: &axum::http::Uri,
+    name: &str,
+) -> Result<Option<String>, ServiceError> {
+    let Some(query) = uri.query() else {
+        return Ok(None);
+    };
     for pair in query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         if key == name {
-            return Some(percent_decode(&value.replace('+', " ")));
+            return query_value(name, value).map(Some);
         }
     }
-    None
+    Ok(None)
 }
 
-pub(crate) fn query_params(uri: &axum::http::Uri, name: &str) -> Vec<String> {
+pub(crate) fn query_params(uri: &axum::http::Uri, name: &str) -> Result<Vec<String>, ServiceError> {
     uri.query()
         .unwrap_or("")
         .split('&')
         .filter_map(|pair| {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            (key == name).then(|| percent_decode(&value.replace('+', " ")))
+            (key == name).then(|| query_value(name, value))
         })
         .collect()
 }
 
-pub(crate) fn percent_decode(raw: &str) -> String {
+fn query_value(name: &str, raw: &str) -> Result<String, ServiceError> {
+    percent_decode(&raw.replace('+', " "))
+        .ok_or_else(|| bad_request(format!("{name} is not valid text")))
+}
+
+pub(crate) fn percent_decode(raw: &str) -> Option<String> {
     let bytes = raw.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -87,7 +97,7 @@ pub(crate) fn percent_decode(raw: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8(out).ok()
 }
 
 pub(crate) fn parse_strict_u64(
@@ -201,9 +211,10 @@ mod tests {
 
     #[test]
     fn percent_decode_reads_escapes_and_keeps_the_rest() {
-        assert_eq!(percent_decode("/orders%23v2%20a"), "/orders#v2 a");
-        assert_eq!(percent_decode("/a%2541+b"), "/a%41+b");
-        assert_eq!(percent_decode("/50%"), "/50%");
-        assert_eq!(percent_decode("/%aé"), "/%aé");
+        assert_eq!(percent_decode("/orders%23v2%20a").unwrap(), "/orders#v2 a");
+        assert_eq!(percent_decode("/a%2541+b").unwrap(), "/a%41+b");
+        assert_eq!(percent_decode("/50%").unwrap(), "/50%");
+        assert_eq!(percent_decode("/%aé").unwrap(), "/%aé");
+        assert!(percent_decode("/a%ff").is_none());
     }
 }

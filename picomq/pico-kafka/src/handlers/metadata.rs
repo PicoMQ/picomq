@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_id, brokers, encode_response, is_internal_topic,
-    service_error_code, topic_name, topic_uuid,
+    INVALID_TOPIC_EXCEPTION, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_id, brokers,
+    encode_response, service_error_code, topic_name, topic_uuid,
 };
 use crate::handlers::topics::KAFKA_CREATED_CT;
 use crate::handlers::{HandlerError, HandlerOutcome};
@@ -88,7 +88,7 @@ async fn resolve_or_create(
     auto_create: bool,
 ) -> Result<Topic, i16> {
     if !is_kafka_name(name) {
-        return Err(UNKNOWN_TOPIC_OR_PARTITION);
+        return Err(INVALID_TOPIC_EXCEPTION);
     }
     if let Some(topic) = ctx
         .topics
@@ -151,7 +151,7 @@ async fn build_topic(
     MetadataResponseTopic::default()
         .with_error_code(NO_ERROR)
         .with_name(Some(topic_name(name)))
-        .with_is_internal(is_internal_topic(name))
+        .with_is_internal(false)
         .with_topic_id(topic_id)
         .with_partitions(partitions)
 }

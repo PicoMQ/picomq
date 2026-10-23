@@ -3,9 +3,15 @@
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use common::{Harness, produce, unique};
+use bytes::Bytes;
+use common::{Harness, assert_exactly_once, produce, unique};
+use picomq_client::pico::ProducerRef;
+use picomq_client::producer::{Producer, ProducerConfig};
+use picomq_client::{CreateOptions, Live, PicoClient, ReadLimits, RetryPolicy, StreamApi};
 use rdkafka::admin::{AdminOptions, NewTopic, ResourceSpecifier, TopicReplication};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, StreamConsumer};
@@ -24,6 +30,92 @@ fn second_admin() -> String {
 
 fn token() -> String {
     std::env::var("PICO_TOKEN").unwrap_or_else(|_| TOKEN.into())
+}
+
+fn first_admin() -> String {
+    std::env::var("PICO_ADMIN").unwrap_or_else(|_| "http://127.0.0.1:9090".into())
+}
+
+fn pico_client(h: &Harness) -> PicoClient {
+    let config = picomq_client::ClientConfig {
+        token: Some(token()),
+        ..Default::default()
+    };
+    PicoClient::with_config(&h.base, &config).unwrap()
+}
+
+/// The node holding `name`, once no transfer is pending.
+async fn settled_owner(h: &Harness, name: &str) -> i64 {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let described: serde_json::Value = h
+            .http
+            .get(format!("{}/admin/streams{name}", first_admin()))
+            .bearer_auth(token())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if described["pendingTransfer"].is_null() {
+            return described["ownerNodeId"].as_i64().unwrap();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "transfer of {name} never settled"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn bodies(client: &PicoClient, name: &str) -> Vec<String> {
+    let page = client
+        .read(
+            name,
+            None,
+            &client.beginning(),
+            Live::Off,
+            ReadLimits::server_default(),
+        )
+        .await
+        .unwrap();
+    page.records
+        .into_iter()
+        .map(|record| String::from_utf8(record.body.to_vec()).unwrap())
+        .collect()
+}
+
+/// Every value in one partition, read from its beginning.
+async fn partition_values(
+    bootstrap: &str,
+    topic: &str,
+    partition: i32,
+    expected: usize,
+) -> Vec<String> {
+    let consumer: StreamConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .set("group.id", unique("partition-reader"))
+        .set("enable.auto.commit", "false")
+        .create()
+        .unwrap();
+    let mut assignment = TopicPartitionList::new();
+    assignment
+        .add_partition_offset(topic, partition, Offset::Beginning)
+        .unwrap();
+    consumer.assign(&assignment).unwrap();
+
+    let mut values = Vec::new();
+    while values.len() < expected {
+        match tokio::time::timeout(Duration::from_secs(20), consumer.recv()).await {
+            Ok(message) => {
+                let message = message.unwrap();
+                values.push(String::from_utf8(message.payload().unwrap().to_vec()).unwrap());
+            }
+            Err(_) => break,
+        }
+    }
+    values
 }
 
 fn cluster() -> Harness {
@@ -342,6 +434,174 @@ async fn a_dead_node_fails_over_and_committed_offsets_survive() {
             .values()
             .any(|leader| *leader == 2)
     );
+}
+
+/// A producer that retries its last batch after the stream moved to another
+/// node is answered as a duplicate, and nothing is stored twice.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn an_http_producer_retry_is_deduplicated_across_a_transfer() {
+    let h = cluster();
+    let client = pico_client(&h);
+    let name = format!("/{}", unique("moved"));
+    client
+        .create(&name, &CreateOptions::new("text/plain"))
+        .await
+        .unwrap();
+    for seq in 0..5 {
+        let producer = ProducerRef {
+            id: "w1",
+            epoch: 1,
+            seq,
+        };
+        let ack = client
+            .append_as(&name, None, &[Bytes::from(format!("r{seq}"))], &producer)
+            .await
+            .unwrap();
+        assert!(ack.applied);
+    }
+
+    let from = settled_owner(&h, &name).await;
+    let to = 3 - from;
+    let accepted = h
+        .http
+        .post(format!("{}/admin/transfer", first_admin()))
+        .bearer_auth(token())
+        .json(&serde_json::json!({ "stream": name, "toNode": to }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), 202);
+    assert_eq!(settled_owner(&h, &name).await, to);
+
+    let retried = ProducerRef {
+        id: "w1",
+        epoch: 1,
+        seq: 4,
+    };
+    let duplicate = client
+        .append_as(&name, None, &[Bytes::from("r4")], &retried)
+        .await
+        .unwrap();
+    assert!(
+        duplicate.duplicate,
+        "the retried batch must be known after the move"
+    );
+    let next = ProducerRef {
+        id: "w1",
+        epoch: 1,
+        seq: 5,
+    };
+    let applied = client
+        .append_as(&name, None, &[Bytes::from("r5")], &next)
+        .await
+        .unwrap();
+    assert!(applied.applied);
+    let stale = ProducerRef {
+        id: "w1",
+        epoch: 0,
+        seq: 6,
+    };
+    let fenced = client
+        .append_as(&name, None, &[Bytes::from("stale")], &stale)
+        .await
+        .unwrap_err();
+    assert_eq!(fenced.status, 403);
+
+    let expected: Vec<String> = (0..6).map(|i| format!("r{i}")).collect();
+    assert_eq!(bodies(&client, &name).await, expected);
+}
+
+/// An HTTP producer that keeps writing through a killed owner sees every
+/// acknowledged record stored exactly once after the survivor takes over.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn an_http_producer_survives_a_killed_owner_exactly_once() {
+    let (Ok(kill), Ok(start)) = (
+        std::env::var("PICOMQ_KILL_CMD"),
+        std::env::var("PICOMQ_START_CMD"),
+    ) else {
+        eprintln!("set PICOMQ_KILL_CMD and PICOMQ_START_CMD to run the failover test");
+        return;
+    };
+
+    let h = cluster();
+    let survivor = Harness::new();
+    let topic = unique("http-failover");
+    h.create_topic(&topic, 4).await;
+    let partition = leaders(&h.bootstrap, &topic)
+        .into_iter()
+        .find(|(_, leader)| *leader == 2)
+        .map(|(partition, _)| partition)
+        .expect("a partition on node 2");
+    let producer = Producer::new(
+        Arc::new(pico_client(&h)),
+        &format!("/{topic}"),
+        "w1",
+        ProducerConfig {
+            partition: Some(partition as u32),
+            retry: RetryPolicy {
+                max_attempts: 400,
+                initial_backoff: Duration::from_millis(50),
+                max_backoff: Duration::from_millis(500),
+                multiplier: 2.0,
+            },
+            ..Default::default()
+        },
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let stop = Arc::clone(&stop);
+        tokio::spawn(async move {
+            let mut acked = Vec::new();
+            while !stop.load(Ordering::SeqCst) {
+                let value = acked.len().to_string();
+                let seq = producer
+                    .send_durable(Bytes::from(value.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(seq as usize, acked.len(), "positions stay dense");
+                acked.push(value);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            producer.close().await.unwrap();
+            acked
+        })
+    };
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    run(&kill);
+    eventually(
+        "the partition to fail over to node 1",
+        Duration::from_secs(90),
+        || leaders(&survivor.bootstrap, &topic)[&partition] == 1,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    stop.store(true, Ordering::SeqCst);
+    let acked = writer.await.unwrap();
+    assert!(
+        acked.len() > 50,
+        "the writer kept going through the failover"
+    );
+
+    let read = partition_values(&survivor.bootstrap, &topic, partition, acked.len()).await;
+    assert_exactly_once(&acked, &read);
+
+    run(&start);
+    eventually("node 2 to come back", Duration::from_secs(90), || {
+        std::process::Command::new("curl")
+            .args([
+                "-sf",
+                "-o",
+                "/dev/null",
+                &format!("{}/ready", second_admin()),
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

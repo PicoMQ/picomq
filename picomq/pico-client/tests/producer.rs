@@ -31,12 +31,11 @@ async fn start(dir: &std::path::Path) -> (picomq_runtime::PicoServer, Arc<PicoCl
     .unwrap();
     let endpoint = format!("http://{}", server.local_addr());
     // HTTP/2 so the session's in-flight batches share one connection.
-    let http = picomq_client::http_client(&ClientConfig {
+    let config = ClientConfig {
         http2: true,
         ..Default::default()
-    })
-    .unwrap();
-    let client = Arc::new(PicoClient::with_http(&endpoint, http, Default::default()));
+    };
+    let client = Arc::new(PicoClient::with_config(&endpoint, &config).unwrap());
     (server, client)
 }
 

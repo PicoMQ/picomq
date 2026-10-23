@@ -33,6 +33,7 @@ pub const INVALID_REPLICATION_FACTOR: i16 = 38;
 pub const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
 pub const INVALID_CONFIG: i16 = 40;
 pub const INVALID_REQUEST: i16 = 42;
+pub const INVALID_TOPIC_EXCEPTION: i16 = 17;
 pub const POLICY_VIOLATION: i16 = 44;
 pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 pub const INVALID_PRODUCER_EPOCH: i16 = 47;
@@ -114,6 +115,7 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
         ErrorKind::Conflict => TOPIC_ALREADY_EXISTS,
         ErrorKind::Transferring | ErrorKind::Unavailable => NOT_LEADER_OR_FOLLOWER,
         ErrorKind::BadRequest => INVALID_REQUEST,
+        ErrorKind::InvalidName => INVALID_TOPIC_EXCEPTION,
         ErrorKind::CorruptBatch => CORRUPT_MESSAGE,
         ErrorKind::SchemaViolation => INVALID_RECORD,
         ErrorKind::Fenced => INVALID_PRODUCER_EPOCH,
@@ -235,10 +237,6 @@ pub fn leader_epochs(
         .into_iter()
         .map(|(epoch, start_offset)| (leader_epoch(epoch), start_offset))
         .collect())
-}
-
-pub fn is_internal_topic(topic: &str) -> bool {
-    topic.starts_with('_')
 }
 
 pub fn concat_batches(batches: &[picomq_server::StreamBatch]) -> Bytes {

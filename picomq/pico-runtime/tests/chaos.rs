@@ -4,11 +4,10 @@
 
 mod common;
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{Harness, unique};
+use common::{Harness, assert_exactly_once, unique};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -200,25 +199,6 @@ async fn read_all(bootstrap: &str, topic: &str, expected: usize) -> Vec<String> 
         }
     }
     values
-}
-
-fn assert_exactly_once(acked: &[String], read: &[String]) {
-    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for value in read {
-        *counts.entry(value.as_str()).or_default() += 1;
-    }
-
-    let lost: Vec<&String> = acked
-        .iter()
-        .filter(|value| !counts.contains_key(value.as_str()))
-        .collect();
-    let doubled: Vec<&&str> = counts
-        .iter()
-        .filter(|(_, count)| **count > 1)
-        .map(|(value, _)| value)
-        .collect();
-    assert!(lost.is_empty(), "acknowledged writes lost: {lost:?}");
-    assert!(doubled.is_empty(), "writes stored twice: {doubled:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

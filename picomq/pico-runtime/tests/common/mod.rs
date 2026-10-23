@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rdkafka::Message;
@@ -150,4 +151,23 @@ pub async fn produce(
         .await
         .unwrap()
         .offset
+}
+
+pub fn assert_exactly_once(acked: &[String], read: &[String]) {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for value in read {
+        *counts.entry(value.as_str()).or_default() += 1;
+    }
+
+    let lost: Vec<&String> = acked
+        .iter()
+        .filter(|value| !counts.contains_key(value.as_str()))
+        .collect();
+    let doubled: Vec<&&str> = counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(value, _)| value)
+        .collect();
+    assert!(lost.is_empty(), "acknowledged writes lost: {lost:?}");
+    assert!(doubled.is_empty(), "writes stored twice: {doubled:?}");
 }
