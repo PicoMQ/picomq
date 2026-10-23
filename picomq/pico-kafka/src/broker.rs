@@ -1,25 +1,9 @@
 use std::sync::Arc;
 
 use picomq_metadata::{MetadataNodeHandle, ViewPublisher};
-use picomq_server::{GroupCoordinator, MetadataOwnershipService, PicoNode, Topics};
-use tokio::sync::Mutex;
-
-const PRODUCER_ID_BLOCK: u32 = 256;
-
-#[derive(Debug)]
-struct ProducerIdLease {
-    next: u64,
-    remaining: u32,
-}
-
-impl ProducerIdLease {
-    fn new() -> Self {
-        Self {
-            next: 0,
-            remaining: 0,
-        }
-    }
-}
+use picomq_server::{
+    GroupCoordinator, MetadataOwnershipService, PicoNode, S3StreamService, Topics,
+};
 
 /// Shared broker state wired from a running Pico node.
 #[derive(Clone)]
@@ -31,7 +15,7 @@ pub struct BrokerContext {
     pub views: Arc<ViewPublisher>,
     pub metadata: MetadataNodeHandle,
     pub groups: Arc<GroupCoordinator>,
-    producer_ids: Arc<Mutex<ProducerIdLease>>,
+    pub service: Arc<S3StreamService>,
 }
 
 impl BrokerContext {
@@ -44,27 +28,11 @@ impl BrokerContext {
             views: node.views(),
             metadata: node.metadata().clone(),
             groups: node.groups(),
-            producer_ids: Arc::new(Mutex::new(ProducerIdLease::new())),
+            service: node.service(),
         }
     }
 
     pub fn broker_id(&self) -> i32 {
         self.node_id
-    }
-
-    pub async fn allocate_producer_id(&self) -> Result<i64, picomq_metadata::MetadataError> {
-        let mut lease = self.producer_ids.lock().await;
-        if lease.remaining == 0 {
-            let first = self
-                .metadata
-                .allocate_producer_ids(PRODUCER_ID_BLOCK)
-                .await?;
-            lease.next = first;
-            lease.remaining = PRODUCER_ID_BLOCK;
-        }
-        let id = lease.next as i64;
-        lease.next += 1;
-        lease.remaining -= 1;
-        Ok(id)
     }
 }

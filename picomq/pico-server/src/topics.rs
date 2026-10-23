@@ -12,8 +12,9 @@ use picomq_schema::Validator as _;
 use tokio::sync::RwLock;
 
 use crate::error::{ErrorKind, ServiceError};
-use crate::log::{Log, ProducerDecision};
+use crate::log::Log;
 use crate::partition::Partition;
+use crate::producers::ProducerDecision;
 use crate::record::{self, LogRecord, StreamRecord};
 use crate::service::S3StreamService;
 use crate::topic::{ClosedBy, Topic, TopicId, TopicName, deadline_of};

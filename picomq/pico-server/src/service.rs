@@ -9,8 +9,8 @@ use picomq_metadata::{MetadataKvClient, ViewPublisher};
 use s3stream::{AppendContext, FetchContext, PendingAppend, RecordBatch, Stream, StreamState};
 
 use crate::error::{ErrorKind, ServiceError};
-use crate::log::{Log, LogEntry, ProducerDecision, validate_producer};
-use crate::producer::{self, Admission};
+use crate::log::{Log, decode_stream_id, encode_stream_id};
+use crate::producers::{self, Admission, IdLease, ProducerDecision, Producers, Session};
 use crate::record::{self, BatchHeader, LogRecord};
 use crate::retention::Retention;
 use crate::streams::Streams;
@@ -22,7 +22,6 @@ use crate::waiter::StreamWaiterRegistry;
 
 const TAIL_MAX_BYTES: usize = 4 * 1024 * 1024;
 const TAIL_MAX_RECORDS: usize = 4096;
-const PRODUCER_CHECKPOINT_INTERVAL: u64 = 4096;
 
 #[derive(Default)]
 pub(crate) struct TailCache {
@@ -90,18 +89,6 @@ struct Gate {
     op: Arc<tokio::sync::Mutex<()>>,
     tail: Mutex<TailCache>,
     last_timestamp_ms: Mutex<Option<i64>>,
-    persisted: tokio::sync::Mutex<Persisted>,
-}
-
-/// What the persisted producer state covers. A snapshot is persisted once its
-/// appends are durable, never moves back, and never comes from a stream epoch
-/// in which an append failed: those snapshots may hold state that never
-/// became durable.
-#[derive(Default)]
-struct Persisted {
-    epoch: u64,
-    offset: u64,
-    failed: Option<u64>,
 }
 
 impl Gate {
@@ -122,7 +109,8 @@ pub struct S3StreamService {
     views: Arc<ViewPublisher>,
     waiters: Arc<StreamWaiterRegistry>,
     gates: Mutex<HashMap<String, Arc<Gate>>>,
-    entries: Mutex<HashMap<String, LogEntry>>,
+    producers: Mutex<HashMap<u64, Arc<tokio::sync::Mutex<Producers>>>>,
+    producer_ids: tokio::sync::Mutex<IdLease>,
 }
 
 pub struct Append<'a> {
@@ -130,8 +118,9 @@ pub struct Append<'a> {
     key: String,
     gate: Arc<Gate>,
     op: tokio::sync::OwnedMutexGuard<()>,
-    entry: LogEntry,
     stream: Arc<dyn Stream>,
+    producers: Arc<tokio::sync::Mutex<Producers>>,
+    held: tokio::sync::OwnedMutexGuard<Producers>,
 }
 
 pub struct Committed {
@@ -152,7 +141,8 @@ impl S3StreamService {
             views,
             waiters,
             gates: Mutex::new(HashMap::new()),
-            entries: Mutex::new(HashMap::new()),
+            producers: Mutex::new(HashMap::new()),
+            producer_ids: tokio::sync::Mutex::new(IdLease::default()),
         }
     }
 
@@ -197,13 +187,14 @@ impl S3StreamService {
 
     pub async fn destroy_log(&self, log: &Log) {
         let key = log.key();
-        let Ok(Some(entry)) = self.entry(&key) else {
+        let Ok(Some(stream_id)) = self.stream_id(log) else {
             return;
         };
 
         let _ = self.kv.del_kv(&key).await;
-        let _ = self.kv.del_kv(&stream_id_key(entry.stream_id)).await;
-        self.forget(&key).await;
+        let _ = self.kv.del_kv(&stream_id_key(stream_id)).await;
+        self.forget_producer_rows(stream_id).await;
+        self.forget(&key, stream_id).await;
     }
 
     async fn claim_log(
@@ -212,28 +203,25 @@ impl S3StreamService {
         own: impl AsyncFnOnce(u64) -> Result<(), ServiceError>,
     ) -> Result<(), ServiceError> {
         let key = log.key();
-        if self.entry(&key)?.is_some() {
+        if self.stream_id(log)?.is_some() {
             return Ok(());
         }
 
         let stream_id = self.streams.register(&key).await?;
         let index = stream_id_key(stream_id);
-        let claimed: Result<LogEntry, ServiceError> = async {
+        let claimed: Result<u64, ServiceError> = async {
             self.kv.put_kv(&index, Bytes::from(key.clone())).await?;
             own(stream_id).await?;
             let stored = self
                 .kv
-                .put_kv_if_absent(&key, LogEntry::new(stream_id).encode())
+                .put_kv_if_absent(&key, encode_stream_id(stream_id))
                 .await?;
-            LogEntry::decode(&stored)
+            decode_stream_id(&stored)
         }
         .await;
 
         match claimed {
-            Ok(current) if current.stream_id == stream_id => {
-                self.entries.lock().unwrap().insert(key, current);
-                Ok(())
-            }
+            Ok(current) if current == stream_id => Ok(()),
             outcome => {
                 if let Err(error) = self.streams.destroy(stream_id).await {
                     tracing::warn!(%error, stream_id, "stream of an unclaimed log not destroyed");
@@ -245,36 +233,46 @@ impl S3StreamService {
     }
 
     async fn discard(&self, stream_id: u64) {
-        let keys: Vec<String> = self
-            .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, entry)| entry.stream_id == stream_id)
-            .map(|(key, _)| key.clone())
-            .collect();
-
-        for key in &keys {
-            self.forget(key).await;
-        }
+        self.producers.lock().unwrap().remove(&stream_id);
+        self.forget_producer_rows(stream_id).await;
 
         if let Err(error) = self.streams.destroy(stream_id).await {
             tracing::warn!(%error, stream_id, "stream not destroyed, retrying");
         }
     }
 
-    async fn forget(&self, key: &str) {
+    async fn forget_producer_rows(&self, stream_id: u64) {
+        let _ = self.kv.del_kv(&producers::checkpoint_key(stream_id)).await;
+        let _ = self.kv.del_kv(&producers::stream_seq_key(stream_id)).await;
+        for (key, _) in self.kv.list_kv(&producers::session_prefix(stream_id)) {
+            let _ = self.kv.del_kv(&key).await;
+        }
+    }
+
+    async fn forget(&self, key: &str, stream_id: u64) {
         let gate = self.gate_of(key);
         let _op = gate.op.lock().await;
 
-        self.entries.lock().unwrap().remove(key);
+        self.producers.lock().unwrap().remove(&stream_id);
         gate.reset();
         self.gates.lock().unwrap().remove(key);
         self.waiters.notify_closed(key);
     }
 
     pub fn stream_id(&self, log: &Log) -> Result<Option<u64>, ServiceError> {
-        Ok(self.entry(&log.key())?.map(|entry| entry.stream_id))
+        self.stream_id_at(&log.key())
+    }
+
+    fn stream_id_at(&self, key: &str) -> Result<Option<u64>, ServiceError> {
+        self.kv
+            .get_kv(key)
+            .map(|value| decode_stream_id(&value))
+            .transpose()
+    }
+
+    fn require_stream_id(&self, key: &str) -> Result<u64, ServiceError> {
+        self.stream_id_at(key)?
+            .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound))
     }
 
     pub async fn begin_append(&self, log: &Log) -> Result<Append<'_>, ServiceError> {
@@ -282,16 +280,19 @@ impl S3StreamService {
         let gate = self.gate_of(&key);
         let op = gate.op.clone().lock_owned().await;
 
-        let entry = self.require_entry(&key)?;
-        let stream = self.streams.ensure_open(entry.stream_id).await?;
+        let stream_id = self.require_stream_id(&key)?;
+        let stream = self.streams.ensure_open(stream_id).await?;
+        let producers = self.load_producers(&stream).await?;
+        let held = producers.clone().lock_owned().await;
 
         Ok(Append {
             service: self,
             key,
             gate,
             op,
-            entry,
             stream,
+            producers,
+            held,
         })
     }
 
@@ -321,20 +322,20 @@ impl S3StreamService {
         let gate = self.gate_of(&key);
         let _op = gate.op.lock().await;
 
-        let mut entry = self.require_entry(&key)?;
-        let stream_id = entry.stream_id;
+        let stream_id = self.require_stream_id(&key)?;
         let stream = self.streams.ensure_open(stream_id).await?;
+        let shared = self.load_producers(&stream).await?;
+        let mut producers = shared.lock().await;
         let log_start_offset = live_start_offset(stream.as_ref());
         let now = now_ms();
 
-        self.recover_producers(&key, &mut entry, stream.as_ref(), producer, now)
-            .await?;
-        producer::expire_producers(&mut entry, now);
-
-        let accepted = match producer::admit(&mut entry, producer, record_count, now) {
-            Ok(Admission::Accepted(accepted)) => accepted,
-            Ok(Admission::Duplicate { base_offset }) => {
-                self.cache_entry(&key, entry);
+        if producers.replay_needed(producer, stream.confirm_offset()) {
+            producers.replay(stream.as_ref(), now).await?;
+        }
+        let expired = producers.expire(now);
+        let accepted = match producers.admit_numeric(producer, record_count, now)? {
+            Admission::Accepted(accepted) => accepted,
+            Admission::Duplicate { base_offset } => {
                 return Ok(SubmittedBatchAppend {
                     key,
                     stream_id,
@@ -344,13 +345,9 @@ impl S3StreamService {
                     duplicate: true,
                     pending: None,
                     batches: Vec::new(),
-                    epoch: stream.stream_epoch(),
-                    checkpoint: None,
+                    checkpoint: false,
+                    expired,
                 });
-            }
-            Err(error) => {
-                self.cache_entry(&key, entry);
-                return Err(error);
             }
         };
 
@@ -369,7 +366,8 @@ impl S3StreamService {
         ) {
             Ok(pending) => pending,
             Err(e) => {
-                self.streams.reset(stream_id).await;
+                drop(producers);
+                self.reset(&key, stream_id).await;
                 return Err(ServiceError::durability(e));
             }
         };
@@ -378,15 +376,10 @@ impl S3StreamService {
             gate.note_timestamp(timestamp_ms);
         }
 
-        producer::record(&mut entry, accepted, base_offset, now);
-        let prev_offset = entry.producer_state_offset;
-        entry.producer_state_offset = stream.next_offset();
-        self.cache_entry(&key, entry.clone());
-
-        let checkpoint = (!entry.numeric_producers.is_empty()
-            && prev_offset / PRODUCER_CHECKPOINT_INTERVAL
-                != entry.producer_state_offset / PRODUCER_CHECKPOINT_INTERVAL)
-            .then_some(entry);
+        producers.record_numeric(accepted, base_offset, now);
+        let covered_before = producers.covered();
+        producers.note_appended(base_offset, stream.next_offset());
+        let checkpoint = producers.checkpoint_due(covered_before);
 
         let notify_offset = stream.next_offset();
         Ok(SubmittedBatchAppend {
@@ -398,8 +391,8 @@ impl S3StreamService {
             duplicate: false,
             pending: Some(pending),
             batches,
-            epoch: stream.stream_epoch(),
             checkpoint,
+            expired,
         })
     }
 
@@ -410,26 +403,21 @@ impl S3StreamService {
         if let Some(pending) = submitted.pending {
             let gate = self.gate_of(&submitted.key);
             if let Err(e) = await_durable(vec![pending]).await {
-                self.forget_failed_append(&submitted.key, &gate, submitted.epoch)
-                    .await;
-                self.streams.reset(submitted.stream_id).await;
+                self.reset(&submitted.key, submitted.stream_id).await;
                 return Err(ServiceError::durability(e));
             }
 
             gate.tail.lock().unwrap().record_append(&submitted.batches);
             self.waiters
                 .notify_append(&submitted.key, submitted.notify_offset);
-            if let Some(checkpoint) = submitted.checkpoint {
-                self.persist_entry(
-                    &submitted.key,
-                    &gate,
-                    checkpoint,
-                    submitted.epoch,
-                    submitted.notify_offset,
-                )
-                .await;
+            if submitted.checkpoint
+                && let Err(error) = self.checkpoint(submitted.stream_id).await
+            {
+                tracing::warn!(%error, log = %submitted.key, "producer checkpoint not written, replay covers it");
             }
         }
+        self.forget_sessions(submitted.stream_id, &submitted.expired)
+            .await;
 
         Ok(AppendBatchResult {
             base_offset: submitted.base_offset,
@@ -446,8 +434,8 @@ impl S3StreamService {
         max_records: usize,
     ) -> Result<LogRead, ServiceError> {
         let key = log.key();
-        let entry = self.require_entry(&key)?;
-        let stream = self.streams.ensure_open(entry.stream_id).await?;
+        let stream_id = self.require_stream_id(&key)?;
+        let stream = self.streams.ensure_open(stream_id).await?;
 
         let start = from.record_offset();
         let end = stream.confirm_offset();
@@ -482,8 +470,8 @@ impl S3StreamService {
         max_bytes: usize,
     ) -> Result<BatchReadResult, ServiceError> {
         let key = log.key();
-        let entry = self.require_entry(&key)?;
-        let stream = self.streams.ensure_open(entry.stream_id).await?;
+        let stream_id = self.require_stream_id(&key)?;
+        let stream = self.streams.ensure_open(stream_id).await?;
 
         let high_watermark = stream.confirm_offset();
         let log_start_offset = live_start_offset(stream.as_ref());
@@ -515,8 +503,8 @@ impl S3StreamService {
     }
 
     pub async fn watermarks(&self, log: &Log) -> Result<StreamWatermarks, ServiceError> {
-        let entry = self.require_entry(&log.key())?;
-        let stream = self.streams.ensure_open(entry.stream_id).await?;
+        let stream_id = self.require_stream_id(&log.key())?;
+        let stream = self.streams.ensure_open(stream_id).await?;
 
         Ok(StreamWatermarks {
             log_start_offset: live_start_offset(stream.as_ref()),
@@ -526,35 +514,35 @@ impl S3StreamService {
     }
 
     pub fn epochs(&self, log: &Log) -> Result<Vec<(u64, u64)>, ServiceError> {
-        let entry = self.require_entry(&log.key())?;
+        let stream_id = self.require_stream_id(&log.key())?;
         Ok(self
             .views
             .load()
             .state
-            .stream_epochs(entry.stream_id)
+            .stream_epochs(stream_id)
             .into_iter()
             .map(|(epoch, start_offset)| (epoch.max(0) as u64, start_offset))
             .collect())
     }
 
     pub async fn live_offsets(&self, log: &Log) -> Result<LogOffsets, ServiceError> {
-        let entry = self.require_entry(&log.key())?;
-        let stream = self.streams.ensure_open(entry.stream_id).await?;
+        let stream_id = self.require_stream_id(&log.key())?;
+        let stream = self.streams.ensure_open(stream_id).await?;
 
-        Ok(stream_offsets(entry.stream_id, stream.as_ref()))
+        Ok(stream_offsets(stream_id, stream.as_ref()))
     }
 
     pub fn offsets(&self, log: &Log) -> Result<LogOffsets, ServiceError> {
-        let entry = self.require_entry(&log.key())?;
-        match self.streams.held(entry.stream_id) {
-            Some(stream) => Ok(stream_offsets(entry.stream_id, stream.as_ref())),
+        let stream_id = self.require_stream_id(&log.key())?;
+        match self.streams.held(stream_id) {
+            Some(stream) => Ok(stream_offsets(stream_id, stream.as_ref())),
             None => self.committed_offsets(log),
         }
     }
 
     fn committed_offsets(&self, log: &Log) -> Result<LogOffsets, ServiceError> {
-        let entry = self.require_entry(&log.key())?;
-        let committed = self.views.load().state.get_stream(entry.stream_id);
+        let stream_id = self.require_stream_id(&log.key())?;
+        let committed = self.views.load().state.get_stream(stream_id);
 
         let (start, end) = committed
             .map(|m| {
@@ -573,7 +561,7 @@ impl S3StreamService {
             .unwrap_or((0, 0));
 
         Ok(LogOffsets {
-            stream_id: entry.stream_id,
+            stream_id,
             start_offset: OffsetToken::of_record_offset(start),
             next_offset: OffsetToken::of_record_offset(end),
             submitted_offset: OffsetToken::of_record_offset(end),
@@ -587,11 +575,11 @@ impl S3StreamService {
         timeout: Duration,
     ) -> Result<bool, ServiceError> {
         let key = log.key();
-        let Some(entry) = self.entry(&key)? else {
+        let Some(stream_id) = self.stream_id_at(&key)? else {
             return Ok(false);
         };
 
-        let stream = self.streams.ensure_open(entry.stream_id).await?;
+        let stream = self.streams.ensure_open(stream_id).await?;
         if stream.confirm_offset() > from.record_offset() {
             return Ok(true);
         }
@@ -614,8 +602,8 @@ impl S3StreamService {
         let gate = self.gate_of(&key);
         let _op = gate.op.lock().await;
 
-        let entry = self.require_entry(&key)?;
-        let stream = self.streams.ensure_open(entry.stream_id).await?;
+        let stream_id = self.require_stream_id(&key)?;
+        let stream = self.streams.ensure_open(stream_id).await?;
         self.trim_open(stream.as_ref(), new_start_offset).await
     }
 
@@ -626,19 +614,16 @@ impl S3StreamService {
         now_ms: i64,
     ) -> Result<(), ServiceError> {
         let key = log.key();
-        let Some(entry) = self.entry(&key)? else {
+        let Some(stream_id) = self.stream_id_at(&key)? else {
             return Ok(());
         };
-        if self
-            .retention_start(entry.stream_id, retention, now_ms)
-            .is_none()
-        {
+        if self.retention_start(stream_id, retention, now_ms).is_none() {
             return Ok(());
         }
 
         let gate = self.gate_of(&key);
         let _op = gate.op.lock().await;
-        let Some((row, start)) = self.retention_start(entry.stream_id, retention, now_ms) else {
+        let Some((row, start)) = self.retention_start(stream_id, retention, now_ms) else {
             return Ok(());
         };
 
@@ -711,6 +696,7 @@ impl S3StreamService {
         };
 
         let released = self.streams.release(stream_id).await?;
+        self.producers.lock().unwrap().remove(&stream_id);
         if released.is_some()
             && let (Some(key), Some(gate)) = (&key, &gate)
         {
@@ -730,6 +716,7 @@ impl S3StreamService {
     pub async fn shutdown(&self) {
         self.stop_live_reads();
         self.streams.shutdown().await;
+        self.producers.lock().unwrap().clear();
     }
 
     fn gate_of(&self, key: &str) -> Arc<Gate> {
@@ -742,67 +729,161 @@ impl S3StreamService {
                     op: Arc::new(tokio::sync::Mutex::new(())),
                     tail: Mutex::new(TailCache::default()),
                     last_timestamp_ms: Mutex::new(None),
-                    persisted: tokio::sync::Mutex::new(Persisted::default()),
                 })
             })
             .clone()
     }
 
-    fn entry(&self, key: &str) -> Result<Option<LogEntry>, ServiceError> {
-        if let Some(cached) = self.entries.lock().unwrap().get(key).cloned() {
-            return Ok(Some(cached));
-        }
-
-        let Some(value) = self.kv.get_kv(key) else {
-            return Ok(None);
-        };
-        let entry = LogEntry::decode(&value)?;
-        self.cache_entry(key, entry.clone());
-
-        Ok(Some(entry))
+    fn producers_of(&self, stream_id: u64) -> Option<Arc<tokio::sync::Mutex<Producers>>> {
+        self.producers.lock().unwrap().get(&stream_id).cloned()
     }
 
-    fn require_entry(&self, key: &str) -> Result<LogEntry, ServiceError> {
-        self.entry(key)?
-            .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound))
-    }
-
-    fn cache_entry(&self, key: &str, entry: LogEntry) {
-        self.entries.lock().unwrap().insert(key.to_owned(), entry);
-    }
-
-    /// After a failed append at `epoch`: drops the cached entry, so the next
-    /// load reads only what was persisted and, for Kafka producers, replays
-    /// the log, and stops snapshots from that epoch being persisted.
-    async fn forget_failed_append(&self, key: &str, gate: &Gate, epoch: u64) {
-        self.entries.lock().unwrap().remove(key);
-        gate.persisted.lock().await.failed = Some(epoch);
-    }
-
-    /// Persists producer state that covers the log up to `offset` at stream
-    /// `epoch`, once those appends are durable. A failure only costs
-    /// deduplication across a restart.
-    async fn persist_entry(
+    async fn load_producers(
         &self,
-        key: &str,
-        gate: &Gate,
-        entry: LogEntry,
-        epoch: u64,
-        offset: u64,
-    ) {
-        let mut persisted = gate.persisted.lock().await;
-        if persisted.failed == Some(epoch) || (epoch, offset) < (persisted.epoch, persisted.offset)
+        stream: &Arc<dyn Stream>,
+    ) -> Result<Arc<tokio::sync::Mutex<Producers>>, ServiceError> {
+        let stream_id = stream.stream_id();
+        if let Some(producers) = self.producers_of(stream_id)
+            && producers.lock().await.epoch() == stream.stream_epoch()
         {
-            return;
+            return Ok(producers);
         }
 
-        match self.kv.put_kv(key, entry.encode()).await {
-            Ok(_) => {
-                persisted.epoch = epoch;
-                persisted.offset = offset;
-            }
-            Err(error) => tracing::warn!(%error, log = %key, "producer state not persisted"),
+        let mut loaded = Producers::load(
+            stream.as_ref(),
+            self.kv.get_kv(&producers::checkpoint_key(stream_id)),
+            self.kv.list_kv(&producers::session_prefix(stream_id)),
+            self.kv.get_kv(&producers::stream_seq_key(stream_id)),
+        )?;
+        if loaded.replay_needed(None, stream.confirm_offset()) {
+            loaded.replay(stream.as_ref(), now_ms()).await?;
         }
+        let producers = Arc::new(tokio::sync::Mutex::new(loaded));
+        self.producers
+            .lock()
+            .unwrap()
+            .insert(stream_id, producers.clone());
+
+        Ok(producers)
+    }
+
+    pub async fn allocate_producer_id(&self) -> Result<i64, ServiceError> {
+        let mut lease = self.producer_ids.lock().await;
+        if let Some(id) = lease.take() {
+            return Ok(id);
+        }
+
+        let first = self
+            .streams
+            .node()
+            .allocate_producer_ids(producers::ID_BLOCK)
+            .await?;
+        lease.refill(first);
+        lease.take().ok_or_else(|| {
+            ServiceError::with_message(ErrorKind::Internal, None, false, "empty producer id lease")
+        })
+    }
+
+    /// An HTTP producer's session at its current epoch. A new epoch gets a
+    /// numeric id and its row before anything is written under it.
+    async fn session_for(
+        &self,
+        stream_id: u64,
+        producers: &mut Producers,
+        producer: &Producer,
+        now_ms: i64,
+    ) -> Result<Session, ServiceError> {
+        if let Some(session) = producers.session(&producer.producer_id)
+            && session.epoch == producer.epoch
+        {
+            return Ok(session);
+        }
+
+        let session = Session {
+            epoch: producer.epoch,
+            id: self.allocate_producer_id().await?,
+        };
+        self.kv
+            .put_kv(
+                &producers::session_key(stream_id, &producer.producer_id),
+                producers::encode_session(session),
+            )
+            .await?;
+        producers.establish(producer.producer_id.clone(), session, now_ms);
+
+        Ok(session)
+    }
+
+    async fn checkpoint(&self, stream_id: u64) -> Result<(), ServiceError> {
+        let Some(producers) = self.producers_of(stream_id) else {
+            return Ok(());
+        };
+        let bytes = producers.lock().await.checkpoint();
+        self.kv
+            .put_kv(&producers::checkpoint_key(stream_id), bytes)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Writes the stream sequence row by compare and set. A row from a
+    /// higher epoch means the stream moved, one from a lower epoch is folded
+    /// in and overwritten.
+    async fn write_stream_seq(
+        &self,
+        stream: &dyn Stream,
+        producers: &mut Producers,
+        mut row: Bytes,
+    ) -> Result<(), ServiceError> {
+        let stream_id = stream.stream_id();
+        let key = producers::stream_seq_key(stream_id);
+
+        loop {
+            let stored = match producers.stream_seq_written() {
+                None => {
+                    let stored = self.kv.put_kv_if_absent(&key, row.clone()).await?;
+                    (stored != row).then_some(stored)
+                }
+                Some(expected) => match self.kv.put_kv_if(&key, &expected, row.clone()).await? {
+                    Some(_) => None,
+                    None => Some(
+                        self.kv
+                            .get_kv(&key)
+                            .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound))?,
+                    ),
+                },
+            };
+            let Some(stored) = stored else {
+                producers.mark_stream_seq_written(row);
+                return Ok(());
+            };
+
+            row = match producers.merge_stream_seq(stream_id, stored, stream.confirm_offset()) {
+                Ok(row) => row,
+                Err(error) => {
+                    self.producers.lock().unwrap().remove(&stream_id);
+                    return Err(error);
+                }
+            };
+        }
+    }
+
+    async fn forget_sessions(&self, stream_id: u64, producer_ids: &[String]) {
+        for producer_id in producer_ids {
+            if let Err(error) = self
+                .kv
+                .del_kv(&producers::session_key(stream_id, producer_id))
+                .await
+            {
+                tracing::warn!(%error, stream_id, "expired producer session not removed");
+            }
+        }
+    }
+
+    async fn reset(&self, key: &str, stream_id: u64) {
+        self.streams.reset(stream_id).await;
+        self.producers.lock().unwrap().remove(&stream_id);
+        self.gate_of(key).reset();
     }
 
     async fn batches_from(
@@ -859,42 +940,6 @@ impl S3StreamService {
 
         Ok(now_ms().max(last + 1))
     }
-
-    async fn recover_producers(
-        &self,
-        key: &str,
-        entry: &mut LogEntry,
-        stream: &dyn Stream,
-        producer: Option<NumericProducer>,
-        now: i64,
-    ) -> Result<(), ServiceError> {
-        if producer.is_none() && entry.numeric_producers.is_empty() {
-            return Ok(());
-        }
-
-        let confirm = stream.confirm_offset();
-        let mut cursor = entry.producer_state_offset.max(live_start_offset(stream));
-        if cursor >= confirm {
-            return Ok(());
-        }
-
-        while cursor < confirm {
-            let fetch = stream
-                .fetch(FetchContext::default(), cursor, confirm, 8 * 1024 * 1024)
-                .await?;
-            if fetch.records.is_empty() {
-                break;
-            }
-            for batch in fetch.records {
-                producer::fold_stored_payload(entry, &batch.payload, now);
-                cursor = cursor.max(batch.last_offset);
-            }
-        }
-
-        entry.producer_state_offset = confirm;
-        self.cache_entry(key, entry.clone());
-        Ok(())
-    }
 }
 
 impl Append<'_> {
@@ -903,7 +948,7 @@ impl Append<'_> {
     }
 
     pub fn producer_decision(&self, producer: &Producer) -> ProducerDecision {
-        validate_producer(&self.entry, producer)
+        self.held.decide(producer)
     }
 
     pub fn check_stream_seq(
@@ -917,10 +962,7 @@ impl Append<'_> {
 
         let accepted =
             decision.is_none() || matches!(decision, Some(ProducerDecision::Accepted { .. }));
-        if accepted
-            && let Some(last_seq) = &self.entry.last_seq
-            && stream_seq <= last_seq.as_str()
-        {
+        if accepted && self.held.stream_seq_regressed(stream_seq) {
             return Err(ServiceError::with_message(
                 ErrorKind::Conflict,
                 Some(self.next_offset()),
@@ -944,21 +986,50 @@ impl Append<'_> {
             key,
             gate,
             op,
-            entry,
             stream,
+            producers,
+            mut held,
         } = self;
+        let stream_id = stream.stream_id();
+        let now = now_ms();
+        let accepted =
+            producer.filter(|_| matches!(decision, Some(ProducerDecision::Accepted { .. })));
+        let landed = (!records.is_empty()).then(|| stream.next_offset());
+
+        let session = match accepted {
+            Some(producer) => Some(
+                service
+                    .session_for(stream_id, &mut held, producer, now)
+                    .await?,
+            ),
+            None => None,
+        };
+        let sequenced = stream_seq.is_some();
+        if let Some(seq) = stream_seq {
+            let row = held.accept_stream_seq(seq, landed);
+            service
+                .write_stream_seq(stream.as_ref(), &mut held, row)
+                .await?;
+        }
 
         let mut pendings = Vec::new();
         let mut batches = Vec::new();
         let mut stamped = None;
-
-        if !records.is_empty() {
-            let base_offset = stream.next_offset();
+        let covered_before = held.covered();
+        if let Some(base_offset) = landed {
             let timestamp_ms = service.next_timestamp(&gate, stream.as_ref()).await?;
             stamped = Some(timestamp_ms);
 
             let leader_epoch = record::leader_epoch(stream.stream_epoch());
-            let payload = record::encode_batch(base_offset, leader_epoch, timestamp_ms, &records);
+            let identity = session
+                .zip(accepted)
+                .map(|(session, producer)| NumericProducer {
+                    id: session.id,
+                    epoch: 0,
+                    first_seq: producers::header_seq(producer.seq),
+                });
+            let payload =
+                record::encode_batch(base_offset, leader_epoch, timestamp_ms, identity, &records);
             let count = records.len() as u32;
             match Arc::clone(&stream).submit_append(
                 AppendContext::default(),
@@ -966,8 +1037,8 @@ impl Append<'_> {
             ) {
                 Ok(pending) => pendings.push(pending),
                 Err(e) => {
-                    service.streams.reset(entry.stream_id).await;
-                    gate.reset();
+                    drop(held);
+                    service.reset(&key, stream_id).await;
                     return Err(ServiceError::durability(e));
                 }
             }
@@ -979,43 +1050,44 @@ impl Append<'_> {
                 count,
                 payload,
             });
+            held.note_appended(base_offset, stream.next_offset());
+        }
+        if let (Some(session), Some(producer)) = (session, accepted) {
+            held.record_http(session, producer.seq, now);
         }
 
-        let updated = apply_append_state(entry.clone(), stream_seq, producer, decision);
-        let changed = updated != entry;
-        if changed {
-            service.cache_entry(&key, updated.clone());
-        }
-
+        let expired = match accepted {
+            Some(_) => held.expire(now),
+            None => Vec::new(),
+        };
+        let checkpoint = held.checkpoint_due(covered_before);
+        let closed_under = landed.is_none() && session.is_some();
         let next_offset = OffsetToken::of_record_offset(stream.next_offset());
+        drop(held);
         drop(op);
 
         if let Err(e) = await_durable(pendings).await {
-            service
-                .forget_failed_append(&key, &gate, stream.stream_epoch())
-                .await;
-            service.streams.reset(entry.stream_id).await;
-            gate.reset();
+            service.reset(&key, stream_id).await;
             return Err(ServiceError::durability(e));
         }
-        if changed {
-            service
-                .persist_entry(
-                    &key,
-                    &gate,
-                    updated,
-                    stream.stream_epoch(),
-                    next_offset.record_offset(),
-                )
-                .await;
-        }
-
         if !batches.is_empty() {
             gate.tail.lock().unwrap().record_append(&batches);
             service
                 .waiters
                 .notify_append(&key, next_offset.record_offset());
         }
+        if sequenced {
+            producers
+                .lock()
+                .await
+                .confirm_stream_seq(stream.confirm_offset());
+        }
+        if closed_under {
+            service.checkpoint(stream_id).await?;
+        } else if checkpoint && let Err(error) = service.checkpoint(stream_id).await {
+            tracing::warn!(%error, log = %key, "producer checkpoint not written, replay covers it");
+        }
+        service.forget_sessions(stream_id, &expired).await;
 
         Ok(Committed {
             next_offset,
@@ -1026,31 +1098,6 @@ impl Append<'_> {
 
 pub(crate) fn stream_id_key(stream_id: u64) -> String {
     format!("idx/sid/{stream_id}")
-}
-
-fn apply_append_state(
-    entry: LogEntry,
-    stream_seq: Option<String>,
-    producer: Option<&Producer>,
-    decision: Option<ProducerDecision>,
-) -> LogEntry {
-    let mut updated = entry;
-    if let Some(seq) = stream_seq {
-        updated = updated.with_last_seq(seq);
-    }
-
-    if let (Some(ProducerDecision::Accepted { .. }), Some(producer)) = (decision, producer) {
-        let now = now_ms();
-        updated = updated.with_producer(
-            producer.producer_id.clone(),
-            producer.epoch,
-            producer.seq,
-            now,
-        );
-        producer::expire_producers(&mut updated, now);
-    }
-
-    updated
 }
 
 fn parse_batches(payload: &Bytes) -> Result<Vec<BatchHeader>, ServiceError> {
@@ -1218,7 +1265,7 @@ mod tests {
             base_offset,
             last_offset: base_offset + values.len() as u64,
             count: values.len() as u32,
-            payload: record::encode_batch(base_offset, -1, 1, &records),
+            payload: record::encode_batch(base_offset, -1, 1, None, &records),
         }
     }
 

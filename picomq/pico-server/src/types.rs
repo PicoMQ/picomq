@@ -115,9 +115,8 @@ pub struct SubmittedBatchAppend {
     pub(crate) duplicate: bool,
     pub(crate) pending: Option<s3stream::PendingAppend>,
     pub(crate) batches: Vec<StreamBatch>,
-    pub(crate) epoch: u64,
-    /// Producer state to persist once the append is durable.
-    pub(crate) checkpoint: Option<crate::log::LogEntry>,
+    pub(crate) checkpoint: bool,
+    pub(crate) expired: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
