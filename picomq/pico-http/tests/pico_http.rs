@@ -25,6 +25,38 @@ fn client() -> reqwest::Client {
         .unwrap()
 }
 
+/// Names in the `/_` namespace and paths that do not decode to text are
+/// refused before anything is created.
+#[tokio::test]
+async fn reserved_and_malformed_names_are_refused() {
+    let server = picomq_server().await;
+    let http = client();
+
+    for path in ["/_groups/a/b/c", "/_other/x", "/_p/1/0", "/a%ff"] {
+        let refused = http
+            .put(format!("{}{path}", server.base_url))
+            .header("Content-Type", "text/plain")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 400, "{path}");
+    }
+    let listed = http
+        .get(format!("{}/?prefix=%ff", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), 400);
+
+    let created = http
+        .put(format!("{}/orders/_internal", server.base_url))
+        .header("Content-Type", "text/plain")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+}
+
 /// (createSemantics +
 /// appendAndRead + matchSeq + producerSession + listTrimCloseDelete).
 #[tokio::test]

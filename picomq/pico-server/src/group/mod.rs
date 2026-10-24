@@ -46,7 +46,7 @@ pub enum GroupError {
     CapacityExceeded,
     #[error("static group member was fenced")]
     FencedInstance,
-    #[error("a newer join from the same member replaced this one")]
+    #[error("a newer request from the same member replaced this one")]
     Superseded,
 }
 
@@ -460,7 +460,9 @@ impl GroupCoordinator {
             }
             let timeout = state.members[&input.member_id].rebalance_timeout;
             let (sender, receiver) = oneshot::channel();
-            state.sync_waiters.insert(input.member_id, sender);
+            if let Some(previous) = state.sync_waiters.insert(input.member_id, sender) {
+                let _ = previous.send(Err(GroupError::Superseded));
+            }
             (receiver, timeout)
         };
         match tokio::time::timeout(timeout, receiver).await {

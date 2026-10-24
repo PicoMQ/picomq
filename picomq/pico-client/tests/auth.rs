@@ -12,7 +12,7 @@ use bytes::Bytes;
 use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
-use picomq_client::{ClientConfig, CreateOptions, ErrorKind, PicoClient, RetryPolicy, StreamApi};
+use picomq_client::{ClientConfig, CreateOptions, ErrorKind, PicoClient, StreamApi};
 use picomq_http::HttpProtocol as ServeProtocol;
 use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, PicoServer, ServerConfig};
 
@@ -41,11 +41,7 @@ fn with_token(endpoint: &str, token: Option<String>) -> PicoClient {
         token,
         ..Default::default()
     };
-    PicoClient::with_http(
-        endpoint,
-        picomq_client::http_client(&config).unwrap(),
-        RetryPolicy::none(),
-    )
+    PicoClient::with_config(endpoint, &config).unwrap()
 }
 
 #[tokio::test]
@@ -182,4 +178,24 @@ async fn redirect_loops_fail_instead_of_spinning() {
     let client = with_token(&format!("http://{looper}"), None);
     let err = client.head("/orders", None).await.unwrap_err();
     assert_eq!(err.code, "too_many_redirects");
+}
+
+/// A hop to a scheme the client cannot reach securely is refused.
+#[tokio::test]
+async fn redirects_to_an_unsupported_scheme_are_refused() {
+    let entry = spawn(Router::new().route(
+        "/orders",
+        any(|| async {
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                [("location", "ftp://127.0.0.1/orders")],
+            )
+                .into_response()
+        }),
+    ))
+    .await;
+
+    let client = with_token(&format!("http://{entry}"), Some("tok".to_owned()));
+    let err = client.head("/orders", None).await.unwrap_err();
+    assert_eq!(err.code, "unsafe_redirect");
 }

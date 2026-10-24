@@ -24,11 +24,11 @@ enum Client {
 
 impl Client {
     fn open(protocol: Protocol, endpoint: &Target) -> Result<Self, ClientError> {
-        let http = picomq_client::http_client(&endpoint.client_config())?;
+        let config = endpoint.client_config();
         let url = &endpoint.endpoint;
         Ok(match protocol {
-            Protocol::Pico => Self::Pico(PicoClient::with_http(url, http, Default::default())),
-            Protocol::Ds => Self::Ds(DsClient::with_http(url, http, Default::default())),
+            Protocol::Pico => Self::Pico(PicoClient::with_config(url, &config)?),
+            Protocol::Ds => Self::Ds(DsClient::with_config(url, &config)?),
         })
     }
 

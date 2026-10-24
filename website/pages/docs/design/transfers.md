@@ -48,7 +48,7 @@ The target sees the pending record disappear and the stream now placed on it, an
 
 ## During the transfer
 
-Requests that arrive mid-handoff route to the target. An open attempt on the target parks and polls until the transfer settles, up to `10` seconds, so clients see added latency rather than errors. A request that reaches any other node while the transfer is pending is rejected as transferring, HTTP `409` or Kafka `NOT_LEADER_OR_FOLLOWER`, and the client retries against the target.
+Requests that arrive mid-handoff route to the target. An open attempt on the target parks and polls until the transfer settles, up to `10` seconds, so clients see added latency rather than errors. A request that reaches any other node while the transfer is pending is rejected as transferring, HTTP `503` or Kafka `NOT_LEADER_OR_FOLLOWER`, and the client retries against the target.
 
 The unavailability window is the source's drain plus two metadata round trips, typically well under a second for a quiet stream and bounded by the buffered data for a busy one.
 

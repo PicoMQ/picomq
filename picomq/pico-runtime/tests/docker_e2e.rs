@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Harness, consume_n, produce, unique};
+use common::{Harness, consume_n, first_admin, produce, read_partitions, run, unique, wait_ready};
 
 use std::time::{Duration, SystemTime};
 
@@ -15,6 +15,75 @@ use rdkafka::types::RDKafkaErrorCode;
 use serde_json::Value;
 
 const CT_BATCH_BINARY: &str = "application/vnd.picomq.batch";
+
+/// An idempotent producer and a committed group ride through a node
+/// restart, and a deleted topic recreated under its name starts empty.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn kafka_clients_ride_through_a_node_restart() {
+    let Ok(restart) = std::env::var("PICOMQ_RESTART_CMD") else {
+        eprintln!("set PICOMQ_RESTART_CMD to run the restart test");
+        return;
+    };
+
+    let h = Harness::new();
+    let topic = unique("kafka-restart");
+    let group = unique("kafka-restart-group");
+    h.create_topic(&topic, 1).await;
+    let producer = h.producer();
+    for value in 0..50 {
+        produce(&producer, &topic, None, &value.to_string()).await;
+    }
+    let member = group_member(&h.bootstrap, &group, &topic);
+    assert_eq!(consume_n(&member, 50).await.last().unwrap().offset, 49);
+    member
+        .commit_consumer_state(rdkafka::consumer::CommitMode::Sync)
+        .unwrap();
+    drop(member);
+
+    run(&restart);
+    wait_ready(&first_admin()).await;
+
+    for value in 50..100 {
+        produce(&producer, &topic, None, &value.to_string()).await;
+    }
+    let member = group_member(&h.bootstrap, &group, &topic);
+    let resumed = consume_n(&member, 50).await;
+    assert_eq!(resumed[0].offset, 50, "the group resumed at its commit");
+    assert_eq!(resumed.last().unwrap().offset, 99);
+
+    let expected: Vec<String> = (0..100).map(|value| value.to_string()).collect();
+    assert_eq!(
+        read_partitions(&h.bootstrap, &topic, 1, 100).await,
+        expected
+    );
+
+    h.admin()
+        .delete_topics(&[&topic], &rdkafka::admin::AdminOptions::new())
+        .await
+        .unwrap()[0]
+        .as_ref()
+        .unwrap();
+    wait_head_gone(&h, &format!("/{topic}")).await;
+    h.create_topic(&topic, 1).await;
+    assert_eq!(produce(&h.producer(), &topic, None, "fresh").await, 0);
+    assert_eq!(
+        read_partitions(&h.bootstrap, &topic, 1, 1).await,
+        vec!["fresh"]
+    );
+}
+
+fn group_member(bootstrap: &str, group: &str, topic: &str) -> StreamConsumer {
+    let consumer: StreamConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .set("group.id", group)
+        .set("enable.auto.commit", "false")
+        .set("auto.offset.reset", "earliest")
+        .create()
+        .unwrap();
+    consumer.subscribe(&[topic]).unwrap();
+    consumer
+}
 
 async fn pico_read_json(h: &Harness, path: &str) -> Vec<Value> {
     let page = h

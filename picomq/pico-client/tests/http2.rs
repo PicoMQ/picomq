@@ -40,11 +40,11 @@ async fn start(dir: &std::path::Path) -> (picomq_runtime::PicoServer, String) {
 async fn appends_over_h2c_negotiate_http2() {
     let dir = tempfile::tempdir().unwrap();
     let (server, endpoint) = start(dir.path()).await;
-    let http = picomq_client::http_client(&ClientConfig {
+    let config = ClientConfig {
         http2: true,
         ..Default::default()
-    })
-    .unwrap();
+    };
+    let http = picomq_client::http_client(&config).unwrap();
 
     // Assert on the transport directly: a client with prior knowledge would
     // error rather than downgrade, but a passing round trip below should not be
@@ -52,7 +52,7 @@ async fn appends_over_h2c_negotiate_http2() {
     let response = http.get(format!("{endpoint}/")).send().await.unwrap();
     assert_eq!(response.version(), reqwest::Version::HTTP_2);
 
-    let client = PicoClient::with_http(&endpoint, http, Default::default());
+    let client = PicoClient::with_config(&endpoint, &config).unwrap();
     assert!(
         client
             .create("/streams/h2", &CreateOptions::new("text/plain"))

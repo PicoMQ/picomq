@@ -26,18 +26,17 @@ pico serve --node-id 1 --listen 0.0.0.0:4437 \
     --storage=-2@s3://picomq?region=us-east-1
 ```
 
-Every node keeps its WAL the same way, all in the bucket or all in Postgres, so any node can take over a dead node's WAL. See [Configuration](/docs/operations/configuration#storage).
+Every node keeps its WAL in the bucket, so any node can take over a dead node's WAL. See [Configuration](/docs/operations/configuration#storage).
 
 Routing shapes what sits in front of the nodes. Clients are redirected to a stream's owner with its advertised address, so clients must be able to reach every node directly and follow redirects. A load balancer works fine as the entry point for creates and first requests, but it should not be the only reachable address, since redirects bypass it by design.
 
 ## Images and compose
 
-Two images are published to GitHub Container Registry for every release.
+One image is published to GitHub Container Registry for every release.
 
 | Image | Tags | Contents |
 | --- | --- | --- |
 | `ghcr.io/picomq/picomq` | `latest`, version, major.minor, commit SHA | The `pico` binary with the dashboard embedded |
-| `ghcr.io/picomq/picomq-pg` | `pg16`, `pg17`, `pg18`, version and SHA per major | Postgres with the [pico extension](/docs/operations/deployment/postgres) preloaded |
 
 The repository has two compose harnesses. `harness/aio` is self-contained, starting Postgres and RustFS alongside one or two nodes, auth off by default (`PICO_AUTH=required` in `.env` turns it on with a known dev bootstrap token). `harness/byo` has the same layout against an existing Postgres and object store, configured through `.env`, runs with auth required, and refuses to start without a bootstrap token.
 
@@ -46,8 +45,6 @@ cd harness/aio && cp .env.example .env
 docker compose up --build                            # 1 node
 docker compose -f compose.lite.yml up --build        # 1 node, SQLite and local files, no Postgres or RustFS
 docker compose -f compose.cluster.yml up --build     # 2 nodes
-docker compose -f compose.cluster.yml -f compose.pgwal.yml up --build   # 2 nodes, WAL in Postgres
-docker compose -f compose.extension.yml up --build   # pico inside Postgres, with a standby
 ```
 
 ## Health and readiness

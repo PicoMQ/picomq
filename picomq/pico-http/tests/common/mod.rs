@@ -10,6 +10,7 @@ use std::time::Duration;
 use picomq_http::{HttpProtocol, RoutingMode, RunningServer, ServeOptions, bind, serve};
 use picomq_metadata::LocalSink;
 use picomq_schema::{Registry, SchemaStore};
+use picomq_server::wal::ObjectWal;
 use picomq_server::{NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
@@ -48,18 +49,20 @@ async fn start_node_inner(schema_registry: Option<Arc<dyn SchemaStore>>) -> Arc<
         wal_config: "3@mem://wal?batchInterval=5".into(),
         ..Default::default()
     };
+    let config = NodeConfig {
+        node_id: 1,
+        node_epoch: 1,
+        engine,
+        ..Default::default()
+    };
+    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
     Arc::new(
         PicoNode::start(
-            NodeConfig {
-                node_id: 1,
-                node_epoch: 1,
-                engine,
-                ..Default::default()
-            },
+            config,
             Arc::new(sink),
             views,
             object_storage,
-            wal_storage,
+            Arc::new(wal),
             schema_registry,
         )
         .await

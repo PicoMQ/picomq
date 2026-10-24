@@ -36,6 +36,8 @@ Topic names are paths, such as `/logs/api`. Slashes and dots are the same separa
 
 The canonical form is also the topic's Kafka name, when it is a legal Kafka name: at most `249` characters from letters, digits, `.`, `_`, and `-`. A topic whose canonical form is not legal in Kafka exists only over HTTP.
 
+The first segment may not start with `_`. That namespace belongs to PicoMQ's own routes, `/_streams`, `/_schemas`, and `/_groups`, and a name in it is refused on every protocol: `400` over HTTP, `INVALID_TOPIC_EXCEPTION` over Kafka.
+
 ## What is stored
 
 Everything about a topic lives in the metadata KV, part of the replicated state described in [Metadata](/docs/design/metadata).
@@ -44,9 +46,12 @@ Everything about a topic lives in the metadata KV, part of the replicated state 
 | --- | --- |
 | `topic/{canonical name}` | The topic: id, partition count, content type, TTL or expiry, closed, bound [schema](/docs/schemas) |
 | `topic-id/{topic id}` | The name of a topic id |
-| `log/partition/{topic id}/{index}` | A partition's log entry: its internal stream and its producers |
+| `log/partition/{topic id}/{index}` | A partition's log entry: its internal stream |
 | `log/group/{group}` | A consumer group's log entry |
 | `idx/sid/{stream id}` | The log an internal stream belongs to |
+| `producers/{stream id}` | A checkpoint of the stream's producer state, see [Producers](#producers) |
+| `producer/{stream id}/{producer id}` | The session id an HTTP producer writes under at its current epoch |
+| `stream_seq/{stream id}` | The last Durable Streams `Stream-Seq` the stream accepted, stamped with the stream epoch |
 
 ## Creating a topic
 
@@ -100,12 +105,14 @@ A topic can limit how much each partition keeps, by age, by size, or both. Unset
 
 ## Producers
 
-Each partition's log entry tracks its idempotent producers, so a retried append is never written twice.
+A retried append is never written twice. Every batch in a partition's log carries the identity of the producer that wrote it, so the log itself is the producer state, and a node that opens a stream rebuilds that state by reading it.
 
 | | HTTP producers | Kafka producers |
 | --- | --- | --- |
-| Identity | `Pico-Producer-Id` and `Pico-Producer-Epoch` | Producer id and epoch from `InitProducerId` |
-| Deduplication | A sequence already accepted is acknowledged without writing | The last `5` batches per producer, as in Kafka |
-| Persisted | After each append is durable | Every `4096` offsets, and rebuilt on load by replaying the log after that point |
+| Identity | `Pico-Producer-Id` and `Pico-Producer-Epoch`, or `Producer-Id` and `Producer-Epoch` on Durable Streams | Producer id and epoch from `InitProducerId` |
+| In the batch header | A session id, a number the cluster allocates once per producer id and epoch and remembers under `producer/{stream id}/{producer id}` | The producer id, epoch, and base sequence as the client sent them |
+| Deduplication | A sequence at or below the last accepted is acknowledged without writing, a new epoch starts at `0` | The last `5` batches per producer, as in Kafka |
 
-An append from a producer at a stale epoch is rejected. Producers idle for `24` hours are forgotten, and a partition tracks at most `1024`. Producer state moves with the log entry, so deduplication survives restarts, transfers, and failover.
+A node opening a stream replays the log from its last checkpoint to the tail and rebuilds every producer's position from the batch headers. Checkpoints are written every `4096` offsets under `producers/{stream id}` and only shorten the replay, nothing depends on them being current. An append from a producer at a stale epoch is rejected. Producers idle for `24` hours are forgotten, and a stream tracks at most `1024`.
+
+A Durable Streams writer that sends `Stream-Seq` gets a stronger promise: a sequence that regresses is refused across restarts and transfers too. The accepted value lives under `stream_seq/{stream id}` with the epoch that wrote it, and a node only replaces it from a higher epoch, so a former owner's late write cannot move it back. Nothing is written for streams whose producers never send it.

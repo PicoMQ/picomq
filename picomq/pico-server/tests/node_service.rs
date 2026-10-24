@@ -9,6 +9,7 @@ use picomq_metadata::{
 };
 use picomq_server::ownership::OwnershipService as _;
 use picomq_server::record::encode_batch;
+use picomq_server::wal::ObjectWal;
 use picomq_server::{
     AppendBatchResult, AppendCommand, CreateCommand, ErrorKind, Log, LogRecord, MAX_NEW_PARTITIONS,
     NodeConfig, OffsetToken, PicoNode, Retention, ServiceError, Topic, Topics, partition_log,
@@ -33,23 +34,18 @@ async fn start_engine(
         Arc::new(MemoryObjectStorage::new((node_id * 2) as i16));
     let wal_storage: Arc<dyn ObjectStorageTrait> =
         Arc::new(MemoryObjectStorage::new((node_id * 2 + 1) as i16));
-    PicoNode::start(
-        NodeConfig {
-            node_id,
-            node_epoch: 1,
-            http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
-            heartbeat_interval: Duration::from_millis(100),
-            engine,
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        None,
-    )
-    .await
-    .unwrap()
+    let config = NodeConfig {
+        node_id,
+        node_epoch: 1,
+        http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
+        heartbeat_interval: Duration::from_millis(100),
+        engine,
+        ..Default::default()
+    };
+    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+        .await
+        .unwrap()
 }
 
 async fn local_node() -> PicoNode {
@@ -543,21 +539,16 @@ async fn start_shared_node(
     object_storage: Arc<dyn ObjectStorageTrait>,
     wal_storage: Arc<dyn ObjectStorageTrait>,
 ) -> PicoNode {
-    PicoNode::start(
-        NodeConfig {
-            node_id,
-            node_epoch,
-            http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        None,
-    )
-    .await
-    .unwrap()
+    let config = NodeConfig {
+        node_id,
+        node_epoch,
+        http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
+        ..Default::default()
+    };
+    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+        .await
+        .unwrap()
 }
 
 async fn wait_for_view(
@@ -807,7 +798,7 @@ fn kafka_batch(producer: Option<(i64, i16, i32)>, values: &[&[u8]]) -> Bytes {
         .iter()
         .map(|v| LogRecord::value(Bytes::copy_from_slice(v)))
         .collect();
-    let mut batch = encode_batch(0, -1, 1, &records).to_vec();
+    let mut batch = encode_batch(0, -1, 1, None, &records).to_vec();
     if let Some((id, epoch, base_seq)) = producer {
         batch[43..51].copy_from_slice(&id.to_be_bytes());
         batch[51..53].copy_from_slice(&epoch.to_be_bytes());
@@ -1357,17 +1348,19 @@ async fn append_rejects_schema_invalid_records() {
     let (sink, views) = LocalSink::new();
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
+    let config = NodeConfig {
+        node_id: 1,
+        node_epoch: 1,
+        http_address: "http://127.0.0.1:4010".into(),
+        ..Default::default()
+    };
+    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
     let node = PicoNode::start(
-        NodeConfig {
-            node_id: 1,
-            node_epoch: 1,
-            http_address: "http://127.0.0.1:4010".into(),
-            ..Default::default()
-        },
+        config,
         Arc::new(sink),
         views,
         object_storage,
-        wal_storage,
+        Arc::new(wal),
         Some(Arc::new(Registry::new(InMemory::new()))),
     )
     .await
@@ -2256,14 +2249,10 @@ async fn faulty_node() -> (PicoNode, Arc<AtomicBool>) {
     let (sink, views) = LocalSink::new();
     let fail = Arc::new(AtomicBool::new(false));
     let wal = Faulty {
-        wal: picomq_server::wal::ObjectWal::new(
-            "picomq",
-            "",
-            Arc::new(MemoryObjectStorage::new(1)),
-        ),
+        wal: ObjectWal::new("picomq", "", Arc::new(MemoryObjectStorage::new(1))),
         fail: fail.clone(),
     };
-    let node = PicoNode::start_with_wal(
+    let node = PicoNode::start(
         NodeConfig {
             node_id: 1,
             node_epoch: 1,
@@ -2422,7 +2411,7 @@ fn timed_batch(timestamp_ms: i64, values: &[&[u8]]) -> Vec<u8> {
         .iter()
         .map(|v| LogRecord::value(Bytes::copy_from_slice(v)))
         .collect();
-    let mut batch = encode_batch(0, -1, timestamp_ms, &records).to_vec();
+    let mut batch = encode_batch(0, -1, timestamp_ms, None, &records).to_vec();
     batch[21..23].copy_from_slice(&0i16.to_be_bytes());
     let crc = crc32c::crc32c(&batch[21..]);
     batch[17..21].copy_from_slice(&crc.to_be_bytes());
@@ -2652,4 +2641,438 @@ async fn grow(
             ..Default::default()
         })
         .await
+}
+
+async fn move_log(from: &PicoNode, views: &ViewPublisher, log: &Log, to: i32) {
+    let stream_id = from.transfer(log, to).await.unwrap();
+    wait_for_view(views, "transfer completion", |view| {
+        !view.state.pending_transfers.contains_key(&stream_id)
+            && view
+                .state
+                .streams
+                .get(&stream_id)
+                .is_some_and(|row| row.node_id == to)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_named_producer_retry_after_a_round_trip_transfer_is_deduplicated() {
+    use picomq_server::types::Producer;
+
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let node1 = start_shared_node(
+        1,
+        1,
+        sink.clone(),
+        views.clone(),
+        object_storage.clone(),
+        wal_storage.clone(),
+    )
+    .await;
+    let node2 = start_shared_node(2, 1, sink, views.clone(), object_storage, wal_storage).await;
+    let send = |payload: &'static [u8], seq: u64| AppendCommand {
+        producer: Some(Producer::new("p", 1, seq).unwrap()),
+        ..append(&[payload], "text/plain")
+    };
+
+    node1
+        .topics()
+        .create(create("/xfer/dedup", "text/plain"))
+        .await
+        .unwrap();
+    let log = log_of(&node1.topics(), "/xfer/dedup").await;
+    node1
+        .topics()
+        .append("/xfer/dedup", 0, send(b"zero", 0))
+        .await
+        .unwrap();
+
+    move_log(&node1, &views, &log, 2).await;
+    let moved = node2
+        .topics()
+        .append("/xfer/dedup", 0, send(b"one", 1))
+        .await
+        .unwrap();
+    assert!(moved.applied);
+    move_log(&node2, &views, &log, 1).await;
+
+    let retried = node1
+        .topics()
+        .append("/xfer/dedup", 0, send(b"one", 1))
+        .await
+        .unwrap();
+    assert!(
+        !retried.applied,
+        "the retry is deduplicated by the new owner"
+    );
+    assert_eq!(retried.producer_seq, Some(1));
+    let next = node1
+        .topics()
+        .append("/xfer/dedup", 0, send(b"two", 2))
+        .await
+        .unwrap();
+    assert!(next.applied);
+    assert_eq!(
+        values(&node1.topics(), "/xfer/dedup").await,
+        ["zero", "one", "two"]
+    );
+
+    node1.close().await;
+    node2.close().await;
+}
+
+#[tokio::test]
+async fn kafka_producer_state_is_replayed_after_a_restart_even_when_the_first_append_has_no_producer()
+ {
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let node = start_shared_node(
+        1,
+        1,
+        sink.clone(),
+        views.clone(),
+        object_storage.clone(),
+        wal_storage.clone(),
+    )
+    .await;
+    let batch = |seq: i32, count: usize| {
+        let values: Vec<Vec<u8>> = (0..count).map(|i| vec![i as u8]).collect();
+        let values: Vec<&[u8]> = values.iter().map(Vec::as_slice).collect();
+        kafka_batch(Some((42, 0, seq)), &values)
+    };
+
+    node.topics()
+        .create(create("/topics/replayed-late", "application/octet-stream"))
+        .await
+        .unwrap();
+    produce(&node.topics(), "/topics/replayed-late", batch(0, 3))
+        .await
+        .unwrap();
+    produce(&node.topics(), "/topics/replayed-late", batch(3, 2))
+        .await
+        .unwrap();
+    node.close().await;
+
+    let node = start_shared_node(1, 2, sink, views, object_storage, wal_storage).await;
+    let plain = produce(
+        &node.topics(),
+        "/topics/replayed-late",
+        kafka_batch(None, &[b"x"]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(plain.base_offset, 5);
+
+    let retry = produce(&node.topics(), "/topics/replayed-late", batch(3, 2))
+        .await
+        .unwrap();
+    assert!(retry.duplicate, "the retry is deduplicated after replay");
+    assert_eq!(retry.base_offset, 3);
+    let next = produce(&node.topics(), "/topics/replayed-late", batch(5, 1))
+        .await
+        .unwrap();
+    assert!(!next.duplicate);
+    assert_eq!(next.base_offset, 6);
+
+    node.close().await;
+}
+
+/// A metadata sink that refuses or holds writes under a key prefix.
+struct KvFaults {
+    inner: LocalSink,
+    refuse: std::sync::Mutex<Option<&'static str>>,
+    hold: std::sync::Mutex<Option<&'static str>>,
+    release: tokio::sync::Notify,
+}
+
+impl KvFaults {
+    fn new() -> (Arc<Self>, Arc<ViewPublisher>) {
+        let (inner, views) = LocalSink::new();
+        let sink = Self {
+            inner,
+            refuse: std::sync::Mutex::new(None),
+            hold: std::sync::Mutex::new(None),
+            release: tokio::sync::Notify::new(),
+        };
+        (Arc::new(sink), views)
+    }
+
+    fn refuse(&self, prefix: Option<&'static str>) {
+        *self.refuse.lock().unwrap() = prefix;
+    }
+
+    fn hold_next(&self, prefix: &'static str) {
+        *self.hold.lock().unwrap() = Some(prefix);
+    }
+}
+
+fn kv_key(command: &MetadataCommand) -> Option<&str> {
+    match command {
+        MetadataCommand::PutKv { key, .. }
+        | MetadataCommand::PutKvIfAbsent { key, .. }
+        | MetadataCommand::PutKvIfMatches { key, .. } => Some(key),
+        _ => None,
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandSink for KvFaults {
+    async fn propose(&self, command: MetadataCommand) -> Result<Proposed, MetadataError> {
+        if let Some(key) = kv_key(&command) {
+            let refused = self
+                .refuse
+                .lock()
+                .unwrap()
+                .is_some_and(|prefix| key.starts_with(prefix));
+            if refused {
+                return Err(MetadataError::Unavailable {
+                    message: "write refused".into(),
+                });
+            }
+            let held = {
+                let mut hold = self.hold.lock().unwrap();
+                match *hold {
+                    Some(prefix) if key.starts_with(prefix) => hold.take().is_some(),
+                    _ => false,
+                }
+            };
+            if held {
+                self.release.notified().await;
+            }
+        }
+        self.inner.propose(command).await
+    }
+
+    async fn sync(&self) -> Result<(), MetadataError> {
+        self.inner.sync().await
+    }
+}
+
+#[tokio::test]
+async fn http_producers_are_acknowledged_while_checkpoints_cannot_be_written() {
+    use picomq_server::types::Producer;
+
+    let (sink, views) = KvFaults::new();
+    let node = start_node(1, sink.clone() as Arc<dyn CommandSink>, views).await;
+    let topics = node.topics();
+    topics
+        .create(create("/unsaved", "text/plain"))
+        .await
+        .unwrap();
+    let send = |payloads: Vec<&'static [u8]>, seq: u64| AppendCommand {
+        producer: Some(Producer::new("p", 0, seq).unwrap()),
+        ..append(&payloads, "text/plain")
+    };
+    topics
+        .append("/unsaved", 0, send(vec![b"zero"], 0))
+        .await
+        .unwrap();
+
+    sink.refuse(Some("producers/"));
+    let many: Vec<&'static [u8]> =
+        vec![b"x"; picomq_server::producers::CHECKPOINT_INTERVAL as usize];
+    let crossed = topics
+        .append("/unsaved", 0, send(many.clone(), 1))
+        .await
+        .unwrap();
+    assert!(
+        crossed.applied,
+        "a refused checkpoint never fails an append"
+    );
+    let retried = topics.append("/unsaved", 0, send(many, 1)).await.unwrap();
+    assert!(!retried.applied);
+    assert!(
+        topics
+            .append("/unsaved", 0, send(vec![b"two"], 2))
+            .await
+            .unwrap()
+            .applied
+    );
+    assert_eq!(
+        values(&topics, "/unsaved").await.len() as u64,
+        2 + picomq_server::producers::CHECKPOINT_INTERVAL
+    );
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn http_producer_state_is_rebuilt_from_the_log_after_a_restart() {
+    use picomq_server::types::Producer;
+
+    let (sink, views) = LocalSink::new();
+    let sink: Arc<dyn CommandSink> = Arc::new(sink);
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let node = start_shared_node(
+        1,
+        1,
+        sink.clone(),
+        views.clone(),
+        object_storage.clone(),
+        wal_storage.clone(),
+    )
+    .await;
+    let send = |payload: &'static [u8], seq: u64| AppendCommand {
+        producer: Some(Producer::new("p", 2, seq).unwrap()),
+        ..append(&[payload], "text/plain")
+    };
+
+    node.topics()
+        .create(create("/rebuilt", "text/plain"))
+        .await
+        .unwrap();
+    let payloads: [&'static [u8]; 3] = [b"zero", b"one", b"two"];
+    for (seq, payload) in payloads.into_iter().enumerate() {
+        node.topics()
+            .append("/rebuilt", 0, send(payload, seq as u64))
+            .await
+            .unwrap();
+    }
+    node.close().await;
+
+    let node = start_shared_node(1, 2, sink, views, object_storage, wal_storage).await;
+    let retried = node
+        .topics()
+        .append("/rebuilt", 0, send(b"two", 2))
+        .await
+        .unwrap();
+    assert!(
+        !retried.applied,
+        "the retry is deduplicated from the log alone"
+    );
+    assert_eq!(retried.producer_seq, Some(2));
+    let stale = node
+        .topics()
+        .append("/rebuilt", 0, send(b"nope", 1))
+        .await
+        .unwrap();
+    assert!(!stale.applied);
+    assert!(
+        node.topics()
+            .append("/rebuilt", 0, send(b"three", 3))
+            .await
+            .unwrap()
+            .applied
+    );
+    assert_eq!(
+        values(&node.topics(), "/rebuilt").await,
+        ["zero", "one", "two", "three"]
+    );
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_new_session_is_refused_while_its_row_cannot_be_written() {
+    use picomq_server::types::Producer;
+
+    let (sink, views) = KvFaults::new();
+    let node = start_node(1, sink.clone() as Arc<dyn CommandSink>, views).await;
+    let topics = node.topics();
+    topics
+        .create(create("/sessions", "text/plain"))
+        .await
+        .unwrap();
+    let send = |id: &'static str, seq: u64| AppendCommand {
+        producer: Some(Producer::new(id, 0, seq).unwrap()),
+        ..append(&[b"x"], "text/plain")
+    };
+    topics.append("/sessions", 0, send("p", 0)).await.unwrap();
+
+    sink.refuse(Some("producer/"));
+    assert!(
+        topics
+            .append("/sessions", 0, send("p", 1))
+            .await
+            .unwrap()
+            .applied
+    );
+    let refused = topics
+        .append("/sessions", 0, send("q", 0))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.kind, ErrorKind::Unavailable);
+    assert_eq!(values(&topics, "/sessions").await.len(), 2);
+
+    sink.refuse(None);
+    assert!(
+        topics
+            .append("/sessions", 0, send("q", 0))
+            .await
+            .unwrap()
+            .applied
+    );
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_former_owners_late_stream_seq_is_rejected() {
+    let (sink, views) = KvFaults::new();
+    let shared: Arc<dyn CommandSink> = sink.clone();
+    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
+    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
+    let node1 = start_shared_node(
+        1,
+        1,
+        shared.clone(),
+        views.clone(),
+        object_storage.clone(),
+        wal_storage.clone(),
+    )
+    .await;
+    let node2 = start_shared_node(2, 1, shared, views.clone(), object_storage, wal_storage).await;
+    let send = |payload: &'static [u8], seq: &str| AppendCommand {
+        stream_seq: Some(seq.to_owned()),
+        ..append(&[payload], "text/plain")
+    };
+
+    node1
+        .topics()
+        .create(create("/taken", "text/plain"))
+        .await
+        .unwrap();
+    let log = log_of(&node1.topics(), "/taken").await;
+    node1
+        .topics()
+        .append("/taken", 0, send(b"a", "a"))
+        .await
+        .unwrap();
+
+    sink.hold_next("stream_seq/");
+    let stalled = tokio::spawn({
+        let topics = node1.topics();
+        async move { topics.append("/taken", 0, send(b"b", "b")).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let stream_id = node1.service().stream_id(&log).unwrap().unwrap();
+    node1.service().streams().release(stream_id).await.unwrap();
+
+    let taken = node2
+        .topics()
+        .append("/taken", 0, send(b"c", "c"))
+        .await
+        .unwrap();
+    assert!(taken.applied);
+    sink.release.notify_one();
+    let late = stalled.await.unwrap().unwrap_err();
+    assert_eq!(late.kind, ErrorKind::Transferring);
+
+    let regressed = node2
+        .topics()
+        .append("/taken", 0, send(b"b", "b"))
+        .await
+        .unwrap_err();
+    assert_eq!(regressed.kind, ErrorKind::Conflict);
+    assert_eq!(values(&node2.topics(), "/taken").await, ["a", "c"]);
+
+    node1.close().await;
+    node2.close().await;
 }

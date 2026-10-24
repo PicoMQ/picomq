@@ -92,6 +92,7 @@ pub fn encode_batch(
     base_offset: u64,
     leader_epoch: i32,
     timestamp_ms: i64,
+    producer: Option<NumericProducer>,
     records: &[LogRecord],
 ) -> Bytes {
     assert!(!records.is_empty(), "a batch needs at least one record");
@@ -107,9 +108,18 @@ pub fn encode_batch(
     buf.put_i32(records.len() as i32 - 1);
     buf.put_i64(timestamp_ms);
     buf.put_i64(timestamp_ms);
-    buf.put_i64(NO_PRODUCER_ID);
-    buf.put_i16(NO_PRODUCER_EPOCH);
-    buf.put_i32(NO_SEQUENCE);
+    match producer {
+        Some(producer) => {
+            buf.put_i64(producer.id);
+            buf.put_i16(producer.epoch);
+            buf.put_i32(producer.first_seq);
+        }
+        None => {
+            buf.put_i64(NO_PRODUCER_ID);
+            buf.put_i16(NO_PRODUCER_EPOCH);
+            buf.put_i32(NO_SEQUENCE);
+        }
+    }
     buf.put_i32(records.len() as i32);
     for (delta, record) in records.iter().enumerate() {
         put_record(&mut buf, delta as i32, record);
@@ -287,7 +297,7 @@ mod tests {
 
     #[test]
     fn round_trips_through_the_kafka_decoder() {
-        let encoded = encode_batch(40, 5, 1_700_000_000_000, &records());
+        let encoded = encode_batch(40, 5, 1_700_000_000_000, None, &records());
         let header = batch_header(&encoded).unwrap();
         assert_eq!(header.base_offset, 40);
         assert_eq!(header.leader_epoch, 5);
@@ -313,8 +323,8 @@ mod tests {
 
     #[test]
     fn concatenated_batches_decode_in_order() {
-        let mut payload = encode_batch(0, 1, 1, &records()[..1]).to_vec();
-        payload.extend_from_slice(&encode_batch(1, 1, 2, &records()[1..]));
+        let mut payload = encode_batch(0, 1, 1, None, &records()[..1]).to_vec();
+        payload.extend_from_slice(&encode_batch(1, 1, 2, None, &records()[1..]));
         let payload = Bytes::from(payload);
         let headers = batch_headers(&payload).unwrap();
         assert_eq!(headers.len(), 2);
@@ -327,7 +337,7 @@ mod tests {
 
     #[test]
     fn crc_is_verified_on_decode() {
-        let mut corrupted = encode_batch(0, 1, 1, &records()).to_vec();
+        let mut corrupted = encode_batch(0, 1, 1, None, &records()).to_vec();
         let last = corrupted.len() - 1;
         corrupted[last] ^= 0x01;
         assert!(matches!(
@@ -338,7 +348,7 @@ mod tests {
 
     #[test]
     fn verify_crc_accepts_valid_and_rejects_flipped_batches() {
-        let encoded = encode_batch(0, 1, 1, &records()).to_vec();
+        let encoded = encode_batch(0, 1, 1, None, &records()).to_vec();
         assert!(verify_crc(&encoded).is_ok());
 
         let mut patched = encoded.clone();
@@ -357,13 +367,13 @@ mod tests {
             batch_header(b"short"),
             Err(RecordError::Truncated)
         ));
-        let mut bad_magic = encode_batch(0, 1, 1, &records()).to_vec();
+        let mut bad_magic = encode_batch(0, 1, 1, None, &records()).to_vec();
         bad_magic[16] = 1;
         assert!(matches!(
             batch_header(&bad_magic),
             Err(RecordError::Magic(1))
         ));
-        let encoded = encode_batch(0, 1, 1, &records());
+        let encoded = encode_batch(0, 1, 1, None, &records());
         assert!(matches!(
             batch_header(&encoded[..encoded.len() - 1]),
             Err(RecordError::Truncated)
@@ -372,7 +382,7 @@ mod tests {
 
     #[test]
     fn producer_identity_and_stamp() {
-        let mut encoded = encode_batch(0, 1, 1, &records()).to_vec();
+        let mut encoded = encode_batch(0, 1, 1, None, &records()).to_vec();
         assert_eq!(batch_header(&encoded).unwrap().producer, None);
 
         encoded[43..51].copy_from_slice(&7i64.to_be_bytes());
@@ -396,7 +406,7 @@ mod tests {
         let decoded = decode_batches(&Bytes::from(encoded)).unwrap();
         assert_eq!(decoded[0].offset.record_offset(), 1234);
 
-        let mut empty = encode_batch(0, 1, 1, &records()).to_vec();
+        let mut empty = encode_batch(0, 1, 1, None, &records()).to_vec();
         empty[57..61].copy_from_slice(&0i32.to_be_bytes());
         assert!(matches!(batch_header(&empty), Err(RecordError::Empty)));
     }

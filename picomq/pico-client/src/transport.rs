@@ -46,10 +46,6 @@ pub(crate) fn invalid_response(e: picomq_protocol::CodecError) -> ClientError {
     ClientError::new(0, ErrorKind::Other, "invalid_response").with_message(Some(e.to_string()))
 }
 
-pub(crate) fn default_http() -> Result<reqwest::Client> {
-    crate::http_client(&crate::ClientConfig::default())
-}
-
 fn build(http: &reqwest::Client, base_url: &str, wire: WireRequest) -> reqwest::RequestBuilder {
     let mut builder = http.request(wire.method, format!("{base_url}{}", wire.path_and_query));
     for (name, value) in wire.headers {
@@ -106,6 +102,13 @@ async fn send(
                 "redirect_without_location",
             ));
         };
+        if !hop_allowed(&base, &target) {
+            return Err(ClientError::new(
+                status,
+                ErrorKind::Other,
+                "unsafe_redirect",
+            ));
+        }
         if let Some(key) = &key {
             routes.learn(key, &target);
         }
@@ -114,6 +117,10 @@ async fn send(
         request = next;
     }
     Err(ClientError::new(0, ErrorKind::Other, "too_many_redirects"))
+}
+
+fn hop_allowed(from: &reqwest::Url, to: &reqwest::Url) -> bool {
+    matches!(to.scheme(), "http" | "https") && !(from.scheme() == "https" && to.scheme() == "http")
 }
 
 fn header(response: &Response, name: &str) -> Option<String> {
@@ -132,4 +139,22 @@ async fn expect(response: Response, expected: &[u16], decode: Decode) -> Result<
     let headers = response.headers().clone();
     let body = response.text().await.unwrap_or_default();
     Err(decode(status, &headers, &body).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url(raw: &str) -> reqwest::Url {
+        reqwest::Url::parse(raw).unwrap()
+    }
+
+    #[test]
+    fn a_hop_keeps_the_token_off_insecure_wires() {
+        assert!(hop_allowed(&url("http://a/x"), &url("http://b/x")));
+        assert!(hop_allowed(&url("http://a/x"), &url("https://b/x")));
+        assert!(hop_allowed(&url("https://a/x"), &url("https://b/x")));
+        assert!(!hop_allowed(&url("https://a/x"), &url("http://b/x")));
+        assert!(!hop_allowed(&url("http://a/x"), &url("ftp://b/x")));
+    }
 }

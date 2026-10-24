@@ -46,7 +46,7 @@ A schema named `orders` is the object `orders.proto`, `orders.json`, or `orders.
 
 ## Register
 
-The schema routes live on the stream listener (`--listen`), under either HTTP protocol. The `/_schemas/` prefix is reserved, so a topic can never collide with them.
+The schema routes live on the stream listener (`--listen`), under either HTTP protocol. The `/_` namespace is reserved for these routes, see [Names](/docs/design/streams#names), so a topic can never collide with them.
 
 | Method and path | What it does |
 | --- | --- |

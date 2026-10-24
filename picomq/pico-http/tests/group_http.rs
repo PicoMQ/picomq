@@ -247,7 +247,7 @@ async fn members_join_heartbeat_commit_and_leave() {
 }
 
 #[tokio::test]
-async fn bad_bodies_are_rejected() {
+async fn bad_requests_are_rejected() {
     let server = common::picomq_server().await;
     let base = server.base_url.clone();
     let client = Client::new();
@@ -275,11 +275,18 @@ async fn bad_bodies_are_rejected() {
     assert_eq!(commit.status(), 400);
     let half_fenced = client
         .put(format!("{base}/_groups/g/offsets"))
-        .json(&json!({ "memberId": "m", "offsets": {} }))
+        .json(&json!({ "memberId": "m", "offsets": { "/a": { "position": 1 } } }))
         .send()
         .await
         .unwrap();
     assert_eq!(half_fenced.status(), 400);
+
+    let undecodable = client
+        .get(format!("{base}/_groups/g/offsets?stream=%ff"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(undecodable.status(), 400);
 }
 
 fn read_scope(prefix: &str, auto_prefix: bool) -> Scope {
@@ -401,6 +408,33 @@ async fn group_routes_require_read_on_the_streams() {
         .await
         .unwrap();
     assert_eq!(describe.status(), 403);
+}
+
+/// Group access is derived from the streams a request names, so a request
+/// naming none must be refused rather than pass with nothing to check.
+#[tokio::test]
+async fn empty_bodies_are_refused() {
+    let (server, wire) = gated(read_scope("/acct/", false)).await;
+    let base = format!("http://{}", server.local_addr());
+    let client = Client::new();
+
+    let unsubscribed = client
+        .post(format!("{base}/_groups/g/members"))
+        .bearer_auth(&wire)
+        .json(&json!({ "subscription": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsubscribed.status(), 400);
+
+    let nothing = client
+        .put(format!("{base}/_groups/g/offsets"))
+        .bearer_auth(&wire)
+        .json(&json!({ "offsets": {} }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(nothing.status(), 400);
 }
 
 #[tokio::test]

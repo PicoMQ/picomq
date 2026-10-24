@@ -45,7 +45,7 @@ All three protocols address the same topics. HTTP names are paths, Kafka names u
 
 ## Producers
 
-Exactly-once appends over HTTP need the server to remember, because a client that times out cannot know whether its write landed. Both HTTP protocols solve this the same way: a producer identifies itself with an id, an epoch, and a per-record sequence number, the server accepts each sequence once, acknowledges repeats without writing, and rejects stale epochs. A mismatch response includes what the server expected next to what it received, so a producer can tell a lost acknowledgement from a real gap. Kafka's idempotent producer is the same mechanism, keyed by the producer id, epoch and base sequence in the batch header. The state behind both is in each partition's log entry, described in [Topics and streams](/docs/design/streams#producers), and survives restarts, transfers, and failover.
+Exactly-once appends over HTTP need the server to remember, because a client that times out cannot know whether its write landed. Both HTTP protocols solve this the same way: a producer identifies itself with an id, an epoch, and a per-record sequence number, the server accepts each sequence once, acknowledges repeats without writing, and rejects stale epochs. A mismatch response includes what the server expected next to what it received, so a producer can tell a lost acknowledgement from a real gap. Kafka's idempotent producer is the same mechanism, keyed by the producer id, epoch and base sequence in the batch header. The state behind both is the log itself, rebuilt from the batch headers whenever a node opens the stream, as [Topics and streams](/docs/design/streams#producers) describes, so it survives restarts, transfers, and failover.
 
 ## Routing at the edge
 
@@ -66,7 +66,7 @@ Every frontend maps the same internal error kinds onto its own vocabulary. Pico 
 | Sequence gap | `409 sequence_gap` | `409` | `OUT_OF_ORDER_SEQUENCE_NUMBER` |
 | Match failed | `412 match_failed` | `400` | `INVALID_REQUEST` |
 | Conflict | `409 conflict` | `409` | `TOPIC_ALREADY_EXISTS` |
-| Transferring | `409 conflict` | `409` | `NOT_LEADER_OR_FOLLOWER` |
+| Transferring, the stream is moving or failing over | `503 unavailable` | `503` | `NOT_LEADER_OR_FOLLOWER` |
 | Closed | `409 closed` | `409` | `POLICY_VIOLATION` |
 | Unavailable, the node is stopping or metadata is unreachable | `503 unavailable` | `503` | `NOT_LEADER_OR_FOLLOWER` |
 | Timeout | `504 timeout` | `504` | `REQUEST_TIMED_OUT` |

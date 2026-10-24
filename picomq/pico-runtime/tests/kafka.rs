@@ -205,6 +205,30 @@ async fn cooperative_sticky_members_split_topics_between_them() {
     }
     offsets.sort_unstable();
     assert_eq!(offsets, (0..10).flat_map(|i| [i, i]).collect::<Vec<_>>());
+
+    let settled = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let groups = first
+            .client()
+            .fetch_group_list(Some("pair"), Duration::from_secs(10))
+            .unwrap();
+        let group = groups
+            .groups()
+            .iter()
+            .find(|group| group.name() == "pair")
+            .expect("the group is listed");
+        if group.state() == "Stable" && group.members().len() == 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < settled,
+            "the group never settled with both members: {} with {} members",
+            group.state(),
+            group.members().len()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
     let owned = |consumer: &StreamConsumer| -> Vec<String> {
         consumer
             .assignment()
@@ -218,6 +242,70 @@ async fn cooperative_sticky_members_split_topics_between_them() {
     all.extend(owned(&second));
     all.sort();
     assert_eq!(all, ["left", "right"], "each topic is owned exactly once");
+
+    server.shutdown().await;
+}
+
+/// Batches are stored as the producer sent them, so a compressed batch
+/// reaches a Kafka consumer intact and an HTTP reader sees its records
+/// decoded.
+#[tokio::test(flavor = "multi_thread")]
+async fn compressed_batches_round_trip_to_kafka_consumers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (server, bootstrap) = broker(dir.path(), 1).await;
+    let http = reqwest::Client::new();
+
+    for codec in ["lz4", "snappy"] {
+        let topic = format!("packed-{codec}");
+        create_topic(&bootstrap, &topic).await;
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", &bootstrap)
+            .set("compression.type", codec)
+            .set("linger.ms", "50")
+            .set("message.timeout.ms", "15000")
+            .create()
+            .unwrap();
+        let mut sends = tokio::task::JoinSet::new();
+        for i in 0..20 {
+            let producer = producer.clone();
+            let topic = topic.clone();
+            sends.spawn(async move {
+                producer
+                    .send(
+                        FutureRecord::to(&topic)
+                            .key(&format!("k{i}"))
+                            .payload(&format!("v{i}")),
+                        Duration::from_secs(15),
+                    )
+                    .await
+                    .unwrap();
+            });
+        }
+        while sends.join_next().await.is_some() {}
+
+        let reader = consumer(&bootstrap, &format!("{codec}-readers"));
+        reader.subscribe(&[topic.as_str()]).unwrap();
+        let records = consume_n(&reader, 20).await;
+        let mut values: Vec<String> = records.into_iter().map(|(_, value, _)| value).collect();
+        values.sort();
+        let mut expected: Vec<String> = (0..20).map(|i| format!("v{i}")).collect();
+        expected.sort();
+        assert_eq!(values, expected, "{codec}");
+
+        let read = http
+            .get(format!("http://{}/{topic}?seq=0", server.local_addr()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(read.status(), 200, "{codec}");
+        let page: Vec<serde_json::Value> = read.json().await.unwrap();
+        let mut bodies: Vec<String> = page
+            .iter()
+            .map(|record| record["body"].as_str().unwrap().to_owned())
+            .collect();
+        bodies.sort();
+        assert_eq!(bodies, expected, "{codec} over http");
+    }
 
     server.shutdown().await;
 }

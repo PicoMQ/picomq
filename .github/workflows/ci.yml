@@ -11,22 +11,6 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  changes:
-    name: path filter
-    runs-on: ubuntu-latest
-    outputs:
-      extension: ${{ steps.filter.outputs.extension }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            extension:
-              - 'picomq/**'
-              - 'Cargo.lock'
-              - 'rust-toolchain.toml'
-
   core:
     name: core / fmt / clippy / test
     runs-on: ubuntu-latest
@@ -58,40 +42,3 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
-
-  extension:
-    name: extension / fmt / clippy
-    needs: changes
-    if: needs.changes.outputs.extension == 'true'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: picomq/pico-extension
-    env:
-      PGRX_PG_CONFIG_PATH: /usr/lib/postgresql/16/bin/pg_config
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-server-dev-16 libclang-dev libsqlite3-dev pkg-config cmake
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
-          components: rustfmt, clippy
-
-      - uses: rui314/setup-mold@v1
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: extension
-          workspaces: picomq/pico-extension -> target
-
-      - name: cargo fmt
-        run: cargo fmt -- --check
-
-      - name: cargo clippy
-        run: cargo clippy --no-default-features --features pg16 --all-targets -- -D warnings

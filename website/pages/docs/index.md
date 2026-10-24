@@ -39,15 +39,14 @@ PicoMQ is a durable stream server. Clients create named streams, append records,
 
 PicoMQ treats a stream as a small, disposable unit. Streams are named like URL paths, created with one request, and cost nothing while idle. A deployment can hold ten streams or millions, one per order, per session, per device, or per job.
 
-Object storage is what makes that granularity economical. Every record ends up there, so durability never depends on a node and an idle stream is a few metadata entries plus its objects. The write-ahead log sits in object storage or in Postgres. Coordination goes through a SQL database. There is no consensus protocol and no broker disks.
+Object storage is what makes that granularity economical. Every record ends up there, so durability never depends on a node and an idle stream is a few metadata entries plus its objects. The write-ahead log sits in object storage too. Coordination goes through a SQL database. There is no consensus protocol and no broker disks.
 
 The structure follows from that. A node can be stopped and replaced at any time because it holds no unique state. Adding capacity is starting another process. A stopping node hands its streams to the others in about a second, and a crashed one has them moved after a timeout. Neither moves any data.
 
 ## Features
 
-- **Zero-disk nodes.** Records are stored on S3-compatible storage. The write-ahead log goes there too, or into Postgres. A node keeps caches, nothing more.
+- **Zero-disk nodes.** Records are stored on S3-compatible storage. The write-ahead log goes there too. A node keeps caches, nothing more.
 - **SQL as the control plane.** Cluster metadata is an ordered command log in Postgres, or SQLite for a single node. Nodes tail it and rebuild the same state.
-- **Runs inside Postgres.** The [extension](/docs/operations/deployment/postgres) starts a node as a background worker, with the metadata log and the WAL in the same database.
 - **Three wire protocols.** The native Pico protocol, the Durable Streams open protocol, and the Kafka wire protocol for standard Kafka clients. Same engine underneath.
 - **HTTP or Kafka, your choice.** Create with `PUT`, append with `POST`, read with `GET`, tail with long polling or SSE. Or point any Kafka producer or consumer at the node. Both see the same streams.
 - **Partitions and consumer groups.** Topics can have many partitions, and one group coordinator serves Kafka and HTTP consumer groups.
@@ -60,4 +59,4 @@ The structure follows from that. A node can be stopped and replaced at any time 
 
 PicoMQ suits anything modeled as many ordered, resumable streams: a stream per user session or chat, per device, per workflow run, or per agent conversation. Readers resume from any position, so it also serves audit trails, per-entity event history, and real-time delivery to many concurrent readers.
 
-An append costs one write to the write-ahead log: tens of milliseconds with the WAL on object storage, low single-digit milliseconds with the WAL in Postgres.
+An append costs one write to the write-ahead log in object storage: tens of milliseconds on S3, single digits on S3 Express.

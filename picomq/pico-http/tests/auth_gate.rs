@@ -120,6 +120,27 @@ async fn pico_gate_enforces_bearer_and_scope() {
     server.shutdown().await;
 }
 
+/// A path that does not decode to text is refused only after the caller is
+/// authenticated, so the gate reveals nothing to a stranger.
+#[tokio::test]
+async fn a_malformed_path_is_refused_after_authentication() {
+    let (server, wire, _node) =
+        gated_server(HttpProtocol::Pico, full_stream_scope("/it/", false)).await;
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::new();
+
+    let stranger = client.get(format!("{base}/it/a%ff")).send().await.unwrap();
+    assert_eq!(stranger.status(), 401);
+
+    let caller = client
+        .get(format!("{base}/it/a%ff"))
+        .bearer_auth(&wire)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(caller.status(), 400);
+}
+
 #[tokio::test]
 async fn auto_prefix_resolves_stores_and_strips() {
     let (server, wire, node) =

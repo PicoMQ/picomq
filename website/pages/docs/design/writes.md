@@ -1,6 +1,6 @@
 # Writes
 
-An append is durable when the record is in the write-ahead log, which lives in object storage or in Postgres. There is no node-local disk in the write path, so a node that dies loses nothing that was acknowledged. The cost of that guarantee is one round trip to the WAL, and the write path is shaped around paying it once for many records instead of once per record.
+An append is durable when the record is in the write-ahead log, which lives in object storage. There is no node-local disk in the write path, so a node that dies loses nothing that was acknowledged. The cost of that guarantee is one round trip to the WAL, and the write path is shaped around paying it once for many records instead of once per record.
 
 ## The append path
 
@@ -42,11 +42,11 @@ Inside the engine the record goes to two places. It enters the log cache, which 
 
 ## The WAL
 
-Incoming records accumulate into a bulk, and each bulk becomes one write to the WAL: a `PUT` on the object store, or a committed `INSERT` in Postgres. Writes are pipelined, so several bulks can be in flight, but acknowledgements are delivered in submission order. A record is acknowledged only when its bulk and every bulk before it are stored.
+Incoming records accumulate into a bulk, and each bulk becomes one `PUT` to the object store. Writes are pipelined, so several bulks can be in flight, but acknowledgements are delivered in submission order. A record is acknowledged only when its bulk and every bulk before it are stored.
 
-Group commit is what makes this affordable. One write of a few hundred kilobytes contains every record that arrived while the previous write was in flight, so per-record cost drops as concurrency rises. A single append on an idle stream pays one round trip, tens of milliseconds on S3, a millisecond or two in Postgres.
+Group commit is what makes this affordable. One write of a few hundred kilobytes contains every record that arrived while the previous write was in flight, so per-record cost drops as concurrency rises. A single append on an idle stream pays one round trip, tens of milliseconds on S3, single digits on S3 Express.
 
-Records are framed with a checksum. Each backend fences its WAL, so a node whose WAL was taken over cannot acknowledge another write. Fencing, the layout of each backend, the Postgres ring of tables, and what each survives are on the [Write-ahead log](/docs/design/wal) page.
+Records are framed with a checksum, and the WAL is fenced by a reservation object, so a node whose WAL was taken over cannot acknowledge another write. Fencing, the layout, and what it survives are on the [Write-ahead log](/docs/design/wal) page.
 
 If a WAL write fails, the append fails and the node releases the stream and drops its cached producer state. The retry reopens the stream at the next epoch and reloads the producers from what was persisted, so a failed append is never half applied.
 

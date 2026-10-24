@@ -163,6 +163,44 @@ async fn ds_protocol_end_to_end() {
     assert_eq!(http.delete(&url).send().await.unwrap().status(), 404);
 }
 
+/// A reserved name, or a path or query value that does not decode to text,
+/// is refused rather than rewritten into something else.
+#[tokio::test]
+async fn ds_refuses_reserved_and_malformed_names() {
+    let server = ds_server().await;
+    let http = client();
+
+    for path in ["/_x", "/ds/a%ff"] {
+        let refused = http
+            .put(format!("{}{path}", server.base_url))
+            .header("Content-Type", "text/plain")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 400, "{path}");
+    }
+
+    let url = format!("{}/ds/decoded", server.base_url);
+    let created = http
+        .put(&url)
+        .header("Content-Type", "text/plain")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let now = http.get(format!("{url}?offset=now")).send().await.unwrap();
+    let tail = now.headers()["Stream-Next-Offset"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let polled = http
+        .get(format!("{url}?offset={tail}&live=long-poll&cursor=%ff"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(polled.status(), 400);
+}
+
 /// Producer fencing per spec: epoch bumps fence older writers (403), gaps are
 /// 409 with `Producer-Expected-Seq`/`Producer-Received-Seq`, and replays ack
 /// without duplicating.

@@ -6,7 +6,7 @@ use crate::http::{bad_request, parse_strict_u64, query_param};
 
 pub(crate) fn requested(uri: &Uri) -> Result<Option<u32>, ServiceError> {
     parse_strict_u64(
-        query_param(uri, Q_PARTITION).as_deref(),
+        query_param(uri, Q_PARTITION)?.as_deref(),
         "invalid partition",
     )?
     .map(|index| u32::try_from(index).map_err(|_| bad_request("invalid partition")))
