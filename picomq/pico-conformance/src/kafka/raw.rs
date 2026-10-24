@@ -120,7 +120,7 @@ pub async fn corrupt_produce(address: &str, topic: &str) -> String {
     }
 }
 
-fn record_batch() -> Bytes {
+pub(super) fn record_batch() -> Bytes {
     let record = Record {
         transactional: false,
         control: false,
@@ -184,38 +184,66 @@ pub(super) async fn exchange(
     header_version: i16,
     body: Bytes,
 ) -> Reply {
-    let header = RequestHeader::default()
-        .with_request_api_key(api as i16)
-        .with_request_api_version(version)
-        .with_correlation_id(1)
-        .with_client_id(Some(StrBytes::from_static_str(CLIENT)));
-
-    let mut request = BytesMut::new();
-    header
-        .encode(&mut request, header_version)
-        .expect("request header encodes");
-    request.put_slice(&body);
-
-    let round_trip = async {
-        let mut stream = TcpStream::connect(address).await?;
-        stream.write_i32(request.len() as i32).await?;
-        stream.write_all(&request).await?;
-
-        let size = stream.read_i32().await?;
-        let mut frame = vec![0u8; size.max(0) as usize];
-        stream.read_exact(&mut frame).await?;
-
-        Ok::<_, std::io::Error>(Bytes::from(frame))
-    };
-
-    match tokio::time::timeout(TIMEOUT, round_trip).await {
-        Ok(Ok(frame)) => Reply::Frame(frame),
-        Ok(Err(_)) => Reply::Closed,
-        Err(_) => Reply::Timeout,
+    match Connection::open(address).await {
+        Some(mut connection) => connection.send(api, version, header_version, body).await,
+        None => Reply::Closed,
     }
 }
 
-fn describe(reply: Reply) -> String {
+pub(super) struct Connection {
+    stream: TcpStream,
+}
+
+impl Connection {
+    pub async fn open(address: &str) -> Option<Self> {
+        let connect = tokio::time::timeout(TIMEOUT, TcpStream::connect(address)).await;
+
+        connect.ok()?.ok().map(|stream| Self { stream })
+    }
+
+    pub async fn send(
+        &mut self,
+        api: ApiKey,
+        version: i16,
+        header_version: i16,
+        body: Bytes,
+    ) -> Reply {
+        let header = RequestHeader::default()
+            .with_request_api_key(api as i16)
+            .with_request_api_version(version)
+            .with_correlation_id(1)
+            .with_client_id(Some(StrBytes::from_static_str(CLIENT)));
+
+        let mut request = BytesMut::new();
+        header
+            .encode(&mut request, header_version)
+            .expect("request header encodes");
+        request.put_slice(&body);
+
+        self.send_bare(request.freeze()).await
+    }
+
+    pub async fn send_bare(&mut self, frame: Bytes) -> Reply {
+        let round_trip = async {
+            self.stream.write_i32(frame.len() as i32).await?;
+            self.stream.write_all(&frame).await?;
+
+            let size = self.stream.read_i32().await?;
+            let mut frame = vec![0u8; size.max(0) as usize];
+            self.stream.read_exact(&mut frame).await?;
+
+            Ok::<_, std::io::Error>(Bytes::from(frame))
+        };
+
+        match tokio::time::timeout(TIMEOUT, round_trip).await {
+            Ok(Ok(frame)) => Reply::Frame(frame),
+            Ok(Err(_)) => Reply::Closed,
+            Err(_) => Reply::Timeout,
+        }
+    }
+}
+
+pub(super) fn describe(reply: Reply) -> String {
     match reply {
         Reply::Closed => "closed".to_owned(),
         Reply::Timeout => "timeout".to_owned(),

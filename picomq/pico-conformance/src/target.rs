@@ -1,22 +1,41 @@
 use std::net::{SocketAddr, TcpListener};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
+use picomq_auth::{
+    AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
+};
 use picomq_http::HttpProtocol;
-use picomq_runtime::{KafkaConfig, MetaBackend, PicoServer, ServerConfig};
+use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, PicoServer, ServerConfig};
 use tempfile::TempDir;
 
+use crate::kafka::sasl::Credentials;
 use crate::suite::Suite;
+
+const ROOT_ID: &str = "conformance/root";
+const READER_ID: &str = "conformance/reader";
+const WRITER_ID: &str = "conformance/writer";
 
 pub struct Target {
     url: Option<String>,
     bootstrap: Option<String>,
     host_address: Option<String>,
     node: Option<Node>,
+    secured: Option<Secured>,
 }
 
 struct Node {
     server: PicoServer,
     _dir: TempDir,
+}
+
+pub struct Secured {
+    bootstrap: String,
+    host_address: String,
+    root: Credentials,
+    reader: Credentials,
+    writer: Credentials,
+    node: Node,
 }
 
 impl Target {
@@ -34,11 +53,17 @@ impl Target {
 
         let server = picomq_runtime::start(config(&dir, suite.protocol(), kafka)?).await?;
 
+        let secured = match suite {
+            Suite::Kafka => Some(Secured::start().await?),
+            Suite::Ds => None,
+        };
+
         Ok(Self {
             url: Some(format!("http://{}", server.local_addr())),
             bootstrap,
             host_address,
             node: Some(Node { server, _dir: dir }),
+            secured,
         })
     }
 
@@ -52,6 +77,7 @@ impl Target {
             bootstrap,
             host_address,
             node: None,
+            secured: None,
         }
     }
 
@@ -67,11 +93,119 @@ impl Target {
         self.host_address.as_deref()
     }
 
+    pub fn secured(&self) -> Option<&Secured> {
+        self.secured.as_ref()
+    }
+
     pub async fn stop(self) {
         if let Some(node) = self.node {
             node.server.shutdown().await;
         }
+        if let Some(secured) = self.secured {
+            secured.node.server.shutdown().await;
+        }
     }
+}
+
+impl Secured {
+    async fn start() -> anyhow::Result<Self> {
+        let dir = tempfile::tempdir()?;
+        let kafka = container_reachable()?;
+        let bootstrap = kafka
+            .advertise
+            .clone()
+            .context("kafka listener advertises")?;
+        let host_address = format!("127.0.0.1:{}", kafka.listen.port());
+
+        let (root, _) = AccessToken::issue(ROOT_ID)?;
+        let server = picomq_runtime::start(ServerConfig {
+            auth_mode: AuthMode::Required,
+            bootstrap_token: Some(root.render()),
+            insecure_allow_remote: false,
+            ..config(&dir, HttpProtocol::Pico, kafka)?
+        })
+        .await?;
+
+        let reader = issue(&server, READER_ID, stream_scope(ReadWrite::read_only())).await?;
+        let writer = issue(
+            &server,
+            WRITER_ID,
+            stream_scope(ReadWrite {
+                read: false,
+                write: true,
+            }),
+        )
+        .await?;
+
+        Ok(Self {
+            bootstrap,
+            host_address,
+            root: credentials(&root),
+            reader: credentials(&reader),
+            writer: credentials(&writer),
+            node: Node { server, _dir: dir },
+        })
+    }
+
+    pub fn bootstrap(&self) -> &str {
+        &self.bootstrap
+    }
+
+    pub fn host_address(&self) -> &str {
+        &self.host_address
+    }
+
+    pub fn root(&self) -> &Credentials {
+        &self.root
+    }
+
+    pub fn reader(&self) -> &Credentials {
+        &self.reader
+    }
+
+    pub fn writer(&self) -> &Credentials {
+        &self.writer
+    }
+}
+
+fn credentials(token: &AccessToken) -> Credentials {
+    Credentials {
+        username: token.id.clone(),
+        password: token.render(),
+    }
+}
+
+fn stream_scope(stream: ReadWrite) -> Scope {
+    Scope {
+        streams: ResourceSet::prefix(""),
+        groups: OperationGroups {
+            stream,
+            ..OperationGroups::default()
+        },
+        audiences: [Audience::Kafka].into(),
+        ..Scope::default()
+    }
+}
+
+async fn issue(server: &PicoServer, id: &str, scope: Scope) -> anyhow::Result<AccessToken> {
+    let (token, verifier) = AccessToken::issue(id)?;
+    let created_at_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+
+    let stored = server
+        .node()
+        .tokens()
+        .store()
+        .put_if_absent(TokenRecord {
+            id: token.id.clone(),
+            verifier,
+            scope,
+            created_at_ms,
+            issued_by: ROOT_ID.to_owned(),
+        })
+        .await?;
+    anyhow::ensure!(stored, "token {id} already exists");
+
+    Ok(token)
 }
 
 fn loopback() -> SocketAddr {

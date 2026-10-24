@@ -13,6 +13,7 @@ name = "pico-conformance"
 path = "src/main.rs"
 
 [dependencies]
+picomq-auth = { workspace = true }
 picomq-http = { workspace = true }
 picomq-runtime = { workspace = true }
 s3stream = { workspace = true }

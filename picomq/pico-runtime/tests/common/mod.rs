@@ -25,6 +25,16 @@ pub fn bootstrap() -> String {
     std::env::var("PICO_KAFKA").unwrap_or_else(|_| "127.0.0.1:9092".into())
 }
 
+const TOKEN: &str = "ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY";
+
+pub fn token() -> String {
+    std::env::var("PICO_TOKEN").unwrap_or_else(|_| TOKEN.into())
+}
+
+fn auth_required() -> bool {
+    std::env::var("PICO_AUTH").is_ok_and(|mode| mode == "required")
+}
+
 pub fn unique(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -55,9 +65,47 @@ impl Harness {
         format!("{}{path}", self.base)
     }
 
-    pub fn producer(&self) -> FutureProducer {
-        ClientConfig::new()
+    pub fn kafka(&self) -> ClientConfig {
+        if auth_required() {
+            return self.kafka_as(&token());
+        }
+
+        let mut config = ClientConfig::new();
+        config.set("bootstrap.servers", &self.bootstrap);
+        config
+    }
+
+    pub fn kafka_as(&self, token: &str) -> ClientConfig {
+        let token = picomq_auth::AccessToken::parse(token).unwrap();
+        let mut config = ClientConfig::new();
+        config
             .set("bootstrap.servers", &self.bootstrap)
+            .set("security.protocol", "SASL_PLAINTEXT")
+            .set("sasl.mechanisms", "PLAIN")
+            .set("sasl.username", &token.id)
+            .set("sasl.password", token.render());
+        config
+    }
+
+    pub async fn issue_token(&self, id: &str, scope: serde_json::Value) -> String {
+        let issued: serde_json::Value = self
+            .http
+            .post(format!("{}/admin/tokens", first_admin()))
+            .bearer_auth(token())
+            .json(&serde_json::json!({ "id": id, "scope": scope }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        issued["token"].as_str().unwrap().to_owned()
+    }
+
+    pub fn producer(&self) -> FutureProducer {
+        self.kafka()
             .set("enable.idempotence", "true")
             .set("acks", "all")
             .set("message.timeout.ms", "30000")
@@ -66,8 +114,8 @@ impl Harness {
     }
 
     pub fn consumer(&self, topic: &str) -> StreamConsumer {
-        let consumer: StreamConsumer = ClientConfig::new()
-            .set("bootstrap.servers", &self.bootstrap)
+        let consumer: StreamConsumer = self
+            .kafka()
             .set("group.id", format!("e2e-{topic}-{}", unique("g")))
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest")
@@ -82,10 +130,7 @@ impl Harness {
     }
 
     pub fn admin(&self) -> AdminClient<DefaultClientContext> {
-        ClientConfig::new()
-            .set("bootstrap.servers", &self.bootstrap)
-            .create()
-            .unwrap()
+        self.kafka().create().unwrap()
     }
 
     pub async fn create_topic(&self, topic: &str, partitions: i32) {
@@ -206,23 +251,19 @@ pub async fn wait_ready(admin: &str) {
     }
 }
 
-fn idempotent_producer(bootstrap: &str) -> FutureProducer {
-    ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
+/// Writes `0..` to `topic` until stopped, returning every acknowledged value.
+pub fn write_continuously(
+    harness: &Harness,
+    topic: &str,
+    stop: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<Vec<String>> {
+    let producer: FutureProducer = harness
+        .kafka()
         .set("enable.idempotence", "true")
         .set("acks", "all")
         .set("message.timeout.ms", "120000")
         .create()
-        .unwrap()
-}
-
-/// Writes `0..` to `topic` until stopped, returning every acknowledged value.
-pub fn write_continuously(
-    bootstrap: &str,
-    topic: &str,
-    stop: Arc<AtomicBool>,
-) -> tokio::task::JoinHandle<Vec<String>> {
-    let producer = idempotent_producer(bootstrap);
+        .unwrap();
     let topic = topic.to_owned();
 
     tokio::spawn(async move {
@@ -254,13 +295,13 @@ pub fn write_continuously(
 
 /// Every value in the first `partitions` of `topic`, read from the beginning.
 pub async fn read_partitions(
-    bootstrap: &str,
+    harness: &Harness,
     topic: &str,
     partitions: i32,
     expected: usize,
 ) -> Vec<String> {
-    let consumer: StreamConsumer = ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
+    let consumer: StreamConsumer = harness
+        .kafka()
         .set("group.id", unique("reader"))
         .set("enable.auto.commit", "false")
         .create()

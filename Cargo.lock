@@ -2465,6 +2465,7 @@ dependencies = [
  "clap",
  "crc32fast",
  "kafka-protocol",
+ "picomq-auth",
  "picomq-http",
  "picomq-runtime",
  "s3stream",
