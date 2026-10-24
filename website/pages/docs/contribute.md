@@ -13,11 +13,6 @@ The workspace is split into two areas with a hard boundary between them:
 - [`s3stream`](https://github.com/PicoMQ/s3stream) is the stream engine: WAL, object layout, caching, compaction. It is a self-contained library (crates, wire specification, conformance fixtures).
 - **`picomq/`** is the host: metadata plane, server, HTTP frontends (Pico protocol and Durable Streams), client, and the `pico` CLI. Host crates depend only on the `s3stream` facade crate, never on engine internals. The wire vocabulary (header constants, Pico record codec) lives in `picomq-protocol`, a small crate shared by the frontends and `picomq-client`, which keeps the client publishable as a standalone SDK with no server dependencies.
 
-Two host crates are specific to Postgres:
-
-- `picomq/pico-pgwal` implements the engine's WAL trait on Postgres tables. See [Write-ahead log](/docs/design/wal).
-- `picomq/pico-extension` is the [Postgres extension](/docs/operations/deployment/postgres), a pgrx background worker around `picomq-runtime`. It is its own workspace because pgrx pins build settings the main workspace does not.
-
 Keeping the engine boundary intact is a review criterion. If a change in `picomq/*` needs something from inside the engine, the right move is to widen the facade.
 
 The docs are at `website/` (`VitePress`). And the deployment harnesses live in `harness/` (`aio` for the all-in-one compose stacks, `byo` for an existing Postgres and object store, `terraform` and more).
@@ -38,7 +33,7 @@ PICOMQ_PG_URL=postgres://user:pass@localhost:5432/picomq \
     cargo test -p picomq-sql --test pg_contract --test pg_e2e
 
 PICO_TEST_PG_URL=postgres://user:pass@localhost:5432/picomq \
-    cargo test -p picomq-pgwal -p picomq-runtime -- --ignored
+    cargo test -p picomq-runtime --test postgres -- --ignored
 ```
 
 ### End to end
@@ -48,20 +43,18 @@ PICO_TEST_PG_URL=postgres://user:pass@localhost:5432/picomq \
 | Scenario | Runs |
 | --- | --- |
 | `single` | One node, Pico and Kafka: protocol cross tests, and the Rust, TypeScript, and Go client suites |
-| `cluster` | Two nodes with auth: redirects, groups and Kafka partitions across nodes, admin APIs, failover of a killed node |
-| `pgwal` | The cluster scenario with each node's WAL in Postgres |
+| `cluster` | Two nodes with auth: redirects, groups and Kafka partitions across nodes, admin APIs, failover of a killed node, HTTP producers deduplicated across a transfer and through a killed owner |
 | `chaos` | Two nodes under faults: paused nodes, a paused lease holder, a paused Postgres, and a clean stop. No acknowledged write may be lost and no healthy node fenced |
 | `ds` | Two nodes on Durable Streams: the Go live and cluster suites |
-| `extension` | Pico inside Postgres: crash, restart, and standby tests, then the protocol cross tests |
 
 ```bash
 scripts/e2e.sh                     # every scenario
 scripts/e2e.sh single cluster      # a subset
 KEEP=1 scripts/e2e.sh single       # leave the stack running
-SKIP_BUILD=1 PICO_IMAGE=... PICO_PG_IMAGE=... scripts/e2e.sh   # use images already built
+SKIP_BUILD=1 PICO_IMAGE=... scripts/e2e.sh   # use an image already built
 ```
 
-The `e2e` workflow runs the same scenarios on demand from GitHub Actions. Building the extension on a host needs `cargo-pgrx` and a Postgres server, see [Postgres extension](/docs/operations/deployment/postgres#build-from-source).
+The `e2e` workflow runs the same scenarios on demand from GitHub Actions.
 
 ### Conformance
 

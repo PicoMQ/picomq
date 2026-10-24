@@ -91,7 +91,7 @@ Until step 3, requests for such a stream get a retryable error: HTTP `409`, or K
 | Its WAL is taken over | Its next WAL write fails as fenced |
 | `SIGTERM` or `Ctrl-C` | The signal, followed by a clean shutdown |
 
-A fenced node stops and exits so a supervisor can restart it. The restart registers at a new epoch and the node rejoins empty. [Docker](/docs/operations/deployment/docker) and the [Postgres extension](/docs/operations/deployment/postgres) cover what each runtime does.
+A fenced node stops and exits so a supervisor can restart it. The restart registers at a new epoch and the node rejoins empty. [Docker](/docs/operations/deployment/docker) covers what the runtime does.
 
 ## Clean shutdown
 

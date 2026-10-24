@@ -16,8 +16,6 @@ Each node runs the same stack. An HTTP listener speaks the Pico protocol or Dura
 - The topic layer maps names to topics, partitions, and logs, see [Topics and streams](/docs/design/streams), and the group coordinator runs [consumer groups](/docs/design/groups).
 - The `s3stream` engine moves records to and from storage.
 
-The same stack runs as a process or as the [Postgres extension](/docs/operations/deployment/postgres).
-
 <div class="pico-diagram">
 <svg viewBox="0 0 559 434" width="559" role="img" aria-label="A node runs listeners, routing, topics and groups, and the engine. The engine writes to object storage. Topics and groups propose commands to the SQL metadata log.">
   <defs>
