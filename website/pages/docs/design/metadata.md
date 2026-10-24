@@ -110,7 +110,7 @@ The cycle runs on its own task, never on the apply path: it forks the latest pub
 </svg>
 </div>
 
-A starting node decodes the snapshot and replays the tail, so recovery time is bounded by the interval rather than the cluster's history. A node that lags so far behind that its next row was truncated detects the gap and reinstalls from the newer snapshot instead of continuing from a fork. An empty log tail is ambiguous — nothing new, or the tail was folded into a snapshot — so a tailer that fetches nothing also checks the stored snapshot index and reinstalls when it has fallen behind it.
+A starting node decodes the snapshot and replays the tail, so recovery time is bounded by the interval rather than the cluster's history. A node that lags so far behind that its next row was truncated detects the gap and reinstalls from the newer snapshot instead of continuing from a fork. An empty log tail is ambiguous, either nothing is new or the tail was folded into a snapshot, so a tailer that fetches nothing also checks the stored snapshot index and reinstalls when it has fallen behind it.
 
 A log row that fails to decode is treated as unrecoverable. Skipping it would silently fork that node from every other reader, so the sink stops, fails all waiting proposals, and the node stops accepting metadata writes.
 

@@ -11,9 +11,11 @@ use picomq_protocol::ds::H_STREAM_CLOSED;
 use picomq_protocol::pico::{H_CLOSED, H_TRIM_SEQ};
 
 use crate::ds;
+use crate::http::query_param;
 use crate::http::{header_str, parse_strict_u64_header, set_header, truthy};
 use crate::pico;
-use crate::route::stream_name;
+use crate::route::{is_root, stream_name};
+use picomq_server::ServiceError;
 
 /// Authorized request: principal plus the stored stream name.
 #[derive(Debug)]
@@ -39,7 +41,8 @@ pub async fn gate(
         return Ok(None);
     };
     let caller = authenticate(authorizer, audience, headers).await?;
-    let client_name = auth_resource(audience, uri);
+    let client_name =
+        auth_resource(audience, uri).map_err(|error| Box::new(service_error(audience, error)))?;
     let stored = caller.resolve(authorizer, &client_name)?;
     for op in ops {
         caller.authorize(authorizer, op, Some(&stored))?;
@@ -149,7 +152,7 @@ fn classify_pico(
         Method::POST => write_ops(closed, body.is_empty()),
         Method::DELETE => vec![Operation::Delete],
         Method::HEAD => vec![Operation::Head],
-        Method::GET if stream_name(uri) == "/" => vec![Operation::List],
+        Method::GET if is_root(uri) => vec![Operation::List],
         Method::GET => vec![Operation::Read],
         _ => return None,
     })
@@ -204,13 +207,20 @@ fn method_not_allowed(audience: Audience) -> Response {
 }
 
 /// The name to authorize. A Pico list is checked against its prefix filter.
-fn auth_resource(audience: Audience, uri: &Uri) -> String {
-    if audience == Audience::Pico && stream_name(uri) == "/" {
-        crate::http::query_param(uri, picomq_protocol::pico::Q_PREFIX)
+fn auth_resource(audience: Audience, uri: &Uri) -> Result<String, ServiceError> {
+    if audience == Audience::Pico && is_root(uri) {
+        let prefix = query_param(uri, picomq_protocol::pico::Q_PREFIX)?;
+        return Ok(prefix
             .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| stream_name(uri))
-    } else {
-        stream_name(uri)
+            .unwrap_or_else(|| "/".to_owned()));
+    }
+    stream_name(uri)
+}
+
+fn service_error(audience: Audience, error: ServiceError) -> Response {
+    match audience {
+        Audience::DurableStreams => ds::service_error_response(error),
+        Audience::Pico | Audience::Admin => pico::service_error_response(error),
     }
 }
 

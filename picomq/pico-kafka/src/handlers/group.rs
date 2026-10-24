@@ -194,9 +194,7 @@ async fn join_group(
         Ok(Joined::Subscribed { .. }) => {
             response = response.with_error_code(INCONSISTENT_GROUP_PROTOCOL);
         }
-        // Kafka never answers a join that a newer join from the same member
-        // replaced.
-        Err(GroupError::Superseded) => std::future::pending().await,
+        Err(GroupError::Superseded) => return Ok(HandlerOutcome::NoResponse),
         Err(error) => {
             response = response.with_error_code(error_code(error));
         }
@@ -242,6 +240,7 @@ async fn sync_group(
             }
             response
         }
+        Err(GroupError::Superseded) => return Ok(HandlerOutcome::NoResponse),
         Err(error) => kafka_protocol::messages::SyncGroupResponse::default()
             .with_error_code(error_code(error)),
     };

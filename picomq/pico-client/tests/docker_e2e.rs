@@ -48,9 +48,7 @@ fn pico() -> PicoClient {
 }
 
 fn pico_at(url: &str) -> PicoClient {
-    let config = config();
-    let http = picomq_client::http_client(&config).unwrap();
-    PicoClient::with_http(url, http, config.retry)
+    PicoClient::with_config(url, &config()).unwrap()
 }
 
 async fn read_bodies(client: &PicoClient, name: &str) -> Vec<String> {

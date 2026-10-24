@@ -87,9 +87,21 @@ export class Http {
           code: 'redirect_without_location',
         })
       }
-      const next = new URL(location, url).toString()
-      if (key !== undefined) this.routes.learn(key, next)
-      url = next
+      const next = URL.parse(location, url)
+      if (next === null) {
+        throw new ClientError('other', 'redirect_without_location', {
+          status: response.status,
+          code: 'redirect_without_location',
+        })
+      }
+      if (!hopAllowed(new URL(url), next)) {
+        throw new ClientError('other', 'unsafe_redirect', {
+          status: response.status,
+          code: 'unsafe_redirect',
+        })
+      }
+      if (key !== undefined) this.routes.learn(key, next.toString())
+      url = next.toString()
     }
 
     throw new ClientError('other', 'too_many_redirects', { code: 'too_many_redirects' })
@@ -126,6 +138,11 @@ export class Http {
         redirect: 'manual',
       } as never) as unknown as Promise<Response>
   }
+}
+
+function hopAllowed(from: URL, to: URL): boolean {
+  const reachable = to.protocol === 'http:' || to.protocol === 'https:'
+  return reachable && !(from.protocol === 'https:' && to.protocol === 'http:')
 }
 
 export function header(response: Response, name: string): string | undefined {

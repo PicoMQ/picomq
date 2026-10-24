@@ -135,11 +135,12 @@ pub(crate) fn auth_error(err: &AuthError) -> Response {
 pub(crate) fn service_error(error: ServiceError) -> Response {
     let status = match error.kind {
         ErrorKind::NotFound => StatusCode::NOT_FOUND,
-        ErrorKind::Conflict | ErrorKind::Transferring | ErrorKind::Closed => StatusCode::CONFLICT,
+        ErrorKind::Conflict | ErrorKind::Closed => StatusCode::CONFLICT,
         ErrorKind::Durability | ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         ErrorKind::Timeout => StatusCode::GATEWAY_TIMEOUT,
-        ErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ErrorKind::Transferring | ErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         ErrorKind::BadRequest
+        | ErrorKind::InvalidName
         | ErrorKind::CorruptBatch
         | ErrorKind::SchemaViolation
         | ErrorKind::Fenced
@@ -147,4 +148,17 @@ pub(crate) fn service_error(error: ServiceError) -> Response {
         | ErrorKind::MatchFailed => StatusCode::BAD_REQUEST,
     };
     (status, Json(json!({"error": error.message}))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_moving_stream_is_unavailable_not_a_conflict() {
+        let moving = service_error(ServiceError::kind(ErrorKind::Transferring));
+        assert_eq!(moving.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let conflict = service_error(ServiceError::kind(ErrorKind::Conflict));
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    }
 }

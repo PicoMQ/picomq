@@ -7,7 +7,7 @@ on:
         description: Which scenario to run
         type: choice
         default: all
-        options: [all, single, cluster, pgwal, chaos, ds, extension]
+        options: [all, single, cluster, chaos, ds]
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: ${{ inputs.scenario == 'all' && fromJSON('["single", "cluster", "pgwal", "chaos", "ds", "extension"]') || fromJSON(format('["{0}"]', inputs.scenario)) }}
+        scenario: ${{ inputs.scenario == 'all' && fromJSON('["single", "cluster", "chaos", "ds"]') || fromJSON(format('["{0}"]', inputs.scenario)) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -58,7 +58,6 @@ jobs:
       - uses: docker/setup-buildx-action@v4
 
       - name: Build the pico image
-        if: matrix.scenario != 'extension'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -67,20 +66,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build the pico extension image
-        if: matrix.scenario == 'extension'
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: picomq/pico-extension/Dockerfile
-          load: true
-          tags: picomq-pg-e2e:local
-          cache-from: type=gha,scope=extension
-          cache-to: type=gha,mode=max,scope=extension
-
       - name: Run scenario
         run: scripts/e2e.sh ${{ matrix.scenario }}
         env:
           SKIP_BUILD: "1"
           PICO_IMAGE: picomq-e2e:local
-          PICO_PG_IMAGE: picomq-pg-e2e:local

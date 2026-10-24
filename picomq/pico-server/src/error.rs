@@ -18,6 +18,9 @@ pub enum ErrorKind {
     Transferring,
     Closed,
     BadRequest,
+    /// A topic name the grammar rejects. HTTP: 400. Kafka:
+    /// `INVALID_TOPIC_EXCEPTION`.
+    InvalidName,
     /// A record batch that does not parse as Kafka RecordBatch v2 (bad
     /// magic, truncated, CRC mismatch). Kafka: `CORRUPT_MESSAGE`.
     CorruptBatch,

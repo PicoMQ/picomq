@@ -25,6 +25,7 @@ pub async fn handle(
     }
 
     let producer_id = ctx
+        .service
         .allocate_producer_id()
         .await
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;

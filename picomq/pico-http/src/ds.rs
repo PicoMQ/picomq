@@ -151,7 +151,10 @@ async fn dispatch(
     };
     let name = match permit {
         Some(permit) => permit.stream_name,
-        None => stream_name(&parts.uri),
+        None => match stream_name(&parts.uri) {
+            Ok(name) => name,
+            Err(e) => return service_error_response(e),
+        },
     };
     let requested = match partition::requested(&parts.uri) {
         Ok(requested) => requested,
@@ -375,15 +378,15 @@ impl DsFrontend {
         requested: Option<u32>,
     ) -> Result<Response, ServiceError> {
         let partition = partition::resolve(&self.topics, name, requested).await?;
-        let live = query_param(uri, Q_LIVE).filter(|v| !v.is_empty());
-        let offset_raw = query_param(uri, Q_OFFSET);
+        let live = query_param(uri, Q_LIVE)?.filter(|v| !v.is_empty());
+        let offset_raw = query_param(uri, Q_OFFSET)?;
         let offset_now = offset_raw
             .as_deref()
             .is_some_and(|raw| raw.eq_ignore_ascii_case(OFFSET_NOW));
         let offset = self
             .parse_offset(name, partition, offset_raw.as_deref(), live.is_some())
             .await?;
-        let cursor_raw = query_param(uri, Q_CURSOR);
+        let cursor_raw = query_param(uri, Q_CURSOR)?;
         let scope = format!("{name}:{partition}");
 
         match live.as_deref() {
@@ -664,10 +667,11 @@ fn options() -> Response {
     response
 }
 
-fn service_error_response(e: ServiceError) -> Response {
+pub(crate) fn service_error_response(e: ServiceError) -> Response {
     match e.kind {
         ErrorKind::NotFound => respond(404, None, false),
         ErrorKind::BadRequest
+        | ErrorKind::InvalidName
         | ErrorKind::CorruptBatch
         | ErrorKind::SchemaViolation
         | ErrorKind::MatchFailed => fail(400, &e.message),
@@ -696,12 +700,10 @@ fn service_error_response(e: ServiceError) -> Response {
             }
             response
         }
-        ErrorKind::Conflict | ErrorKind::Transferring | ErrorKind::Closed => {
-            respond(409, e.next_offset.as_ref(), e.closed)
-        }
+        ErrorKind::Conflict | ErrorKind::Closed => respond(409, e.next_offset.as_ref(), e.closed),
         ErrorKind::Durability | ErrorKind::Internal => fail(500, &e.message),
         ErrorKind::Timeout => fail(504, &e.message),
-        ErrorKind::Unavailable => fail(503, &e.message),
+        ErrorKind::Transferring | ErrorKind::Unavailable => fail(503, &e.message),
     }
 }
 
@@ -769,4 +771,17 @@ pub(crate) fn fail(status: u16, message: &str) -> Response {
     let message = if message.is_empty() { "error" } else { message };
     *response.body_mut() = Body::from(message.to_owned());
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_moving_stream_is_unavailable_not_a_conflict() {
+        let moving = service_error_response(ServiceError::kind(ErrorKind::Transferring));
+        assert_eq!(moving.status(), 503);
+        let conflict = service_error_response(ServiceError::kind(ErrorKind::Conflict));
+        assert_eq!(conflict.status(), 409);
+    }
 }

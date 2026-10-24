@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
+use picomq_server::wal::ObjectWal;
 use picomq_server::{
     CommittedOffset, CreateCommand, GroupCoordinator, GroupError, GroupState, JoinInput,
     JoinOutcome, JoinProtocol, Joined, MemberFence, MemberRole, Membership, NodeConfig,
-    OffsetCommit, Partition, PicoNode, SyncInput, TopicId,
+    OffsetCommit, Partition, PicoNode, SyncInput, SyncOutcome, TopicId,
 };
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 use tokio::task::JoinHandle;
@@ -20,21 +21,16 @@ async fn start_node(
         Arc::new(MemoryObjectStorage::new((node_id * 2) as i16));
     let wal_storage: Arc<dyn ObjectStorageTrait> =
         Arc::new(MemoryObjectStorage::new((node_id * 2 + 1) as i16));
-    PicoNode::start(
-        NodeConfig {
-            node_id,
-            node_epoch: 1,
-            http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        None,
-    )
-    .await
-    .unwrap()
+    let config = NodeConfig {
+        node_id,
+        node_epoch: 1,
+        http_address: format!("http://127.0.0.1:{}", 4000 + node_id),
+        ..Default::default()
+    };
+    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+        .await
+        .unwrap()
 }
 
 fn partition(byte: u8) -> Partition {
@@ -62,6 +58,21 @@ fn join(group_id: &str, member_id: &str, membership: Membership) -> JoinInput {
         session_timeout_ms: 10_000,
         rebalance_timeout_ms: 2_000,
         require_known_member_id: false,
+    }
+}
+
+fn sync(
+    group_id: &str,
+    generation: i32,
+    member_id: &str,
+    assignments: Vec<(String, Bytes)>,
+) -> SyncInput {
+    SyncInput {
+        group_id: group_id.to_owned(),
+        generation,
+        member_id: member_id.to_owned(),
+        instance_id: None,
+        assignments,
     }
 }
 
@@ -240,13 +251,7 @@ async fn subscribed_members_receive_a_server_side_assignment() {
     );
     assert_eq!(
         groups
-            .sync(SyncInput {
-                group_id: "g".to_owned(),
-                generation: 2,
-                member_id: second.member_id.clone(),
-                instance_id: None,
-                assignments: Vec::new(),
-            })
+            .sync(sync("g", 2, &second.member_id, vec![]))
             .await
             .err(),
         Some(GroupError::InvalidRequest)
@@ -378,25 +383,18 @@ async fn client_members_elect_a_leader_and_distribute_opaque_assignments() {
         async {
             tokio::time::sleep(Duration::from_millis(50)).await;
             groups
-                .sync(SyncInput {
-                    group_id: "g".to_owned(),
-                    generation: 2,
-                    member_id: first.member_id.clone(),
-                    instance_id: None,
-                    assignments: vec![
+                .sync(sync(
+                    "g",
+                    2,
+                    &first.member_id,
+                    vec![
                         (first.member_id.clone(), Bytes::from_static(b"tasks-a")),
                         (second.member_id.clone(), Bytes::from_static(b"tasks-b")),
                     ],
-                })
+                ))
                 .await
         },
-        groups.sync(SyncInput {
-            group_id: "g".to_owned(),
-            generation: 2,
-            member_id: second.member_id.clone(),
-            instance_id: None,
-            assignments: Vec::new(),
-        }),
+        groups.sync(sync("g", 2, &second.member_id, vec![])),
     );
     assert_eq!(
         leader_sync.unwrap().assignment,
@@ -571,13 +569,12 @@ async fn stable_member(groups: &Arc<GroupCoordinator>, group: &str) -> String {
         .join(join(group, "", client("consumer", "range", "a")))
         .await;
     groups
-        .sync(SyncInput {
-            group_id: group.to_owned(),
-            generation: first.generation,
-            member_id: first.member_id.clone(),
-            instance_id: None,
-            assignments: vec![(first.member_id.clone(), Bytes::from_static(b"all"))],
-        })
+        .sync(sync(
+            group,
+            first.generation,
+            &first.member_id,
+            vec![(first.member_id.clone(), Bytes::from_static(b"all"))],
+        ))
         .await
         .unwrap();
     first.member_id
@@ -586,6 +583,14 @@ async fn stable_member(groups: &Arc<GroupCoordinator>, group: &str) -> String {
 fn spawn_join(groups: &Arc<GroupCoordinator>, input: JoinInput) -> JoinHandle<JoinOutcome> {
     let groups = Arc::clone(groups);
     tokio::spawn(async move { groups.join(input).await })
+}
+
+fn spawn_sync(
+    groups: &Arc<GroupCoordinator>,
+    input: SyncInput,
+) -> JoinHandle<Result<SyncOutcome, GroupError>> {
+    let groups = Arc::clone(groups);
+    tokio::spawn(async move { groups.sync(input).await })
 }
 
 #[tokio::test]
@@ -658,6 +663,43 @@ async fn a_newer_join_supersedes_the_pending_one() {
 }
 
 #[tokio::test]
+async fn a_newer_sync_supersedes_the_pending_one() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+    let leader = stable_member(&groups, "g").await;
+
+    let joining = spawn_join(&groups, join("g", "", client("consumer", "range", "b")));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let rejoined = groups
+        .join(join("g", &leader, client("consumer", "range", "a")))
+        .await;
+    rejoined.result.unwrap();
+    let joined = joining.await.unwrap();
+    joined.result.unwrap();
+    let generation = joined.generation;
+    let follower = joined.member_id;
+
+    let earlier = spawn_sync(&groups, sync("g", generation, &follower, vec![]));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let later = spawn_sync(&groups, sync("g", generation, &follower, vec![]));
+
+    assert_eq!(earlier.await.unwrap().err(), Some(GroupError::Superseded));
+
+    let assignments = vec![(follower.clone(), Bytes::from_static(b"all"))];
+    groups
+        .sync(sync("g", generation, &leader, assignments))
+        .await
+        .unwrap();
+    assert_eq!(
+        later.await.unwrap().unwrap().assignment,
+        Bytes::from_static(b"all")
+    );
+
+    node.close().await;
+}
+
+#[tokio::test]
 async fn a_group_on_a_fenced_node_waits_for_its_log_to_be_recovered() {
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
@@ -706,13 +748,7 @@ async fn an_expired_member_departs_and_the_rebalance_completes_without_it() {
         })
         .await;
     groups
-        .sync(SyncInput {
-            group_id: "g".to_owned(),
-            generation: first.generation,
-            member_id: first.member_id.clone(),
-            instance_id: None,
-            assignments: Vec::new(),
-        })
+        .sync(sync("g", first.generation, &first.member_id, vec![]))
         .await
         .unwrap();
 

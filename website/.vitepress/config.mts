@@ -48,7 +48,6 @@ const docsSidebar = [
         collapsed: true,
         items: [
           { text: 'Docker', link: '/docs/operations/deployment/docker' },
-          { text: 'Postgres extension', link: '/docs/operations/deployment/postgres' },
           { text: 'Fly', link: '/docs/operations/deployment/fly' },
           { text: 'AWS', link: '/docs/operations/deployment/aws' },
         ],

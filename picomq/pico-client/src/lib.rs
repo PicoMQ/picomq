@@ -43,10 +43,9 @@ pub fn connect_with(
     endpoint: &str,
     config: &ClientConfig,
 ) -> Result<Box<dyn StreamApi>> {
-    let http = http_client(config)?;
     Ok(match protocol {
-        Protocol::Pico => Box::new(PicoClient::with_http(endpoint, http, config.retry.clone())),
-        Protocol::Ds => Box::new(DsClient::with_http(endpoint, http, config.retry.clone())),
+        Protocol::Pico => Box::new(PicoClient::with_config(endpoint, config)?),
+        Protocol::Ds => Box::new(DsClient::with_config(endpoint, config)?),
     })
 }
 

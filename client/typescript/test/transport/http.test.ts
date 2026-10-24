@@ -89,6 +89,66 @@ describe('Http', () => {
     expect(String(fetch.mock.calls[2]![0])).toBe('https://gw.test/node2/orders?seq=7')
   })
 
+  it('refuses a redirect from https to http', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(redirect(307, 'http://b.test/moved'))
+    vi.stubGlobal('fetch', fetch)
+
+    const http = new Http('https://a.test', 'secret')
+    await expect(http.send({ method: 'GET', url: 'https://a.test/x' })).rejects.toMatchObject({
+      code: 'unsafe_redirect',
+    })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('allows a redirect from http to https', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(redirect(307, 'https://b.test/moved'))
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }))
+    vi.stubGlobal('fetch', fetch)
+
+    const http = new Http('http://a.test', 'secret')
+    const response = await http.send({ method: 'GET', url: 'http://a.test/x' })
+    expect(response.status).toBe(200)
+    expect(String(fetch.mock.calls[1]![0])).toBe('https://b.test/moved')
+  })
+
+  it('does not learn an owner from a refused hop', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(redirect(307, 'http://b.test/orders'))
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }))
+    vi.stubGlobal('fetch', fetch)
+
+    const http = new Http('https://a.test', 'secret')
+    await expect(http.send({ method: 'GET', url: 'https://a.test/orders' })).rejects.toMatchObject({
+      code: 'unsafe_redirect',
+    })
+    await http.send({ method: 'GET', url: 'https://a.test/orders' })
+    expect(String(fetch.mock.calls[1]![0])).toBe('https://a.test/orders')
+  })
+
+  it('rejects a redirect whose location is not a url', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(redirect(307, 'http://exa mple.com/x'))
+    vi.stubGlobal('fetch', fetch)
+
+    const http = new Http('http://a.test')
+    await expect(http.send({ method: 'GET', url: 'http://a.test/x' })).rejects.toMatchObject({
+      code: 'redirect_without_location',
+    })
+  })
+
+  it('refuses a redirect to an unsupported scheme', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(redirect(307, 'ftp://b.test/moved'))
+    vi.stubGlobal('fetch', fetch)
+
+    const http = new Http('http://a.test', 'secret')
+    await expect(http.send({ method: 'GET', url: 'http://a.test/x' })).rejects.toMatchObject({
+      code: 'unsafe_redirect',
+    })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
   it('fails after too many redirects', async () => {
     const fetch = vi.fn().mockResolvedValue(redirect(307, 'http://a.test/loop'))
     vi.stubGlobal('fetch', fetch)

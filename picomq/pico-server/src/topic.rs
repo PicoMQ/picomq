@@ -29,12 +29,10 @@ impl TopicName {
 
         let canonical = picomq_common::name::canonical(&spelling);
         if canonical.is_empty() {
-            return Err(ServiceError::with_message(
-                ErrorKind::BadRequest,
-                None,
-                false,
-                "topic name must not be empty",
-            ));
+            return Err(invalid_name("topic name must not be empty"));
+        }
+        if canonical.starts_with('_') {
+            return Err(invalid_name("the _ namespace is reserved"));
         }
 
         Ok(Self {
@@ -60,6 +58,10 @@ impl fmt::Display for TopicName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.spelling)
     }
+}
+
+fn invalid_name(message: &str) -> ServiceError {
+    ServiceError::with_message(ErrorKind::InvalidName, None, false, message)
 }
 
 pub fn is_kafka_name(name: &str) -> bool {
@@ -275,8 +277,21 @@ mod tests {
 
     #[test]
     fn empty_names_are_rejected() {
-        assert!(TopicName::parse("/").is_err());
-        assert!(TopicName::parse("").is_err());
+        for empty in ["/", ""] {
+            let error = TopicName::parse(empty).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::InvalidName, "{empty:?}");
+        }
+    }
+
+    #[test]
+    fn the_underscore_namespace_is_reserved() {
+        for reserved in ["/_groups/x", "_streams.x", "/_schemas", "/_p/1/0"] {
+            let error = TopicName::parse(reserved).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::InvalidName, "{reserved}");
+        }
+        for allowed in ["/a_b", "/x/_y", "a_b", "/orders/_internal"] {
+            assert!(TopicName::parse(allowed).is_ok(), "{allowed}");
+        }
     }
 
     #[test]

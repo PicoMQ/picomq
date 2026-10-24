@@ -95,10 +95,10 @@ terraform output
 
 Useful outputs:
 
-- `endpoints` — protocol URLs such as `http://pico-1.picomq.internal`
-- `kafka_bootstrap` — `kafka.picomq.internal:9092`, and `kafka_brokers` for the per-node advertised addresses
-- `bootstrap_secret_arn` — Secrets Manager ARN for the bootstrap token
-- `alb_dns_name`, `kafka_nlb_dns_name`, `vpc_id`, `bucket`, `meta_endpoint` — for wiring clients and debugging
+- `endpoints`: protocol URLs such as `http://pico-1.picomq.internal`
+- `kafka_bootstrap`: `kafka.picomq.internal:9092`, and `kafka_brokers` for the per-node advertised addresses
+- `bootstrap_secret_arn`: Secrets Manager ARN for the bootstrap token
+- `alb_dns_name`, `kafka_nlb_dns_name`, `vpc_id`, `bucket`, `meta_endpoint`: for wiring clients and debugging
 
 Fetch the bootstrap token (value is the secret string):
 

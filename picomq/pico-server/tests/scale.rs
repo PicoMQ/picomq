@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use picomq_metadata::{CommandSink, LocalSink};
+use picomq_server::wal::ObjectWal;
 use picomq_server::{AppendCommand, CreateCommand, LogRecord, NodeConfig, OffsetToken, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
@@ -54,20 +55,15 @@ async fn run_gate(total: u64) {
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
-    let node = PicoNode::start(
-        NodeConfig {
-            node_id: 1,
-            node_epoch: 1,
-            ..Default::default()
-        },
-        sink,
-        views,
-        object_storage,
-        wal_storage,
-        None,
-    )
-    .await
-    .unwrap();
+    let config = NodeConfig {
+        node_id: 1,
+        node_epoch: 1,
+        ..Default::default()
+    };
+    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
+    let node = PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+        .await
+        .unwrap();
     let service = node.topics();
     let base_rss = rss_mib();
 

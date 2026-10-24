@@ -49,7 +49,7 @@ use crate::http::{
     parse_strict_u64_header, query_param, set_header, truthy,
 };
 use crate::partition;
-use crate::route::{RoutingMode, route, stream_name};
+use crate::route::{RoutingMode, is_root, route, stream_name};
 
 const CACHE_CATCH_UP: &str = "public, max-age=60, stale-while-revalidate=300";
 
@@ -157,7 +157,10 @@ async fn dispatch(
     };
     let name = match &permit {
         Some(permit) => permit.stream_name.clone(),
-        None => stream_name(&parts.uri),
+        None => match stream_name(&parts.uri) {
+            Ok(name) => name,
+            Err(e) => return service_error_response(e),
+        },
     };
     let requested = match partition::requested(&parts.uri) {
         Ok(requested) => requested,
@@ -217,7 +220,7 @@ impl PicoFrontend {
         body: &Bytes,
         name: &str,
     ) -> Result<Response, ServiceError> {
-        if stream_name(uri) == "/" {
+        if is_root(uri) {
             return Ok(error(
                 400,
                 E_BAD_REQUEST,
@@ -295,7 +298,7 @@ impl PicoFrontend {
         name: &str,
         requested: Option<u32>,
     ) -> Result<Response, ServiceError> {
-        if stream_name(uri) == "/" {
+        if is_root(uri) {
             return Ok(error(400, E_BAD_REQUEST, "no stream in path", None));
         }
         if let Some(trim_seq) =
@@ -380,7 +383,7 @@ impl PicoFrontend {
         requested: Option<u32>,
         permit: Option<&Permit>,
     ) -> Result<Response, ServiceError> {
-        if stream_name(uri) == "/" {
+        if is_root(uri) {
             return self.list(uri, permit).await;
         }
 
@@ -388,7 +391,7 @@ impl PicoFrontend {
         let scope = format!("{name}:{partition}");
         let seq = self.parse_seq(uri, headers, name, partition).await?;
 
-        match query_param(uri, Q_LIVE) {
+        match query_param(uri, Q_LIVE)? {
             None => {
                 let out = self.read(name, partition, seq, uri).await?;
                 self.write_read(uri, headers, &scope, seq, out, false)
@@ -405,11 +408,11 @@ impl PicoFrontend {
     async fn list(&self, uri: &Uri, permit: Option<&Permit>) -> Result<Response, ServiceError> {
         let prefix = match permit {
             Some(permit) => permit.stream_name.clone(),
-            None => query_param(uri, Q_PREFIX)
+            None => query_param(uri, Q_PREFIX)?
                 .filter(|p| !p.is_empty())
                 .unwrap_or_else(|| "/".into()),
         };
-        let start_after = match (permit, query_param(uri, Q_START_AFTER)) {
+        let start_after = match (permit, query_param(uri, Q_START_AFTER)?) {
             (Some(permit), Some(after)) => Some(
                 permit
                     .principal
@@ -419,7 +422,7 @@ impl PicoFrontend {
             ),
             (_, after) => after,
         };
-        let limit = parse_strict_u64(query_param(uri, Q_LIMIT).as_deref(), "invalid limit")?;
+        let limit = parse_strict_u64(query_param(uri, Q_LIMIT)?.as_deref(), "invalid limit")?;
         let result =
             self.topics
                 .list(&prefix, start_after.as_deref(), limit.unwrap_or(0) as usize)?;
@@ -472,8 +475,8 @@ impl PicoFrontend {
         seq: OffsetToken,
         uri: &Uri,
     ) -> Result<ReadResult, ServiceError> {
-        let count = parse_strict_u64(query_param(uri, Q_COUNT).as_deref(), "invalid count")?;
-        let bytes = parse_strict_u64(query_param(uri, Q_BYTES).as_deref(), "invalid bytes")?;
+        let count = parse_strict_u64(query_param(uri, Q_COUNT)?.as_deref(), "invalid count")?;
+        let bytes = parse_strict_u64(query_param(uri, Q_BYTES)?.as_deref(), "invalid bytes")?;
         let cap = self.max_chunk_size.max(MAX_READ_BYTES);
         let max_bytes = match bytes {
             None => self.max_chunk_size,
@@ -493,7 +496,7 @@ impl PicoFrontend {
         scope: &str,
         seq: OffsetToken,
     ) -> Result<Response, ServiceError> {
-        let cursor = cursor(query_param(uri, Q_CURSOR).as_deref());
+        let cursor = cursor(query_param(uri, Q_CURSOR)?.as_deref());
         let out = self.read(name, partition, seq, uri).await?;
         if !(out.records.is_empty() && out.up_to_date) || out.closed {
             let mut response = self.write_read(uri, headers, scope, seq, out, true)?;
@@ -615,7 +618,7 @@ impl PicoFrontend {
         out: ReadResult,
         live: bool,
     ) -> Result<Response, ServiceError> {
-        let format = query_param(uri, Q_FORMAT)
+        let format = query_param(uri, Q_FORMAT)?
             .filter(|f| !f.is_empty())
             .unwrap_or_else(|| FORMAT_JSON.into());
         let empty_tail = out.records.is_empty() && out.up_to_date;
@@ -690,7 +693,7 @@ impl PicoFrontend {
         name: &str,
         partition: u32,
     ) -> Result<OffsetToken, ServiceError> {
-        let Some(raw) = query_param(uri, Q_SEQ) else {
+        let Some(raw) = query_param(uri, Q_SEQ)? else {
             if let Some(last_event_id) =
                 header_str(headers, "last-event-id").filter(|v| !v.is_empty())
             {
@@ -737,7 +740,7 @@ fn options() -> Response {
 pub(crate) fn service_error_response(e: ServiceError) -> Response {
     match e.kind {
         ErrorKind::NotFound => error(404, E_NOT_FOUND, "no such stream", None),
-        ErrorKind::BadRequest | ErrorKind::CorruptBatch => {
+        ErrorKind::BadRequest | ErrorKind::InvalidName | ErrorKind::CorruptBatch => {
             error(400, E_BAD_REQUEST, &e.message, None)
         }
         ErrorKind::SchemaViolation => error(400, E_SCHEMA_VIOLATION, &e.message, None),
@@ -759,9 +762,7 @@ pub(crate) fn service_error_response(e: ServiceError) -> Response {
             response
         }
         ErrorKind::MatchFailed => error(412, E_MATCH_FAILED, &e.message, e.next_offset.as_ref()),
-        ErrorKind::Conflict | ErrorKind::Transferring => {
-            error(409, E_CONFLICT, &e.message, e.next_offset.as_ref())
-        }
+        ErrorKind::Conflict => error(409, E_CONFLICT, &e.message, e.next_offset.as_ref()),
         ErrorKind::Closed => {
             let mut response = error(409, E_CLOSED, "stream is closed", e.next_offset.as_ref());
             set_header(&mut response, H_CLOSED, "true");
@@ -770,7 +771,9 @@ pub(crate) fn service_error_response(e: ServiceError) -> Response {
         ErrorKind::Durability => error(500, E_DURABILITY, &e.message, None),
         ErrorKind::Internal => error(500, E_INTERNAL, &e.message, None),
         ErrorKind::Timeout => error(504, E_TIMEOUT, &e.message, None),
-        ErrorKind::Unavailable => error(503, E_UNAVAILABLE, &e.message, None),
+        ErrorKind::Transferring | ErrorKind::Unavailable => {
+            error(503, E_UNAVAILABLE, &e.message, None)
+        }
     }
 }
 
@@ -900,4 +903,17 @@ pub(crate) fn error(
     };
     *response.body_mut() = Body::from(body.encode());
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_moving_stream_is_unavailable_not_a_conflict() {
+        let moving = service_error_response(ServiceError::kind(ErrorKind::Transferring));
+        assert_eq!(moving.status(), 503);
+        let conflict = service_error_response(ServiceError::kind(ErrorKind::Conflict));
+        assert_eq!(conflict.status(), 409);
+    }
 }

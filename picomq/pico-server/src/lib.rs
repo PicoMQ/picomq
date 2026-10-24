@@ -10,7 +10,7 @@ pub mod log;
 pub mod node;
 pub mod ownership;
 pub mod partition;
-pub mod producer;
+pub mod producers;
 pub mod record;
 pub mod retention;
 pub mod service;
@@ -38,6 +38,7 @@ pub use picomq_schema::{
     Batch as SchemaBatch, Record as SchemaRecord, Registry as SchemaRegistry, SchemaFormat,
     SchemaStore,
 };
+pub use producers::ProducerDecision;
 pub use record::{LogRecord, StreamRecord};
 pub use retention::Retention;
 pub use service::S3StreamService;

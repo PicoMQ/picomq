@@ -17,9 +17,10 @@ use picomq_protocol::record::PicoRecord;
 use picomq_protocol::schemas::Schema;
 use reqwest::Response;
 
+use crate::ClientConfig;
 use crate::error::{ClientError, Result};
 use crate::retry::RetryPolicy;
-use crate::transport::{Transport, default_http, invalid_response};
+use crate::transport::{Transport, invalid_response};
 use crate::types::{
     AppendAck, CreateOptions, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo,
     StreamListing,
@@ -42,18 +43,14 @@ pub struct PicoClient {
 
 impl PicoClient {
     pub fn new(endpoint: &str) -> Result<Self> {
-        Ok(Self::with_http(
-            endpoint,
-            default_http()?,
-            RetryPolicy::none(),
-        ))
+        Self::with_config(endpoint, &ClientConfig::default())
     }
 
-    pub fn with_http(endpoint: &str, http: reqwest::Client, retry: RetryPolicy) -> Self {
-        Self {
-            transport: Transport::new(endpoint, http),
-            retry,
-        }
+    pub fn with_config(endpoint: &str, config: &ClientConfig) -> Result<Self> {
+        Ok(Self {
+            transport: Transport::new(endpoint, crate::http_client(config)?),
+            retry: config.retry.clone(),
+        })
     }
 
     pub async fn append_as(

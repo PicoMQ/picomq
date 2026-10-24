@@ -312,11 +312,17 @@ async fn assignment(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    let Some(generation) = query_param(&uri, Q_GENERATION).and_then(|g| g.parse::<i32>().ok())
-    else {
+    let generation = match param(&uri, Q_GENERATION) {
+        Ok(raw) => raw.and_then(|g| g.parse::<i32>().ok()),
+        Err(response) => return *response,
+    };
+    let Some(generation) = generation else {
         return bad_request("generation query parameter is required");
     };
-    let instance_id = query_param(&uri, Q_INSTANCE_ID);
+    let instance_id = match param(&uri, Q_INSTANCE_ID) {
+        Ok(instance_id) => instance_id,
+        Err(response) => return *response,
+    };
     if let Some(response) = state.redirect(&uri, &group).await {
         return response;
     }
@@ -390,7 +396,10 @@ async fn leave(
     if let Err(response) = state.member_streams(&caller, &group, &member).await {
         return *response;
     }
-    let instance_id = query_param(&uri, Q_INSTANCE_ID);
+    let instance_id = match param(&uri, Q_INSTANCE_ID) {
+        Ok(instance_id) => instance_id,
+        Err(response) => return *response,
+    };
     match state
         .groups
         .leave(&group, &[(member, instance_id)])
@@ -471,7 +480,10 @@ async fn fetch(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    let requested = query_params(&uri, Q_STREAM);
+    let requested = match params(&uri, Q_STREAM) {
+        Ok(requested) => requested,
+        Err(response) => return *response,
+    };
     let requested = match state.resolve(&caller, &requested) {
         Ok(requested) => requested,
         Err(response) => return *response,
@@ -587,6 +599,14 @@ fn no_content() -> Response {
 
 fn bad_request(message: &str) -> Response {
     error(400, E_BAD_REQUEST, message, None)
+}
+
+fn param(uri: &Uri, name: &str) -> Result<Option<String>, Box<Response>> {
+    query_param(uri, name).map_err(|error| Box::new(service_error_response(error)))
+}
+
+fn params(uri: &Uri, name: &str) -> Result<Vec<String>, Box<Response>> {
+    query_params(uri, name).map_err(|error| Box::new(service_error_response(error)))
 }
 
 fn group_error(err: GroupError) -> Response {

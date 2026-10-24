@@ -62,10 +62,16 @@ impl JoinRequest {
 
     pub fn decode(group: String, body: &[u8]) -> Result<Self, CodecError> {
         let node = object(body)?;
+        let subscription = strings(&node, "subscription")?
+            .ok_or_else(|| CodecError::new("subscription is required"))?;
+        if subscription.is_empty() {
+            return Err(CodecError::new(
+                "subscription must name at least one stream",
+            ));
+        }
         Ok(Self {
             group,
-            subscription: strings(&node, "subscription")?
-                .ok_or_else(|| CodecError::new("subscription is required"))?,
+            subscription,
             member_id: string(&node, "memberId")?,
             instance_id: string(&node, "instanceId")?,
             client_id: string(&node, "clientId")?,
@@ -223,6 +229,9 @@ impl CommitRequest {
     pub fn decode(group: String, body: &[u8]) -> Result<Self, CodecError> {
         let node = object(body)?;
         let offsets = offsets_of(&node)?;
+        if offsets.is_empty() {
+            return Err(CodecError::new("offsets must name at least one stream"));
+        }
         let fence = match (string(&node, "memberId")?, i32_of(&node, "generation")?) {
             (Some(member_id), Some(generation)) => Some(MemberFence {
                 member_id,
@@ -603,13 +612,20 @@ mod tests {
     fn decoding_rejects_bad_shapes() {
         assert!(JoinRequest::decode("g".to_owned(), br#"{"clientId":"w"}"#).is_err());
         assert!(JoinRequest::decode("g".to_owned(), br#"{"subscription":[1]}"#).is_err());
+        assert!(JoinRequest::decode("g".to_owned(), br#"{"subscription":[]}"#).is_err());
         assert!(JoinRequest::decode("g".to_owned(), b"[]").is_err());
+        assert!(CommitRequest::decode("g".to_owned(), br#"{"offsets":{}}"#).is_err());
+        assert!(OffsetsResponse::decode(br#"{"offsets":{}}"#).is_ok());
         assert!(
             CommitRequest::decode("g".to_owned(), br#"{"offsets":{"/a":{"position":-1}}}"#)
                 .is_err()
         );
         assert!(
-            CommitRequest::decode("g".to_owned(), br#"{"memberId":"m","offsets":{}}"#).is_err()
+            CommitRequest::decode(
+                "g".to_owned(),
+                br#"{"memberId":"m","offsets":{"/a":{"position":1}}}"#
+            )
+            .is_err()
         );
         assert!(JoinResponse::decode(br#"{"generation":1}"#).is_err());
     }

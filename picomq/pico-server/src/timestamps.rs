@@ -106,8 +106,20 @@ mod tests {
 
     #[test]
     fn the_newest_timestamp_covers_every_batch_in_a_payload() {
-        let old = encode_batch(0, -1, 100, &[LogRecord::value(Bytes::from_static(b"old"))]);
-        let new = encode_batch(1, -1, 500, &[LogRecord::value(Bytes::from_static(b"new"))]);
+        let old = encode_batch(
+            0,
+            -1,
+            100,
+            None,
+            &[LogRecord::value(Bytes::from_static(b"old"))],
+        );
+        let new = encode_batch(
+            1,
+            -1,
+            500,
+            None,
+            &[LogRecord::value(Bytes::from_static(b"new"))],
+        );
         let batch = StreamBatch {
             base_offset: 0,
             last_offset: 2,

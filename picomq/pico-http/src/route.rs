@@ -11,8 +11,8 @@ use axum::response::Response;
 
 use picomq_server::ownership::OwnershipService;
 
-use crate::http::percent_decode;
-use picomq_server::{ErrorKind, Log, Topics, partition_log};
+use crate::http::{bad_request, percent_decode};
+use picomq_server::{ErrorKind, Log, ServiceError, Topics, partition_log};
 
 use crate::partition;
 
@@ -32,14 +32,14 @@ pub async fn route(
     name: &str,
     requested: Option<u32>,
 ) -> Option<Response> {
-    if stream_name(uri) == "/" || *method == Method::OPTIONS {
+    if is_root(uri) || *method == Method::OPTIONS {
         return None;
     }
 
     let topic = match topics.get(name).await {
         Ok(Some(topic)) => topic,
         Ok(None) => return None,
-        Err(error) if error.kind == ErrorKind::BadRequest => return None,
+        Err(error) if error.kind == ErrorKind::InvalidName => return None,
         Err(error) => return Some(routing_error(&error.message)),
     };
     let Ok(log) =
@@ -94,13 +94,15 @@ pub async fn owner_redirect(
     )
 }
 
-pub fn stream_name(uri: &Uri) -> String {
-    let path = uri.path();
-    if path.is_empty() {
-        "/".to_owned()
-    } else {
-        percent_decode(path)
+pub fn is_root(uri: &Uri) -> bool {
+    matches!(uri.path(), "" | "/")
+}
+
+pub fn stream_name(uri: &Uri) -> Result<String, ServiceError> {
+    if is_root(uri) {
+        return Ok("/".to_owned());
     }
+    percent_decode(uri.path()).ok_or_else(|| bad_request("stream name is not valid text"))
 }
 
 fn routing_error(message: &str) -> Response {

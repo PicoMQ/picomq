@@ -4,14 +4,12 @@
 //! helpers here are expected rather than dead.
 #![allow(dead_code)]
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// A port nothing is listening on. Racy in principle. The window is one
-/// process spawn and the alternative (ephemeral bind inside the child) gives
-/// the test no address to talk to.
+/// A port nothing is listening on, for tests that need a closed port.
 pub fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -75,19 +73,18 @@ pub fn start_node(dir: &std::path::Path, node_id: i32, wal: &str, extra: &[&str]
     )
 }
 
+/// Starts `pico serve` on ephemeral ports and reads the addresses it bound
+/// from its stdout, so parallel tests never race for a port.
 fn launch(dir: &std::path::Path, wal: &str, extra: &[&str]) -> Server {
-    let http = free_port();
-    let admin = free_port();
-    let kafka = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_pico"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pico"))
         .args([
             "serve",
             "--listen",
-            &format!("127.0.0.1:{http}"),
+            "127.0.0.1:0",
             "--admin-listen",
-            &format!("127.0.0.1:{admin}"),
+            "127.0.0.1:0",
             "--kafka-listen",
-            &format!("127.0.0.1:{kafka}"),
+            "127.0.0.1:0",
             "--meta-url",
             &format!("sqlite:{}", dir.join("meta.db").display()),
             "--storage",
@@ -96,14 +93,38 @@ fn launch(dir: &std::path::Path, wal: &str, extra: &[&str]) -> Server {
             wal,
         ])
         .args(extra)
+        .stdout(Stdio::piped())
         .spawn()
         .unwrap();
 
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let (mut base_url, mut admin_url, mut kafka_addr) = (None, None, None);
+    while base_url.is_none() || admin_url.is_none() || kafka_addr.is_none() {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).unwrap() == 0 {
+            let status = child.wait().unwrap();
+            panic!("pico serve exited before it was serving: {status}");
+        }
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("serving on ") {
+            base_url = rest.split(' ').next().map(str::to_owned);
+        } else if let Some(rest) = line.strip_prefix("admin on ") {
+            admin_url = Some(rest.to_owned());
+        } else if let Some(rest) = line.strip_prefix("kafka on ") {
+            kafka_addr = Some(rest.to_owned());
+        }
+    }
+    std::thread::spawn(move || {
+        for line in stdout.lines().map_while(Result::ok) {
+            println!("{line}");
+        }
+    });
+
     Server {
         child,
-        base_url: format!("http://127.0.0.1:{http}"),
-        admin_url: format!("http://127.0.0.1:{admin}"),
-        kafka_addr: format!("127.0.0.1:{kafka}"),
+        base_url: base_url.unwrap(),
+        admin_url: admin_url.unwrap(),
+        kafka_addr: kafka_addr.unwrap(),
     }
 }
 

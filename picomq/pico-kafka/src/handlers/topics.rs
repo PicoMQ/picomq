@@ -17,9 +17,9 @@ use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
     EXCESSIVE_PARTITIONS, Failure, INVALID_CONFIG, INVALID_PARTITIONS, INVALID_REPLICA_ASSIGNMENT,
-    INVALID_REPLICATION_FACTOR, INVALID_REQUEST, NO_ERROR, POLICY_VIOLATION, TOPIC_ALREADY_EXISTS,
-    UNKNOWN_TOPIC_OR_PARTITION, assigned_broker, encode_response, resolve_topic,
-    service_error_code, service_failure, topic_name, topic_uuid,
+    INVALID_REPLICATION_FACTOR, INVALID_REQUEST, INVALID_TOPIC_EXCEPTION, NO_ERROR,
+    POLICY_VIOLATION, TOPIC_ALREADY_EXISTS, UNKNOWN_TOPIC_OR_PARTITION, assigned_broker,
+    encode_response, resolve_topic, service_error_code, service_failure, topic_name, topic_uuid,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -75,7 +75,7 @@ async fn create_topic(
     let name = topic.name.to_string();
     if !is_kafka_name(&name) {
         return Err((
-            INVALID_REQUEST,
+            INVALID_TOPIC_EXCEPTION,
             Some(format!("{name} is not a valid topic name")),
         ));
     }

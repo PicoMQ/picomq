@@ -9,7 +9,7 @@ use axum::Router;
 use axum::http::{Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::any;
-use picomq_client::{PicoClient, RetryPolicy, StreamApi};
+use picomq_client::{ClientConfig, PicoClient, StreamApi};
 
 async fn spawn(router: Router) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -58,11 +58,8 @@ async fn learned_owners_skip_the_redirect_until_they_are_gone() {
     ))
     .await;
 
-    let client = PicoClient::with_http(
-        &format!("http://{entry}"),
-        picomq_client::http_client(&Default::default()).unwrap(),
-        RetryPolicy::none(),
-    );
+    let client =
+        PicoClient::with_config(&format!("http://{entry}"), &ClientConfig::default()).unwrap();
 
     for _ in 0..3 {
         assert!(client.head("/orders", None).await.unwrap().is_some());
@@ -82,11 +79,8 @@ async fn learned_owners_skip_the_redirect_until_they_are_gone() {
     );
 
     *target.lock().unwrap() = unused_addr();
-    let fresh = PicoClient::with_http(
-        &format!("http://{entry}"),
-        picomq_client::http_client(&Default::default()).unwrap(),
-        RetryPolicy::none(),
-    );
+    let fresh =
+        PicoClient::with_config(&format!("http://{entry}"), &ClientConfig::default()).unwrap();
     assert!(fresh.head("/orders", None).await.is_err());
     *target.lock().unwrap() = owner;
     assert!(fresh.head("/orders", None).await.unwrap().is_some());

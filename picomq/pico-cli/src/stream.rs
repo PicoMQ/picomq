@@ -421,8 +421,7 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
                     "trim is a Pico protocol operation; use --protocol pico",
                 ));
             }
-            let http = picomq_client::http_client(&endpoint.client_config())?;
-            let start = PicoClient::with_http(&endpoint.endpoint, http, Default::default())
+            let start = PicoClient::with_config(&endpoint.endpoint, &endpoint.client_config())?
                 .trim(&stream, partition, seq)
                 .await?;
             note(format!("trimmed start={start}"));
