@@ -6,6 +6,8 @@ use kafka_protocol::messages::produce_response::{
 use kafka_protocol::protocol::Decodable;
 use picomq_server::{SubmittedBatchAppend, Topic};
 
+use picomq_auth::Operation;
+
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
@@ -31,7 +33,7 @@ pub async fn handle(
     let mut pending = Vec::with_capacity(request.topic_data.len());
     for topic in request.topic_data {
         let topic_name_str = topic.name.to_string();
-        let resolved = resolve_topic(ctx, &topic_name_str).await;
+        let resolved = resolve_topic(ctx, req, Operation::Append, &topic_name_str).await;
 
         let mut partitions = Vec::with_capacity(topic.partition_data.len());
         for partition in topic.partition_data {

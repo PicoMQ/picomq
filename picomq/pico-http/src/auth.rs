@@ -133,7 +133,7 @@ fn classify(
     match audience {
         Audience::Pico => classify_pico(method, uri, headers, body),
         Audience::DurableStreams => classify_ds(method, headers, body),
-        Audience::Admin => Some(Vec::new()),
+        Audience::Admin | Audience::Kafka => Some(Vec::new()),
     }
 }
 
@@ -200,7 +200,7 @@ fn write_ops(close: bool, empty: bool) -> Vec<Operation> {
 fn method_not_allowed(audience: Audience) -> Response {
     match audience {
         Audience::DurableStreams => ds::fail(405, "method not allowed"),
-        Audience::Pico | Audience::Admin => {
+        Audience::Pico | Audience::Admin | Audience::Kafka => {
             pico::error(405, "method_not_allowed", "method not allowed", None)
         }
     }
@@ -220,7 +220,7 @@ fn auth_resource(audience: Audience, uri: &Uri) -> Result<String, ServiceError> 
 fn service_error(audience: Audience, error: ServiceError) -> Response {
     match audience {
         Audience::DurableStreams => ds::service_error_response(error),
-        Audience::Pico | Audience::Admin => pico::service_error_response(error),
+        Audience::Pico | Audience::Admin | Audience::Kafka => pico::service_error_response(error),
     }
 }
 
@@ -230,7 +230,7 @@ fn reject(audience: Audience, err: AuthError) -> Response {
     }
     match audience {
         Audience::DurableStreams => ds_reject(err),
-        Audience::Pico | Audience::Admin => pico_reject(err),
+        Audience::Pico | Audience::Admin | Audience::Kafka => pico_reject(err),
     }
 }
 

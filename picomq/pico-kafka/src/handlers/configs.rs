@@ -11,6 +11,8 @@ use kafka_protocol::messages::{
 use kafka_protocol::protocol::{Decodable, StrBytes};
 use picomq_server::{Topic, UpdateTopicCommand};
 
+use picomq_auth::Operation;
+
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
@@ -52,7 +54,7 @@ pub async fn describe(
             .with_resource_type(resource.resource_type)
             .with_resource_name(resource.resource_name.clone());
 
-        results.push(match configs(ctx, resource).await {
+        results.push(match configs(ctx, req, resource).await {
             Ok(configs) => result.with_error_code(NO_ERROR).with_configs(configs),
             Err((code, message)) => result
                 .with_error_code(code)
@@ -79,7 +81,7 @@ pub async fn alter(
 
     let mut responses = Vec::with_capacity(request.resources.len());
     for resource in &request.resources {
-        let (code, message) = change(ctx, resource, request.validate_only)
+        let (code, message) = change(ctx, req, resource, request.validate_only)
             .await
             .err()
             .unwrap_or((NO_ERROR, None));
@@ -103,12 +105,13 @@ pub async fn alter(
 
 async fn configs(
     ctx: &BrokerContext,
+    req: &RequestContext,
     resource: &DescribeConfigsResource,
 ) -> Result<Vec<DescribeConfigsResourceResult>, Failure> {
     let name = resource.resource_name.as_str();
     let configs = match resource.resource_type {
         TOPIC => topic_configs(
-            &resolve_topic(ctx, name)
+            &resolve_topic(ctx, req, Operation::Head, name)
                 .await
                 .map_err(|code| (code, None))?,
         ),
@@ -191,6 +194,7 @@ fn config(
 
 async fn change(
     ctx: &BrokerContext,
+    req: &RequestContext,
     resource: &AlterConfigsResource,
     validate_only: bool,
 ) -> Result<(), Failure> {
@@ -200,7 +204,7 @@ async fn change(
             Some("only topic configs can be changed".to_owned()),
         ));
     }
-    let topic = resolve_topic(ctx, resource.resource_name.as_str())
+    let topic = resolve_topic(ctx, req, Operation::Create, resource.resource_name.as_str())
         .await
         .map_err(|code| (code, None))?;
 

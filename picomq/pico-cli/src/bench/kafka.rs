@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
 use hdrhistogram::sync::{Recorder, SyncHistogram};
+use picomq_auth::AccessToken;
 use picomq_client::ClientError;
 use rdkafka::Message;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
@@ -16,8 +17,43 @@ use super::{BenchArgs, Counters, Schedule, emit, report_progress};
 use crate::io::note;
 use crate::stream::Target;
 
+struct Bootstrap {
+    address: String,
+    token: Option<AccessToken>,
+}
+
+impl Bootstrap {
+    fn new(endpoint: &Target) -> Result<Self, ClientError> {
+        let token = endpoint
+            .token
+            .as_deref()
+            .map(AccessToken::parse)
+            .transpose()
+            .map_err(|_| ClientError::transport("the token is not in wire form"))?;
+
+        Ok(Self {
+            address: endpoint.endpoint.clone(),
+            token,
+        })
+    }
+
+    fn client(&self) -> ClientConfig {
+        let mut config = ClientConfig::new();
+        config.set("bootstrap.servers", &self.address);
+
+        if let Some(token) = &self.token {
+            config
+                .set("security.protocol", "SASL_PLAINTEXT")
+                .set("sasl.mechanisms", "PLAIN")
+                .set("sasl.username", &token.id)
+                .set("sasl.password", token.render());
+        }
+        config
+    }
+}
+
 pub(super) async fn run(endpoint: &Target, args: BenchArgs) -> Result<i32, ClientError> {
-    let bootstrap = endpoint.endpoint.as_str();
+    let bootstrap = &Bootstrap::new(endpoint)?;
     let streams = args.streams.max(1);
     let connections = args.connections.max(1);
     let in_flight = if args.producer {
@@ -147,13 +183,13 @@ pub(super) async fn run(endpoint: &Target, args: BenchArgs) -> Result<i32, Clien
 }
 
 fn producer(
-    bootstrap: &str,
+    bootstrap: &Bootstrap,
     args: &BenchArgs,
     in_flight: usize,
 ) -> Result<FutureProducer, ClientError> {
     let batch_size = (args.batch.max(1) * args.record_size.max(1)).clamp(1024, 1_048_576);
-    ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
+    bootstrap
+        .client()
         .set("acks", "all")
         .set("linger.ms", "5")
         .set("batch.size", batch_size.to_string())
@@ -170,9 +206,9 @@ fn producer(
         .map_err(kafka_err)
 }
 
-fn consumer(bootstrap: &str, group: &str) -> Result<StreamConsumer, ClientError> {
-    ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
+fn consumer(bootstrap: &Bootstrap, group: &str) -> Result<StreamConsumer, ClientError> {
+    bootstrap
+        .client()
         .set("group.id", group)
         .set("enable.auto.commit", "false")
         .set("auto.offset.reset", "earliest")
@@ -181,14 +217,12 @@ fn consumer(bootstrap: &str, group: &str) -> Result<StreamConsumer, ClientError>
 }
 
 async fn create_topics(
-    bootstrap: &str,
+    bootstrap: &Bootstrap,
     topics: &[String],
     partitions: i32,
 ) -> Result<(), ClientError> {
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
-        .create()
-        .map_err(kafka_err)?;
+    let admin: AdminClient<DefaultClientContext> =
+        bootstrap.client().create().map_err(kafka_err)?;
     let new_topics: Vec<NewTopic> = topics
         .iter()
         .map(|name| NewTopic::new(name, partitions, TopicReplication::Fixed(1)))
@@ -203,11 +237,9 @@ async fn create_topics(
     Ok(())
 }
 
-async fn delete_topics(bootstrap: &str, topics: &[String]) -> Result<(), ClientError> {
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
-        .create()
-        .map_err(kafka_err)?;
+async fn delete_topics(bootstrap: &Bootstrap, topics: &[String]) -> Result<(), ClientError> {
+    let admin: AdminClient<DefaultClientContext> =
+        bootstrap.client().create().map_err(kafka_err)?;
     let names: Vec<&str> = topics.iter().map(String::as_str).collect();
     let results = admin
         .delete_topics(&names, &AdminOptions::new())
@@ -339,5 +371,38 @@ async fn reader(
             }
             Err(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::ProtocolArg;
+
+    fn target(token: Option<&str>) -> Target {
+        Target {
+            endpoint: "127.0.0.1:9092".to_owned(),
+            protocol: ProtocolArg::Kafka,
+            http2: false,
+            token: token.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_token_becomes_sasl_plain_credentials() {
+        let (token, _) = AccessToken::issue("bench/root").unwrap();
+        let rendered = token.render();
+
+        let config = Bootstrap::new(&target(Some(&rendered))).unwrap().client();
+        assert_eq!(config.get("bootstrap.servers"), Some("127.0.0.1:9092"));
+        assert_eq!(config.get("security.protocol"), Some("SASL_PLAINTEXT"));
+        assert_eq!(config.get("sasl.mechanisms"), Some("PLAIN"));
+        assert_eq!(config.get("sasl.username"), Some("bench/root"));
+        assert_eq!(config.get("sasl.password"), Some(rendered.as_str()));
+
+        let open = Bootstrap::new(&target(None)).unwrap().client();
+        assert_eq!(open.get("security.protocol"), None);
+
+        assert!(Bootstrap::new(&target(Some("not-a-token"))).is_err());
     }
 }

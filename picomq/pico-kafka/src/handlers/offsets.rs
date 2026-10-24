@@ -8,6 +8,8 @@ use kafka_protocol::protocol::Decodable;
 use picomq_server::Topic;
 use picomq_server::record::leader_epoch;
 
+use picomq_auth::Operation;
+
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
@@ -30,7 +32,7 @@ pub async fn handle(
     let mut topics = Vec::with_capacity(request.topics.len());
     for topic in request.topics {
         let topic_name_str = topic.name.to_string();
-        let resolved = resolve_topic(ctx, &topic_name_str).await;
+        let resolved = resolve_topic(ctx, req, Operation::Head, &topic_name_str).await;
 
         let mut partitions = Vec::with_capacity(topic.partitions.len());
         for partition in topic.partitions {

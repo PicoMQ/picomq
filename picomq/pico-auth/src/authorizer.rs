@@ -82,6 +82,29 @@ impl Authorizer {
         Ok(self.intern(fresh))
     }
 
+    pub async fn refresh(
+        &self,
+        principal: &AuthPrincipal,
+        now_ms: i64,
+    ) -> Result<AuthPrincipal, AuthError> {
+        let fresh = match self.store.get(&principal.id).await? {
+            Some(record) => record,
+            None => {
+                self.drop_cached(&principal.id);
+                return Err(AuthError::Unauthenticated);
+            }
+        };
+
+        if fresh.verifier != principal.verifier {
+            return Err(AuthError::Unauthenticated);
+        }
+        if fresh.scope.is_expired(now_ms) {
+            return Err(AuthError::Expired);
+        }
+
+        Ok(self.intern(fresh))
+    }
+
     /// The principal for a request with no credential: the stored
     /// [`ANONYMOUS_TOKEN_ID`] record. Every miss is
     /// [`AuthError::Unauthenticated`], the remedy is always a credential.

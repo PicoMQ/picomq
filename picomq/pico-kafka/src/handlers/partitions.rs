@@ -6,6 +6,8 @@ use kafka_protocol::messages::create_partitions_response::{
 use kafka_protocol::protocol::{Decodable, StrBytes};
 use picomq_server::{MAX_NEW_PARTITIONS, UpdateTopicCommand};
 
+use picomq_auth::Operation;
+
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
@@ -25,7 +27,7 @@ pub async fn create(
 
     let mut results = Vec::with_capacity(request.topics.len());
     for topic in &request.topics {
-        let (code, message) = grow(ctx, topic, request.validate_only)
+        let (code, message) = grow(ctx, req, topic, request.validate_only)
             .await
             .err()
             .unwrap_or((NO_ERROR, None));
@@ -48,10 +50,11 @@ pub async fn create(
 
 async fn grow(
     ctx: &BrokerContext,
+    req: &RequestContext,
     requested: &CreatePartitionsTopic,
     validate_only: bool,
 ) -> Result<(), Failure> {
-    let topic = resolve_topic(ctx, requested.name.as_str())
+    let topic = resolve_topic(ctx, req, Operation::Create, requested.name.as_str())
         .await
         .map_err(|code| (code, None))?;
 

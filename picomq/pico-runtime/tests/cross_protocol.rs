@@ -57,6 +57,7 @@ struct Node {
     http: reqwest::Client,
     base: String,
     bootstrap: String,
+    token: Option<AccessToken>,
 }
 
 impl Node {
@@ -74,6 +75,10 @@ impl Node {
     }
 
     async fn serve(config: ServerConfig) -> Self {
+        let token = config
+            .bootstrap_token
+            .as_deref()
+            .map(|wire| AccessToken::parse(wire).unwrap());
         let server = picomq_runtime::start(config).await.unwrap();
         Self {
             http: reqwest::Client::builder()
@@ -82,8 +87,22 @@ impl Node {
                 .unwrap(),
             base: format!("http://{}", server.local_addr()),
             bootstrap: server.kafka_addr().to_string(),
+            token,
             server,
         }
+    }
+
+    fn kafka(&self) -> ClientConfig {
+        let mut config = ClientConfig::new();
+        config.set("bootstrap.servers", &self.bootstrap);
+        if let Some(token) = &self.token {
+            config
+                .set("security.protocol", "SASL_PLAINTEXT")
+                .set("sasl.mechanisms", "PLAIN")
+                .set("sasl.username", &token.id)
+                .set("sasl.password", token.render());
+        }
+        config
     }
 
     fn url(&self, path: &str) -> String {
@@ -91,8 +110,7 @@ impl Node {
     }
 
     fn producer(&self) -> FutureProducer {
-        ClientConfig::new()
-            .set("bootstrap.servers", &self.bootstrap)
+        self.kafka()
             .set("enable.idempotence", "true")
             .set("message.timeout.ms", "15000")
             .create()
@@ -105,8 +123,8 @@ impl Node {
         partitions: &[i32],
         offset: rdkafka::Offset,
     ) -> StreamConsumer {
-        let consumer: StreamConsumer = ClientConfig::new()
-            .set("bootstrap.servers", &self.bootstrap)
+        let consumer: StreamConsumer = self
+            .kafka()
             .set("group.id", format!("g-{topic}-{}", rand_suffix()))
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest")
@@ -127,10 +145,7 @@ impl Node {
     }
 
     fn admin(&self) -> AdminClient<DefaultClientContext> {
-        ClientConfig::new()
-            .set("bootstrap.servers", &self.bootstrap)
-            .create()
-            .unwrap()
+        self.kafka().create().unwrap()
     }
 
     async fn create_topic(&self, topic: &str, partitions: i32) -> Result<(), RDKafkaErrorCode> {
@@ -765,7 +780,7 @@ async fn schema_binding_applies_to_every_writer() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn auth_gates_http_while_kafka_reads_the_same_stream() {
+async fn auth_gates_http_and_kafka_with_one_token() {
     let dir = tempfile::tempdir().unwrap();
     let (root, _) = AccessToken::issue("ops/root").unwrap();
     let mut config = config(dir.path(), HttpProtocol::Pico, 1);
@@ -800,6 +815,19 @@ async fn auth_gates_http_while_kafka_reads_the_same_stream() {
         .unwrap()
         .error_for_status()
         .unwrap();
+
+    let plaintext: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &node.bootstrap)
+        .set("message.timeout.ms", "5000")
+        .create()
+        .unwrap();
+    let refused = plaintext
+        .send(
+            FutureRecord::<(), str>::to("secure").payload("unauthenticated"),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(refused.is_err(), "plaintext Kafka must be refused");
 
     produce(&node.producer(), "secure", None, "via-kafka").await;
     let consumed = consume_n(&node.consumer("secure"), 2).await;

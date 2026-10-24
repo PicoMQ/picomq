@@ -11,11 +11,13 @@ use picomq_server::topic::is_kafka_name;
 use picomq_server::{CreateCommand, OwnershipService, Topic, partition_log};
 use uuid::Uuid;
 
+use picomq_auth::Operation;
+
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    INVALID_TOPIC_EXCEPTION, NO_ERROR, UNKNOWN_TOPIC_OR_PARTITION, broker_id, brokers,
-    encode_response, service_error_code, topic_name, topic_uuid,
+    INVALID_TOPIC_EXCEPTION, NO_ERROR, TOPIC_AUTHORIZATION_FAILED, UNKNOWN_TOPIC_OR_PARTITION,
+    broker_id, brokers, encode_response, service_error_code, topic_name, topic_uuid,
 };
 use crate::handlers::topics::KAFKA_CREATED_CT;
 use crate::handlers::{HandlerError, HandlerOutcome};
@@ -55,13 +57,22 @@ pub async fn handle(
     match requested {
         None => {
             for topic in ctx.topics.kafka_topics() {
-                response_topics.push(build_topic(ctx, &topic, req.api_version).await);
+                let readable = req.allowed(
+                    ctx.authorizer.as_deref(),
+                    Operation::Head,
+                    topic.name.kafka(),
+                );
+                if readable {
+                    response_topics.push(build_topic(ctx, &topic, req.api_version).await);
+                }
             }
         }
         Some(names) => {
             for name in names {
                 response_topics.push(
-                    match resolve_or_create(ctx, &name, request.allow_auto_topic_creation).await {
+                    match resolve_or_create(ctx, req, &name, request.allow_auto_topic_creation)
+                        .await
+                    {
                         Ok(topic) => build_topic(ctx, &topic, req.api_version).await,
                         Err(code) => topic_error(&name, code),
                     },
@@ -84,11 +95,16 @@ pub async fn handle(
 
 async fn resolve_or_create(
     ctx: &BrokerContext,
+    req: &RequestContext,
     name: &str,
     auto_create: bool,
 ) -> Result<Topic, i16> {
     if !is_kafka_name(name) {
         return Err(INVALID_TOPIC_EXCEPTION);
+    }
+    let authorizer = ctx.authorizer.as_deref();
+    if !req.allowed(authorizer, Operation::Head, Some(name)) {
+        return Err(TOPIC_AUTHORIZATION_FAILED);
     }
     if let Some(topic) = ctx
         .topics
@@ -100,6 +116,9 @@ async fn resolve_or_create(
     }
     if !auto_create {
         return Err(UNKNOWN_TOPIC_OR_PARTITION);
+    }
+    if !req.allowed(authorizer, Operation::Create, Some(name)) {
+        return Err(TOPIC_AUTHORIZATION_FAILED);
     }
 
     ctx.topics

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use picomq_auth::Authorizer;
 use picomq_metadata::{MetadataNodeHandle, ViewPublisher};
 use picomq_server::{
     GroupCoordinator, MetadataOwnershipService, PicoNode, S3StreamService, Topics,
@@ -16,11 +17,13 @@ pub struct BrokerContext {
     pub metadata: MetadataNodeHandle,
     pub groups: Arc<GroupCoordinator>,
     pub service: Arc<S3StreamService>,
+    pub authorizer: Option<Arc<Authorizer>>,
 }
 
 impl BrokerContext {
-    pub fn new(node: &PicoNode) -> Self {
+    pub fn new(node: &PicoNode, authorizer: Option<Arc<Authorizer>>) -> Self {
         Self {
+            authorizer,
             node_id: node.config().node_id,
             cluster_id: node.config().cluster_id.clone(),
             topics: node.topics(),

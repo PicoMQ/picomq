@@ -8,6 +8,8 @@ use kafka_protocol::messages::delete_records_response::{
 use kafka_protocol::protocol::Decodable;
 use picomq_server::Topic;
 
+use picomq_auth::Operation;
+
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
@@ -30,7 +32,7 @@ pub async fn delete(
 
     let mut topics = Vec::with_capacity(request.topics.len());
     for topic in &request.topics {
-        let resolved = resolve_topic(ctx, topic.name.as_str()).await;
+        let resolved = resolve_topic(ctx, req, Operation::Trim, topic.name.as_str()).await;
         let partitions = join_all(topic.partitions.iter().map(|partition| async {
             let (low_watermark, code) = match trim(
                 ctx,

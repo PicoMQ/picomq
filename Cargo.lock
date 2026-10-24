@@ -2513,6 +2513,7 @@ dependencies = [
  "futures",
  "kafka-protocol",
  "object_store",
+ "picomq-auth",
  "picomq-common",
  "picomq-metadata",
  "picomq-schema",

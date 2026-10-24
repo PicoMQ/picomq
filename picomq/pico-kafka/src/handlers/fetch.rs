@@ -10,11 +10,14 @@ use kafka_protocol::protocol::Decodable;
 use picomq_server::{OffsetToken, StreamWatermarks, Topic, TopicId};
 use uuid::Uuid;
 
+use picomq_auth::Operation;
+
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
-    NO_ERROR, OFFSET_OUT_OF_RANGE, UNKNOWN_TOPIC_ID, concat_batches, encode_response,
-    leader_partition, leader_watermarks, resolve_topic, service_error_code, topic_name,
+    NO_ERROR, OFFSET_OUT_OF_RANGE, TOPIC_AUTHORIZATION_FAILED, UNKNOWN_TOPIC_ID, concat_batches,
+    encode_response, leader_partition, leader_watermarks, resolve_topic, service_error_code,
+    topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -59,14 +62,7 @@ pub async fn handle(
     let mut topics = Vec::with_capacity(request.topics.len());
     for topic in &request.topics {
         topics.push(
-            resolve_fetch_topic(
-                ctx,
-                req.api_version,
-                &topic.topic,
-                topic.topic_id,
-                &topic.partitions,
-            )
-            .await,
+            resolve_fetch_topic(ctx, req, &topic.topic, topic.topic_id, &topic.partitions).await,
         );
     }
 
@@ -140,14 +136,21 @@ pub async fn handle(
 
 async fn resolve_fetch_topic(
     ctx: &BrokerContext,
-    api_version: i16,
+    req: &RequestContext,
     requested_name: &kafka_protocol::messages::TopicName,
     requested_id: Uuid,
     requested: &[fetch_request::FetchPartition],
 ) -> ResolvedTopic {
-    let (name, topic) = if api_version >= FETCH_TOPIC_ID_VERSION {
+    let (name, topic) = if req.api_version >= FETCH_TOPIC_ID_VERSION {
         let topic = match ctx.topics.by_id(&TopicId(*requested_id.as_bytes())).await {
-            Ok(Some(topic)) if topic.name.kafka().is_some() => Ok(topic),
+            Ok(Some(topic)) if topic.name.kafka().is_some() => {
+                let readable = req.allowed(
+                    ctx.authorizer.as_deref(),
+                    Operation::Read,
+                    topic.name.kafka(),
+                );
+                readable.then_some(topic).ok_or(TOPIC_AUTHORIZATION_FAILED)
+            }
             Ok(_) => Err(UNKNOWN_TOPIC_ID),
             Err(error) => Err(service_error_code(&error)),
         };
@@ -160,7 +163,7 @@ async fn resolve_fetch_topic(
         (name, topic)
     } else {
         let name = requested_name.to_string();
-        let topic = resolve_topic(ctx, &name).await;
+        let topic = resolve_topic(ctx, req, Operation::Read, &name).await;
         (name, topic)
     };
 

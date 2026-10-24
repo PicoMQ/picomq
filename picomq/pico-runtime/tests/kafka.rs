@@ -9,7 +9,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use picomq_runtime::{KafkaConfig, MetaBackend, PicoServer, ServerConfig};
+use picomq_auth::AccessToken;
+use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, PicoServer, ServerConfig};
 use rdkafka::Message;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
@@ -308,6 +309,97 @@ async fn compressed_batches_round_trip_to_kafka_consumers() {
     }
 
     server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sasl_plain_clients_produce_and_consume() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, _) = AccessToken::issue("ops/root").unwrap();
+    let server = picomq_runtime::start(ServerConfig {
+        auth_mode: AuthMode::Required,
+        bootstrap_token: Some(root.render()),
+        ..config(dir.path(), 1)
+    })
+    .await
+    .unwrap();
+    let bootstrap = server.kafka_addr().to_string();
+    let sasl = |config: &mut ClientConfig, password: &str| {
+        config
+            .set("bootstrap.servers", &bootstrap)
+            .set("security.protocol", "SASL_PLAINTEXT")
+            .set("sasl.mechanisms", "PLAIN")
+            .set("sasl.username", &root.id)
+            .set("sasl.password", password)
+            .set("message.timeout.ms", "5000");
+    };
+
+    let admin: AdminClient<DefaultClientContext> = {
+        let mut config = ClientConfig::new();
+        sasl(&mut config, &root.render());
+        config.create().unwrap()
+    };
+    admin
+        .create_topics(
+            [&NewTopic::new("secured", 1, TopicReplication::Fixed(1))],
+            &AdminOptions::new(),
+        )
+        .await
+        .unwrap()[0]
+        .as_ref()
+        .unwrap();
+    let producer: FutureProducer = {
+        let mut config = ClientConfig::new();
+        sasl(&mut config, &root.render());
+        config.set("enable.idempotence", "true").create().unwrap()
+    };
+    produce_n(&producer, "secured", 0, 5).await;
+    let reader: StreamConsumer = {
+        let mut config = ClientConfig::new();
+        sasl(&mut config, &root.render());
+        config
+            .set("group.id", "secured-readers")
+            .set("auto.offset.reset", "earliest")
+            .set("enable.auto.commit", "false")
+            .create()
+            .unwrap()
+    };
+    reader.subscribe(&["secured"]).unwrap();
+    assert_eq!(consume_n(&reader, 5).await.last().unwrap().2, 4);
+
+    let wrong: FutureProducer = {
+        let mut config = ClientConfig::new();
+        sasl(&mut config, "not-the-token");
+        config.create().unwrap()
+    };
+    let refused = wrong
+        .send(
+            FutureRecord::<(), str>::to("secured").payload("x"),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(refused.is_err(), "a wrong password must not produce");
+
+    let plaintext = producer_without_sasl(&bootstrap);
+    let refused = plaintext
+        .send(
+            FutureRecord::<(), str>::to("secured").payload("x"),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "an unauthenticated client must not produce"
+    );
+
+    server.shutdown().await;
+}
+
+fn producer_without_sasl(bootstrap: &str) -> FutureProducer {
+    ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .set("message.timeout.ms", "5000")
+        .create()
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
