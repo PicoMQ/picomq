@@ -42,8 +42,8 @@ PICO_TEST_PG_URL=postgres://user:pass@localhost:5432/picomq \
 
 | Scenario | Runs |
 | --- | --- |
-| `single` | One node, Pico and Kafka: protocol cross tests, and the Rust, TypeScript, and Go client suites |
-| `cluster` | Two nodes with auth: redirects, groups and Kafka partitions across nodes, admin APIs, failover of a killed node, HTTP producers deduplicated across a transfer and through a killed owner |
+| `single` | One node, Pico and Kafka: protocol cross tests, Kafka clients through a node restart, and the Rust, TypeScript, and Go client suites |
+| `cluster` | Two nodes with auth: redirects, groups and Kafka partitions across nodes, admin APIs, failover of a killed node, HTTP and Kafka producers deduplicated across a transfer and through a killed owner, a Kafka group riding through the kill |
 | `chaos` | Two nodes under faults: paused nodes, a paused lease holder, a paused Postgres, and a clean stop. No acknowledged write may be lost and no healthy node fenced |
 | `ds` | Two nodes on Durable Streams: the Go live and cluster suites |
 

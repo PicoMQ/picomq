@@ -4,14 +4,10 @@
 
 mod common;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::{Harness, assert_exactly_once, unique};
-use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::{Message, Offset, TopicPartitionList};
+use common::{Harness, assert_exactly_once, produce, read_partitions, unique, write_continuously};
 use serde_json::Value;
 
 const TOKEN: &str = "ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY";
@@ -126,81 +122,6 @@ where
     }
 }
 
-fn producer(bootstrap: &str) -> FutureProducer {
-    ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
-        .set("enable.idempotence", "true")
-        .set("acks", "all")
-        .set("message.timeout.ms", "120000")
-        .create()
-        .unwrap()
-}
-
-/// Writes `0..` to `topic` until stopped, returning every acknowledged value.
-fn write_continuously(
-    bootstrap: &str,
-    topic: &str,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-) -> tokio::task::JoinHandle<Vec<String>> {
-    let producer = producer(bootstrap);
-    let topic = topic.to_owned();
-
-    tokio::spawn(async move {
-        let acked = Arc::new(Mutex::new(Vec::new()));
-        let mut inflight = tokio::task::JoinSet::new();
-        let mut value = 0u64;
-
-        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-            let (producer, topic, acked) = (producer.clone(), topic.clone(), acked.clone());
-            let payload = value.to_string();
-            inflight.spawn(async move {
-                let record = FutureRecord::to(&topic).key(&payload).payload(&payload);
-                if producer
-                    .send(record, Duration::from_secs(120))
-                    .await
-                    .is_ok()
-                {
-                    acked.lock().unwrap().push(payload);
-                }
-            });
-            value += 1;
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        while inflight.join_next().await.is_some() {}
-        Arc::try_unwrap(acked).unwrap().into_inner().unwrap()
-    })
-}
-
-/// Every value in `topic`, read from the beginning of each partition.
-async fn read_all(bootstrap: &str, topic: &str, expected: usize) -> Vec<String> {
-    let consumer: StreamConsumer = ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
-        .set("group.id", unique("chaos-reader"))
-        .set("enable.auto.commit", "false")
-        .create()
-        .unwrap();
-    let mut assignment = TopicPartitionList::new();
-    for partition in 0..PARTITIONS {
-        assignment
-            .add_partition_offset(topic, partition, Offset::Beginning)
-            .unwrap();
-    }
-    consumer.assign(&assignment).unwrap();
-
-    let mut values = Vec::new();
-    while values.len() < expected {
-        match tokio::time::timeout(Duration::from_secs(20), consumer.recv()).await {
-            Ok(message) => {
-                let message = message.unwrap();
-                values.push(String::from_utf8(message.payload().unwrap().to_vec()).unwrap());
-            }
-            Err(_) => break,
-        }
-    }
-    values
-}
-
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn a_paused_node_loses_no_acknowledged_write() {
@@ -235,7 +156,7 @@ async fn a_paused_node_loses_no_acknowledged_write() {
         Some(false)
     );
 
-    let read = read_all(&cluster.harness.bootstrap, &topic, acked.len()).await;
+    let read = read_partitions(&cluster.harness.bootstrap, &topic, PARTITIONS, acked.len()).await;
     assert_exactly_once(&acked, &read);
 }
 
@@ -298,16 +219,10 @@ async fn a_metadata_outage_fences_nobody() {
 
     let topic = unique("chaos-outage");
     cluster.harness.create_topic(&topic, PARTITIONS).await;
-    let producer = producer(&cluster.harness.bootstrap);
+    let producer = cluster.harness.producer();
     for value in 0..20 {
         let payload = value.to_string();
-        producer
-            .send(
-                FutureRecord::to(&topic).key(&payload).payload(&payload),
-                Duration::from_secs(30),
-            )
-            .await
-            .unwrap();
+        produce(&producer, &topic, Some(&payload), &payload).await;
     }
 }
 

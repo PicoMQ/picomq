@@ -537,6 +537,31 @@ async fn listener_serves_api_versions() {
     server.abort();
 }
 
+/// A frame larger than the listener allows closes that connection and
+/// nothing else.
+#[tokio::test]
+async fn listener_refuses_an_oversized_frame() {
+    let (addr, server) = serve(Arc::new(test_broker().await)).await;
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let too_large = (5 * 1024 * 1024_i32).to_be_bytes();
+    client.write_all(&too_large).await.unwrap();
+    let mut probe = [0u8; 1];
+    let closed = tokio::time::timeout(Duration::from_secs(5), client.read(&mut probe))
+        .await
+        .expect("the connection must be closed")
+        .map(|read| read == 0)
+        .unwrap_or(true);
+    assert!(closed, "the oversized frame left the connection open");
+
+    let req = encode_request(ApiKey::ApiVersions, 3, 9, &ApiVersionsRequest::default());
+    let mut next = TcpStream::connect(addr).await.unwrap();
+    next.write_all(&framed(&req)).await.unwrap();
+    assert_eq!(correlation_id(&read_response(&mut next).await), 9);
+
+    server.abort();
+}
+
 /// An acks=0 produce yields no response frame, so the ordered writer must
 /// skip its slot instead of wedging every later response.
 #[tokio::test]
@@ -915,10 +940,10 @@ async fn metadata_seen(broker: &BrokerContext, group: &str, member_id: &str, met
     }
 }
 
-/// A sync that a newer sync from the same member replaced is answered with
-/// a rebalance in progress, and the newest one carries the assignment.
+/// A sync that a newer sync from the same member replaced gets no response,
+/// as on a Kafka broker, and the newest one carries the assignment.
 #[tokio::test]
-async fn a_superseded_sync_is_answered_with_rebalance_in_progress() {
+async fn a_superseded_sync_gets_no_response() {
     let broker = Arc::new(test_broker().await);
     let (leader, newcomer) = leader_and_newcomer(&broker, "pair").await;
 
@@ -941,12 +966,12 @@ async fn a_superseded_sync_is_answered_with_rebalance_in_progress() {
     let mut first = {
         let broker = Arc::clone(&broker);
         let req = sync_request("pair", newcomer.clone(), 2, vec![], 12);
-        tokio::spawn(async move { response_body(&broker, &req).await })
+        tokio::spawn(async move { resolve(dispatch(&broker, &req).await.unwrap()).await })
     };
     let mut second = {
         let broker = Arc::clone(&broker);
         let req = sync_request("pair", newcomer.clone(), 2, vec![], 13);
-        tokio::spawn(async move { response_body(&broker, &req).await })
+        tokio::spawn(async move { resolve(dispatch(&broker, &req).await.unwrap()).await })
     };
     let first_to_resolve = async {
         tokio::select! {
@@ -957,7 +982,7 @@ async fn a_superseded_sync_is_answered_with_rebalance_in_progress() {
     let (replaced, surviving) = tokio::time::timeout(Duration::from_secs(2), first_to_resolve)
         .await
         .expect("the superseded sync must resolve before the leader syncs");
-    assert_eq!(decode_sync(replaced.unwrap()).error_code, 27);
+    assert!(matches!(replaced.unwrap(), HandlerOutcome::NoResponse));
 
     let synced = decode_sync(
         response_body(
@@ -967,7 +992,11 @@ async fn a_superseded_sync_is_answered_with_rebalance_in_progress() {
         .await,
     );
     assert_eq!(synced.error_code, 0);
-    assert_eq!(decode_sync(surviving.await.unwrap()).error_code, 0);
+    let surviving = match surviving.await.unwrap() {
+        HandlerOutcome::Response(frame) => decode_sync(frame.0),
+        _ => panic!("the newest sync is answered"),
+    };
+    assert_eq!(surviving.error_code, 0);
 }
 
 /// A duplicate join on a connection must not wedge the responses queued
@@ -983,7 +1012,9 @@ async fn listener_pipeline_survives_a_superseded_join() {
     client.write_all(&framed(&first)).await.unwrap();
     metadata_seen(&broker, "pair", &newcomer, b"first").await;
     let second = join_request("pair", newcomer.clone(), b"second", 10_000, 21);
-    client.write_all(&framed(&second)).await.unwrap();
+    let mut pipelined = framed(&second);
+    pipelined.extend_from_slice(&framed(&heartbeat_request("pair", leader.clone(), 1, 23)));
+    client.write_all(&pipelined).await.unwrap();
     metadata_seen(&broker, "pair", &newcomer, b"second").await;
     let rejoined = decode_join(
         response_body(
@@ -995,13 +1026,20 @@ async fn listener_pipeline_survives_a_superseded_join() {
     assert_eq!(rejoined.generation_id, 2);
 
     let frame = read_response(&mut client).await;
-    assert_eq!(correlation_id(&frame), 20);
-    assert_eq!(decode_join(frame).error_code, 27);
-    let frame = read_response(&mut client).await;
-    assert_eq!(correlation_id(&frame), 21);
+    assert_eq!(
+        correlation_id(&frame),
+        21,
+        "the superseded join has no frame"
+    );
     let joined = decode_join(frame);
     assert_eq!(joined.error_code, 0);
     assert_eq!(joined.generation_id, 2);
+    let frame = read_response(&mut client).await;
+    assert_eq!(
+        correlation_id(&frame),
+        23,
+        "the slot behind it was released"
+    );
 
     server.abort();
 }
