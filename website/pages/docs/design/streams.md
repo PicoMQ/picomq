@@ -36,6 +36,8 @@ Topic names are paths, such as `/logs/api`. Slashes and dots are the same separa
 
 The canonical form is also the topic's Kafka name, when it is a legal Kafka name: at most `249` characters from letters, digits, `.`, `_`, and `-`. A topic whose canonical form is not legal in Kafka exists only over HTTP.
 
+The first segment may not start with `_`. That namespace belongs to PicoMQ's own routes, `/_streams`, `/_schemas`, and `/_groups`, and a name in it is refused on every protocol: `400` over HTTP, `INVALID_TOPIC_EXCEPTION` over Kafka.
+
 ## What is stored
 
 Everything about a topic lives in the metadata KV, part of the replicated state described in [Metadata](/docs/design/metadata).
@@ -47,11 +49,11 @@ Everything about a topic lives in the metadata KV, part of the replicated state 
 | `log/partition/{topic id}/{index}` | A partition's log entry: its internal stream |
 | `log/group/{group}` | A consumer group's log entry |
 | `idx/sid/{stream id}` | The log an internal stream belongs to |
-
-## Creating a topic
 | `producers/{stream id}` | A checkpoint of the stream's producer state, see [Producers](#producers) |
 | `producer/{stream id}/{producer id}` | The session id an HTTP producer writes under at its current epoch |
 | `stream_seq/{stream id}` | The last Durable Streams `Stream-Seq` the stream accepted, stamped with the stream epoch |
+
+## Creating a topic
 
 1. A fresh topic id is recorded.
 2. Each partition gets its log: an internal stream is registered, its index entry written, and it is placed on the least loaded live node. A create that carries records opens partition `0` on the receiving node instead, so the records land there.

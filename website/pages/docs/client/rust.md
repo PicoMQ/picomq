@@ -112,7 +112,7 @@ member.leave().await?;
 
 ## Configuration
 
-`connect_with` takes a `ClientConfig`:
+`connect_with`, `PicoClient::with_config`, and `DsClient::with_config` take a `ClientConfig`:
 
 | Field | Meaning |
 | --- | --- |

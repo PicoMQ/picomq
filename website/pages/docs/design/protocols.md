@@ -66,7 +66,7 @@ Every frontend maps the same internal error kinds onto its own vocabulary. Pico 
 | Sequence gap | `409 sequence_gap` | `409` | `OUT_OF_ORDER_SEQUENCE_NUMBER` |
 | Match failed | `412 match_failed` | `400` | `INVALID_REQUEST` |
 | Conflict | `409 conflict` | `409` | `TOPIC_ALREADY_EXISTS` |
-| Transferring | `409 conflict` | `409` | `NOT_LEADER_OR_FOLLOWER` |
+| Transferring, the stream is moving or failing over | `503 unavailable` | `503` | `NOT_LEADER_OR_FOLLOWER` |
 | Closed | `409 closed` | `409` | `POLICY_VIOLATION` |
 | Unavailable, the node is stopping or metadata is unreachable | `503 unavailable` | `503` | `NOT_LEADER_OR_FOLLOWER` |
 | Timeout | `504 timeout` | `504` | `REQUEST_TIMED_OUT` |

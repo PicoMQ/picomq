@@ -81,7 +81,7 @@ An open stream may have acknowledged records that exist only in the dead node's 
 3. It closes the streams the dead node had open.
 4. The next tick places them on live nodes, which open them at the next epoch.
 
-Until step 3, requests for such a stream get a retryable error: HTTP `409`, or Kafka `NOT_LEADER_OR_FOLLOWER`. No acknowledged record is lost, and nothing is written under the dead node's epoch after the takeover.
+Until step 3, requests for such a stream get a retryable error: HTTP `503`, or Kafka `NOT_LEADER_OR_FOLLOWER`. No acknowledged record is lost, and nothing is written under the dead node's epoch after the takeover.
 
 ## When a node stops
 

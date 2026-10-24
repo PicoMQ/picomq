@@ -23,7 +23,7 @@ curl http://127.0.0.1:4437/orders
 
 ## Topics
 
-A Kafka topic is a PicoMQ topic, with the same partitions. The HTTP name `/orders/eu` is the Kafka topic `orders.eu`, and a topic whose name has characters Kafka does not allow is reachable only over HTTP, see [Topics and streams](/docs/design/streams#names).
+A Kafka topic is a PicoMQ topic, with the same partitions. The HTTP name `/orders/eu` is the Kafka topic `orders.eu`, and a topic whose name has characters Kafka does not allow is reachable only over HTTP, see [Topics and streams](/docs/design/streams#names). A name starting with `_` is refused with `INVALID_TOPIC_EXCEPTION`, so tools that create `_schemas` or `_confluent-*` topics by default need another name.
 
 - **Partitions.** `CreateTopics` takes any partition count, and `CreatePartitions` adds more later. Explicit replica assignments place each partition on the named node.
 - **Replication.** Each partition has one replica, its owning node, and durability comes from object storage. The replication factor must be `1` or `-1`.
@@ -37,25 +37,25 @@ Produce and fetch are a copy of the stored [RecordBatch v2](/docs/design/protoco
 
 | API | Versions | Notes |
 | --- | --- | --- |
-| `ApiVersions` | 0–4 | |
-| `Metadata` | 0–12 | |
-| `Produce` | 3–10 | `acks` 0, 1, and all behave alike: an acknowledged record is durable in the WAL |
-| `Fetch` | 4–16 | Long polling with `fetch.min.bytes` and `fetch.max.wait.ms` |
-| `ListOffsets` | 1–7 | Earliest, latest, by timestamp, and max timestamp |
-| `OffsetForLeaderEpoch` | 2–4 | The leader epoch is the partition's stream epoch |
-| `InitProducerId` | 0–4 | Idempotent producers with epoch fencing and sequence checks |
-| `CreateTopics` | 2–7 | |
-| `DeleteTopics` | 1–6 | |
-| `CreatePartitions` | 0–3 | Partitions only grow |
-| `DeleteRecords` | 0–2 | Trims a partition. Waits for buffered records to reach data objects, up to the request timeout |
-| `DescribeConfigs` | 1–4 | See [Configs](#configs) |
-| `IncrementalAlterConfigs` | 0–1 | See [Configs](#configs) |
-| `DescribeCluster` | 0–2 | |
-| `FindCoordinator` | 0–3 | Group coordinators only |
-| `JoinGroup`, `SyncGroup`, `Heartbeat`, `LeaveGroup` | 0–7, 0–5, 0–4, 0–5 | The classic group protocol, see [Consumer groups](/docs/design/groups) |
-| `OffsetCommit`, `OffsetFetch` | 2–8, 1–7 | |
-| `DescribeGroups`, `ListGroups` | 0–5 | `ListGroups` answers per broker, as in Kafka |
-| `DeleteGroups` | 0–2 | Only groups without members |
+| `ApiVersions` | 0 to 4 | |
+| `Metadata` | 0 to 12 | |
+| `Produce` | 3 to 10 | `acks` 0, 1, and all behave alike: an acknowledged record is durable in the WAL |
+| `Fetch` | 4 to 16 | Long polling with `fetch.min.bytes` and `fetch.max.wait.ms` |
+| `ListOffsets` | 1 to 7 | Earliest, latest, by timestamp, and max timestamp |
+| `OffsetForLeaderEpoch` | 2 to 4 | The leader epoch is the partition's stream epoch |
+| `InitProducerId` | 0 to 4 | Idempotent producers with epoch fencing and sequence checks |
+| `CreateTopics` | 2 to 7 | |
+| `DeleteTopics` | 1 to 6 | |
+| `CreatePartitions` | 0 to 3 | Partitions only grow |
+| `DeleteRecords` | 0 to 2 | Trims a partition. Waits for buffered records to reach data objects, up to the request timeout |
+| `DescribeConfigs` | 1 to 4 | See [Configs](#configs) |
+| `IncrementalAlterConfigs` | 0 to 1 | See [Configs](#configs) |
+| `DescribeCluster` | 0 to 2 | |
+| `FindCoordinator` | 0 to 3 | Group coordinators only |
+| `JoinGroup`, `SyncGroup`, `Heartbeat`, `LeaveGroup` | 0 to 7, 0 to 5, 0 to 4, 0 to 5 | The classic group protocol, see [Consumer groups](/docs/design/groups) |
+| `OffsetCommit`, `OffsetFetch` | 2 to 8, 1 to 7 | |
+| `DescribeGroups`, `ListGroups` | 0 to 5 | `ListGroups` answers per broker, as in Kafka |
+| `DeleteGroups` | 0 to 2 | Only groups without members |
 | `OffsetDelete` | 0 | Not for topics the group is subscribed to |
 
 Clients negotiate through `ApiVersions` and stay inside the advertised ranges.

@@ -6,11 +6,12 @@ OpenAPI spec: <a href="/openapi.yaml" download>openapi.yaml</a>
 
 ## Conventions
 
-- **Names.** The request path is the topic name, so `/logs/api/prod` addresses that topic. Slashes and dots are the same separator, see [Topics and streams](/docs/design/streams#names).
+- **Names.** The request path is the topic name, so `/logs/api/prod` addresses that topic. Slashes and dots are the same separator, and the `/_` namespace is reserved, see [Topics and streams](/docs/design/streams#names).
+- **Encoding.** Paths and query values are percent-decoded once. A value that does not decode to UTF-8 is a `400`, never rewritten into another name.
 - **Partitions.** A topic has one partition unless it was created or grown with more. Every request to a topic with several partitions names one with `?partition=N`, and leaving it out is a `400`.
 - **Sequences.** Record offsets within a partition, starting at `0` and stable forever.
 - **Headers.** Custom headers use the `Pico-` prefix.
-- **Redirects.** A request for a partition owned by another node returns `307` with the owner's address in `Location`. Standard HTTP clients drop `Authorization` on cross-origin redirects, so clients follow `307`s themselves and re-attach the credential. `picomq-client` and the CLI do.
+- **Redirects.** A request for a partition owned by another node returns `307` with the owner's address in `Location`. Standard HTTP clients drop `Authorization` on cross-origin redirects, so clients follow `307`s themselves and re-attach the credential. A hop must stay on `http` or `https` and never downgrade from `https` to `http`, since the credential rides along, and the clients refuse such a hop as `unsafe_redirect`. `picomq-client`, the Go and TypeScript clients, and the CLI do all of this.
 - **Auth.** With auth required, every request sends `Authorization: Bearer <token>`. See [Authorization](/docs/design/auth) for scopes.
 
 ## Errors
@@ -31,16 +32,16 @@ Errors on stream and group routes are JSON with a code:
 | `403` | `fenced` | Stale producer epoch, with the current one in `Pico-Producer-Epoch` |
 | `404` | `not_found` | No such topic, partition, or group |
 | `405` | `method_not_allowed` | A method this protocol does not serve |
-| `409` | `conflict` | Create with different settings, or the partition is moving between nodes |
+| `409` | `conflict` | Create with different settings |
 | `409` | `sequence_gap` | Producer sequence gap, with `Pico-Expected-Seq` and `Pico-Received-Seq` |
 | `409` | `closed` | The topic is sealed, with `Pico-Closed: true` |
 | `412` | `match_failed` | `Pico-Match-Seq` did not match the tail |
 | `413` | | Body larger than `--max-request-size` |
 | `500` | `durability`, `internal` | The WAL write failed, or an unexpected error |
-| `503` | `unavailable` | The node is stopping or metadata is unreachable. Retry |
+| `503` | `unavailable` | The partition is moving between nodes, the node is stopping, or metadata is unreachable. Retry |
 | `504` | `timeout` | The operation timed out. Retry |
 
-Retrying `409` from a moving partition, `503`, and `504` is safe. How the same failures look over Durable Streams and Kafka is in [Protocols](/docs/design/protocols#errors).
+Retrying `503` and `504` is safe. How the same failures look over Durable Streams and Kafka is in [Protocols](/docs/design/protocols#errors).
 
 The config and schema routes, `/_streams` and `/_schemas`, are a control surface and answer errors as `{"error": "<message>"}`, like the admin API.
 
@@ -185,7 +186,7 @@ How groups work is in [Consumer groups](/docs/design/groups). Group routes are s
 | `PUT /_groups/{group}/offsets` | Commits offsets. `204` |
 | `GET /_groups/{group}/offsets?stream=` | Fetches committed offsets, for the named topics or all of them |
 
-A join sends the topics to subscribe to, and optionally the member's previous id, a static `instanceId`, a `clientId`, and timeouts:
+A join sends the topics to subscribe to, at least one, and optionally the member's previous id, a static `instanceId`, a `clientId`, and timeouts:
 
 ```json
 { "subscription": ["/orders", "/payments"], "sessionTimeoutMs": 30000 }
@@ -197,7 +198,7 @@ and gets back the member id, generation, and the topics assigned to it:
 { "memberId": "m-1", "generation": 3, "assignment": ["/orders"], "members": ["m-1", "m-2"] }
 ```
 
-Heartbeats send `{"generation": 3}`. A commit sends the offsets, with the member id and generation when committing as a member:
+Heartbeats send `{"generation": 3}`. A commit sends offsets for at least one topic, with the member id and generation when committing as a member:
 
 ```json
 { "offsets": { "/orders": { "position": 42, "metadata": "checkpoint" } }, "memberId": "m-1", "generation": 3 }
