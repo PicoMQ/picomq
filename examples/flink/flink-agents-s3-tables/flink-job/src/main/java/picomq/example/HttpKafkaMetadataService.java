@@ -76,9 +76,7 @@ public final class HttpKafkaMetadataService implements KafkaMetadataService {
     public void close() {}
 
     private KafkaStream stream(Set<String> topics) {
-        Properties properties = new Properties();
-        properties.setProperty(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG, bootstrap);
-        ClusterMetadata cluster = new ClusterMetadata(topics, properties);
+        ClusterMetadata cluster = new ClusterMetadata(topics, Sasl.properties(bootstrap, token));
         return new KafkaStream(STREAM_ID, Map.of(CLUSTER_ID, cluster));
     }
 

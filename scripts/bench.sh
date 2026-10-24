@@ -34,7 +34,7 @@ compose_file() {
 }
 
 compose() {
-  PICO_IMAGE="$IMAGE" docker compose -f "$(compose_file "$1")" "${@:2}"
+  PICO_IMAGE="$IMAGE" PICO_AUTH=off docker compose -f "$(compose_file "$1")" "${@:2}"
 }
 
 wait_ready() {
@@ -50,7 +50,7 @@ bench() {
   local topology="$1" name="$2" args="$3" json
 
   # shellcheck disable=SC2086
-  json=$("$BIN" $args -d "$DURATION" --warmup "$WARMUP" --output json 2>/dev/null) || {
+  json=$(env -u PICO_TOKEN "$BIN" $args -d "$DURATION" --warmup "$WARMUP" --output json 2>/dev/null) || {
     printf '%-22s %-8s %-18s failed\n' "$IMAGE" "$topology" "$name"
     return
   }

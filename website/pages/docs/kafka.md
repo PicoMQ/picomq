@@ -5,7 +5,7 @@ Every node serves the Kafka wire protocol on `--kafka-listen`, next to its HTTP 
 ```bash
 pico serve \
     --kafka-listen 0.0.0.0:9092 --kafka-advertise node1.internal:9092 \
-    --insecure-allow-remote \
+    --auth required --auth-bootstrap-token-file /run/secrets/pico-root \
     --meta-url postgres://user:pass@pg:5432/picomq \
     --storage=-2@s3://bucket?region=us-east-1
 ```
@@ -57,10 +57,11 @@ Produce and fetch are a copy of the stored [RecordBatch v2](/docs/design/protoco
 | `DescribeGroups`, `ListGroups` | 0 to 5 | `ListGroups` answers per broker, as in Kafka |
 | `DeleteGroups` | 0 to 2 | Only groups without members |
 | `OffsetDelete` | 0 | Not for topics the group is subscribed to |
+| `SaslHandshake`, `SaslAuthenticate` | 0 to 1, 0 to 2 | Advertised with `--auth required`, see [Authentication](#authentication) |
 
 Clients negotiate through `ApiVersions` and stay inside the advertised ranges.
 
-Not supported: transactions and control batches, which are rejected, the KIP-848 consumer protocol, and SASL, see [Exposure](#exposure).
+Not supported: transactions and control batches, which are rejected, and the KIP-848 consumer protocol.
 
 ## Configs
 
@@ -80,6 +81,67 @@ PicoMQ does not compact topics, so `CreateTopics` refuses `cleanup.policy=compac
 
 Kafka error codes for each failure are listed in [Protocols](/docs/design/protocols#errors). A node that is stopping, or that cannot reach the metadata store, answers `NOT_LEADER_OR_FOLLOWER`, so clients refresh their metadata and retry on a live node.
 
-## Exposure
+## Authentication
 
-The Kafka listener has no authentication of its own, so binding it beyond loopback always requires `--insecure-allow-remote`, even with `--auth required`, which gates only the HTTP listeners. Treat it as an in-network service behind your own boundary.
+With `--auth required` the listener authenticates every connection with SASL PLAIN, and the credential is the same token the HTTP listeners take as a bearer. The token model, issuing, and revocation are covered in [Authentication](/docs/operations/auth).
+
+| Client setting | Value |
+| --- | --- |
+| `security.protocol` | `SASL_PLAINTEXT` |
+| `sasl.mechanism` | `PLAIN` |
+| `sasl.username` | The token id, for example `svc/ingest` |
+| `sasl.password` | The token in wire form, `BASE64URL(id).BASE64URL(secret)` |
+
+The token needs the `kafka` audience. A token that has `pico` and `kafka` works over both protocols with one scope, and a token with only `kafka` is a Kafka-only credential.
+
+```bash
+kcat -b node1.internal:9092 -t orders -P \
+    -X security.protocol=SASL_PLAINTEXT -X sasl.mechanisms=PLAIN \
+    -X sasl.username=svc/ingest -X sasl.password="$TOKEN"
+```
+
+```properties
+# Java clients and the kafka-*.sh tools, through --command-config
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="svc/ingest" password="<token>";
+```
+
+Until a connection authenticates, the listener holds it to the same limits a Kafka broker does. Breaking any of them closes the connection.
+
+| Before authentication | Limit |
+| --- | --- |
+| Requests | `ApiVersions`, `SaslHandshake`, and `SaslAuthenticate` only |
+| Frame size | 512 KiB, as Kafka's `sasl.server.max.receive.size` |
+| Idle time | 10 minutes, as Kafka's `connections.max.idle.ms` |
+| Credential | A wrong one answers `SASL_AUTHENTICATION_FAILED` |
+
+### What the scope allows
+
+Each request needs an operation from the token's scope, on the topic it names. A topic is matched under its HTTP name, so a scope with the prefix `/orders/` covers the Kafka topics `orders.eu` and `orders.us`.
+
+| Request | Needs |
+| --- | --- |
+| `Produce` | `append` |
+| `Fetch`, `OffsetCommit`, `OffsetFetch`, `OffsetDelete` | `read` |
+| `FindCoordinator`, `JoinGroup`, `SyncGroup`, `Heartbeat`, `LeaveGroup` | `read`, and for a consumer's `JoinGroup` also `read` on every subscribed topic |
+| `Metadata`, `ListOffsets`, `OffsetForLeaderEpoch`, `DescribeConfigs` | `head`, which any stream right on the topic grants |
+| `CreateTopics`, `CreatePartitions`, `IncrementalAlterConfigs`, auto creation | `create` |
+| `DeleteTopics` | `delete` |
+| `DeleteRecords` | `trim` |
+| `InitProducerId` | `append` on some topic |
+| `DescribeGroups`, `ListGroups` | `stream_inspect` |
+| `DeleteGroups` | `delete_group` |
+
+A refused topic answers `TOPIC_AUTHORIZATION_FAILED`, a refused group `GROUP_AUTHORIZATION_FAILED`, and a refused `InitProducerId` `CLUSTER_AUTHORIZATION_FAILED`, so clients surface the same errors they would from a Kafka broker with ACLs. A `Metadata` request for all topics lists only the topics the token may describe, and `ListGroups` lists nothing without `stream_inspect`. A token that stops being valid closes the connection on its next request, see [Revocation](/docs/design/auth#revocation).
+
+### Differences from Kafka
+
+- Groups are not resources of their own, so rights come from the topics. A consumer joins only with `read` on what it subscribes to, but any token with `read` can heartbeat in or leave any group, and commit offsets for any group on the topics it reads, where Kafka would also check `Read` on the group.
+- `DescribeConfigs` needs `head`, where Kafka needs a separate `DescribeConfigs` right. Configs hold retention and schema settings, nothing secret.
+- SASL PLAIN is the only mechanism and `SASL_PLAINTEXT` the only security protocol. SCRAM and a TLS listener are listed under [Deliberately excluded](/docs/design/auth#deliberately-excluded).
+- Tokens with `autoPrefixStreams` are refused at authentication rather than half applied, since Kafka names cannot be rewritten per tenant.
+
+### Auth off
+
+With `--auth off` the listener takes any client, the SASL APIs are not advertised, and the node binds the listener to loopback unless `--insecure-allow-remote` opts out for a network that is guarded some other way.

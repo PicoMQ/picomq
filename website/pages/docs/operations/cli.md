@@ -101,7 +101,9 @@ pico admin set-slots 2 --slots 4
 pico bench --record-size 1024 --duration 15
 ```
 
-It exercises the same client path as `append` and `read`, so the numbers reflect what an application would see, including protocol and redirect behavior. `--protocol kafka` benchmarks the Kafka listener instead. `--help` lists the load shape flags: in-flight requests, batch size, streams, partitions, connections, and a target rate.
+It exercises the same client path as `append` and `read`, so the numbers reflect what an application would see, including protocol and redirect behavior. `--help` lists the load shape flags: in-flight requests, batch size, streams, partitions, connections, and a target rate.
+
+`--protocol kafka` benchmarks the Kafka listener instead, through librdkafka. With a token it connects over SASL PLAIN, the token id as the username and the token as the password, so it needs a node with auth required and a token with the `kafka` audience, see [Kafka authentication](/docs/kafka#authentication).
 
 ## Serving
 

@@ -92,7 +92,14 @@ PICO_AUTH_BOOTSTRAP_TOKEN=ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJS
 
 == Kafka
 
-Kafka is already on. Leave `PICO_PROTOCOL` at `pico` or `ds`. The Kafka listener carries no client auth, so the auth sections below do not apply to it. See [exposure](/docs/kafka#exposure).
+Kafka is already on. Leave `PICO_PROTOCOL` at `pico` or `ds`.
+
+Auth ships commented out. Uncomment both lines to exercise the auth sections below, which also show how a Kafka client presents the token:
+
+```bash
+PICO_AUTH=required
+PICO_AUTH_BOOTSTRAP_TOKEN=ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY
+```
 
 :::
 
@@ -127,6 +134,7 @@ export PICO_TOKEN='ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY'
 ```bash
 export BOOTSTRAP=localhost:9092   # node 2 is :9093
 export ADMIN=http://localhost:9090
+export PICO_TOKEN='ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY'
 ```
 
 Either node works as bootstrap. Clients discover both brokers and route to the topic's owner.
@@ -278,7 +286,19 @@ curl -I "$ENDPOINT/streams/demo" -H "Authorization: Bearer $PICO_TOKEN"
 
 == Kafka
 
-Not applicable. The Kafka listener accepts clients without credentials, and the `curl` checks above still hold for the admin listener.
+A Kafka client presents the token as SASL PLAIN credentials, the token id as the username and the token as the password. Wrap that once, then call `kcat` through it as any identity:
+
+```bash
+sasl() {
+  kcat -b $BOOTSTRAP -X security.protocol=SASL_PLAINTEXT -X sasl.mechanisms=PLAIN \
+    -X sasl.username="$1" -X sasl.password="$2" "${@:3}"
+}
+
+kcat -b $BOOTSTRAP -L
+sasl dev/root "$PICO_TOKEN" -L
+```
+
+Expect the bare call to be disconnected, `kcat` reports that the broker might require SASL authentication, and the authenticated call to list brokers and topics. The Streams commands above run the same way with auth on.
 
 :::
 
@@ -295,7 +315,7 @@ RESP=$(curl -s -X POST $ADMIN/admin/tokens \
     "scope": {
       "streams": [{ "prefix": "/logs/" }],
       "groups": { "stream": { "read": false, "write": true } },
-      "audiences": ["pico"]
+      "audiences": ["pico", "durable_streams", "kafka"]
     }
   }')
 echo "$RESP"
@@ -350,7 +370,19 @@ curl "$ENDPOINT/logs/app" -H "Authorization: Bearer $PICO_TOKEN"
 
 == Kafka
 
-Not applicable to the Kafka listener. Scoped tokens still govern the admin API, so the issue and delete calls above behave the same.
+The stream `/logs/app` is the topic `logs.app`:
+
+```bash
+printf 'hi\n' | sasl svc/ingest "$INGEST" -P -t logs.app
+
+sasl svc/ingest "$INGEST" -C -t logs.app -o beginning -e
+
+printf 'nope\n' | sasl svc/ingest "$INGEST" -P -t demo
+
+sasl dev/root "$PICO_TOKEN" -C -t logs.app -o beginning -e
+```
+
+Expect the produce under `logs.app` to succeed and create the topic, the ingest consume and the produce to `demo` to fail with `Topic authorization failed`, and the root consume to print `hi`.
 
 :::
 
@@ -386,13 +418,12 @@ echo hi | curl -s -o /dev/null -w '%{http_code}\n' -X POST "$ENDPOINT/logs/app" 
 == Kafka
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' $ADMIN/admin/tokens \
-  -H "Authorization: Bearer $INGEST"
+printf 'hi\n' | sasl svc/ingest "$INGEST" -P -t logs.app
 ```
 
 :::
 
-Expect `401` after revoke. Detail on scopes and audiences is in [Authentication](/docs/operations/auth) and [Authorization](/docs/design/auth).
+Expect `401` after revoke, and `SASL authentication error` from `kcat`. Detail on scopes and audiences is in [Authentication](/docs/operations/auth) and [Authorization](/docs/design/auth).
 
 ## Bench
 

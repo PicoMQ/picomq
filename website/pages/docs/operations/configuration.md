@@ -37,7 +37,7 @@ The node id is the one value worth care. Each start registers the id at a higher
 
 `--http-address` and `--kafka-advertise` matter in any multi-node deployment. Both are registered in the metadata state and handed to clients verbatim, in redirects for HTTP and in metadata responses for Kafka, so they must be addresses clients can actually reach, not bind addresses. The defaults only work single-node on localhost.
 
-Binding an unauthenticated listener to anything but loopback fails startup unless `--insecure-allow-remote` deliberately opts out for deployments that bring their own network boundary. For the HTTP listeners, `--auth required` is the authenticated alternative. The Kafka listener has no authentication, so exposing it always takes the explicit opt-out.
+Binding an unauthenticated listener to anything but loopback fails startup unless `--insecure-allow-remote` deliberately opts out for deployments that bring their own network boundary. `--auth required` is the authenticated alternative for every listener: bearer tokens on HTTP and SASL on Kafka, see [Authentication](/docs/operations/auth).
 
 ## Liveness
 
@@ -107,8 +107,8 @@ Three things make this setup effective:
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--auth` | `off` | `required` gates every request on the stream and admin listeners. `off` allows loopback binds only. |
-| `--insecure-allow-remote` | off | Permit non-loopback binds that are unauthenticated: the Kafka listener always, and the HTTP listeners when auth is off. |
+| `--auth` | `off` | `required` gates every request on the stream and admin listeners and every Kafka connection. `off` allows loopback binds only. |
+| `--insecure-allow-remote` | off | Permit non-loopback binds with auth off, when something else guards the network. |
 | `--auth-bootstrap-token` | none | Root token in wire form, seeded at startup. Idempotent across restarts. |
 | `--auth-bootstrap-token-file` | none | Read the bootstrap token from a file instead, keeping it out of process listings. Not with `--auth-bootstrap-token`. |
 

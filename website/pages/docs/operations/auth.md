@@ -4,9 +4,14 @@ How to turn auth on and run the token lifecycle. The model is in [Authorization]
 
 ## Modes
 
-`--auth` (`PICO_AUTH`) is `off` or `required`. With `required`, every request on the stream and admin listeners needs a bearer token, except the health probes and CORS preflights. With `off`, nothing is checked and the node refuses to bind anything but loopback. Binding `0.0.0.0` means running with auth required, or opting out explicitly with `--insecure-allow-remote` (`PICO_INSECURE_ALLOW_REMOTE`) when something else guards the network, e.g. a private network or a proxy that authenticates.
+`--auth` (`PICO_AUTH`) is `off` or `required`, and it applies to every listener at once.
 
-The Kafka listener never authenticates, so binding it beyond loopback always takes `--insecure-allow-remote`, whatever `--auth` says. See [Kafka protocol](/docs/kafka#exposure).
+| Listener | With `required` | With `off` |
+| --- | --- | --- |
+| Stream and admin | A bearer token on every request, except the health probes and CORS preflights | Nothing is checked |
+| Kafka | SASL PLAIN on every connection, with the same tokens, see [Kafka protocol](/docs/kafka#authentication) | Any client is served |
+
+With `off` the node refuses to bind anything but loopback. Binding `0.0.0.0` means running with auth required, or opting out explicitly with `--insecure-allow-remote` (`PICO_INSECURE_ALLOW_REMOTE`) when something else guards the network, such as a private network or a proxy that authenticates.
 
 ## Bootstrap
 
@@ -39,28 +44,40 @@ curl -s -X POST http://127.0.0.1:9090/admin/tokens \
       "scope": {
         "streams": [{ "prefix": "/logs/" }],
         "groups": { "stream": { "read": false, "write": true } },
-        "audiences": ["pico"],
+        "audiences": ["pico", "kafka"],
         "expiresAtMs": 1790000000000
       }
     }'
 ```
 
-The response contains the wire token once. Only its hash is stored, so a lost secret means issuing a replacement.
+The response contains the wire token once. Only its hash is stored, so a lost secret means issuing a replacement. This token appends under `/logs/` over Pico and produces to the Kafka topics `logs.*`, and nothing else on either protocol.
 
-In the scope JSON, `streams` and `tokens` are arrays of `{"exact": name}` or `{"prefix": p}` matchers, `groups` holds the three read/write pairs, `ops` names fine operations from the table in [Authorization](/docs/design/auth#scopes), `audiences` is any of `pico`, `durable_streams`, and `admin`, `autoPrefixStreams` turns on tenant prefixing, and `expiresAtMs` is unix milliseconds. Missing keys deny. Unknown keys are rejected.
+In the scope JSON, `streams` and `tokens` are arrays of `{"exact": name}` or `{"prefix": p}` matchers, `groups` holds the three read/write pairs, `ops` names fine operations from the table in [Authorization](/docs/design/auth#scopes), `audiences` is any of `pico`, `durable_streams`, `kafka`, and `admin`, `autoPrefixStreams` turns on tenant prefixing, and `expiresAtMs` is unix milliseconds. Missing keys deny. Unknown keys are rejected.
 
 The reserved id `anonymous` applies its scope to requests with no credential. Issue it read-only under `/public/` and those streams are readable by anyone while everything else stays closed. Revoke it and all access needs a token again. It cannot be given the `admin` audience.
 
 ## Client credentials
 
-`pico auth login` stores a token per profile, in the OS keyring or in a private file with `PICO_NO_KEYRING=1`. `status` verifies it against the endpoint and `logout` removes it. An explicit `--token` or `PICO_TOKEN` wins over storage. See [CLI](/docs/operations/cli#connecting).
+One token serves every kind of client. How each one carries it:
 
-Programs using `picomq-client` set the token on the client config. The client follows `307`s itself and re-attaches the credential on every hop, because standard HTTP clients drop `Authorization` on cross-origin redirects and ownership redirects cross origins. The dashboard prompts for a token on rejection and holds it in session storage.
+| Client | Carries the token as |
+| --- | --- |
+| `pico` CLI | A stored profile from `pico auth login`, in the OS keyring or in a private file with `PICO_NO_KEYRING=1`. `status` verifies it and `logout` removes it. An explicit `--token` or `PICO_TOKEN` wins over storage, see [CLI](/docs/operations/cli#connecting) |
+| `picomq-client` and the HTTP clients | The bearer set on the client config. The client follows `307`s itself and re-attaches the credential on every hop, because standard HTTP clients drop `Authorization` on cross-origin redirects and ownership redirects cross origins |
+| Dashboard | A token entered on rejection, held in session storage |
+| Kafka clients | SASL PLAIN credentials, the token id as the username and the token as the password, see [Kafka protocol](/docs/kafka#authentication) |
 
 ## Errors
 
-`401` means no valid credential: absent, malformed, unknown, expired, or revoked. `403` means the credential is valid and the scope is insufficient. A `403` on appends can also be producer fencing, which carries the code `fenced` and `Pico-Producer-Epoch` on Pico, or `Producer-Epoch` on Durable Streams.
+`401` means no valid credential: absent, malformed, unknown, expired, or revoked. `403` means the credential is valid and the scope is insufficient. A `403` on appends can also be producer fencing, which carries the code `fenced` and `Pico-Producer-Epoch` on Pico, or `Producer-Epoch` on Durable Streams. The Kafka codes for the same two outcomes are in [Protocols](/docs/design/protocols#errors).
 
 ## Deployment notes
 
-Auth controls who may call, not who can read the wire. Terminate TLS in front of the nodes before sending tokens over untrusted networks. The `harness/aio` compose files run with auth off for development; setting `PICO_AUTH=required` in `.env` turns it on with a known dev bootstrap token. `harness/byo` runs with auth required and refuses to start without a bootstrap token in `.env`. The Fly configs take it as an app secret.
+Auth controls who may call, not who can read the wire. A token crosses the network as a bearer header on HTTP and as a SASL password on Kafka, so what protects it in transit is the network, not the protocol.
+
+| Listener | Protecting the wire |
+| --- | --- |
+| Stream and admin | Terminate TLS in front of the nodes before sending tokens over untrusted networks |
+| Kafka | There is no TLS form of the listener yet, so keep it on a network you trust, such as a VPC or a private overlay |
+
+The `harness/aio` compose files run with auth off for development, and setting `PICO_AUTH=required` in `.env` turns it on with a known dev bootstrap token. `harness/byo` runs with auth required and refuses to start without a bootstrap token in `.env`. The Fly configs take it as an app secret, and the AWS harness generates one into Secrets Manager.
