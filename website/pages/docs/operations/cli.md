@@ -89,9 +89,12 @@ pico admin nodes
 pico admin stream /streams/orders
 pico admin transfer /streams/orders --to-node 2 --wait
 pico admin set-slots 2 --slots 4
+pico admin tokens list
+pico admin tokens issue svc/ingest --stream-prefix /logs/ --grant stream:write --audience pico
+pico admin tokens revoke svc/ingest
 ```
 
-`cluster` prints the node's identity, counts, the applied index, the lease holder, and any pending transfers. `nodes` lists every registered node with its epoch, slots, stream counts, and whether it is fenced. `stream` shows one partition's owner, state, epoch, and offsets. `transfer` starts a move and with `--wait` polls until the partition settles on the target. Both take `--partition` for topics with several partitions. `set-slots` changes a node's placement weight.
+`cluster` prints the node's identity, counts, the applied index, the lease holder, and any pending transfers. `nodes` lists every registered node with its epoch, slots, stream counts, and whether it is fenced. `stream` shows one partition's owner, state, epoch, and offsets. `transfer` starts a move and with `--wait` polls until the partition settles on the target. Both take `--partition` for topics with several partitions. `set-slots` changes a node's placement weight. `tokens` lists, issues, and revokes access tokens, covered in [Authentication](/docs/operations/auth#issuing-tokens).
 
 ## Benchmarking
 

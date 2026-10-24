@@ -9,6 +9,7 @@ mod io;
 mod schema;
 mod serve;
 mod stream;
+mod tokens;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
