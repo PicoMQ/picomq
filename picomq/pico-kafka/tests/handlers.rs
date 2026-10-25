@@ -21,14 +21,16 @@ use picomq_auth::{
     TokenRecord, TokenStore,
 };
 use picomq_kafka::{BrokerContext, HandlerOutcome, KafkaListener, ListenerConfig, dispatch};
+use picomq_listener::testing::Authority;
+use picomq_listener::{Listener, Tls};
 use picomq_metadata::{CommandSink, LocalSink};
 use picomq_server::wal::ObjectWal;
 use picomq_server::{NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
 fn tn(name: &str) -> TopicName {
@@ -570,21 +572,17 @@ async fn list_offsets_resolves_timestamps_like_kafka() {
 }
 
 async fn serve(broker: Arc<BrokerContext>) -> (SocketAddr, JoinHandle<()>) {
-    serve_with(broker, ListenerConfig::default()).await
+    serve_with(broker, ListenerConfig::default(), None).await
 }
 
 async fn serve_with(
     broker: Arc<BrokerContext>,
     config: ListenerConfig,
+    tls: Option<Tls>,
 ) -> (SocketAddr, JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        KafkaListener::new(ListenerConfig { addr, ..config }, broker)
-            .serve(listener)
-            .await
-            .unwrap();
-    });
+    let listener = Listener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024, tls).unwrap();
+    let addr = listener.local_addr();
+    let server = tokio::spawn(KafkaListener::new(config, broker).serve(listener));
     (addr, server)
 }
 
@@ -594,7 +592,7 @@ fn framed(req: &[u8]) -> Vec<u8> {
     frame
 }
 
-async fn read_response(client: &mut TcpStream) -> Bytes {
+async fn read_response(client: &mut (impl AsyncRead + Unpin)) -> Bytes {
     let mut len_buf = [0u8; 4];
     tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut len_buf))
         .await
@@ -684,7 +682,7 @@ fn metadata_request(correlation_id: i32) -> Vec<u8> {
     )
 }
 
-async fn closed(client: &mut TcpStream) -> bool {
+async fn closed(client: &mut (impl AsyncRead + Unpin)) -> bool {
     let mut probe = [0u8; 1];
     tokio::time::timeout(Duration::from_secs(5), client.read(&mut probe))
         .await
@@ -721,6 +719,88 @@ async fn sasl_plain_authenticates_a_token() {
     let authenticated = decode_authenticate(read_response(&mut client).await);
     assert_eq!(authenticated.error_code, 0);
 
+    client
+        .write_all(&framed(&metadata_request(3)))
+        .await
+        .unwrap();
+    assert_eq!(correlation_id(&read_response(&mut client).await), 3);
+
+    server.abort();
+}
+
+async fn tls_client(
+    addr: SocketAddr,
+    root: rustls::pki_types::CertificateDer<'static>,
+) -> tokio_rustls::client::TlsStream<TcpStream> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(root).unwrap();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+
+    tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            TcpStream::connect(addr).await.unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn sasl_ssl_runs_the_same_exchange_inside_tls() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = Authority::new().unwrap();
+    let config = authority
+        .issue(&["localhost"])
+        .unwrap()
+        .write(dir.path())
+        .unwrap();
+    let (broker, token, _) = secured_broker().await;
+    let tls = Tls::load(config).unwrap();
+    let (addr, server) = serve_with(Arc::new(broker), ListenerConfig::default(), Some(tls)).await;
+
+    let mut plaintext = TcpStream::connect(addr).await.unwrap();
+    plaintext
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), plaintext.read_to_end(&mut answer))
+        .await
+        .expect("a plaintext client must be closed")
+        .unwrap();
+    assert_eq!(
+        answer.first(),
+        Some(&0x15),
+        "expected a TLS alert, got {answer:?}"
+    );
+
+    let mut client = tls_client(addr, authority.root().clone()).await;
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    assert_eq!(
+        decode_handshake(read_response(&mut client).await, 1).error_code,
+        0
+    );
+    client
+        .write_all(&framed(&authenticate_request(
+            &token.id,
+            &token.render(),
+            2,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(
+        decode_authenticate(read_response(&mut client).await).error_code,
+        0
+    );
     client
         .write_all(&framed(&metadata_request(3)))
         .await
@@ -1020,7 +1100,7 @@ async fn an_idle_connection_must_authenticate_in_time() {
         idle_before_auth: Duration::from_millis(200),
         ..ListenerConfig::default()
     };
-    let (addr, server) = serve_with(Arc::new(broker), config).await;
+    let (addr, server) = serve_with(Arc::new(broker), config, None).await;
 
     let mut silent = TcpStream::connect(addr).await.unwrap();
     assert!(closed(&mut silent).await);

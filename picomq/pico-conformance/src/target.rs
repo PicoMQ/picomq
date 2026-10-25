@@ -6,9 +6,10 @@ use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
 use picomq_http::HttpProtocol;
-use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, PicoServer, ServerConfig};
+use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, PicoServer, ServerConfig, TlsConfig};
 use tempfile::TempDir;
 
+use crate::certificates::Certificates;
 use crate::kafka::sasl::Credentials;
 use crate::suite::Suite;
 
@@ -21,7 +22,9 @@ pub struct Target {
     bootstrap: Option<String>,
     host_address: Option<String>,
     node: Option<Node>,
-    secured: Option<Secured>,
+    sasl_plaintext: Option<Secured>,
+    sasl_ssl: Option<Secured>,
+    certificates: Option<Certificates>,
 }
 
 struct Node {
@@ -53,9 +56,17 @@ impl Target {
 
         let server = picomq_runtime::start(config(&dir, suite.protocol(), kafka)?).await?;
 
-        let secured = match suite {
-            Suite::Kafka => Some(Secured::start().await?),
-            Suite::Ds => None,
+        let (sasl_plaintext, sasl_ssl, certificates) = match suite {
+            Suite::Kafka => {
+                let certificates = Certificates::mint()?;
+                let tls = TlsConfig::new(certificates.certificate(), certificates.key());
+                (
+                    Some(Secured::start(None).await?),
+                    Some(Secured::start(Some(tls)).await?),
+                    Some(certificates),
+                )
+            }
+            Suite::Ds => (None, None, None),
         };
 
         Ok(Self {
@@ -63,7 +74,9 @@ impl Target {
             bootstrap,
             host_address,
             node: Some(Node { server, _dir: dir }),
-            secured,
+            sasl_plaintext,
+            sasl_ssl,
+            certificates,
         })
     }
 
@@ -77,7 +90,9 @@ impl Target {
             bootstrap,
             host_address,
             node: None,
-            secured: None,
+            sasl_plaintext: None,
+            sasl_ssl: None,
+            certificates: None,
         }
     }
 
@@ -93,22 +108,32 @@ impl Target {
         self.host_address.as_deref()
     }
 
-    pub fn secured(&self) -> Option<&Secured> {
-        self.secured.as_ref()
+    pub fn sasl_plaintext(&self) -> Option<&Secured> {
+        self.sasl_plaintext.as_ref()
+    }
+
+    pub fn sasl_ssl(&self) -> Option<&Secured> {
+        self.sasl_ssl.as_ref()
+    }
+
+    pub fn certificates(&self) -> Option<&Certificates> {
+        self.certificates.as_ref()
     }
 
     pub async fn stop(self) {
-        if let Some(node) = self.node {
+        let nodes = [
+            self.node,
+            self.sasl_plaintext.map(|secured| secured.node),
+            self.sasl_ssl.map(|secured| secured.node),
+        ];
+        for node in nodes.into_iter().flatten() {
             node.server.shutdown().await;
-        }
-        if let Some(secured) = self.secured {
-            secured.node.server.shutdown().await;
         }
     }
 }
 
 impl Secured {
-    async fn start() -> anyhow::Result<Self> {
+    async fn start(tls: Option<TlsConfig>) -> anyhow::Result<Self> {
         let dir = tempfile::tempdir()?;
         let kafka = container_reachable()?;
         let bootstrap = kafka
@@ -122,6 +147,7 @@ impl Secured {
             auth_mode: AuthMode::Required,
             bootstrap_token: Some(root.render()),
             insecure_allow_remote: false,
+            tls,
             ..config(&dir, HttpProtocol::Pico, kafka)?
         })
         .await?;

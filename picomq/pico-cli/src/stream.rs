@@ -1,5 +1,6 @@
 //! Stream commands.
 
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -24,9 +25,9 @@ pub struct Endpoint {
     #[arg(long, value_enum, env = "PICO_PROTOCOL", global = true)]
     pub protocol: Option<ProtocolArg>,
 
-    /// Speak HTTP/2 over cleartext. One connection then carries many
-    /// concurrent requests, which is what deep append pipelines need. The
-    /// server must have HTTP/2 enabled.
+    /// Speak HTTP/2 only, without falling back to HTTP/1.1. One connection
+    /// then carries many concurrent requests, which is what deep append
+    /// pipelines need.
     #[arg(long, env = "PICO_HTTP2", global = true)]
     pub http2: bool,
 
@@ -38,11 +39,28 @@ pub struct Endpoint {
     /// (`pico auth login`).
     #[arg(long, env = "PICO_TOKEN", global = true, hide_env_values = true)]
     pub token: Option<String>,
+
+    /// PEM file of CA certificates to trust for https endpoints, on top of
+    /// the system's. Needed when a node's certificate comes from a private
+    /// CA.
+    #[arg(long, env = "PICO_CA_CERTIFICATE", global = true)]
+    pub ca_certificate: Option<PathBuf>,
 }
 
 impl Endpoint {
+    pub fn ca_certificate(&self) -> Result<Option<Vec<u8>>, String> {
+        self.ca_certificate
+            .as_ref()
+            .map(|path| {
+                std::fs::read(path)
+                    .map_err(|error| format!("read CA certificate {}: {error}", path.display()))
+            })
+            .transpose()
+    }
+
     pub fn resolve(self) -> Result<Target, String> {
         let profile = crate::config::selected(self.profile.as_deref())?;
+        let ca_certificate = self.ca_certificate()?;
         let token = match self.token {
             Some(token) => Some(token),
             None => crate::auth::lookup(&crate::auth::profile_name(self.profile.as_deref())?)?,
@@ -58,6 +76,7 @@ impl Endpoint {
                 .unwrap_or(ProtocolArg::Pico),
             http2: self.http2 || profile.http2.unwrap_or(false),
             token,
+            ca_certificate,
         })
     }
 }
@@ -68,6 +87,7 @@ pub struct Target {
     pub protocol: ProtocolArg,
     pub http2: bool,
     pub token: Option<String>,
+    pub ca_certificate: Option<Vec<u8>>,
 }
 
 impl Target {
@@ -75,6 +95,7 @@ impl Target {
         ClientConfig {
             http2: self.http2,
             token: self.token.clone(),
+            ca_certificate: self.ca_certificate.clone(),
             ..Default::default()
         }
     }

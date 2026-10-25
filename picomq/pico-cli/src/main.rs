@@ -96,7 +96,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
     // Admin talks to the admin listener, not the stream endpoint, so it does
     // not resolve a profile.
     if let Command::Admin(args) = command {
-        return Ok(admin::run(args).await?);
+        return Ok(admin::run(args, &endpoint).await?);
     }
     // Auth edits the stored credential the others read, so like `config` it
     // must not need a resolvable endpoint.
@@ -109,15 +109,17 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
         Command::Stream(command) => Ok(stream::run(&target, command).await?),
         Command::Bench(args) => Ok(bench::run(&target, args).await?),
         Command::Serve(args) => {
-            let server = picomq_runtime::start(args.into_config(target.protocol)?).await?;
+            let config = args.into_config(target.protocol)?;
+            let scheme = config.scheme();
+            let server = picomq_runtime::start(config).await?;
             println!(
-                "serving on http://{} (advertised {})",
+                "serving on {scheme}://{} (advertised {})",
                 server.local_addr(),
                 server.base_url()
             );
             println!("kafka on {}", server.kafka_addr());
             if let Some(admin) = server.admin_addr() {
-                println!("admin on http://{admin}");
+                println!("admin on {scheme}://{admin}");
             }
             let mut fenced = server.fenced();
             let code = tokio::select! {

@@ -7,6 +7,7 @@ members = [
     "picomq/pico-metadata",
     "picomq/pico-sql",
     "picomq/pico-server",
+    "picomq/pico-listener",
     "picomq/pico-kafka",
     "picomq/pico-http",
     "picomq/pico-runtime",
@@ -22,6 +23,7 @@ default-members = [
     "picomq/pico-metadata",
     "picomq/pico-sql",
     "picomq/pico-server",
+    "picomq/pico-listener",
     "picomq/pico-kafka",
     "picomq/pico-http",
     "picomq/pico-runtime",
@@ -47,6 +49,7 @@ picomq-auth = { path = "picomq/pico-auth" }
 picomq-metadata = { path = "picomq/pico-metadata" }
 picomq-sql = { path = "picomq/pico-sql" }
 picomq-server = { path = "picomq/pico-server" }
+picomq-listener = { path = "picomq/pico-listener" }
 picomq-kafka = { path = "picomq/pico-kafka" }
 picomq-http = { path = "picomq/pico-http" }
 picomq-runtime = { path = "picomq/pico-runtime" }
@@ -100,6 +103,8 @@ lru = "0.18.4"
 metrics = "0.24.6"
 im = "15.1.0"
 arc-swap = "1.9.2"
+rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws_lc_rs", "tls12"] }
 sqlx = { version = "0.9.0", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
@@ -114,6 +119,7 @@ keyring = { version = "4.2.0", features = ["apple-native-keyring-store", "window
 proptest = "1.11.0"
 tokio-test = "0.4.5"
 tempfile = "3.27.0"
+rcgen = "0.14.10"
 serde_json = "1.0.151"
 criterion = "0.8.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["json"] }

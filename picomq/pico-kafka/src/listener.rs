@@ -1,14 +1,13 @@
 //! TCP listener and per-connection pipeline. Produce requests process
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use kafka_protocol::messages::ApiKey;
 use picomq_auth::AuthPrincipal;
-use tokio::net::{TcpListener, TcpStream};
+use picomq_listener::{Listener, Reader, Stream, Writer};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tracing::{debug, warn};
 
@@ -21,7 +20,6 @@ use crate::sasl::{self, Answer, Session};
 
 #[derive(Debug, Clone)]
 pub struct ListenerConfig {
-    pub addr: SocketAddr,
     pub max_request_bytes: usize,
     pub max_in_flight: usize,
     pub max_frame_before_auth: usize,
@@ -31,7 +29,6 @@ pub struct ListenerConfig {
 impl Default for ListenerConfig {
     fn default() -> Self {
         Self {
-            addr: SocketAddr::from(([127, 0, 0, 1], 9092)),
             max_request_bytes: 4 * 1024 * 1024,
             max_in_flight: 16,
             max_frame_before_auth: 512 * 1024,
@@ -92,13 +89,8 @@ impl KafkaListener {
         &self.config
     }
 
-    pub async fn bind(&self) -> Result<TcpListener, KafkaError> {
-        Ok(TcpListener::bind(self.config.addr).await?)
-    }
-
-    pub async fn serve(self, listener: TcpListener) -> Result<(), KafkaError> {
-        loop {
-            let (socket, peer) = listener.accept().await?;
+    pub async fn serve(self, mut listener: Listener) {
+        while let Some((socket, peer)) = listener.accept().await {
             debug!(%peer, "kafka client connected");
             let config = self.config.clone();
             let broker = self.broker.clone();
@@ -112,7 +104,7 @@ impl KafkaListener {
 }
 
 async fn serve_connection(
-    socket: TcpStream,
+    socket: Stream,
     broker: Arc<BrokerContext>,
     config: ListenerConfig,
 ) -> Result<(), KafkaError> {
@@ -136,7 +128,7 @@ async fn serve_connection(
 }
 
 async fn run_reader(
-    mut read_half: tokio::net::tcp::OwnedReadHalf,
+    mut read_half: Reader,
     response_tx: mpsc::Sender<(u64, Slot)>,
     broker: Arc<BrokerContext>,
     config: ListenerConfig,
@@ -309,10 +301,7 @@ async fn run_produce_worker(
     }
 }
 
-async fn run_ordered_writer(
-    mut write_half: tokio::net::tcp::OwnedWriteHalf,
-    mut response_rx: mpsc::Receiver<(u64, Slot)>,
-) {
+async fn run_ordered_writer(mut write_half: Writer, mut response_rx: mpsc::Receiver<(u64, Slot)>) {
     let mut next_sequence = 0u64;
     let mut pending = BTreeMap::new();
     while let Some((sequence, slot)) = response_rx.recv().await {

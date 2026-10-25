@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+picomq-listener = { workspace = true, features = ["testing"] }
 axum = { workspace = true }
 futures = { workspace = true }
 picomq-auth = { workspace = true }

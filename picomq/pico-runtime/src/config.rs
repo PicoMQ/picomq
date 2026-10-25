@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use picomq_common::now_ms;
 use picomq_http::{HttpProtocol, RoutingMode};
+use picomq_listener::TlsConfig;
 
 /// Where the metadata command log lives.
 ///
@@ -119,6 +120,7 @@ pub struct ServerConfig {
     /// Cap on a single request body. Oversized bodies get `413`.
     pub max_request_size: usize,
     pub shutdown_drain: Duration,
+    pub shutdown_timeout: Duration,
     /// `acceptQueueSize`). The kernel clamps it to `somaxconn`.
     pub backlog: i32,
     pub auth_mode: AuthMode,
@@ -128,6 +130,7 @@ pub struct ServerConfig {
     /// (`picomq_auth::Scope::root`). Idempotent across restarts. A different
     /// stored token under the same id fails startup.
     pub bootstrap_token: Option<String>,
+    pub tls: Option<TlsConfig>,
     pub schema_registry: Option<String>,
     pub engine: s3stream::Config,
 }
@@ -158,10 +161,12 @@ impl Default for ServerConfig {
             max_chunk_size: 64 * 1024,
             max_request_size: 32 * 1024 * 1024,
             shutdown_drain: Duration::ZERO,
+            shutdown_timeout: Duration::from_secs(10),
             backlog: 1024,
             auth_mode: AuthMode::Off,
             insecure_allow_remote: false,
             bootstrap_token: None,
+            tls: None,
             schema_registry: None,
             engine: s3stream::Config::default(),
         }
@@ -172,7 +177,11 @@ impl ServerConfig {
     pub fn advertised_url(&self, bound: SocketAddr) -> String {
         self.advertised_url
             .clone()
-            .unwrap_or_else(|| format!("http://{bound}"))
+            .unwrap_or_else(|| format!("{}://{bound}", self.scheme()))
+    }
+
+    pub fn scheme(&self) -> &'static str {
+        if self.tls.is_some() { "https" } else { "http" }
     }
 
     /// WAL when `--wal` is absent. The bucket id is the engine's per-bucket
@@ -240,5 +249,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(configured.advertised_url(bound), "http://pico.example");
+
+        let tls = ServerConfig {
+            tls: Some(TlsConfig::new("certificate.pem", "key.pem")),
+            ..Default::default()
+        };
+        assert_eq!(tls.advertised_url(bound), "https://127.0.0.1:50123");
     }
 }

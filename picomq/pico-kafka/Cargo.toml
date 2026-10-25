@@ -14,6 +14,7 @@ fastrand = { workspace = true }
 futures = { workspace = true }
 kafka-protocol = { workspace = true }
 picomq-auth = { workspace = true }
+picomq-listener = { workspace = true }
 picomq-common = { workspace = true }
 picomq-metadata = { workspace = true }
 picomq-server = { workspace = true }
@@ -23,6 +24,10 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+picomq-listener = { workspace = true, features = ["testing"] }
+rustls = { workspace = true }
+tempfile = { workspace = true }
+tokio-rustls = { workspace = true }
 picomq-schema = { workspace = true }
 picomq-metadata = { workspace = true }
 picomq-server = { workspace = true }

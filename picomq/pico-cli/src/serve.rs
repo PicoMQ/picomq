@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use picomq_http::{HttpProtocol, RoutingMode};
-use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, ServerConfig};
+use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, ServerConfig, TlsConfig};
 
 use crate::stream::ProtocolArg;
 
@@ -41,7 +41,8 @@ pub struct ServeArgs {
     no_admin: bool,
 
     /// Public URL of this node, used for cross-node redirects and registered
-    /// in metadata. Defaults to `http://{listen}`, which only works when
+    /// in metadata. Defaults to `http://{listen}`, or `https://{listen}` with
+    /// TLS, which only works single-node on localhost.
     #[arg(long, env = "PICO_HTTP_ADDRESS")]
     http_address: Option<String>,
 
@@ -99,6 +100,12 @@ pub struct ServeArgs {
     #[arg(long, env = "PICO_SHUTDOWN_DRAIN_SEC", default_value_t = 0)]
     shutdown_drain_sec: u64,
 
+    /// Seconds to wait for open connections once the listeners stop
+    /// accepting. After that the node stops waiting and hands off its
+    /// streams, so a stalled client cannot hold up the handoff.
+    #[arg(long, env = "PICO_SHUTDOWN_TIMEOUT_SEC", default_value_t = 10)]
+    shutdown_timeout_sec: u64,
+
     /// Accept queue depth for the listeners. The kernel clamps it to
     /// `somaxconn` (128 on macOS, 4096 on current Linux).
     #[arg(long, env = "PICO_BACKLOG", default_value_t = 1024)]
@@ -139,6 +146,21 @@ pub struct ServeArgs {
         conflicts_with = "auth_bootstrap_token"
     )]
     auth_bootstrap_token_file: Option<PathBuf>,
+
+    /// PEM certificate chain served by every listener. Turns on TLS: HTTPS
+    /// for the stream and admin listeners, SASL_SSL or SSL for Kafka. The
+    /// file is reread every minute, so a renewed certificate needs no
+    /// restart.
+    #[arg(long, env = "PICO_TLS_CERTIFICATE", requires = "tls_key")]
+    tls_certificate: Option<PathBuf>,
+
+    /// PEM private key for `--tls-certificate`.
+    #[arg(long, env = "PICO_TLS_KEY", requires = "tls_certificate")]
+    tls_key: Option<PathBuf>,
+
+    /// Seconds a client has to finish its TLS handshake.
+    #[arg(long, env = "PICO_TLS_HANDSHAKE_TIMEOUT_SEC", default_value_t = 10)]
+    tls_handshake_timeout_sec: u64,
 
     #[arg(long, env = "PICO_SCHEMA_REGISTRY")]
     schema_registry: Option<String>,
@@ -227,6 +249,7 @@ impl ServeArgs {
             max_chunk_size: self.max_chunk_size,
             max_request_size: self.max_request_size,
             shutdown_drain: Duration::from_secs(self.shutdown_drain_sec),
+            shutdown_timeout: Duration::from_secs(self.shutdown_timeout_sec),
             backlog: self.backlog,
             auth_mode: match self.auth {
                 AuthArg::Off => AuthMode::Off,
@@ -234,6 +257,13 @@ impl ServeArgs {
             },
             insecure_allow_remote: self.insecure_allow_remote,
             bootstrap_token,
+            tls: self
+                .tls_certificate
+                .zip(self.tls_key)
+                .map(|(certificate, key)| TlsConfig {
+                    handshake_timeout: Duration::from_secs(self.tls_handshake_timeout_sec),
+                    ..TlsConfig::new(certificate, key)
+                }),
             schema_registry: self.schema_registry,
             engine,
         })

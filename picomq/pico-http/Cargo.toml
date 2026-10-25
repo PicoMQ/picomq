@@ -13,13 +13,11 @@ picomq-server = { workspace = true }
 picomq-common = { workspace = true }
 picomq-auth = { workspace = true }
 picomq-metadata = { workspace = true }
+picomq-listener = { workspace = true }
 s3stream = { workspace = true }
 axum = { workspace = true, features = ["http2"] }
-socket2 = { workspace = true }
 bytes = { workspace = true }
-# `net` for the listeners in `serve` (axum enables it transitively; declared so
-# this crate does not depend on feature unification).
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true }
 tokio-stream = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }
@@ -29,6 +27,7 @@ rust-embed = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["net"] }
 async-trait = { workspace = true }
 reqwest = { workspace = true, features = ["http2", "stream"] }
 durable-streams = { workspace = true }

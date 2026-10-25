@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 use picomq_auth::AccessToken;
+use picomq_client::ClientConfig;
 
 use crate::io::note;
 use crate::stream::Endpoint;
@@ -208,7 +209,12 @@ pub async fn run(command: AuthCommand, flags: &Endpoint) -> Result<i32, String> 
             };
             // Any answer but 401 means the server accepted the credential.
             // 403 is authenticated but out of scope for a root list.
-            let response = reqwest::Client::new()
+            let http = picomq_client::http_client(&ClientConfig {
+                ca_certificate: flags.ca_certificate()?,
+                ..Default::default()
+            })
+            .map_err(|error| error.to_string())?;
+            let response = http
                 .get(format!("{}/", endpoint.trim_end_matches('/')))
                 .bearer_auth(&token)
                 .send()

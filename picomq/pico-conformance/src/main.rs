@@ -1,3 +1,4 @@
+mod certificates;
 mod ds;
 mod kafka;
 mod known;

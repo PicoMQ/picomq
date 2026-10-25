@@ -6,7 +6,8 @@ mod common;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use picomq_http::{HttpProtocol, ServeOptions, bind, serve};
+use picomq_http::{HttpProtocol, ServeOptions, serve};
+use picomq_listener::Listener;
 
 #[tokio::test]
 async fn health_and_ready() {
@@ -78,16 +79,15 @@ async fn ready_fails_while_draining() {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node,
-        bind(loopback, 1024).unwrap(),
+        Listener::bind(loopback, 1024, None).unwrap(),
+        Some(Listener::bind(loopback, 1024, None).unwrap()),
         ServeOptions {
             protocol: HttpProtocol::Pico,
-            admin_addr: Some(loopback),
             shutdown_drain: Duration::from_secs(2),
             ..Default::default()
         },
     )
-    .await
-    .unwrap();
+    .await;
     let admin_url = format!("http://{}", server.admin_addr().unwrap());
 
     let draining = tokio::spawn(async move { server.shutdown().await });
@@ -121,6 +121,39 @@ async fn ready_fails_while_draining() {
             .is_err(),
         "listener closed after the drain window"
     );
+}
+
+#[tokio::test]
+async fn a_silent_http2_client_cannot_hold_up_shutdown() {
+    use tokio::io::AsyncWriteExt;
+
+    let node = common::start_node().await;
+    let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
+    let server = serve(
+        node,
+        Listener::bind(loopback, 1024, None).unwrap(),
+        None,
+        ServeOptions {
+            protocol: HttpProtocol::Pico,
+            shutdown_timeout: Duration::from_millis(300),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let mut silent = tokio::net::TcpStream::connect(server.local_addr())
+        .await
+        .unwrap();
+    silent
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown())
+        .await
+        .expect("a silent http/2 client held up shutdown");
+    drop(silent);
 }
 
 #[tokio::test]
@@ -327,14 +360,13 @@ async fn admin_listener_can_be_disabled() {
     let node = common::start_node().await;
     let server = serve(
         node,
-        bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024).unwrap(),
+        Listener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024, None).unwrap(),
+        None,
         ServeOptions {
-            admin_addr: None,
             ..Default::default()
         },
     )
-    .await
-    .unwrap();
+    .await;
     assert!(server.admin_addr().is_none());
     server.shutdown().await;
 }

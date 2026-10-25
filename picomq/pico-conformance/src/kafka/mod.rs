@@ -2,7 +2,7 @@ mod clients;
 mod docker;
 mod raw;
 mod rebalance;
-mod reference;
+pub mod reference;
 pub mod sasl;
 mod scenario;
 mod versions;
@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 
+use crate::certificates::Certificates;
 use crate::kafka::clients::Clients;
 use crate::kafka::reference::Reference;
 use crate::kafka::sasl::Listener;
@@ -31,8 +32,16 @@ pub async fn run(target: &Target) -> anyhow::Result<Vec<Outcome>> {
             .context("target has no kafka address reachable from this host")?,
     };
 
-    let reference = Reference::start().await?;
-    let clients = Clients::start(reference.network()).await?;
+    let minted;
+    let certificates = match target.certificates() {
+        Some(certificates) => certificates,
+        None => {
+            minted = Certificates::mint()?;
+            &minted
+        }
+    };
+    let reference = Reference::start(certificates).await?;
+    let clients = Clients::start(reference.network(), certificates.dir()).await?;
     clients.wait_for(reference.bootstrap()).await?;
     reference.grant(&clients).await?;
 
@@ -59,38 +68,66 @@ pub async fn run(target: &Target) -> anyhow::Result<Vec<Outcome>> {
         ));
     }
 
-    let Some(secured) = target.secured() else {
+    let (Some(plaintext), Some(ssl)) = (target.sasl_plaintext(), target.sasl_ssl()) else {
         eprintln!("sasl scenarios need an in-process target and were not run");
         return Ok(outcomes);
     };
-    let secured_kafka = Listener {
-        bootstrap: reference.sasl_bootstrap(),
-        host_address: reference.sasl_host_address(),
-        root: reference.root(),
-        reader: reference.reader(),
-        writer: reference.writer(),
-    };
-    let secured_picomq = Listener {
-        bootstrap: secured.bootstrap(),
-        host_address: secured.host_address(),
-        root: secured.root(),
-        reader: secured.reader(),
-        writer: secured.writer(),
-    };
-    for scenario in sasl::Scenario::ALL {
-        let topic = format!("{}-{suffix}", scenario.name());
+    let pairs = [
+        (
+            sasl::Scenario::ALL,
+            Listener {
+                bootstrap: reference.sasl_bootstrap(),
+                host_address: reference.sasl_host_address(),
+                tls: false,
+                root: reference.root(),
+                reader: reference.reader(),
+                writer: reference.writer(),
+            },
+            Listener {
+                bootstrap: plaintext.bootstrap(),
+                host_address: plaintext.host_address(),
+                tls: false,
+                root: plaintext.root(),
+                reader: plaintext.reader(),
+                writer: plaintext.writer(),
+            },
+        ),
+        (
+            sasl::Scenario::SSL,
+            Listener {
+                bootstrap: reference.secure_bootstrap(),
+                host_address: reference.secure_host_address(),
+                tls: true,
+                root: reference.root(),
+                reader: reference.reader(),
+                writer: reference.writer(),
+            },
+            Listener {
+                bootstrap: ssl.bootstrap(),
+                host_address: ssl.host_address(),
+                tls: true,
+                root: ssl.root(),
+                reader: ssl.reader(),
+                writer: ssl.writer(),
+            },
+        ),
+    ];
+    for (scenarios, kafka, picomq) in &pairs {
+        for scenario in *scenarios {
+            let topic = format!("{}-{suffix}", scenario.name());
 
-        let expected = scenario.run(&clients, &secured_kafka, &topic).await;
-        let actual = scenario.run(&clients, &secured_picomq, &topic).await;
+            let expected = scenario.run(&clients, kafka, &topic).await;
+            let actual = scenario.run(&clients, picomq, &topic).await;
 
-        outcomes.push(outcome(
-            scenario.name(),
-            Compare::Equal,
-            &topic,
-            expected,
-            actual,
-            clients.take_tooling_failures(),
-        ));
+            outcomes.push(outcome(
+                scenario.name(),
+                Compare::Equal,
+                &topic,
+                expected,
+                actual,
+                clients.take_tooling_failures(),
+            ));
+        }
     }
 
     Ok(outcomes)

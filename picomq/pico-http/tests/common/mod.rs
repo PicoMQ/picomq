@@ -7,7 +7,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use picomq_http::{HttpProtocol, RoutingMode, RunningServer, ServeOptions, bind, serve};
+use picomq_http::{HttpProtocol, RoutingMode, RunningServer, ServeOptions, serve};
+use picomq_listener::Listener;
 use picomq_metadata::LocalSink;
 use picomq_schema::{Registry, SchemaStore};
 use picomq_server::wal::ObjectWal;
@@ -78,10 +79,10 @@ async fn start_with_node(protocol: HttpProtocol, node: Arc<PicoNode>) -> TestSer
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node.clone(),
-        bind(loopback, 1024).unwrap(),
+        Listener::bind(loopback, 1024, None).unwrap(),
+        Some(Listener::bind(loopback, 1024, None).unwrap()),
         ServeOptions {
             protocol,
-            admin_addr: Some(loopback),
             routing_mode: RoutingMode::LocalAlways,
             long_poll_timeout: Duration::from_secs(1),
             sse_max_duration: Duration::from_secs(2),
@@ -90,8 +91,7 @@ async fn start_with_node(protocol: HttpProtocol, node: Arc<PicoNode>) -> TestSer
             ..Default::default()
         },
     )
-    .await
-    .unwrap();
+    .await;
     TestServer {
         base_url: format!("http://{}", server.local_addr()),
         admin_url: format!("http://{}", server.admin_addr().unwrap()),
