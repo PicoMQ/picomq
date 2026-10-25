@@ -314,7 +314,7 @@ RESP=$(curl -s -X POST $ADMIN/admin/tokens \
     "id": "svc/ingest",
     "scope": {
       "streams": [{ "prefix": "/logs/" }],
-      "groups": { "stream": { "read": false, "write": true } },
+      "access": { "stream": { "read": false, "write": true } },
       "audiences": ["pico", "durable_streams", "kafka"]
     }
   }')

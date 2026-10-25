@@ -1127,10 +1127,14 @@ components:
           type: array
           items: { $ref: "#/components/schemas/ResourceMatcher" }
         groups:
+          type: array
+          items: { $ref: "#/components/schemas/ResourceMatcher" }
+        access:
           type: object
           properties:
             stream: { $ref: "#/components/schemas/ReadWrite" }
             tokens: { $ref: "#/components/schemas/ReadWrite" }
+            group: { $ref: "#/components/schemas/ReadWrite" }
             admin: { $ref: "#/components/schemas/ReadWrite" }
         ops:
           type: array
@@ -1149,17 +1153,19 @@ components:
                 issue_token,
                 revoke_token,
                 list_tokens,
+                consume,
+                describe_group,
+                delete_group,
                 cluster_read,
                 node_read,
                 stream_inspect,
                 transfer_stream,
                 update_node_slots,
-                delete_group,
               ]
         audiences:
           type: array
-          items: { type: string, enum: [pico, durable_streams, admin] }
-        autoPrefixStreams: { type: boolean }
+          items: { type: string, enum: [pico, durable_streams, kafka, admin] }
+        autoPrefix: { type: boolean }
         expiresAtMs: { type: [integer, "null"] }
     TokenRecord:
       type: object

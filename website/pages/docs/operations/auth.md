@@ -43,7 +43,7 @@ curl -s -X POST http://127.0.0.1:9090/admin/tokens \
       "id": "svc/ingest",
       "scope": {
         "streams": [{ "prefix": "/logs/" }],
-        "groups": { "stream": { "read": false, "write": true } },
+        "access": { "stream": { "read": false, "write": true } },
         "audiences": ["pico", "kafka"],
         "expiresAtMs": 1790000000000
       }
@@ -52,7 +52,18 @@ curl -s -X POST http://127.0.0.1:9090/admin/tokens \
 
 The response contains the wire token once. Only its hash is stored, so a lost secret means issuing a replacement. This token appends under `/logs/` over Pico and produces to the Kafka topics `logs.*`, and nothing else on either protocol.
 
-In the scope JSON, `streams` and `tokens` are arrays of `{"exact": name}` or `{"prefix": p}` matchers, `groups` holds the three read/write pairs, `ops` names fine operations from the table in [Authorization](/docs/design/auth#scopes), `audiences` is any of `pico`, `durable_streams`, `kafka`, and `admin`, `autoPrefixStreams` turns on tenant prefixing, and `expiresAtMs` is unix milliseconds. Missing keys deny. Unknown keys are rejected.
+The scope JSON takes these keys:
+
+| Key | Holds |
+| --- | --- |
+| `streams`, `tokens`, `groups` | Arrays of `{"exact": name}` or `{"prefix": p}` matchers for streams, token ids, and consumer groups |
+| `access` | `{"read": bool, "write": bool}` for each of `stream`, `tokens`, `group`, and `admin` |
+| `ops` | Single operations from the table in [Authorization](/docs/design/auth#scopes) |
+| `audiences` | Any of `pico`, `durable_streams`, `kafka`, and `admin` |
+| `autoPrefix` | Tenant prefixing, see [Auto-prefixing](/docs/design/auth#auto-prefixing) |
+| `expiresAtMs` | Expiry in unix milliseconds |
+
+Missing keys deny. Unknown keys are rejected.
 
 The reserved id `anonymous` applies its scope to requests with no credential. Issue it read-only under `/public/` and those streams are readable by anyone while everything else stays closed. Revoke it and all access needs a token again. It cannot be given the `admin` audience.
 

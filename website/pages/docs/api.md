@@ -176,7 +176,7 @@ How groups work is in [Consumer groups](/docs/design/groups). Group routes are s
 
 | Route | Does |
 | --- | --- |
-| `GET /_groups` | Lists every group in the cluster: `{"groups": ["a", "b"]}` |
+| `GET /_groups` | Lists the groups the token may describe, every group in the cluster with auth off: `{"groups": ["a", "b"]}` |
 | `GET /_groups/{group}` | Describes a group: `group`, `state`, `generation`, and `members` |
 | `DELETE /_groups/{group}` | Deletes a group without members and its offsets. `204` |
 | `POST /_groups/{group}/members` | Joins. Returns once the rebalance completes |

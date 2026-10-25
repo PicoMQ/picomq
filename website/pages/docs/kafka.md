@@ -119,29 +119,34 @@ Until a connection authenticates, the listener holds it to the same limits a Kaf
 
 ### What the scope allows
 
-Each request needs an operation from the token's scope, on the topic it names. A topic is matched under its HTTP name, so a scope with the prefix `/orders/` covers the Kafka topics `orders.eu` and `orders.us`.
+Each request needs an operation from the token's scope on the topics it names, and a group request also needs one on its group. The operations are defined under [Scopes](/docs/design/auth#scopes). A topic is matched under its HTTP name, so a scope with the prefix `/orders/` covers the Kafka topics `orders.eu` and `orders.us`.
 
-| Request | Needs |
-| --- | --- |
-| `Produce` | `append` |
-| `Fetch`, `OffsetCommit`, `OffsetFetch`, `OffsetDelete` | `read` |
-| `FindCoordinator`, `JoinGroup`, `SyncGroup`, `Heartbeat`, `LeaveGroup` | `read`, and for a consumer's `JoinGroup` also `read` on every subscribed topic |
-| `Metadata`, `ListOffsets`, `OffsetForLeaderEpoch`, `DescribeConfigs` | `head`, which any stream right on the topic grants |
-| `CreateTopics`, `CreatePartitions`, `IncrementalAlterConfigs`, auto creation | `create` |
-| `DeleteTopics` | `delete` |
-| `DeleteRecords` | `trim` |
-| `InitProducerId` | `append` on some topic |
-| `DescribeGroups`, `ListGroups` | `stream_inspect` |
-| `DeleteGroups` | `delete_group` |
+| Request | On the group | On the topics |
+| --- | --- | --- |
+| `Produce` | none | `append` |
+| `Fetch` | none | `read` |
+| `Metadata`, `ListOffsets`, `OffsetForLeaderEpoch`, `DescribeConfigs` | none | `head`, which any stream right on the topic grants |
+| `CreateTopics`, `CreatePartitions`, `IncrementalAlterConfigs`, auto creation | none | `create` |
+| `DeleteTopics` | none | `delete` |
+| `DeleteRecords` | none | `trim` |
+| `InitProducerId` | none | `append` on some topic |
+| `FindCoordinator`, `DescribeGroups` | `describe_group` | none |
+| `JoinGroup` | `consume` | `read` on every topic a consumer subscribes to |
+| `SyncGroup`, `Heartbeat`, `LeaveGroup` | `consume` | none |
+| `OffsetCommit` | `consume` | `read` |
+| `OffsetFetch` | `describe_group` | `read`, and unreadable topics are left out |
+| `OffsetDelete` | `delete_group` | `read` |
+| `DeleteGroups` | `delete_group` | none |
+| `ListGroups` | Lists only the groups the token may describe | none |
 
-A refused topic answers `TOPIC_AUTHORIZATION_FAILED`, a refused group `GROUP_AUTHORIZATION_FAILED`, and a refused `InitProducerId` `CLUSTER_AUTHORIZATION_FAILED`, so clients surface the same errors they would from a Kafka broker with ACLs. A `Metadata` request for all topics lists only the topics the token may describe, and `ListGroups` lists nothing without `stream_inspect`. A token that stops being valid closes the connection on its next request, see [Revocation](/docs/design/auth#revocation).
+A refused group answers `GROUP_AUTHORIZATION_FAILED` for the whole request, whatever its topics, as on a Kafka broker. A refused topic answers `TOPIC_AUTHORIZATION_FAILED`, and a refused `InitProducerId` answers `CLUSTER_AUTHORIZATION_FAILED`, so clients surface the same errors they would from a Kafka broker with ACLs. A `Metadata` request for all topics lists only the topics the token may describe. A token that stops being valid closes the connection on its next request, see [Revocation](/docs/design/auth#revocation).
 
 ### Differences from Kafka
 
-- Groups are not resources of their own, so rights come from the topics. A consumer joins only with `read` on what it subscribes to, but any token with `read` can heartbeat in or leave any group, and commit offsets for any group on the topics it reads, where Kafka would also check `Read` on the group.
 - `DescribeConfigs` needs `head`, where Kafka needs a separate `DescribeConfigs` right. Configs hold retention and schema settings, nothing secret.
+- `OffsetDelete` looks the group up before checking `delete_group`. A token that may describe a group but not delete it gets `GROUP_ID_NOT_FOUND` for a group that does not exist, which describing the group would show anyway. Kafka requires `Delete` on the group for `OffsetDelete`.
 - SASL PLAIN is the only mechanism. SCRAM is listed under [Deliberately excluded](/docs/design/auth#deliberately-excluded).
-- Tokens with `autoPrefixStreams` are refused at authentication rather than half applied, since Kafka names cannot be rewritten per tenant.
+- Tokens with `autoPrefix` are refused at authentication rather than half applied, since Kafka names cannot be rewritten per tenant, see [Auto-prefixing](/docs/design/auth#auto-prefixing).
 
 ### Auth off
 
