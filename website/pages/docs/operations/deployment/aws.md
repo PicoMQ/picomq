@@ -24,7 +24,7 @@ Both load balancers are internal. Reach them from inside the VPC (bastion, VPN, 
 
 Every node runs the Kafka listener next to the HTTP one. Kafka is TCP with no Host header, so the ALB cannot route it: instead node N advertises `kafka.<domain>:<9092 + N - 1>` and the NLB forwards that port to that node. Clients bootstrap at `kafka.<domain>:9092` and follow the `Metadata` response to whichever node owns a topic.
 
-The tasks run with `PICO_AUTH=required`, so Kafka clients authenticate over SASL PLAIN with the same tokens HTTP takes as bearers, see [Kafka protocol](/docs/kafka#authentication). The exchange is not encrypted, which is why the listener stays inside the VPC and nothing in this harness is public.
+The tasks run with `PICO_AUTH=required`, so Kafka clients authenticate over SASL PLAIN with the same tokens HTTP takes as bearers, see [Kafka protocol](/docs/kafka#authentication). The harness does not turn on [TLS](/docs/operations/tls), so the exchange is not encrypted, which is why the listener stays inside the VPC and nothing in this harness is public.
 
 From inside the VPC, with `$TOKEN` holding the bootstrap token, whose id is `aws/root`, or a token issued with the `kafka` audience and its own id:
 

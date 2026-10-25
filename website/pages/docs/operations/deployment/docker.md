@@ -44,7 +44,10 @@ cd harness/aio && cp .env.example .env
 docker compose up --build                            # 1 node
 docker compose -f compose.lite.yml up --build        # 1 node, SQLite and local files, no Postgres or RustFS
 docker compose -f compose.cluster.yml up --build     # 2 nodes
+PICO_CERTS=./certs docker compose -f compose.cluster.yml -f compose.tls.yml up --build   # 2 nodes with TLS
 ```
+
+The TLS layer mounts `certificate.pem` and `key.pem` from `PICO_CERTS` into both nodes and serves `https://localhost:4437`, `https://localhost:4438`, and Kafka over TLS on `9092` and `9093`, see [TLS](/docs/operations/tls).
 
 ## Health and readiness
 

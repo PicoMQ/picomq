@@ -43,6 +43,7 @@ const docsSidebar = [
       { text: 'CLI', link: '/docs/operations/cli' },
       { text: 'Configuration', link: '/docs/operations/configuration' },
       { text: 'Authentication', link: '/docs/operations/auth' },
+      { text: 'TLS', link: '/docs/operations/tls' },
       {
         text: 'Deployment',
         collapsed: true,
