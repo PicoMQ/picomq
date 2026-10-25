@@ -114,7 +114,7 @@ impl Scenario {
         let host_address = broker.host_address;
         let broker = broker.bootstrap;
 
-        let lines = match self {
+        match self {
             Scenario::ApiVersions => api_versions(clients, broker).await,
             Scenario::Metadata => metadata(clients, broker, topic).await,
             Scenario::UnknownTopic => unknown_topic(clients, broker, topic).await,
@@ -143,12 +143,7 @@ impl Scenario {
             Scenario::GroupLeave => rebalance::leave(host_address, topic).await,
             Scenario::GroupRejoin => rebalance::rejoin(host_address, topic).await,
             Scenario::GroupMissing => rebalance::missing(host_address, topic).await,
-        };
-
-        lines
-            .into_iter()
-            .map(|line| line.replace(topic, "{topic}").trim_end().to_owned())
-            .collect()
+        }
     }
 }
 

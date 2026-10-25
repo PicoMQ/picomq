@@ -3,23 +3,29 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
+use kafka_protocol::messages::ApiKey;
+use picomq_auth::AuthPrincipal;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tracing::{debug, warn};
 
 use crate::KafkaError;
 use crate::broker::BrokerContext;
-use crate::dispatch::dispatch;
+use crate::dispatch::{dispatch, request_context};
 use crate::frame::{read_frame, write_frame};
 use crate::handlers::{HandlerError, HandlerOutcome};
+use crate::sasl::{self, Answer, Session};
 
 #[derive(Debug, Clone)]
 pub struct ListenerConfig {
     pub addr: SocketAddr,
     pub max_request_bytes: usize,
     pub max_in_flight: usize,
+    pub max_frame_before_auth: usize,
+    pub idle_before_auth: Duration,
 }
 
 impl Default for ListenerConfig {
@@ -28,6 +34,8 @@ impl Default for ListenerConfig {
             addr: SocketAddr::from(([127, 0, 0, 1], 9092)),
             max_request_bytes: 4 * 1024 * 1024,
             max_in_flight: 16,
+            max_frame_before_auth: 512 * 1024,
+            idle_before_auth: Duration::from_secs(600),
         }
     }
 }
@@ -141,6 +149,7 @@ async fn run_reader(
         broker.clone(),
     ));
 
+    let mut session = broker.authorizer.clone().map(Session::new);
     let mut sequence = 0u64;
     loop {
         let permit = in_flight
@@ -148,12 +157,82 @@ async fn run_reader(
             .acquire_owned()
             .await
             .expect("connection semaphore never closes");
-        let frame = read_frame(&mut read_half, config.max_request_bytes).await?;
+        let frame = match &session {
+            Some(session) if session.principal().is_none() => {
+                let limit = config.max_frame_before_auth.min(config.max_request_bytes);
+                let read = read_frame(&mut read_half, limit);
+                match tokio::time::timeout(config.idle_before_auth, read).await {
+                    Ok(frame) => frame?,
+                    Err(_) => return Ok(()),
+                }
+            }
+            _ => read_frame(&mut read_half, config.max_request_bytes).await?,
+        };
         let body = frame.freeze();
         let seq = sequence;
         sequence += 1;
-        if frame_api_key(&body) == Some(PRODUCE_API_KEY) {
-            if produce_tx.send((seq, body, permit)).await.is_err() {
+
+        let api_key = frame_api_key(&body);
+        if let Some(session) = &mut session {
+            let answer = if session.awaits_raw_token() {
+                Some(session.authenticate_raw(&body).await)
+            } else if api_key.is_some_and(sasl::is_sasl) {
+                let Ok((req, rest)) = request_context(&body, None) else {
+                    send(&response_tx, seq, permit, Reply::Close).await;
+                    return Ok(());
+                };
+                let answered = if req.api_key == ApiKey::SaslHandshake as i16 {
+                    session.handshake(&req, &rest)
+                } else {
+                    session.authenticate(&req, &rest).await
+                };
+                match answered {
+                    Ok(answer) => Some(answer),
+                    Err(_) => {
+                        send(&response_tx, seq, permit, Reply::Close).await;
+                        return Ok(());
+                    }
+                }
+            } else if session.principal().is_none() && api_key != Some(ApiKey::ApiVersions as i16) {
+                send(&response_tx, seq, permit, Reply::Close).await;
+                return Ok(());
+            } else {
+                None
+            };
+            if let Some(Answer { frame, close }) = answer {
+                let reply = frame.map_or(Reply::Skip, Reply::Frame);
+                send(&response_tx, seq, permit, reply).await;
+                if close {
+                    return Ok(());
+                }
+                continue;
+            }
+        } else if api_key.is_some_and(sasl::is_sasl) {
+            let reply = match request_context(&body, None) {
+                Ok((req, _)) => Reply::Frame(sasl::illegal_state(&req)),
+                Err(_) => Reply::Close,
+            };
+            send(&response_tx, seq, permit, reply).await;
+            continue;
+        }
+
+        let principal = match &mut session {
+            Some(session) if session.principal().is_some() => match session.refresh().await {
+                Ok(principal) => Some(principal),
+                Err(error) => {
+                    debug!(%error, "closing kafka connection, credential no longer valid");
+                    send(&response_tx, seq, permit, Reply::Close).await;
+                    return Ok(());
+                }
+            },
+            _ => None,
+        };
+        if api_key == Some(PRODUCE_API_KEY) {
+            if produce_tx
+                .send((seq, body, principal, permit))
+                .await
+                .is_err()
+            {
                 return Ok(());
             }
             continue;
@@ -161,7 +240,7 @@ async fn run_reader(
         let tx = response_tx.clone();
         let broker = broker.clone();
         tokio::spawn(async move {
-            let reply = to_reply(dispatch(&broker, &body).await).await;
+            let reply = to_reply(dispatch(&broker, principal, &body).await).await;
             let _ = tx
                 .send((
                     seq,
@@ -175,13 +254,26 @@ async fn run_reader(
     }
 }
 
+async fn send(
+    response_tx: &mpsc::Sender<(u64, Slot)>,
+    seq: u64,
+    permit: OwnedSemaphorePermit,
+    reply: Reply,
+) {
+    let slot = Slot {
+        reply,
+        _permit: permit,
+    };
+    let _ = response_tx.send((seq, slot)).await;
+}
+
 async fn run_produce_worker(
-    mut produce_rx: mpsc::Receiver<(u64, Bytes, OwnedSemaphorePermit)>,
+    mut produce_rx: mpsc::Receiver<(u64, Bytes, Option<AuthPrincipal>, OwnedSemaphorePermit)>,
     response_tx: mpsc::Sender<(u64, Slot)>,
     broker: Arc<BrokerContext>,
 ) {
-    while let Some((seq, body, permit)) = produce_rx.recv().await {
-        match dispatch(&broker, &body).await {
+    while let Some((seq, body, principal, permit)) = produce_rx.recv().await {
+        match dispatch(&broker, principal, &body).await {
             Ok(HandlerOutcome::Deferred(deferred)) => {
                 let tx = response_tx.clone();
                 tokio::spawn(async move {

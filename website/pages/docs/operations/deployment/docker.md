@@ -14,13 +14,12 @@ Durability follows the storage. With `file://` the data is as durable as that di
 
 ## Cluster
 
-Each node needs a unique `--node-id`, the shared Postgres URL, the shared bucket, and a `--http-address` that clients and other nodes can reach. Binding beyond loopback requires either auth or an explicit `--insecure-allow-remote` opt-out. Here each node gets `--auth required` and the shared bootstrap token, which is idempotent across nodes and restarts (see [Authentication](/docs/operations/auth)). The Kafka listener has no auth, so exposing it takes the opt-out and its own advertised address.
+Each node needs a unique `--node-id`, the shared Postgres URL, the shared bucket, and a `--http-address` that clients and other nodes can reach. Binding beyond loopback requires either auth or an explicit `--insecure-allow-remote` opt-out. Here each node gets `--auth required` and the shared bootstrap token, which is idempotent across nodes and restarts (see [Authentication](/docs/operations/auth)). The Kafka listener authenticates with the same tokens over SASL and needs its own advertised address.
 
 ```bash
 pico serve --node-id 1 --listen 0.0.0.0:4437 \
     --http-address http://node1.internal:4437 \
     --kafka-listen 0.0.0.0:9092 --kafka-advertise node1.internal:9092 \
-    --insecure-allow-remote \
     --auth required --auth-bootstrap-token-file /run/secrets/pico-root \
     --meta-url postgres://user:pass@pg:5432/picomq \
     --storage=-2@s3://picomq?region=us-east-1

@@ -1,6 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::messages::{BrokerId, ResponseHeader, TopicName};
 use kafka_protocol::protocol::{Encodable, HeaderVersion, StrBytes};
+use picomq_auth::Operation;
 use picomq_metadata::MetadataState;
 use picomq_server::record::leader_epoch;
 use picomq_server::{
@@ -9,6 +10,7 @@ use picomq_server::{
 use uuid::Uuid;
 
 use crate::broker::BrokerContext;
+use crate::dispatch::RequestContext;
 
 #[derive(Debug, Clone)]
 pub struct ResponseFrame(pub Bytes);
@@ -33,6 +35,12 @@ pub const INVALID_REPLICATION_FACTOR: i16 = 38;
 pub const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
 pub const INVALID_CONFIG: i16 = 40;
 pub const INVALID_REQUEST: i16 = 42;
+pub const TOPIC_AUTHORIZATION_FAILED: i16 = 29;
+pub const GROUP_AUTHORIZATION_FAILED: i16 = 30;
+pub const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
+pub const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
+pub const ILLEGAL_SASL_STATE: i16 = 34;
+pub const SASL_AUTHENTICATION_FAILED: i16 = 58;
 pub const INVALID_TOPIC_EXCEPTION: i16 = 17;
 pub const POLICY_VIOLATION: i16 = 44;
 pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
@@ -173,7 +181,16 @@ pub fn parse_host_port(address: &str) -> (String, i32) {
     }
 }
 
-pub async fn resolve_topic(ctx: &BrokerContext, topic: &str) -> Result<Topic, i16> {
+pub async fn resolve_topic(
+    ctx: &BrokerContext,
+    req: &RequestContext,
+    op: Operation,
+    topic: &str,
+) -> Result<Topic, i16> {
+    if !req.allowed(ctx.authorizer.as_deref(), op, Some(topic)) {
+        return Err(TOPIC_AUTHORIZATION_FAILED);
+    }
+
     ctx.topics
         .get_kafka(topic)
         .await

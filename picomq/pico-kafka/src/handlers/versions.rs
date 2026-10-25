@@ -6,10 +6,11 @@ use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{UNSUPPORTED_VERSION, encode_response};
 use crate::handlers::{HandlerError, HandlerOutcome};
+use crate::sasl;
 use crate::versions::{self, SupportedApi};
 
 pub async fn handle(
-    _ctx: &BrokerContext,
+    ctx: &BrokerContext,
     req: &RequestContext,
     body: &[u8],
 ) -> Result<HandlerOutcome, HandlerError> {
@@ -35,7 +36,11 @@ pub async fn handle(
     ApiVersionsRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
 
-    let api_keys = versions::supported_apis().iter().map(advertised).collect();
+    let api_keys = versions::supported_apis()
+        .iter()
+        .filter(|api| ctx.authorizer.is_some() || !sasl::is_sasl(api.api_key))
+        .map(advertised)
+        .collect();
     let response = ApiVersionsResponse::default().with_api_keys(api_keys);
 
     Ok(HandlerOutcome::Response(encode_response(

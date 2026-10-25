@@ -13,13 +13,16 @@ use picomq_server::topic::is_kafka_name;
 use picomq_server::{CreateCommand, MAX_NEW_PARTITIONS, Retention};
 use uuid::Uuid;
 
+use picomq_auth::Operation;
+
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
     EXCESSIVE_PARTITIONS, Failure, INVALID_CONFIG, INVALID_PARTITIONS, INVALID_REPLICA_ASSIGNMENT,
     INVALID_REPLICATION_FACTOR, INVALID_REQUEST, INVALID_TOPIC_EXCEPTION, NO_ERROR,
-    POLICY_VIOLATION, TOPIC_ALREADY_EXISTS, UNKNOWN_TOPIC_OR_PARTITION, assigned_broker,
-    encode_response, resolve_topic, service_error_code, service_failure, topic_name, topic_uuid,
+    POLICY_VIOLATION, TOPIC_ALREADY_EXISTS, TOPIC_AUTHORIZATION_FAILED, UNKNOWN_TOPIC_OR_PARTITION,
+    assigned_broker, encode_response, resolve_topic, service_error_code, service_failure,
+    topic_name, topic_uuid,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
@@ -47,7 +50,7 @@ pub async fn create(
         let outcome = if oversized {
             Err((POLICY_VIOLATION, Some(EXCESSIVE_PARTITIONS.to_owned())))
         } else {
-            create_topic(ctx, topic, request.validate_only).await
+            create_topic(ctx, req, topic, request.validate_only).await
         };
 
         topics.push(match outcome {
@@ -69,6 +72,7 @@ pub async fn create(
 
 async fn create_topic(
     ctx: &BrokerContext,
+    req: &RequestContext,
     topic: &CreatableTopic,
     validate_only: bool,
 ) -> Result<CreatableTopicResult, Failure> {
@@ -78,6 +82,9 @@ async fn create_topic(
             INVALID_TOPIC_EXCEPTION,
             Some(format!("{name} is not a valid topic name")),
         ));
+    }
+    if !req.allowed(ctx.authorizer.as_deref(), Operation::Create, Some(&name)) {
+        return Err((TOPIC_AUTHORIZATION_FAILED, None));
     }
 
     let (partitions, owners) = partitions(ctx, topic)?;
@@ -227,7 +234,7 @@ pub async fn delete(
 
     let mut responses = Vec::with_capacity(names.len());
     for name in names {
-        let topic = match resolve_topic(ctx, &name).await {
+        let topic = match resolve_topic(ctx, req, Operation::Delete, &name).await {
             Ok(topic) => topic,
             Err(code) => {
                 responses.push(

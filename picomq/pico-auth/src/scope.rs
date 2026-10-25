@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use picomq_common::name::{canonical, strip_canonical_prefix};
+use picomq_common::name::{canonical, canonical_eq, canonical_starts_with, strip_canonical_prefix};
 
 /// Fine-grained operations. Hosts map HTTP methods onto these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -126,6 +126,7 @@ pub enum Audience {
     Pico,
     DurableStreams,
     Admin,
+    Kafka,
 }
 
 /// Match a single resource name (stream path or token id).
@@ -258,7 +259,13 @@ impl Scope {
                 tokens: ReadWrite::all(),
                 admin: ReadWrite::all(),
             },
-            audiences: [Audience::Pico, Audience::DurableStreams, Audience::Admin].into(),
+            audiences: [
+                Audience::Pico,
+                Audience::DurableStreams,
+                Audience::Admin,
+                Audience::Kafka,
+            ]
+            .into(),
             ..Self::default()
         }
     }
@@ -277,6 +284,7 @@ impl Scope {
         }
         let g = &self.groups;
         match op {
+            Operation::Head => self.allows_any_stream_operation(),
             o if o.is_stream_read() => g.stream.read,
             o if o.is_stream_write() => g.stream.write,
             o if o.is_tokens_read() => g.tokens.read,
@@ -285,6 +293,15 @@ impl Scope {
             o if o.is_admin_write() => g.admin.write,
             _ => false,
         }
+    }
+
+    fn allows_any_stream_operation(&self) -> bool {
+        self.groups.stream.read
+            || self.groups.stream.write
+            || self
+                .ops
+                .iter()
+                .any(|op| op.is_stream_read() || op.is_stream_write())
     }
 
     /// Effective operation set (groups expanded union explicit ops).
@@ -296,10 +313,9 @@ impl Scope {
     }
 
     pub fn allows_stream(&self, name: &str) -> bool {
-        let name = canonical(name);
         self.streams.matchers().iter().any(|matcher| match matcher {
-            ResourceMatcher::Exact(exact) => canonical(exact) == name,
-            ResourceMatcher::Prefix(prefix) => name.starts_with(&canonical(prefix)),
+            ResourceMatcher::Exact(exact) => canonical_eq(exact, name),
+            ResourceMatcher::Prefix(prefix) => canonical_starts_with(name, prefix),
         })
     }
 
@@ -389,6 +405,31 @@ mod tests {
         assert!(!scope.allows_operation(Operation::Append));
         scope.ops.insert(Operation::Append);
         assert!(scope.allows_operation(Operation::Append));
+    }
+
+    #[test]
+    fn any_stream_right_grants_head() {
+        let mut scope = Scope::default();
+        scope.groups.stream = ReadWrite {
+            read: false,
+            write: true,
+        };
+        assert!(scope.allows_operation(Operation::Head));
+        assert!(!scope.allows_operation(Operation::Read));
+        assert!(!scope.allows_operation(Operation::List));
+
+        let append_only = Scope {
+            ops: [Operation::Append].into(),
+            ..Scope::default()
+        };
+        assert!(append_only.allows_operation(Operation::Head));
+        assert!(!append_only.allows_operation(Operation::Read));
+
+        let tokens_only = Scope {
+            ops: [Operation::ListTokens].into(),
+            ..Scope::default()
+        };
+        assert!(!tokens_only.allows_operation(Operation::Head));
     }
 
     #[test]

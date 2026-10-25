@@ -34,8 +34,7 @@ public final class AgentsJob {
         String namespace = cfg.getOrDefault("NAMESPACE", "agents");
         String token = token(cfg, region);
 
-        Properties properties = new Properties();
-        properties.setProperty(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG, bootstrap);
+        Properties properties = Sasl.properties(bootstrap, token);
         properties.setProperty("group.id", "picomq-flink-agents");
         properties.setProperty("allow.auto.create.topics", "false");
         properties.setProperty("stream-metadata-discovery-interval-ms", cfg.getOrDefault("DISCOVERY_INTERVAL_MS", "10000"));

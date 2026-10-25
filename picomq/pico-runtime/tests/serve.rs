@@ -213,20 +213,25 @@ async fn auth_off_refuses_non_loopback_binds() {
         picomq_runtime::start(refused_admin).await,
         Err(RuntimeError::InsecureBind { .. })
     ));
-}
 
-/// The Kafka listener has no authentication, so a non-loopback bind needs
-/// the explicit opt-out even with auth required.
-#[tokio::test]
-async fn kafka_non_loopback_bind_refused_regardless_of_auth() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut refused = config(dir.path(), HttpProtocol::Pico, 1);
-    refused.auth_mode = AuthMode::Required;
-    refused.kafka = KafkaConfig::new(SocketAddr::from(([0, 0, 0, 0], 0)));
+    let mut refused_kafka = config(dir.path(), HttpProtocol::Pico, 1);
+    refused_kafka.kafka = KafkaConfig::new(SocketAddr::from(([0, 0, 0, 0], 0)));
     assert!(matches!(
-        picomq_runtime::start(refused).await,
+        picomq_runtime::start(refused_kafka).await,
         Err(RuntimeError::InsecureBind { .. })
     ));
+}
+
+#[tokio::test]
+async fn auth_required_permits_non_loopback_binds() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut allowed = config(dir.path(), HttpProtocol::Pico, 1);
+    allowed.auth_mode = AuthMode::Required;
+    allowed.addr = SocketAddr::from(([0, 0, 0, 0], 0));
+    allowed.admin_addr = Some(SocketAddr::from(([0, 0, 0, 0], 0)));
+    allowed.kafka = KafkaConfig::new(SocketAddr::from(([0, 0, 0, 0], 0)));
+    let server = picomq_runtime::start(allowed).await.unwrap();
+    server.shutdown().await;
 }
 
 #[tokio::test]

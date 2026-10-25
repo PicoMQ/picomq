@@ -59,6 +59,8 @@ Every frontend maps the same internal error kinds onto its own vocabulary. Pico 
 
 | Kind | Pico | Durable Streams | Kafka |
 | --- | --- | --- | --- |
+| Unauthenticated, no valid credential | `401 unauthenticated` | `401` | `SASL_AUTHENTICATION_FAILED`, then the connection closes |
+| Permission denied, the scope is insufficient | `403 permission_denied` | `403` | `TOPIC_AUTHORIZATION_FAILED`, `GROUP_AUTHORIZATION_FAILED`, `CLUSTER_AUTHORIZATION_FAILED` |
 | Not found | `404 not_found` | `404` | `UNKNOWN_TOPIC_OR_PARTITION` |
 | Bad request, corrupt batch | `400 bad_request` | `400` | `INVALID_REQUEST`, `CORRUPT_MESSAGE` |
 | Schema violation | `400 schema_violation` | `400` | `INVALID_RECORD` |

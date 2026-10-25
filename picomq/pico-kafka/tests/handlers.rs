@@ -16,6 +16,10 @@ use kafka_protocol::records::{
     Compression, NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, NO_SEQUENCE, Record,
     RecordBatchEncoder, RecordEncodeOptions, TimestampType,
 };
+use picomq_auth::{
+    AccessToken, Audience, AuthPrincipal, OperationGroups, ReadWrite, ResourceSet, Scope,
+    TokenRecord, TokenStore,
+};
 use picomq_kafka::{BrokerContext, HandlerOutcome, KafkaListener, ListenerConfig, dispatch};
 use picomq_metadata::{CommandSink, LocalSink};
 use picomq_server::wal::ObjectWal;
@@ -36,6 +40,80 @@ async fn test_broker() -> BrokerContext {
 }
 
 async fn broker_with(registry: Option<Arc<dyn picomq_schema::SchemaStore>>) -> BrokerContext {
+    BrokerContext::new(&start_node(registry).await, None)
+}
+
+async fn secured_broker() -> (BrokerContext, AccessToken, PicoNode) {
+    let node = start_node(None).await;
+    let token = seed(&node, "ci/kafka", Scope::root()).await;
+    (
+        BrokerContext::new(&node, Some(node.authorizer())),
+        token,
+        node,
+    )
+}
+
+fn principal(id: &str, scope: Scope) -> AuthPrincipal {
+    let (_, verifier) = AccessToken::issue(id).unwrap();
+    Arc::new(TokenRecord {
+        id: id.to_owned(),
+        verifier,
+        scope,
+        created_at_ms: 1,
+        issued_by: String::new(),
+    })
+}
+
+fn reader(prefix: &str) -> AuthPrincipal {
+    principal(
+        "reader",
+        Scope {
+            streams: ResourceSet::prefix(prefix),
+            groups: OperationGroups {
+                stream: ReadWrite::read_only(),
+                ..OperationGroups::default()
+            },
+            audiences: [Audience::Kafka].into(),
+            ..Scope::default()
+        },
+    )
+}
+
+fn writer(prefix: &str) -> AuthPrincipal {
+    principal(
+        "writer",
+        Scope {
+            streams: ResourceSet::prefix(prefix),
+            groups: OperationGroups {
+                stream: ReadWrite {
+                    read: false,
+                    write: true,
+                },
+                ..OperationGroups::default()
+            },
+            audiences: [Audience::Kafka].into(),
+            ..Scope::default()
+        },
+    )
+}
+
+async fn seed(node: &PicoNode, id: &str, scope: Scope) -> AccessToken {
+    let (token, verifier) = AccessToken::issue(id).unwrap();
+    node.tokens()
+        .store()
+        .put_if_absent(TokenRecord {
+            id: token.id.clone(),
+            verifier,
+            scope,
+            created_at_ms: 1,
+            issued_by: String::new(),
+        })
+        .await
+        .unwrap();
+    token
+}
+
+async fn start_node(registry: Option<Arc<dyn picomq_schema::SchemaStore>>) -> PicoNode {
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
@@ -51,10 +129,9 @@ async fn broker_with(registry: Option<Arc<dyn picomq_schema::SchemaStore>>) -> B
         ..Default::default()
     };
     let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
-    let node = PicoNode::start(config, sink, views, object_storage, Arc::new(wal), registry)
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), registry)
         .await
-        .unwrap();
-    BrokerContext::new(&node)
+        .unwrap()
 }
 
 fn encode_request<T: Encodable>(
@@ -118,7 +195,7 @@ async fn api_versions_handler_lists_supported_apis() {
             .with_client_software_name(StrBytes::from_static_str("picomq"))
             .with_client_software_version(StrBytes::from_static_str("0.1")),
     );
-    let outcome = dispatch(&broker, &req).await.unwrap();
+    let outcome = dispatch(&broker, None, &req).await.unwrap();
     let mut buf = match resolve(outcome).await {
         HandlerOutcome::Response(frame) => frame.0,
         _ => panic!("expected response"),
@@ -152,7 +229,7 @@ async fn advertised_produce_versions_below_three_are_still_refused() {
         .with_correlation_id(1);
     encode_request_header_into_buffer(&mut req, &header).unwrap();
 
-    assert!(dispatch(&broker, &req).await.is_err());
+    assert!(dispatch(&broker, None, &req).await.is_err());
 }
 
 #[tokio::test]
@@ -185,7 +262,7 @@ async fn resolve(outcome: HandlerOutcome) -> HandlerOutcome {
 }
 
 async fn response_body(broker: &BrokerContext, req: &[u8]) -> Bytes {
-    match resolve(dispatch(broker, req).await.unwrap()).await {
+    match resolve(dispatch(broker, None, req).await.unwrap()).await {
         HandlerOutcome::Response(frame) => frame.0,
         _ => panic!("expected response"),
     }
@@ -197,7 +274,23 @@ async fn call<Request: Encodable, Response: Decodable + HeaderVersion>(
     version: i16,
     request: &Request,
 ) -> Response {
-    let mut buf = response_body(broker, &encode_request(api_key, version, 1, request)).await;
+    call_as(broker, None, api_key, version, request).await
+}
+
+async fn call_as<Request: Encodable, Response: Decodable + HeaderVersion>(
+    broker: &BrokerContext,
+    principal: Option<AuthPrincipal>,
+    api_key: ApiKey,
+    version: i16,
+    request: &Request,
+) -> Response {
+    let frame = encode_request(api_key, version, 1, request);
+    let outcome = resolve(dispatch(broker, principal, &frame).await.unwrap()).await;
+    let HandlerOutcome::Response(frame) = outcome else {
+        panic!("expected response");
+    };
+
+    let mut buf = frame.0;
     ResponseHeader::decode(&mut buf, Response::header_version(version)).unwrap();
     Response::decode(&mut buf, version).unwrap()
 }
@@ -477,19 +570,20 @@ async fn list_offsets_resolves_timestamps_like_kafka() {
 }
 
 async fn serve(broker: Arc<BrokerContext>) -> (SocketAddr, JoinHandle<()>) {
+    serve_with(broker, ListenerConfig::default()).await
+}
+
+async fn serve_with(
+    broker: Arc<BrokerContext>,
+    config: ListenerConfig,
+) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        KafkaListener::new(
-            ListenerConfig {
-                addr,
-                ..Default::default()
-            },
-            broker,
-        )
-        .serve(listener)
-        .await
-        .unwrap();
+        KafkaListener::new(ListenerConfig { addr, ..config }, broker)
+            .serve(listener)
+            .await
+            .unwrap();
     });
     (addr, server)
 }
@@ -537,6 +631,933 @@ async fn listener_serves_api_versions() {
     server.abort();
 }
 
+fn handshake_request(version: i16, mechanism: &str, correlation_id: i32) -> Vec<u8> {
+    use kafka_protocol::messages::SaslHandshakeRequest;
+
+    encode_request(
+        ApiKey::SaslHandshake,
+        version,
+        correlation_id,
+        &SaslHandshakeRequest::default().with_mechanism(StrBytes::from(mechanism.to_owned())),
+    )
+}
+
+fn plain_token(username: &str, password: &str) -> Vec<u8> {
+    format!("\0{username}\0{password}").into_bytes()
+}
+
+fn authenticate_request(username: &str, password: &str, correlation_id: i32) -> Vec<u8> {
+    use kafka_protocol::messages::SaslAuthenticateRequest;
+
+    encode_request(
+        ApiKey::SaslAuthenticate,
+        2,
+        correlation_id,
+        &SaslAuthenticateRequest::default()
+            .with_auth_bytes(Bytes::from(plain_token(username, password))),
+    )
+}
+
+fn decode_handshake(
+    mut frame: Bytes,
+    version: i16,
+) -> kafka_protocol::messages::SaslHandshakeResponse {
+    use kafka_protocol::messages::SaslHandshakeResponse;
+
+    ResponseHeader::decode(&mut frame, SaslHandshakeResponse::header_version(version)).unwrap();
+    SaslHandshakeResponse::decode(&mut frame, version).unwrap()
+}
+
+fn decode_authenticate(mut frame: Bytes) -> kafka_protocol::messages::SaslAuthenticateResponse {
+    use kafka_protocol::messages::SaslAuthenticateResponse;
+
+    ResponseHeader::decode(&mut frame, SaslAuthenticateResponse::header_version(2)).unwrap();
+    SaslAuthenticateResponse::decode(&mut frame, 2).unwrap()
+}
+
+fn metadata_request(correlation_id: i32) -> Vec<u8> {
+    encode_request(
+        ApiKey::Metadata,
+        12,
+        correlation_id,
+        &MetadataRequest::default().with_topics(Some(vec![])),
+    )
+}
+
+async fn closed(client: &mut TcpStream) -> bool {
+    let mut probe = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(5), client.read(&mut probe))
+        .await
+        .expect("the connection must close")
+        .map(|read| read == 0)
+        .unwrap_or(true)
+}
+
+#[tokio::test]
+async fn sasl_plain_authenticates_a_token() {
+    let (broker, token, _) = secured_broker().await;
+    let (addr, server) = serve(Arc::new(broker)).await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    let handshake = decode_handshake(read_response(&mut client).await, 1);
+    assert_eq!(handshake.error_code, 0);
+    assert_eq!(
+        handshake.mechanisms,
+        vec![StrBytes::from_static_str("PLAIN")]
+    );
+
+    client
+        .write_all(&framed(&authenticate_request(
+            &token.id,
+            &token.render(),
+            2,
+        )))
+        .await
+        .unwrap();
+    let authenticated = decode_authenticate(read_response(&mut client).await);
+    assert_eq!(authenticated.error_code, 0);
+
+    client
+        .write_all(&framed(&metadata_request(3)))
+        .await
+        .unwrap();
+    assert_eq!(correlation_id(&read_response(&mut client).await), 3);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn sasl_refuses_bad_credentials_and_unknown_mechanisms() {
+    let (broker, token, _) = secured_broker().await;
+    let (addr, server) = serve(Arc::new(broker)).await;
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    read_response(&mut client).await;
+    client
+        .write_all(&framed(&authenticate_request(
+            &token.id,
+            "not-the-token",
+            2,
+        )))
+        .await
+        .unwrap();
+    let refused = decode_authenticate(read_response(&mut client).await);
+    assert_eq!(refused.error_code, 58);
+    assert!(closed(&mut client).await);
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    read_response(&mut client).await;
+    client
+        .write_all(&framed(&authenticate_request(
+            "someone/else",
+            &token.render(),
+            2,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(
+        decode_authenticate(read_response(&mut client).await).error_code,
+        58
+    );
+    assert!(closed(&mut client).await);
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&framed(&handshake_request(1, "SCRAM-SHA-256", 1)))
+        .await
+        .unwrap();
+    let unsupported = decode_handshake(read_response(&mut client).await, 1);
+    assert_eq!(unsupported.error_code, 33);
+    assert_eq!(
+        unsupported.mechanisms,
+        vec![StrBytes::from_static_str("PLAIN")]
+    );
+    assert!(closed(&mut client).await);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_request_before_sasl_closes_the_connection() {
+    let (broker, _, _) = secured_broker().await;
+    let (addr, server) = serve(Arc::new(broker)).await;
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&framed(&metadata_request(1)))
+        .await
+        .unwrap();
+    assert!(closed(&mut client).await);
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let versions = encode_request(ApiKey::ApiVersions, 3, 2, &ApiVersionsRequest::default());
+    client.write_all(&framed(&versions)).await.unwrap();
+    assert_eq!(correlation_id(&read_response(&mut client).await), 2);
+    client
+        .write_all(&framed(&metadata_request(3)))
+        .await
+        .unwrap();
+    assert!(closed(&mut client).await);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_legacy_handshake_takes_the_token_as_a_bare_frame() {
+    let (broker, token, _) = secured_broker().await;
+    let (addr, server) = serve(Arc::new(broker)).await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    client
+        .write_all(&framed(&handshake_request(0, "PLAIN", 1)))
+        .await
+        .unwrap();
+    assert_eq!(
+        decode_handshake(read_response(&mut client).await, 0).error_code,
+        0
+    );
+
+    client
+        .write_all(&framed(&plain_token(&token.id, &token.render())))
+        .await
+        .unwrap();
+    assert!(read_response(&mut client).await.is_empty());
+
+    client
+        .write_all(&framed(&metadata_request(2)))
+        .await
+        .unwrap();
+    assert_eq!(correlation_id(&read_response(&mut client).await), 2);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn sasl_is_advertised_only_when_auth_is_on() {
+    use kafka_protocol::messages::ApiVersionsResponse;
+
+    let (secured, _, _) = secured_broker().await;
+    let advertised: ApiVersionsResponse = call(
+        &secured,
+        ApiKey::ApiVersions,
+        3,
+        &ApiVersionsRequest::default(),
+    )
+    .await;
+    let keys: Vec<i16> = advertised.api_keys.iter().map(|api| api.api_key).collect();
+    assert!(keys.contains(&(ApiKey::SaslHandshake as i16)));
+    assert!(keys.contains(&(ApiKey::SaslAuthenticate as i16)));
+
+    let open = test_broker().await;
+    let advertised: ApiVersionsResponse = call(
+        &open,
+        ApiKey::ApiVersions,
+        3,
+        &ApiVersionsRequest::default(),
+    )
+    .await;
+    let keys: Vec<i16> = advertised.api_keys.iter().map(|api| api.api_key).collect();
+    assert!(!keys.contains(&(ApiKey::SaslHandshake as i16)));
+
+    let (addr, server) = serve(Arc::new(open)).await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    assert_eq!(
+        decode_handshake(read_response(&mut client).await, 1).error_code,
+        34
+    );
+    client
+        .write_all(&framed(&metadata_request(2)))
+        .await
+        .unwrap();
+    assert_eq!(correlation_id(&read_response(&mut client).await), 2);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn sasl_requests_out_of_order_follow_the_reference() {
+    let (broker, token, _) = secured_broker().await;
+    let (addr, server) = serve(Arc::new(broker)).await;
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&framed(&authenticate_request(
+            &token.id,
+            &token.render(),
+            2,
+        )))
+        .await
+        .unwrap();
+    assert!(closed(&mut client).await);
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    read_response(&mut client).await;
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 2)))
+        .await
+        .unwrap();
+    let repeated = decode_handshake(read_response(&mut client).await, 1);
+    assert_eq!(repeated.error_code, 34);
+    assert!(repeated.mechanisms.is_empty());
+    assert!(closed(&mut client).await);
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    read_response(&mut client).await;
+    client
+        .write_all(&framed(&authenticate_request(
+            &token.id,
+            &token.render(),
+            2,
+        )))
+        .await
+        .unwrap();
+    read_response(&mut client).await;
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 3)))
+        .await
+        .unwrap();
+    let late = decode_handshake(read_response(&mut client).await, 1);
+    assert_eq!(late.error_code, 34);
+    assert!(late.mechanisms.is_empty());
+    client
+        .write_all(&framed(&authenticate_request(
+            &token.id,
+            &token.render(),
+            2,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(
+        decode_authenticate(read_response(&mut client).await).error_code,
+        34
+    );
+    client
+        .write_all(&framed(&metadata_request(4)))
+        .await
+        .unwrap();
+    assert_eq!(correlation_id(&read_response(&mut client).await), 4);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn large_frames_wait_for_authentication() {
+    let (broker, token, _) = secured_broker().await;
+    secured_topic(&broker, "/bulk").await;
+    let (addr, server) = serve(Arc::new(broker)).await;
+    let big_produce = encode_request(
+        ApiKey::Produce,
+        10,
+        7,
+        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
+            TopicProduceData::default()
+                .with_name(tn("bulk"))
+                .with_partition_data(vec![
+                    PartitionProduceData::default()
+                        .with_index(0)
+                        .with_records(Some(kafka_batch(&vec![7u8; 1 << 20]))),
+                ]),
+        ]),
+    );
+    assert!(big_produce.len() > ListenerConfig::default().max_frame_before_auth);
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&(big_produce.len() as i32).to_be_bytes())
+        .await
+        .unwrap();
+    assert!(closed(&mut client).await);
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    read_response(&mut client).await;
+    client
+        .write_all(&framed(&authenticate_request(
+            &token.id,
+            &token.render(),
+            2,
+        )))
+        .await
+        .unwrap();
+    read_response(&mut client).await;
+    client.write_all(&framed(&big_produce)).await.unwrap();
+    assert_eq!(correlation_id(&read_response(&mut client).await), 7);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn an_idle_connection_must_authenticate_in_time() {
+    let (broker, token, _) = secured_broker().await;
+    let config = ListenerConfig {
+        idle_before_auth: Duration::from_millis(200),
+        ..ListenerConfig::default()
+    };
+    let (addr, server) = serve_with(Arc::new(broker), config).await;
+
+    let mut silent = TcpStream::connect(addr).await.unwrap();
+    assert!(closed(&mut silent).await);
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    read_response(&mut client).await;
+    client
+        .write_all(&framed(&authenticate_request(
+            &token.id,
+            &token.render(),
+            2,
+        )))
+        .await
+        .unwrap();
+    read_response(&mut client).await;
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    client
+        .write_all(&framed(&metadata_request(3)))
+        .await
+        .unwrap();
+    assert_eq!(correlation_id(&read_response(&mut client).await), 3);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn group_membership_needs_a_reader() {
+    use kafka_protocol::messages::{
+        FindCoordinatorRequest, FindCoordinatorResponse, GroupId, HeartbeatRequest,
+        HeartbeatResponse, LeaveGroupRequest, LeaveGroupResponse, SyncGroupRequest,
+        SyncGroupResponse,
+    };
+
+    let (broker, _, _) = secured_broker().await;
+    let group = GroupId(StrBytes::from_static_str("members"));
+
+    let found: FindCoordinatorResponse = call_as(
+        &broker,
+        Some(writer("/")),
+        ApiKey::FindCoordinator,
+        3,
+        &FindCoordinatorRequest::default()
+            .with_key(StrBytes::from_static_str("members"))
+            .with_key_type(0),
+    )
+    .await;
+    assert_eq!(found.error_code, 30);
+    let found: FindCoordinatorResponse = call_as(
+        &broker,
+        Some(reader("/")),
+        ApiKey::FindCoordinator,
+        3,
+        &FindCoordinatorRequest::default()
+            .with_key(StrBytes::from_static_str("members"))
+            .with_key_type(0),
+    )
+    .await;
+    assert_eq!(found.error_code, 0);
+
+    let synced: SyncGroupResponse = call_as(
+        &broker,
+        Some(writer("/")),
+        ApiKey::SyncGroup,
+        3,
+        &SyncGroupRequest::default()
+            .with_group_id(group.clone())
+            .with_member_id(StrBytes::from_static_str("m1")),
+    )
+    .await;
+    assert_eq!(synced.error_code, 30);
+
+    let beat: HeartbeatResponse = call_as(
+        &broker,
+        Some(writer("/")),
+        ApiKey::Heartbeat,
+        4,
+        &HeartbeatRequest::default()
+            .with_group_id(group.clone())
+            .with_member_id(StrBytes::from_static_str("m1")),
+    )
+    .await;
+    assert_eq!(beat.error_code, 30);
+
+    let left: LeaveGroupResponse = call_as(
+        &broker,
+        Some(writer("/")),
+        ApiKey::LeaveGroup,
+        2,
+        &LeaveGroupRequest::default()
+            .with_group_id(group)
+            .with_member_id(StrBytes::from_static_str("m1")),
+    )
+    .await;
+    assert_eq!(left.error_code, 30);
+}
+
+#[tokio::test]
+async fn an_auto_prefix_token_is_refused_over_kafka() {
+    use picomq_auth::{Audience, OperationGroups, ReadWrite, ResourceSet};
+
+    let node = start_node(None).await;
+    let scope = Scope {
+        streams: ResourceSet::prefix("/acct/"),
+        groups: OperationGroups {
+            stream: ReadWrite::all(),
+            ..OperationGroups::default()
+        },
+        audiences: [Audience::Kafka].into(),
+        auto_prefix_streams: true,
+        ..Scope::default()
+    };
+    let token = seed(&node, "acct/kafka", scope).await;
+    let broker = BrokerContext::new(&node, Some(node.authorizer()));
+    let (addr, server) = serve(Arc::new(broker)).await;
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    read_response(&mut client).await;
+    client
+        .write_all(&framed(&authenticate_request(
+            &token.id,
+            &token.render(),
+            2,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(
+        decode_authenticate(read_response(&mut client).await).error_code,
+        58
+    );
+    assert!(closed(&mut client).await);
+
+    server.abort();
+}
+
+async fn secured_topic(broker: &BrokerContext, name: &str) {
+    broker
+        .topics
+        .create(picomq_server::CreateCommand::new(
+            name,
+            "application/octet-stream",
+        ))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn producing_needs_append_and_reading_needs_read() {
+    use kafka_protocol::messages::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
+    use kafka_protocol::messages::{ListOffsetsRequest, ListOffsetsResponse, ProduceResponse};
+
+    let (broker, _, _) = secured_broker().await;
+    secured_topic(&broker, "/orders").await;
+    let produce = ProduceRequest::default().with_acks(1).with_topic_data(vec![
+        TopicProduceData::default()
+            .with_name(tn("orders"))
+            .with_partition_data(vec![
+                PartitionProduceData::default()
+                    .with_index(0)
+                    .with_records(Some(kafka_batch(b"value"))),
+            ]),
+    ]);
+
+    let denied: ProduceResponse =
+        call_as(&broker, Some(reader("/")), ApiKey::Produce, 10, &produce).await;
+    assert_eq!(denied.responses[0].partition_responses[0].error_code, 29);
+    let written: ProduceResponse =
+        call_as(&broker, Some(writer("/")), ApiKey::Produce, 10, &produce).await;
+    assert_eq!(written.responses[0].partition_responses[0].error_code, 0);
+
+    let offsets = ListOffsetsRequest::default().with_topics(vec![
+        ListOffsetsTopic::default()
+            .with_name(tn("orders"))
+            .with_partitions(vec![
+                ListOffsetsPartition::default()
+                    .with_partition_index(0)
+                    .with_timestamp(-1),
+            ]),
+    ]);
+    for principal in [writer("/"), reader("/")] {
+        let listed: ListOffsetsResponse =
+            call_as(&broker, Some(principal), ApiKey::ListOffsets, 7, &offsets).await;
+        assert_eq!(listed.topics[0].partitions[0].error_code, 0);
+        assert_eq!(listed.topics[0].partitions[0].offset, 1);
+    }
+    let denied: ListOffsetsResponse = call_as(
+        &broker,
+        Some(reader("/elsewhere")),
+        ApiKey::ListOffsets,
+        7,
+        &offsets,
+    )
+    .await;
+    assert_eq!(denied.topics[0].partitions[0].error_code, 29);
+
+    let fetch = FetchRequest::default()
+        .with_max_wait_ms(0)
+        .with_min_bytes(1)
+        .with_topics(vec![
+            FetchTopic::default()
+                .with_topic(tn("orders"))
+                .with_partitions(vec![
+                    FetchPartition::default()
+                        .with_partition(0)
+                        .with_fetch_offset(0)
+                        .with_partition_max_bytes(1 << 20),
+                ]),
+        ]);
+    let denied: kafka_protocol::messages::FetchResponse =
+        call_as(&broker, Some(writer("/")), ApiKey::Fetch, 12, &fetch).await;
+    assert_eq!(denied.responses[0].partitions[0].error_code, 29);
+    let read: kafka_protocol::messages::FetchResponse =
+        call_as(&broker, Some(reader("/")), ApiKey::Fetch, 12, &fetch).await;
+    assert_eq!(read.responses[0].partitions[0].error_code, 0);
+}
+
+#[tokio::test]
+async fn topic_administration_follows_the_scope() {
+    use kafka_protocol::messages::create_topics_request::CreatableTopic;
+    use kafka_protocol::messages::delete_records_request::{
+        DeleteRecordsPartition, DeleteRecordsTopic,
+    };
+    use kafka_protocol::messages::describe_configs_request::DescribeConfigsResource;
+    use kafka_protocol::messages::{
+        CreateTopicsRequest, CreateTopicsResponse, DeleteRecordsRequest, DeleteRecordsResponse,
+        DeleteTopicsRequest, DeleteTopicsResponse, DescribeConfigsRequest, DescribeConfigsResponse,
+        InitProducerIdRequest, InitProducerIdResponse,
+    };
+
+    let (broker, _, _) = secured_broker().await;
+    let create = CreateTopicsRequest::default()
+        .with_timeout_ms(5_000)
+        .with_topics(vec![
+            CreatableTopic::default()
+                .with_name(tn("ledger"))
+                .with_num_partitions(1)
+                .with_replication_factor(1),
+        ]);
+    let denied: CreateTopicsResponse =
+        call_as(&broker, Some(reader("/")), ApiKey::CreateTopics, 5, &create).await;
+    assert_eq!(denied.topics[0].error_code, 29);
+    let created: CreateTopicsResponse =
+        call_as(&broker, Some(writer("/")), ApiKey::CreateTopics, 5, &create).await;
+    assert_eq!(created.topics[0].error_code, 0);
+
+    let describe = DescribeConfigsRequest::default().with_resources(vec![
+        DescribeConfigsResource::default()
+            .with_resource_type(2)
+            .with_resource_name(StrBytes::from_static_str("ledger")),
+    ]);
+    for principal in [writer("/"), reader("/")] {
+        let described: DescribeConfigsResponse = call_as(
+            &broker,
+            Some(principal),
+            ApiKey::DescribeConfigs,
+            4,
+            &describe,
+        )
+        .await;
+        assert_eq!(described.results[0].error_code, 0);
+    }
+    let denied: DescribeConfigsResponse = call_as(
+        &broker,
+        Some(reader("/elsewhere")),
+        ApiKey::DescribeConfigs,
+        4,
+        &describe,
+    )
+    .await;
+    assert_eq!(denied.results[0].error_code, 29);
+
+    let trim = DeleteRecordsRequest::default()
+        .with_timeout_ms(200)
+        .with_topics(vec![
+            DeleteRecordsTopic::default()
+                .with_name(tn("ledger"))
+                .with_partitions(vec![
+                    DeleteRecordsPartition::default()
+                        .with_partition_index(0)
+                        .with_offset(0),
+                ]),
+        ]);
+    let denied: DeleteRecordsResponse =
+        call_as(&broker, Some(reader("/")), ApiKey::DeleteRecords, 2, &trim).await;
+    assert_eq!(denied.topics[0].partitions[0].error_code, 29);
+
+    let init = InitProducerIdRequest::default()
+        .with_transactional_id(None)
+        .with_transaction_timeout_ms(1_000);
+    let denied: InitProducerIdResponse =
+        call_as(&broker, Some(reader("/")), ApiKey::InitProducerId, 4, &init).await;
+    assert_eq!(denied.error_code, 31);
+    let allowed: InitProducerIdResponse =
+        call_as(&broker, Some(writer("/")), ApiKey::InitProducerId, 4, &init).await;
+    assert_eq!(allowed.error_code, 0);
+
+    let delete = DeleteTopicsRequest::default()
+        .with_timeout_ms(5_000)
+        .with_topic_names(vec![tn("ledger")]);
+    let denied: DeleteTopicsResponse =
+        call_as(&broker, Some(reader("/")), ApiKey::DeleteTopics, 5, &delete).await;
+    assert_eq!(denied.responses[0].error_code, 29);
+    let deleted: DeleteTopicsResponse =
+        call_as(&broker, Some(writer("/")), ApiKey::DeleteTopics, 5, &delete).await;
+    assert_eq!(deleted.responses[0].error_code, 0);
+}
+
+#[tokio::test]
+async fn metadata_lists_only_readable_topics() {
+    use kafka_protocol::messages::MetadataResponse;
+
+    let (broker, _, _) = secured_broker().await;
+    secured_topic(&broker, "/a/x").await;
+    secured_topic(&broker, "/b/x").await;
+    let everything = MetadataRequest::default().with_topics(None);
+    let listed: MetadataResponse = call_as(
+        &broker,
+        Some(reader("/a/")),
+        ApiKey::Metadata,
+        12,
+        &everything,
+    )
+    .await;
+    let names: Vec<String> = listed
+        .topics
+        .iter()
+        .map(|topic| topic.name.as_ref().unwrap().to_string())
+        .collect();
+    assert_eq!(names, vec!["a.x"]);
+
+    let named = |name: &str, auto_create: bool| {
+        MetadataRequest::default()
+            .with_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(tn(name))),
+            ]))
+            .with_allow_auto_topic_creation(auto_create)
+    };
+    let denied: MetadataResponse = call_as(
+        &broker,
+        Some(reader("/a/")),
+        ApiKey::Metadata,
+        12,
+        &named("b.x", false),
+    )
+    .await;
+    assert_eq!(denied.topics[0].error_code, 29);
+    let denied: MetadataResponse = call_as(
+        &broker,
+        Some(reader("/a/")),
+        ApiKey::Metadata,
+        12,
+        &named("a.new", true),
+    )
+    .await;
+    assert_eq!(denied.topics[0].error_code, 29);
+    assert!(broker.topics.get("/a/new").await.unwrap().is_none());
+    let created: MetadataResponse = call_as(
+        &broker,
+        Some(principal("root", Scope::root())),
+        ApiKey::Metadata,
+        12,
+        &named("a.new", true),
+    )
+    .await;
+    assert_eq!(created.topics[0].error_code, 0);
+}
+
+#[tokio::test]
+async fn groups_follow_the_readable_topics() {
+    use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
+    use kafka_protocol::messages::offset_commit_request::{
+        OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+    };
+    use kafka_protocol::messages::{
+        ConsumerProtocolSubscription, DeleteGroupsRequest, DeleteGroupsResponse,
+        DescribeGroupsRequest, DescribeGroupsResponse, GroupId, JoinGroupRequest,
+        JoinGroupResponse, ListGroupsRequest, ListGroupsResponse, OffsetCommitRequest,
+        OffsetCommitResponse,
+    };
+    use kafka_protocol::protocol::Encodable;
+
+    let (broker, _, _) = secured_broker().await;
+    secured_topic(&broker, "/a/x").await;
+    secured_topic(&broker, "/b/x").await;
+    let subscription = |topic: &str| {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&1_i16.to_be_bytes());
+        ConsumerProtocolSubscription::default()
+            .with_topics(vec![StrBytes::from(topic.to_owned())])
+            .encode(&mut buf, 1)
+            .unwrap();
+        buf.freeze()
+    };
+    let join = |topic: &str| {
+        JoinGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("readers")))
+            .with_session_timeout_ms(10_000)
+            .with_rebalance_timeout_ms(10_000)
+            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocols(vec![
+                JoinGroupRequestProtocol::default()
+                    .with_name(StrBytes::from_static_str("range"))
+                    .with_metadata(subscription(topic)),
+            ])
+    };
+    let denied: JoinGroupResponse = call_as(
+        &broker,
+        Some(reader("/a/")),
+        ApiKey::JoinGroup,
+        5,
+        &join("b.x"),
+    )
+    .await;
+    assert_eq!(denied.error_code, 30);
+    let required: JoinGroupResponse = call_as(
+        &broker,
+        Some(reader("/a/")),
+        ApiKey::JoinGroup,
+        5,
+        &join("a.x"),
+    )
+    .await;
+    assert_eq!(required.error_code, 79, "the join itself proceeds");
+
+    let commit = OffsetCommitRequest::default()
+        .with_group_id(GroupId(StrBytes::from_static_str("readers")))
+        .with_topics(vec![
+            OffsetCommitRequestTopic::default()
+                .with_name(tn("b.x"))
+                .with_partitions(vec![
+                    OffsetCommitRequestPartition::default()
+                        .with_partition_index(0)
+                        .with_committed_offset(1),
+                ]),
+        ]);
+    let denied: OffsetCommitResponse = call_as(
+        &broker,
+        Some(reader("/a/")),
+        ApiKey::OffsetCommit,
+        8,
+        &commit,
+    )
+    .await;
+    assert_eq!(denied.topics[0].partitions[0].error_code, 29);
+
+    let list = ListGroupsRequest::default();
+    let hidden: ListGroupsResponse =
+        call_as(&broker, Some(reader("/")), ApiKey::ListGroups, 4, &list).await;
+    assert_eq!(hidden.error_code, 0);
+    assert!(
+        hidden.groups.is_empty(),
+        "a reader lists no groups, as on a Kafka broker"
+    );
+    let listed: ListGroupsResponse = call_as(
+        &broker,
+        Some(principal("root", Scope::root())),
+        ApiKey::ListGroups,
+        4,
+        &list,
+    )
+    .await;
+    assert_eq!(listed.error_code, 0);
+
+    let describe = DescribeGroupsRequest::default()
+        .with_groups(vec![GroupId(StrBytes::from_static_str("readers"))]);
+    let denied: DescribeGroupsResponse = call_as(
+        &broker,
+        Some(reader("/")),
+        ApiKey::DescribeGroups,
+        5,
+        &describe,
+    )
+    .await;
+    assert_eq!(denied.groups[0].error_code, 30);
+
+    let delete = DeleteGroupsRequest::default()
+        .with_groups_names(vec![GroupId(StrBytes::from_static_str("readers"))]);
+    let denied: DeleteGroupsResponse =
+        call_as(&broker, Some(reader("/")), ApiKey::DeleteGroups, 2, &delete).await;
+    assert_eq!(denied.results[0].error_code, 30);
+}
+
+#[tokio::test]
+async fn a_revoked_token_closes_the_connection_on_its_next_request() {
+    use picomq_auth::Verifier;
+
+    let (broker, token, node) = secured_broker().await;
+    let (addr, server) = serve(Arc::new(broker)).await;
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    client
+        .write_all(&framed(&handshake_request(1, "PLAIN", 1)))
+        .await
+        .unwrap();
+    read_response(&mut client).await;
+    client
+        .write_all(&framed(&authenticate_request(
+            &token.id,
+            &token.render(),
+            2,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(
+        decode_authenticate(read_response(&mut client).await).error_code,
+        0
+    );
+    client
+        .write_all(&framed(&metadata_request(3)))
+        .await
+        .unwrap();
+    assert_eq!(correlation_id(&read_response(&mut client).await), 3);
+
+    let revoked = node
+        .tokens()
+        .store()
+        .delete_if(&token.id, &Verifier::from_secret(&token.secret))
+        .await
+        .unwrap();
+    assert!(revoked);
+    client
+        .write_all(&framed(&metadata_request(4)))
+        .await
+        .unwrap();
+    assert!(closed(&mut client).await);
+
+    server.abort();
+}
+
 /// A frame larger than the listener allows closes that connection and
 /// nothing else.
 #[tokio::test]
@@ -578,7 +1599,7 @@ async fn listener_pipeline_survives_acks_zero() {
             ]))
             .with_allow_auto_topic_creation(true),
     );
-    dispatch(&broker, &metadata_req).await.unwrap();
+    dispatch(&broker, None, &metadata_req).await.unwrap();
     let (addr, server) = serve(Arc::new(broker)).await;
 
     let produce_req = encode_request(
@@ -966,12 +1987,12 @@ async fn a_superseded_sync_gets_no_response() {
     let mut first = {
         let broker = Arc::clone(&broker);
         let req = sync_request("pair", newcomer.clone(), 2, vec![], 12);
-        tokio::spawn(async move { resolve(dispatch(&broker, &req).await.unwrap()).await })
+        tokio::spawn(async move { resolve(dispatch(&broker, None, &req).await.unwrap()).await })
     };
     let mut second = {
         let broker = Arc::clone(&broker);
         let req = sync_request("pair", newcomer.clone(), 2, vec![], 13);
-        tokio::spawn(async move { resolve(dispatch(&broker, &req).await.unwrap()).await })
+        tokio::spawn(async move { resolve(dispatch(&broker, None, &req).await.unwrap()).await })
     };
     let first_to_resolve = async {
         tokio::select! {

@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use picomq_protocol::record::{PicoRecord, encode_batch_append};
-use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::FutureRecord;
 use rdkafka::types::RDKafkaErrorCode;
@@ -34,7 +33,7 @@ async fn kafka_clients_ride_through_a_node_restart() {
     for value in 0..50 {
         produce(&producer, &topic, None, &value.to_string()).await;
     }
-    let member = group_member(&h.bootstrap, &group, &topic);
+    let member = group_member(&h, &group, &topic);
     assert_eq!(consume_n(&member, 50).await.last().unwrap().offset, 49);
     member
         .commit_consumer_state(rdkafka::consumer::CommitMode::Sync)
@@ -47,16 +46,13 @@ async fn kafka_clients_ride_through_a_node_restart() {
     for value in 50..100 {
         produce(&producer, &topic, None, &value.to_string()).await;
     }
-    let member = group_member(&h.bootstrap, &group, &topic);
+    let member = group_member(&h, &group, &topic);
     let resumed = consume_n(&member, 50).await;
     assert_eq!(resumed[0].offset, 50, "the group resumed at its commit");
     assert_eq!(resumed.last().unwrap().offset, 99);
 
     let expected: Vec<String> = (0..100).map(|value| value.to_string()).collect();
-    assert_eq!(
-        read_partitions(&h.bootstrap, &topic, 1, 100).await,
-        expected
-    );
+    assert_eq!(read_partitions(&h, &topic, 1, 100).await, expected);
 
     h.admin()
         .delete_topics(&[&topic], &rdkafka::admin::AdminOptions::new())
@@ -67,15 +63,12 @@ async fn kafka_clients_ride_through_a_node_restart() {
     wait_head_gone(&h, &format!("/{topic}")).await;
     h.create_topic(&topic, 1).await;
     assert_eq!(produce(&h.producer(), &topic, None, "fresh").await, 0);
-    assert_eq!(
-        read_partitions(&h.bootstrap, &topic, 1, 1).await,
-        vec!["fresh"]
-    );
+    assert_eq!(read_partitions(&h, &topic, 1, 1).await, vec!["fresh"]);
 }
 
-fn group_member(bootstrap: &str, group: &str, topic: &str) -> StreamConsumer {
-    let consumer: StreamConsumer = ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
+fn group_member(h: &Harness, group: &str, topic: &str) -> StreamConsumer {
+    let consumer: StreamConsumer = h
+        .kafka()
         .set("group.id", group)
         .set("enable.auto.commit", "false")
         .set("auto.offset.reset", "earliest")
@@ -191,8 +184,8 @@ async fn consumer_group_is_shared_by_kafka_and_pico_members() {
         produce(&producer, &topic, None, &format!("job-{n}")).await;
     }
 
-    let subscriber: StreamConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &h.bootstrap)
+    let subscriber: StreamConsumer = h
+        .kafka()
         .set("group.id", &group)
         .set("enable.auto.commit", "false")
         .set("auto.offset.reset", "earliest")

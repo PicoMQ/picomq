@@ -108,7 +108,7 @@ The example ships its own Terraform. It reads the harness state from the same S3
 | `vpc_id`, `private_subnet_ids` | Flink security group and `vpc_configuration` |
 | `endpoints["1"]` | `PICO_HTTP` for prefix discovery through the ALB |
 | `kafka_bootstrap` | `KAFKA_BOOTSTRAP`, `kafka.picomq.internal:9092` |
-| `bootstrap_secret_arn` | `PICO_TOKEN_SECRET_ARN`, fetched by the job at start |
+| `bootstrap_secret_arn` | `PICO_TOKEN_SECRET_ARN`, fetched by the job at start and used for both discovery and Kafka |
 
 | Created | Setting |
 | --- | --- |
@@ -124,7 +124,7 @@ The example ships its own Terraform. It reads the harness state from the same S3
 | Piece | Setting |
 | --- | --- |
 | Discovery | `HttpKafkaMetadataService` polls `GET /?prefix=/examples/agents/ai-sdk/` with the bootstrap token, 10s |
-| Source | `DynamicKafkaSource`, committed group offsets, earliest on a cold start |
+| Source | `DynamicKafkaSource` over SASL PLAIN with the bootstrap token, see [Kafka authentication](/docs/kafka#authentication), committed group offsets, earliest on a cold start |
 | Routing | topic `examples.agents.ai-sdk.chat.*` to `conversations`, `agent.*` to `agent_events` |
 | Sink | `IcebergSink` per table, REST catalog `https://s3tables.<region>.amazonaws.com/iceberg`, sigv4 |
 | Checkpoint | 60s, one Iceberg commit per checkpoint |

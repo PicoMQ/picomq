@@ -43,6 +43,7 @@ pub fn audience_name(audience: Audience) -> &'static str {
         Audience::Pico => "pico",
         Audience::DurableStreams => "durable_streams",
         Audience::Admin => "admin",
+        Audience::Kafka => "kafka",
     }
 }
 
@@ -51,6 +52,7 @@ pub fn audience_from_name(name: &str) -> Option<Audience> {
         "pico" => Some(Audience::Pico),
         "durable_streams" => Some(Audience::DurableStreams),
         "admin" => Some(Audience::Admin),
+        "kafka" => Some(Audience::Kafka),
         _ => None,
     }
 }
@@ -226,7 +228,7 @@ mod tests {
         for bad in [
             json!({ "surprise": true }),
             json!({ "ops": ["fly"] }),
-            json!({ "audiences": ["kafka"] }),
+            json!({ "audiences": ["telnet"] }),
             json!({ "streams": [{ "regex": ".*" }] }),
             json!({ "streams": [{ "exact": "/a", "prefix": "/b" }] }),
             json!({ "groups": { "stream": { "read": 1 } } }),

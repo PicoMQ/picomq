@@ -90,13 +90,11 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     }
 
     if !config.insecure_allow_remote {
-        // The Kafka listener carries no authentication, so a non-loopback
-        // bind needs the explicit opt-out regardless of auth mode.
         let auth_off = config.auth_mode == AuthMode::Off;
         for addr in [
             auth_off.then_some(config.addr),
             auth_off.then_some(config.admin_addr).flatten(),
-            Some(config.kafka.listen),
+            auth_off.then_some(config.kafka.listen),
         ]
         .into_iter()
         .flatten()
@@ -206,12 +204,18 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         .streams()
         .spawn_compaction_check(LIFECYCLE_TICK);
 
-    let kafka = spawn_kafka(&config, &node, kafka_listener, kafka_addr);
-
     let authorizer = match config.auth_mode {
         AuthMode::Required => Some(node.authorizer()),
         AuthMode::Off => None,
     };
+    let kafka = spawn_kafka(
+        &config,
+        &node,
+        authorizer.clone(),
+        kafka_listener,
+        kafka_addr,
+    );
+
     let server = picomq_http::serve(
         node,
         http_listener,
@@ -263,10 +267,11 @@ async fn bind_kafka(
 fn spawn_kafka(
     config: &ServerConfig,
     node: &Arc<PicoNode>,
+    authorizer: Option<Arc<picomq_auth::Authorizer>>,
     listener: tokio::net::TcpListener,
     bound: std::net::SocketAddr,
 ) -> tokio::task::JoinHandle<()> {
-    let broker = Arc::new(picomq_kafka::BrokerContext::new(node));
+    let broker = Arc::new(picomq_kafka::BrokerContext::new(node, authorizer));
     let listener_config = picomq_kafka::ListenerConfig {
         addr: bound,
         max_request_bytes: config.max_request_size,

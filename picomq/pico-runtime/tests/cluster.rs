@@ -9,19 +9,17 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common::{
-    Harness, assert_exactly_once, first_admin, produce, read_partitions, run, unique, wait_ready,
-    write_continuously,
+    Harness, assert_exactly_once, first_admin, produce, read_partitions, run, token, unique,
+    wait_ready, write_continuously,
 };
 use picomq_client::pico::ProducerRef;
 use picomq_client::producer::{Producer, ProducerConfig};
 use picomq_client::{CreateOptions, Live, PicoClient, ReadLimits, RetryPolicy, StreamApi};
 use rdkafka::admin::{AdminOptions, NewTopic, ResourceSpecifier, TopicReplication};
-use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, StreamConsumer};
-use rdkafka::producer::FutureRecord;
+use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::types::RDKafkaErrorCode;
 use rdkafka::{Message, Offset, TopicPartitionList};
-
-const TOKEN: &str = "ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY";
 
 fn second_bootstrap() -> String {
     std::env::var("PICO_KAFKA_2").unwrap_or_else(|_| "127.0.0.1:9093".into())
@@ -29,10 +27,6 @@ fn second_bootstrap() -> String {
 
 fn second_admin() -> String {
     std::env::var("PICO_ADMIN_2").unwrap_or_else(|_| "http://127.0.0.1:9091".into())
-}
-
-fn token() -> String {
-    std::env::var("PICO_TOKEN").unwrap_or_else(|_| TOKEN.into())
 }
 
 fn pico_client(h: &Harness) -> PicoClient {
@@ -93,9 +87,9 @@ fn cluster() -> Harness {
     }
 }
 
-fn group_consumer(bootstrap: &str, group: &str, topic: &str) -> StreamConsumer {
-    let consumer: StreamConsumer = ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
+fn group_consumer(harness: &Harness, group: &str, topic: &str) -> StreamConsumer {
+    let consumer: StreamConsumer = harness
+        .kafka()
         .set("group.id", group)
         .set("enable.auto.commit", "false")
         .set("auto.offset.reset", "earliest")
@@ -106,11 +100,8 @@ fn group_consumer(bootstrap: &str, group: &str, topic: &str) -> StreamConsumer {
     consumer
 }
 
-fn leaders(bootstrap: &str, topic: &str) -> BTreeMap<i32, i32> {
-    let client: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
-        .create()
-        .unwrap();
+fn leaders(harness: &Harness, topic: &str) -> BTreeMap<i32, i32> {
+    let client: BaseConsumer = harness.kafka().create().unwrap();
     let metadata = client
         .fetch_metadata(Some(topic), Duration::from_secs(10))
         .unwrap();
@@ -126,6 +117,40 @@ async fn eventually(what: &str, timeout: Duration, mut check: impl FnMut() -> bo
     let deadline = Instant::now() + timeout;
     while !check() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn tokens_on_every_node(h: &Harness, ids: &[&str]) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let mut everywhere = true;
+        for admin in [first_admin(), second_admin()] {
+            let listed: serde_json::Value = h
+                .http
+                .get(format!("{admin}/admin/tokens"))
+                .bearer_auth(token())
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let known: Vec<&str> = listed["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|entry| entry["id"].as_str())
+                .collect();
+            everywhere &= ids.iter().all(|id| known.contains(id));
+        }
+        if everywhere {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tokens {ids:?} never reached every node"
+        );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
@@ -176,12 +201,16 @@ async fn partitions_spread_across_nodes_and_serve_both_bootstraps() {
     let expected: BTreeMap<i32, i32> = (0..6)
         .map(|index| (index, brokers[index as usize][0]))
         .collect();
-    assert_eq!(leaders(&Harness::new().bootstrap, &topic), expected);
-    assert_eq!(leaders(&second_bootstrap(), &topic), expected);
+    let second = Harness {
+        bootstrap: second_bootstrap(),
+        ..Harness::new()
+    };
+    assert_eq!(leaders(&Harness::new(), &topic), expected);
+    assert_eq!(leaders(&second, &topic), expected);
 
     produce_range(&Harness::new(), &topic, 0..300).await;
 
-    let consumer = group_consumer(&second_bootstrap(), &unique("spread"), &topic);
+    let consumer = group_consumer(&second, &unique("spread"), &topic);
     let consumed = consume_values(&consumer, 300).await;
 
     let values: BTreeSet<usize> = consumed
@@ -207,7 +236,7 @@ async fn http_reads_of_a_partition_reach_its_owner() {
     let topic = unique("owner");
     h.create_topic(&topic, 2).await;
 
-    let leaders = leaders(&h.bootstrap, &topic);
+    let leaders = leaders(&h, &topic);
     let (partition, _) = leaders
         .iter()
         .find(|(_, leader)| **leader == 2)
@@ -301,7 +330,7 @@ async fn admin_apis_reach_partitions_on_both_nodes() {
 
     let group = unique("admin-group");
     {
-        let consumer = group_consumer(&h.bootstrap, &group, &topic);
+        let consumer = group_consumer(&h, &group, &topic);
         consume_values(&consumer, 4).await;
         consumer.commit_consumer_state(CommitMode::Sync).unwrap();
     }
@@ -339,7 +368,7 @@ async fn a_dead_node_fails_over_and_committed_offsets_survive() {
     produce_range(&h, &topic, 0..200).await;
 
     let before: BTreeSet<String> = {
-        let consumer = group_consumer(&h.bootstrap, &group, &topic);
+        let consumer = group_consumer(&h, &group, &topic);
         let consumed = consume_values(&consumer, 100).await;
         consumer.commit_consumer_state(CommitMode::Sync).unwrap();
         consumed.into_iter().map(|(_, _, value)| value).collect()
@@ -350,7 +379,7 @@ async fn a_dead_node_fails_over_and_committed_offsets_survive() {
         "partitions to fail over to node 1",
         Duration::from_secs(90),
         || {
-            leaders(&survivor.bootstrap, &topic)
+            leaders(&survivor, &topic)
                 .values()
                 .all(|leader| *leader == 1)
         },
@@ -359,7 +388,7 @@ async fn a_dead_node_fails_over_and_committed_offsets_survive() {
 
     produce_range(&survivor, &topic, 200..400).await;
 
-    let consumer = group_consumer(&survivor.bootstrap, &group, &topic);
+    let consumer = group_consumer(&survivor, &group, &topic);
     let after: BTreeSet<String> = consume_values(&consumer, 300)
         .await
         .into_iter()
@@ -376,10 +405,85 @@ async fn a_dead_node_fails_over_and_committed_offsets_survive() {
 
     let rejoined = unique("rejoined");
     h.create_topic(&rejoined, 4).await;
+    assert!(leaders(&h, &rejoined).values().any(|leader| *leader == 2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_narrow_token_is_enforced_over_kafka() {
+    let h = cluster();
+    let topic = unique("narrow");
+    h.create_topic(&topic, 1).await;
+    produce(&h.producer(), &topic, None, "from-root").await;
+
+    let scope = |read: bool, write: bool| {
+        serde_json::json!({
+            "streams": [{ "prefix": format!("/{topic}") }],
+            "groups": { "stream": { "read": read, "write": write } },
+            "audiences": ["kafka"]
+        })
+    };
+    let (reader_id, writer_id) = (unique("it/reader"), unique("it/writer"));
+    let reader = h.issue_token(&reader_id, scope(true, false)).await;
+    let writer = h.issue_token(&writer_id, scope(false, true)).await;
+    tokens_on_every_node(&h, &[&reader_id, &writer_id]).await;
+
+    let reading: StreamConsumer = h
+        .kafka_as(&reader)
+        .set("group.id", unique("narrow-readers"))
+        .set("auto.offset.reset", "earliest")
+        .set("enable.auto.commit", "false")
+        .create()
+        .unwrap();
+    let mut assignment = TopicPartitionList::new();
+    assignment
+        .add_partition_offset(&topic, 0, Offset::Beginning)
+        .unwrap();
+    reading.assign(&assignment).unwrap();
+    let consumed = consume_values(&reading, 1).await;
+    assert_eq!(consumed[0].2, "from-root");
+
+    let writing: FutureProducer = h
+        .kafka_as(&reader)
+        .set("message.timeout.ms", "5000")
+        .create()
+        .unwrap();
+    let refused = writing
+        .send(
+            FutureRecord::<(), str>::to(&topic).payload("from-reader"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.0.rdkafka_error_code(),
+        Some(RDKafkaErrorCode::TopicAuthorizationFailed)
+    );
+
+    let producer: FutureProducer = h
+        .kafka_as(&writer)
+        .set("message.timeout.ms", "5000")
+        .create()
+        .unwrap();
+    produce(&producer, &topic, None, "from-writer").await;
+    let peeking: StreamConsumer = h
+        .kafka_as(&writer)
+        .set("group.id", unique("narrow-writers"))
+        .set("enable.auto.commit", "false")
+        .create()
+        .unwrap();
+    peeking.assign(&assignment).unwrap();
+    let refused = tokio::time::timeout(Duration::from_secs(20), peeking.recv())
+        .await
+        .expect("the fetch is answered")
+        .unwrap_err();
     assert!(
-        leaders(&h.bootstrap, &rejoined)
-            .values()
-            .any(|leader| *leader == 2)
+        matches!(
+            refused.rdkafka_error_code(),
+            Some(RDKafkaErrorCode::TopicAuthorizationFailed)
+                | Some(RDKafkaErrorCode::GroupAuthorizationFailed)
+        ),
+        "a writer was allowed to read: {refused}"
     );
 }
 
@@ -476,7 +580,7 @@ async fn an_http_producer_survives_a_killed_owner_exactly_once() {
     let survivor = Harness::new();
     let topic = unique("http-failover");
     h.create_topic(&topic, 4).await;
-    let partition = leaders(&h.bootstrap, &topic)
+    let partition = leaders(&h, &topic)
         .into_iter()
         .find(|(_, leader)| *leader == 2)
         .map(|(partition, _)| partition)
@@ -522,7 +626,7 @@ async fn an_http_producer_survives_a_killed_owner_exactly_once() {
     eventually(
         "the partition to fail over to node 1",
         Duration::from_secs(90),
-        || leaders(&survivor.bootstrap, &topic)[&partition] == 1,
+        || leaders(&survivor, &topic)[&partition] == 1,
     )
     .await;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -533,7 +637,7 @@ async fn an_http_producer_survives_a_killed_owner_exactly_once() {
         "the writer kept going through the failover"
     );
 
-    let read = read_partitions(&survivor.bootstrap, &topic, 4, acked.len()).await;
+    let read = read_partitions(&survivor, &topic, 4, acked.len()).await;
     assert_exactly_once(&acked, &read);
 
     run(&start);
@@ -543,12 +647,12 @@ async fn an_http_producer_survives_a_killed_owner_exactly_once() {
 /// Reads `topic` as a group member until stopped, committing as it goes and
 /// riding out the errors a failover produces. Returns every value it saw.
 fn consume_continuously(
-    bootstrap: &str,
+    harness: &Harness,
     group: &str,
     topic: &str,
     stop: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<(StreamConsumer, Vec<String>)> {
-    let consumer = group_consumer(bootstrap, group, topic);
+    let consumer = group_consumer(harness, group, topic);
     tokio::spawn(async move {
         let mut seen = Vec::new();
         while !stop.load(Ordering::SeqCst) {
@@ -585,15 +689,13 @@ async fn kafka_clients_survive_a_killed_coordinator_and_owner() {
     let group = unique("kafka-failover-group");
     h.create_topic(&topic, 4).await;
     assert!(
-        leaders(&h.bootstrap, &topic)
-            .values()
-            .any(|leader| *leader == 2),
+        leaders(&h, &topic).values().any(|leader| *leader == 2),
         "a partition on node 2"
     );
 
     let stop = Arc::new(AtomicBool::new(false));
-    let writer = write_continuously(&survivor.bootstrap, &topic, Arc::clone(&stop));
-    let reader = consume_continuously(&survivor.bootstrap, &group, &topic, Arc::clone(&stop));
+    let writer = write_continuously(&survivor, &topic, Arc::clone(&stop));
+    let reader = consume_continuously(&survivor, &group, &topic, Arc::clone(&stop));
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     run(&kill);
@@ -601,7 +703,7 @@ async fn kafka_clients_survive_a_killed_coordinator_and_owner() {
         "every partition to fail over to node 1",
         Duration::from_secs(90),
         || {
-            leaders(&survivor.bootstrap, &topic)
+            leaders(&survivor, &topic)
                 .values()
                 .all(|leader| *leader == 1)
         },
@@ -616,7 +718,7 @@ async fn kafka_clients_survive_a_killed_coordinator_and_owner() {
         "the writer kept going through the failover"
     );
 
-    let read = read_partitions(&survivor.bootstrap, &topic, 4, acked.len()).await;
+    let read = read_partitions(&survivor, &topic, 4, acked.len()).await;
     assert_exactly_once(&acked, &read);
 
     let seen: BTreeSet<String> = seen.into_iter().collect();
@@ -661,11 +763,11 @@ async fn a_kafka_producer_is_deduplicated_across_a_transfer() {
     let h = cluster();
     let topic = unique("kafka-moved");
     h.create_topic(&topic, 2).await;
-    let from = leaders(&h.bootstrap, &topic)[&0];
+    let from = leaders(&h, &topic)[&0];
     let to = 3 - from;
 
     let stop = Arc::new(AtomicBool::new(false));
-    let writer = write_continuously(&h.bootstrap, &topic, Arc::clone(&stop));
+    let writer = write_continuously(&h, &topic, Arc::clone(&stop));
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let accepted = h
@@ -678,7 +780,7 @@ async fn a_kafka_producer_is_deduplicated_across_a_transfer() {
         .unwrap();
     assert_eq!(accepted.status(), 202);
     eventually("partition 0 to move", Duration::from_secs(60), || {
-        leaders(&h.bootstrap, &topic)[&0] == to
+        leaders(&h, &topic)[&0] == to
     })
     .await;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -686,7 +788,7 @@ async fn a_kafka_producer_is_deduplicated_across_a_transfer() {
     let acked = writer.await.unwrap();
     assert!(acked.len() > 50, "the writer kept going through the move");
 
-    let read = read_partitions(&h.bootstrap, &topic, 2, acked.len()).await;
+    let read = read_partitions(&h, &topic, 2, acked.len()).await;
     assert_exactly_once(&acked, &read);
 }
 
@@ -706,10 +808,7 @@ async fn retention_trims_expired_data_in_every_partition() {
     created[0].as_ref().unwrap();
     produce_range(&harness, &topic, 0..20).await;
 
-    let client: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &harness.bootstrap)
-        .create()
-        .unwrap();
+    let client: BaseConsumer = harness.kafka().create().unwrap();
     eventually("every partition to expire", Duration::from_secs(60), || {
         let watermarks: Vec<_> = (0..4)
             .filter_map(|partition| {

@@ -38,6 +38,8 @@ const APIS: &[SupportedApi] = &[
     SupportedApi::new(ApiKey::IncrementalAlterConfigs, 0, 1),
     SupportedApi::new(ApiKey::DescribeCluster, 0, 2),
     SupportedApi::new(ApiKey::InitProducerId, 0, 4),
+    SupportedApi::new(ApiKey::SaslHandshake, 0, 1),
+    SupportedApi::new(ApiKey::SaslAuthenticate, 0, 2),
     SupportedApi::new(ApiKey::OffsetCommit, 2, 8),
     SupportedApi::new(ApiKey::OffsetFetch, 1, 7),
     SupportedApi::new(ApiKey::FindCoordinator, 0, 3),

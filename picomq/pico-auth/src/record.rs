@@ -239,6 +239,7 @@ fn audience_tag(audience: Audience) -> u8 {
         Audience::Pico => 1,
         Audience::DurableStreams => 2,
         Audience::Admin => 3,
+        Audience::Kafka => 4,
     }
 }
 
@@ -247,6 +248,7 @@ fn audience_from_tag(tag: u8) -> Result<Audience, AuthError> {
         1 => Audience::Pico,
         2 => Audience::DurableStreams,
         3 => Audience::Admin,
+        4 => Audience::Kafka,
         _ => return Err(AuthError::Malformed),
     })
 }

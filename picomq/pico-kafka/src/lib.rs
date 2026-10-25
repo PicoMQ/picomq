@@ -6,12 +6,13 @@ mod error;
 mod frame;
 mod handlers;
 mod listener;
+mod sasl;
 mod versions;
 
 pub const PROTOCOL_NAME: &str = "kafka";
 
 pub use broker::BrokerContext;
-pub use dispatch::{RequestContext, dispatch};
+pub use dispatch::{RequestContext, dispatch, request_context};
 pub use error::KafkaError;
 pub use frame::{read_frame, write_frame};
 pub use handlers::{HandlerError, HandlerOutcome, ResponseFrame};

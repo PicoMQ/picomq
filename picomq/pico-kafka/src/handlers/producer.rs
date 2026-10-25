@@ -1,9 +1,13 @@
 use kafka_protocol::messages::{InitProducerIdRequest, InitProducerIdResponse, ProducerId};
 use kafka_protocol::protocol::Decodable;
 
+use picomq_auth::Operation;
+
 use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
-use crate::handlers::common::{INVALID_REQUEST, NO_ERROR, encode_response};
+use crate::handlers::common::{
+    CLUSTER_AUTHORIZATION_FAILED, INVALID_REQUEST, NO_ERROR, encode_response,
+};
 use crate::handlers::{HandlerError, HandlerOutcome};
 
 pub async fn handle(
@@ -17,6 +21,15 @@ pub async fn handle(
 
     if request.transactional_id.is_some() {
         let response = InitProducerIdResponse::default().with_error_code(INVALID_REQUEST);
+        return Ok(HandlerOutcome::Response(encode_response(
+            req.correlation_id,
+            req.api_version,
+            &response,
+        )));
+    }
+    if !req.allows_operation(ctx.authorizer.as_deref(), Operation::Append) {
+        let response =
+            InitProducerIdResponse::default().with_error_code(CLUSTER_AUTHORIZATION_FAILED);
         return Ok(HandlerOutcome::Response(encode_response(
             req.correlation_id,
             req.api_version,

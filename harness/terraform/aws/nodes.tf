@@ -94,7 +94,6 @@ resource "aws_ecs_task_definition" "node" {
         { name = "PICO_HTTP_ADDRESS", value = "http://${each.value.host}" },
         { name = "PICO_KAFKA_LISTEN", value = "0.0.0.0:9092" },
         { name = "PICO_KAFKA_ADVERTISE", value = each.value.kafka_advertise },
-        { name = "PICO_INSECURE_ALLOW_REMOTE", value = "true" },
         { name = "PICO_META_URL", value = local.meta_url },
         { name = "PICO_STORAGE", value = local.storage },
         { name = "PICO_AUTH", value = "required" },

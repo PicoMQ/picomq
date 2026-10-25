@@ -7,10 +7,11 @@ mod common;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::{Harness, assert_exactly_once, produce, read_partitions, unique, write_continuously};
+use common::{
+    Harness, assert_exactly_once, produce, read_partitions, token, unique, write_continuously,
+};
 use serde_json::Value;
 
-const TOKEN: &str = "ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY";
 const PARTITIONS: i32 = 4;
 
 struct Cluster {
@@ -53,7 +54,7 @@ impl Cluster {
         let response = self
             .http
             .get(format!("{}{path}", self.admins[node - 1]))
-            .bearer_auth(std::env::var("PICO_TOKEN").unwrap_or_else(|_| TOKEN.into()))
+            .bearer_auth(token())
             .timeout(Duration::from_secs(2))
             .send()
             .await
@@ -135,7 +136,7 @@ async fn a_paused_node_loses_no_acknowledged_write() {
     let (epoch, _) = cluster.row(1, 2).await.unwrap();
 
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let writer = write_continuously(&cluster.harness.bootstrap, &topic, stop.clone());
+    let writer = write_continuously(&cluster.harness, &topic, stop.clone());
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     cluster.compose("pause pico2");
@@ -156,7 +157,7 @@ async fn a_paused_node_loses_no_acknowledged_write() {
         Some(false)
     );
 
-    let read = read_partitions(&cluster.harness.bootstrap, &topic, PARTITIONS, acked.len()).await;
+    let read = read_partitions(&cluster.harness, &topic, PARTITIONS, acked.len()).await;
     assert_exactly_once(&acked, &read);
 }
 
