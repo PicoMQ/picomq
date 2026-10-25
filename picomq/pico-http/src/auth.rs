@@ -45,7 +45,7 @@ pub async fn gate(
         auth_resource(audience, uri).map_err(|error| Box::new(service_error(audience, error)))?;
     let stored = caller.resolve(Resource::Stream, &client_name)?;
     for op in ops {
-        caller.authorize(authorizer, op, Some(&stored))?;
+        caller.authorize(op, Some(&stored))?;
     }
     Ok(Some(Permit {
         principal: caller.principal,
@@ -83,13 +83,14 @@ impl Caller {
 
     pub(crate) fn authorize(
         &self,
-        authorizer: &Authorizer,
         op: Operation,
         resource: Option<&str>,
     ) -> Result<(), Box<Response>> {
-        authorizer
-            .authorize(&self.principal, op, resource)
-            .map_err(|err| self.demote(err))
+        if self.principal.scope.allows(op, resource) {
+            Ok(())
+        } else {
+            Err(self.demote(AuthError::Denied))
+        }
     }
 }
 

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::AuthError;
 use crate::record::TokenRecord;
-use crate::scope::{Audience, Operation};
+use crate::scope::Audience;
 use crate::store::TokenStore;
 use crate::token::AccessToken;
 
@@ -126,19 +126,6 @@ impl Authorizer {
         Ok(self.intern(fresh))
     }
 
-    pub fn authorize(
-        &self,
-        principal: &TokenRecord,
-        op: Operation,
-        resource: Option<&str>,
-    ) -> Result<(), AuthError> {
-        if principal.scope.allows(op, resource) {
-            Ok(())
-        } else {
-            Err(AuthError::Denied)
-        }
-    }
-
     /// Drop a cached entry. Hosts may call this after a local revoke.
     pub fn invalidate(&self, id: &str) {
         self.drop_cached(id);
@@ -174,7 +161,7 @@ fn strip_bearer(raw: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scope::{Access, ReadWrite, Resource, ResourceSet, Scope};
+    use crate::scope::{Access, Operation, ReadWrite, Resource, ResourceSet, Scope};
     use crate::store::MemoryTokenStore;
     use crate::token::{AccessToken, Verifier};
 
@@ -270,20 +257,10 @@ mod tests {
 
         let stored = principal.scope.resolve(Resource::Stream, "orders").unwrap();
         assert_eq!(stored, "/acct/orders");
-        auth.authorize(&principal, Operation::Read, Some(&stored))
-            .unwrap();
-        assert!(matches!(
-            auth.authorize(&principal, Operation::Read, Some("/other/x")),
-            Err(AuthError::Denied)
-        ));
-        assert!(matches!(
-            auth.authorize(&principal, Operation::Append, Some(&stored)),
-            Err(AuthError::Denied)
-        ));
-        assert!(matches!(
-            auth.authorize(&principal, Operation::IssueToken, Some("svc/x")),
-            Err(AuthError::Denied)
-        ));
+        assert!(principal.scope.allows(Operation::Read, Some(&stored)));
+        assert!(!principal.scope.allows(Operation::Read, Some("/other/x")));
+        assert!(!principal.scope.allows(Operation::Append, Some(&stored)));
+        assert!(!principal.scope.allows(Operation::IssueToken, Some("svc/x")));
         assert_eq!(
             principal.scope.strip(Resource::Stream, "/acct/orders"),
             "orders"
@@ -297,16 +274,13 @@ mod tests {
 
         let group = principal.scope.resolve(Resource::Group, "workers").unwrap();
         assert_eq!(group, "acct/workers");
-        auth.authorize(&principal, Operation::Consume, Some(&group))
-            .unwrap();
-        assert!(matches!(
-            auth.authorize(&principal, Operation::Consume, Some("other/workers")),
-            Err(AuthError::Denied)
-        ));
-        assert!(matches!(
-            auth.authorize(&principal, Operation::DeleteGroup, Some(&group)),
-            Err(AuthError::Denied)
-        ));
+        assert!(principal.scope.allows(Operation::Consume, Some(&group)));
+        assert!(
+            !principal
+                .scope
+                .allows(Operation::Consume, Some("other/workers"))
+        );
+        assert!(!principal.scope.allows(Operation::DeleteGroup, Some(&group)));
     }
 
     #[tokio::test]

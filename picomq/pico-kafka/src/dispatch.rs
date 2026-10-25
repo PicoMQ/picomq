@@ -24,10 +24,10 @@ impl RequestContext {
     ) -> bool {
         match authorizer {
             None => true,
-            Some(authorizer) => self
+            Some(_) => self
                 .principal
                 .as_ref()
-                .is_some_and(|principal| authorizer.authorize(principal, op, resource).is_ok()),
+                .is_some_and(|principal| principal.scope.allows(op, resource)),
         }
     }
 

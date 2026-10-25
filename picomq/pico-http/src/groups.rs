@@ -75,30 +75,6 @@ impl GroupState {
         .await
     }
 
-    /// `op` on every stream the request names. Naming none needs nothing.
-    fn allow_streams(
-        &self,
-        caller: &Option<Caller>,
-        op: Operation,
-        streams: &[String],
-    ) -> Result<(), Box<Response>> {
-        let (Some(authorizer), Some(caller)) = (&self.authorizer, caller) else {
-            return Ok(());
-        };
-        streams
-            .iter()
-            .try_for_each(|stream| caller.authorize(authorizer, op, Some(stream)))
-    }
-
-    fn allowed(&self, caller: &Option<Caller>, stream: &str) -> bool {
-        match (&self.authorizer, caller) {
-            (Some(authorizer), Some(caller)) => caller
-                .authorize(authorizer, Operation::Read, Some(stream))
-                .is_ok(),
-            _ => true,
-        }
-    }
-
     async fn topic(&self, name: &str) -> Result<Option<Topic>, Box<Response>> {
         match self.topics.get(name).await {
             Ok(Some(topic)) if topic.partitions > 1 => Err(Box::new(error(
@@ -217,7 +193,7 @@ async fn join(
         Ok(subscription) => subscription,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow_streams(&caller, Operation::Read, &subscription) {
+    if let Err(response) = allow_streams(&caller, Operation::Read, &subscription) {
         return *response;
     }
     let mut subscribed = Vec::with_capacity(subscription.len());
@@ -397,7 +373,7 @@ async fn commit(
         Ok(streams) => streams,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow_streams(&caller, Operation::Read, &streams) {
+    if let Err(response) = allow_streams(&caller, Operation::Read, &streams) {
         return *response;
     }
     let partitions = match state.partitions(&streams).await {
@@ -457,7 +433,7 @@ async fn fetch(
         Ok(requested) => requested,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow_streams(&caller, Operation::Read, &requested) {
+    if let Err(response) = allow_streams(&caller, Operation::Read, &requested) {
         return *response;
     }
     let partitions = match state.partitions(&requested).await {
@@ -491,7 +467,7 @@ async fn fetch(
         }
 
         let stream = topic.name.spelling();
-        if !state.allowed(&caller, stream) {
+        if !allowed(&caller, stream) {
             continue;
         }
         named.insert(
@@ -581,6 +557,25 @@ fn strip_group<'a>(caller: &Option<Caller>, stored: &'a str) -> &'a str {
         Some(caller) => caller.principal.scope.strip(Resource::Group, stored),
         None => stored,
     }
+}
+
+fn allow_streams(
+    caller: &Option<Caller>,
+    op: Operation,
+    streams: &[String],
+) -> Result<(), Box<Response>> {
+    match caller {
+        Some(caller) => streams
+            .iter()
+            .try_for_each(|stream| caller.authorize(op, Some(stream))),
+        None => Ok(()),
+    }
+}
+
+fn allowed(caller: &Option<Caller>, stream: &str) -> bool {
+    caller
+        .as_ref()
+        .is_none_or(|caller| caller.principal.scope.allows(Operation::Read, Some(stream)))
 }
 
 fn refused(caller: &Option<Caller>, error: GroupError) -> Response {
