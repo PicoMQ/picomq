@@ -134,12 +134,12 @@ Each request needs an operation from the token's scope on the topics it names, a
 | `JoinGroup` | `consume` | `read` on every topic a consumer subscribes to |
 | `SyncGroup`, `Heartbeat`, `LeaveGroup` | `consume` | none |
 | `OffsetCommit` | `consume` | `read` |
-| `OffsetFetch` | `describe_group` | `read`, and unreadable topics are left out |
+| `OffsetFetch` | `describe_group` | `read` on each named topic, and a fetch of every offset leaves out unreadable topics |
 | `OffsetDelete` | `delete_group` | `read` |
 | `DeleteGroups` | `delete_group` | none |
 | `ListGroups` | Lists only the groups the token may describe | none |
 
-A refused group answers `GROUP_AUTHORIZATION_FAILED` for the whole request, whatever its topics, as on a Kafka broker. A refused topic answers `TOPIC_AUTHORIZATION_FAILED`, and a refused `InitProducerId` answers `CLUSTER_AUTHORIZATION_FAILED`, so clients surface the same errors they would from a Kafka broker with ACLs. A `Metadata` request for all topics lists only the topics the token may describe. A token that stops being valid closes the connection on its next request, see [Revocation](/docs/design/auth#revocation).
+A refused group answers `GROUP_AUTHORIZATION_FAILED` for that group, whatever the request's topics, as on a Kafka broker. A refused topic answers `TOPIC_AUTHORIZATION_FAILED`, and a refused `InitProducerId` answers `CLUSTER_AUTHORIZATION_FAILED`, so clients surface the same errors they would from a Kafka broker with ACLs. A `Metadata` request for all topics lists only the topics the token may describe. A token that stops being valid closes the connection on its next request, see [Revocation](/docs/design/auth#revocation).
 
 ### Differences from Kafka
 

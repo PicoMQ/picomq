@@ -58,7 +58,7 @@ Enforcement runs once the request body is read and before routing. The gate work
 - A `POST` with a `Pico-Trim-Seq` header needs `trim`. A `POST` that closes the stream needs `close`, and `append` too when it carries records.
 - A Durable Streams `PUT` with a body needs `create` and `append`.
 - A list needs `list` on the requested prefix, and returns only the topics the token may read.
-- Consumer group routes check the group and the topics separately. The coordinator checks the group's right from the [Scopes](#scopes) table on the group itself: `consume` to take part, `describe_group` to describe it or fetch its offsets, `delete_group` to delete it or its offsets. A join or a commit also needs `read` on every topic it names, and a list returns only the groups the token may describe.
+- Consumer group routes check the group and the topics separately. The coordinator checks the group's right from the [Scopes](#scopes) table on the group itself: `consume` to take part, `describe_group` to describe it or fetch its offsets, `delete_group` to delete it or its offsets. A join, a commit, or an offset fetch that names topics also needs `read` on every one of them, a fetch of every offset leaves out unreadable topics, and a list returns only the groups the token may describe.
 - A method the protocol does not serve is refused with `405` before any of this.
 - On Kafka the SASL exchange fixes the principal once per connection, and every request then passes the same gate against the record as it currently stands. The frontend translates each request kind into an operation and each refusal into Kafka's authorization codes, the decisions are the scope's, see [Kafka](/docs/kafka#authentication).
 
