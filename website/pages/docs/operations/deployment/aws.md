@@ -117,7 +117,7 @@ curl -H "Authorization: Bearer <bootstrap-token>" \
   http://pico-1.picomq.internal/
 ```
 
-Admin API and dashboard listen on `9090` on the tasks. They are not published on either load balancer. Reach them with a tunnel, sidecar, or security-group path into the task ENIs, same idea as keeping Fly's admin listener private.
+Admin API and dashboard listen on `9090` on the tasks. They are not published on either load balancer. Reach them with a tunnel, sidecar, or security-group path into the task ENIs.
 
 ## Deploys
 
