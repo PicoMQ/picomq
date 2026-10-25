@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
+use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation, Resource};
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{ErrorKind, ServiceError, Topics};
 use serde_json::json;
@@ -58,7 +58,7 @@ impl CommonState {
             return Ok(name.to_owned());
         };
         let caller = crate::auth::authenticate(authorizer, self.audience, headers).await?;
-        let name = caller.resolve(authorizer, name)?;
+        let name = caller.resolve(Resource::Stream, name)?;
         caller.authorize(authorizer, op, Some(&name))?;
         Ok(name)
     }

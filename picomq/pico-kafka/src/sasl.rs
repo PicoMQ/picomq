@@ -186,7 +186,7 @@ async fn verify(authorizer: &Authorizer, token: &[u8]) -> Result<AuthPrincipal, 
     if principal.id != username {
         return Err("invalid username or password");
     }
-    if principal.scope.auto_prefix_streams {
+    if principal.scope.auto_prefix {
         return Err("auto prefix scopes are not supported over Kafka");
     }
 

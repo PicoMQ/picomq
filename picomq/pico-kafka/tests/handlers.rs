@@ -17,7 +17,7 @@ use kafka_protocol::records::{
     RecordBatchEncoder, RecordEncodeOptions, TimestampType,
 };
 use picomq_auth::{
-    AccessToken, Audience, AuthPrincipal, OperationGroups, ReadWrite, ResourceSet, Scope,
+    Access, AccessToken, Audience, AuthPrincipal, Operation, ReadWrite, ResourceSet, Scope,
     TokenRecord, TokenStore,
 };
 use picomq_kafka::{BrokerContext, HandlerOutcome, KafkaListener, ListenerConfig, dispatch};
@@ -71,9 +71,26 @@ fn reader(prefix: &str) -> AuthPrincipal {
         "reader",
         Scope {
             streams: ResourceSet::prefix(prefix),
-            groups: OperationGroups {
+            access: Access {
                 stream: ReadWrite::read_only(),
-                ..OperationGroups::default()
+                ..Access::default()
+            },
+            audiences: [Audience::Kafka].into(),
+            ..Scope::default()
+        },
+    )
+}
+
+fn consumer(prefix: &str, groups: &str) -> AuthPrincipal {
+    principal(
+        "consumer",
+        Scope {
+            streams: ResourceSet::prefix(prefix),
+            groups: ResourceSet::prefix(groups),
+            access: Access {
+                stream: ReadWrite::read_only(),
+                group: ReadWrite::read_only(),
+                ..Access::default()
             },
             audiences: [Audience::Kafka].into(),
             ..Scope::default()
@@ -86,12 +103,12 @@ fn writer(prefix: &str) -> AuthPrincipal {
         "writer",
         Scope {
             streams: ResourceSet::prefix(prefix),
-            groups: OperationGroups {
+            access: Access {
                 stream: ReadWrite {
                     read: false,
                     write: true,
                 },
-                ..OperationGroups::default()
+                ..Access::default()
             },
             audiences: [Audience::Kafka].into(),
             ..Scope::default()
@@ -1132,7 +1149,8 @@ async fn an_idle_connection_must_authenticate_in_time() {
 }
 
 #[tokio::test]
-async fn group_membership_needs_a_reader() {
+async fn group_membership_needs_the_group() {
+    use kafka_protocol::messages::leave_group_request::MemberIdentity;
     use kafka_protocol::messages::{
         FindCoordinatorRequest, FindCoordinatorResponse, GroupId, HeartbeatRequest,
         HeartbeatResponse, LeaveGroupRequest, LeaveGroupResponse, SyncGroupRequest,
@@ -1141,80 +1159,100 @@ async fn group_membership_needs_a_reader() {
 
     let (broker, _, _) = secured_broker().await;
     let group = GroupId(StrBytes::from_static_str("members"));
+    let find = FindCoordinatorRequest::default()
+        .with_key(StrBytes::from_static_str("members"))
+        .with_key_type(0);
+
+    for refused in [reader("/"), consumer("/", "others")] {
+        let found: FindCoordinatorResponse = call_as(
+            &broker,
+            Some(refused.clone()),
+            ApiKey::FindCoordinator,
+            3,
+            &find,
+        )
+        .await;
+        assert_eq!(found.error_code, 30);
+
+        let synced: SyncGroupResponse = call_as(
+            &broker,
+            Some(refused.clone()),
+            ApiKey::SyncGroup,
+            3,
+            &SyncGroupRequest::default()
+                .with_group_id(group.clone())
+                .with_member_id(StrBytes::from_static_str("m1")),
+        )
+        .await;
+        assert_eq!(synced.error_code, 30);
+
+        let beat: HeartbeatResponse = call_as(
+            &broker,
+            Some(refused.clone()),
+            ApiKey::Heartbeat,
+            4,
+            &HeartbeatRequest::default()
+                .with_group_id(group.clone())
+                .with_member_id(StrBytes::from_static_str("m1")),
+        )
+        .await;
+        assert_eq!(beat.error_code, 30);
+
+        let left: LeaveGroupResponse = call_as(
+            &broker,
+            Some(refused.clone()),
+            ApiKey::LeaveGroup,
+            2,
+            &LeaveGroupRequest::default()
+                .with_group_id(group.clone())
+                .with_member_id(StrBytes::from_static_str("m1")),
+        )
+        .await;
+        assert_eq!(left.error_code, 30);
+
+        let left: LeaveGroupResponse = call_as(
+            &broker,
+            Some(refused),
+            ApiKey::LeaveGroup,
+            4,
+            &LeaveGroupRequest::default()
+                .with_group_id(group.clone())
+                .with_members(vec![
+                    MemberIdentity::default().with_member_id(StrBytes::from_static_str("m1")),
+                ]),
+        )
+        .await;
+        assert_eq!(
+            (left.error_code, left.members.len()),
+            (30, 0),
+            "a refused group answers for the whole request"
+        );
+    }
 
     let found: FindCoordinatorResponse = call_as(
         &broker,
-        Some(writer("/")),
+        Some(consumer("/", "members")),
         ApiKey::FindCoordinator,
         3,
-        &FindCoordinatorRequest::default()
-            .with_key(StrBytes::from_static_str("members"))
-            .with_key_type(0),
-    )
-    .await;
-    assert_eq!(found.error_code, 30);
-    let found: FindCoordinatorResponse = call_as(
-        &broker,
-        Some(reader("/")),
-        ApiKey::FindCoordinator,
-        3,
-        &FindCoordinatorRequest::default()
-            .with_key(StrBytes::from_static_str("members"))
-            .with_key_type(0),
+        &find,
     )
     .await;
     assert_eq!(found.error_code, 0);
-
-    let synced: SyncGroupResponse = call_as(
-        &broker,
-        Some(writer("/")),
-        ApiKey::SyncGroup,
-        3,
-        &SyncGroupRequest::default()
-            .with_group_id(group.clone())
-            .with_member_id(StrBytes::from_static_str("m1")),
-    )
-    .await;
-    assert_eq!(synced.error_code, 30);
-
-    let beat: HeartbeatResponse = call_as(
-        &broker,
-        Some(writer("/")),
-        ApiKey::Heartbeat,
-        4,
-        &HeartbeatRequest::default()
-            .with_group_id(group.clone())
-            .with_member_id(StrBytes::from_static_str("m1")),
-    )
-    .await;
-    assert_eq!(beat.error_code, 30);
-
-    let left: LeaveGroupResponse = call_as(
-        &broker,
-        Some(writer("/")),
-        ApiKey::LeaveGroup,
-        2,
-        &LeaveGroupRequest::default()
-            .with_group_id(group)
-            .with_member_id(StrBytes::from_static_str("m1")),
-    )
-    .await;
-    assert_eq!(left.error_code, 30);
 }
 
 #[tokio::test]
 async fn an_auto_prefix_token_is_refused_over_kafka() {
-    use picomq_auth::{Audience, OperationGroups, ReadWrite, ResourceSet};
+    use picomq_auth::{Access, Audience, ReadWrite, ResourceSet};
 
     let node = start_node(None).await;
     let scope = Scope {
         streams: ResourceSet::prefix("/acct/"),
-        groups: OperationGroups {
+        access: Access {
             stream: ReadWrite::all(),
-            ..OperationGroups::default()
+            ..Access::default()
         },
         audiences: [Audience::Kafka].into(),
-        auto_prefix_streams: true,
+        auto_prefix: true,
         ..Scope::default()
     };
     let token = seed(&node, "acct/kafka", scope).await;
@@ -1477,7 +1515,7 @@ async fn metadata_lists_only_readable_topics() {
 }
 
 #[tokio::test]
-async fn groups_follow_the_readable_topics() {
+async fn groups_need_the_group_and_the_readable_topics() {
     use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
     use kafka_protocol::messages::offset_commit_request::{
         OffsetCommitRequestPartition, OffsetCommitRequestTopic,
@@ -1514,9 +1552,18 @@ async fn groups_follow_the_readable_topics() {
                     .with_metadata(subscription(topic)),
             ])
     };
-    let denied: JoinGroupResponse = call_as(
+    let no_group: JoinGroupResponse = call_as(
         &broker,
         Some(reader("/a/")),
+        ApiKey::JoinGroup,
+        5,
+        &join("a.x"),
+    )
+    .await;
+    assert_eq!(no_group.error_code, 30, "readable topics are not enough");
+    let denied: JoinGroupResponse = call_as(
+        &broker,
+        Some(consumer("/a/", "readers")),
         ApiKey::JoinGroup,
         5,
         &join("b.x"),
@@ -1525,7 +1572,7 @@ async fn groups_follow_the_readable_topics() {
     assert_eq!(denied.error_code, 30);
     let required: JoinGroupResponse = call_as(
         &broker,
-        Some(reader("/a/")),
+        Some(consumer("/a/", "readers")),
         ApiKey::JoinGroup,
         5,
         &join("a.x"),
@@ -1535,16 +1582,27 @@ async fn groups_follow_the_readable_topics() {
 
     let commit = OffsetCommitRequest::default()
         .with_group_id(GroupId(StrBytes::from_static_str("readers")))
-        .with_topics(vec![
-            OffsetCommitRequestTopic::default()
-                .with_name(tn("b.x"))
-                .with_partitions(vec![
-                    OffsetCommitRequestPartition::default()
-                        .with_partition_index(0)
-                        .with_committed_offset(1),
-                ]),
-        ]);
-    let denied: OffsetCommitResponse = call_as(
+        .with_topics(
+            ["a.x", "b.x"]
+                .map(|topic| {
+                    OffsetCommitRequestTopic::default()
+                        .with_name(tn(topic))
+                        .with_partitions(vec![
+                            OffsetCommitRequestPartition::default()
+                                .with_partition_index(0)
+                                .with_committed_offset(1),
+                        ])
+                })
+                .to_vec(),
+        );
+    let codes = |response: OffsetCommitResponse| {
+        response
+            .topics
+            .iter()
+            .map(|topic| topic.partitions[0].error_code)
+            .collect::<Vec<_>>()
+    };
+    let no_group: OffsetCommitResponse = call_as(
         &broker,
         Some(reader("/a/")),
         ApiKey::OffsetCommit,
@@ -1552,7 +1610,16 @@ async fn groups_follow_the_readable_topics() {
         &commit,
     )
     .await;
-    assert_eq!(denied.topics[0].partitions[0].error_code, 29);
+    assert_eq!(codes(no_group), [30, 30], "the group is checked first");
+    let committed: OffsetCommitResponse = call_as(
+        &broker,
+        Some(consumer("/a/", "readers")),
+        ApiKey::OffsetCommit,
+        8,
+        &commit,
+    )
+    .await;
+    assert_eq!(codes(committed), [0, 29]);
 
     let list = ListGroupsRequest::default();
     let hidden: ListGroupsResponse =
@@ -1583,12 +1650,112 @@ async fn groups_follow_the_readable_topics() {
     )
     .await;
     assert_eq!(denied.groups[0].error_code, 30);
+    let described: DescribeGroupsResponse = call_as(
+        &broker,
+        Some(consumer("/", "readers")),
+        ApiKey::DescribeGroups,
+        5,
+        &describe,
+    )
+    .await;
+    assert_eq!(described.groups[0].error_code, 0);
 
     let delete = DeleteGroupsRequest::default()
         .with_groups_names(vec![GroupId(StrBytes::from_static_str("readers"))]);
-    let denied: DeleteGroupsResponse =
-        call_as(&broker, Some(reader("/")), ApiKey::DeleteGroups, 2, &delete).await;
-    assert_eq!(denied.results[0].error_code, 30);
+    for refused in [reader("/"), consumer("/", "readers")] {
+        let denied: DeleteGroupsResponse =
+            call_as(&broker, Some(refused), ApiKey::DeleteGroups, 2, &delete).await;
+        assert_eq!(denied.results[0].error_code, 30);
+    }
+    let deleter = principal(
+        "deleter",
+        Scope {
+            groups: ResourceSet::exact("readers"),
+            ops: [Operation::DeleteGroup].into(),
+            audiences: [Audience::Kafka].into(),
+            ..Scope::default()
+        },
+    );
+    let deleted: DeleteGroupsResponse =
+        call_as(&broker, Some(deleter), ApiKey::DeleteGroups, 2, &delete).await;
+    assert_eq!(
+        deleted.results[0].error_code, 68,
+        "authorized, so the coordinator answers: the join left a pending member"
+    );
+}
+
+#[tokio::test]
+async fn deleting_offsets_needs_delete_group() {
+    use kafka_protocol::messages::offset_commit_request::{
+        OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+    };
+    use kafka_protocol::messages::offset_delete_request::{
+        OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
+    };
+    use kafka_protocol::messages::{
+        GroupId, OffsetCommitRequest, OffsetCommitResponse, OffsetDeleteRequest,
+        OffsetDeleteResponse,
+    };
+
+    let (broker, _, _) = secured_broker().await;
+    secured_topic(&broker, "/a/x").await;
+    let committed: OffsetCommitResponse = call_as(
+        &broker,
+        Some(consumer("/a/", "readers")),
+        ApiKey::OffsetCommit,
+        8,
+        &OffsetCommitRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("readers")))
+            .with_topics(vec![
+                OffsetCommitRequestTopic::default()
+                    .with_name(tn("a.x"))
+                    .with_partitions(vec![
+                        OffsetCommitRequestPartition::default()
+                            .with_partition_index(0)
+                            .with_committed_offset(1),
+                    ]),
+            ]),
+    )
+    .await;
+    assert_eq!(committed.topics[0].partitions[0].error_code, 0);
+
+    let delete = OffsetDeleteRequest::default()
+        .with_group_id(GroupId(StrBytes::from_static_str("readers")))
+        .with_topics(vec![
+            OffsetDeleteRequestTopic::default()
+                .with_name(tn("a.x"))
+                .with_partitions(vec![
+                    OffsetDeleteRequestPartition::default().with_partition_index(0),
+                ]),
+        ]);
+    let refused: OffsetDeleteResponse = call_as(
+        &broker,
+        Some(consumer("/a/", "readers")),
+        ApiKey::OffsetDelete,
+        0,
+        &delete,
+    )
+    .await;
+    assert_eq!(refused.error_code, 30);
+
+    let deleter = principal(
+        "deleter",
+        Scope {
+            streams: ResourceSet::prefix("/a/"),
+            groups: ResourceSet::exact("readers"),
+            access: Access {
+                stream: ReadWrite::read_only(),
+                ..Access::default()
+            },
+            ops: [Operation::DeleteGroup].into(),
+            audiences: [Audience::Kafka].into(),
+            ..Scope::default()
+        },
+    );
+    let deleted: OffsetDeleteResponse =
+        call_as(&broker, Some(deleter), ApiKey::OffsetDelete, 0, &delete).await;
+    assert_eq!(deleted.error_code, 0);
+    assert_eq!(deleted.topics[0].partitions[0].error_code, 0);
 }
 
 #[tokio::test]
@@ -2029,7 +2196,7 @@ async fn metadata_seen(broker: &BrokerContext, group: &str, member_id: &str, met
     use picomq_server::group::MemberRole;
 
     loop {
-        let description = broker.groups.describe(group).await.unwrap();
+        let description = broker.groups.describe(None, group).await.unwrap();
         let seen = description.members.iter().any(|member| {
             member.member_id == member_id
                 && matches!(&member.role, MemberRole::Client { metadata: seen, .. } if seen == metadata)
@@ -3271,7 +3438,7 @@ async fn offset_delete_and_delete_groups_respect_members() {
     }
     broker
         .groups
-        .commit_offsets("workers", None, &committed)
+        .commit_offsets(None, "workers", None, &committed)
         .await
         .unwrap();
 
@@ -3283,22 +3450,25 @@ async fn offset_delete_and_delete_groups_respect_members() {
         .unwrap();
     let member = broker
         .groups
-        .join(JoinInput {
-            group_id: "workers".to_owned(),
-            member_id: String::new(),
-            instance_id: None,
-            client_id: "test".to_owned(),
-            membership: Membership::Client {
-                protocol_type: "consumer".to_owned(),
-                protocols: vec![JoinProtocol {
-                    name: "range".to_owned(),
-                    metadata: subscription.freeze(),
-                }],
+        .join(
+            None,
+            JoinInput {
+                group_id: "workers".to_owned(),
+                member_id: String::new(),
+                instance_id: None,
+                client_id: "test".to_owned(),
+                membership: Membership::Client {
+                    protocol_type: "consumer".to_owned(),
+                    protocols: vec![JoinProtocol {
+                        name: "range".to_owned(),
+                        metadata: subscription.freeze(),
+                    }],
+                },
+                session_timeout_ms: 10_000,
+                rebalance_timeout_ms: 2_000,
+                require_known_member_id: false,
             },
-            session_timeout_ms: 10_000,
-            rebalance_timeout_ms: 2_000,
-            require_known_member_id: false,
-        })
+        )
         .await;
     assert!(member.result.is_ok());
 
@@ -3325,7 +3495,11 @@ async fn offset_delete_and_delete_groups_respect_members() {
         .collect();
     assert_eq!(codes, [vec![86], vec![0, 3], vec![3]]);
 
-    let remaining = broker.groups.fetch_offsets("workers", None).await.unwrap();
+    let remaining = broker
+        .groups
+        .fetch_offsets(None, "workers", None)
+        .await
+        .unwrap();
     assert_eq!(
         remaining.keys().copied().collect::<Vec<_>>(),
         [committed[0].partition]
@@ -3351,15 +3525,16 @@ async fn offset_delete_and_delete_groups_respect_members() {
 
     broker
         .groups
-        .leave("workers", &[(member.member_id.clone(), None)])
-        .await;
+        .leave(None, "workers", &[(member.member_id.clone(), None)])
+        .await
+        .unwrap();
     let response: DeleteGroupsResponse =
         call(&broker, ApiKey::DeleteGroups, 2, &delete(&["workers"])).await;
     assert_eq!(response.results[0].error_code, 0);
     assert!(
         broker
             .groups
-            .fetch_offsets("workers", None)
+            .fetch_offsets(None, "workers", None)
             .await
             .unwrap()
             .is_empty()

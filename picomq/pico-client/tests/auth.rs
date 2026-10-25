@@ -10,7 +10,7 @@ use axum::response::IntoResponse;
 use axum::routing::any;
 use bytes::Bytes;
 use picomq_auth::{
-    AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
+    Access, AccessToken, Audience, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
 use picomq_client::{ClientConfig, CreateOptions, ErrorKind, PicoClient, StreamApi};
 use picomq_http::HttpProtocol as ServeProtocol;
@@ -67,9 +67,9 @@ async fn error_kinds_distinguish_auth_from_fencing() {
             verifier,
             scope: Scope {
                 streams: ResourceSet::prefix(""),
-                groups: OperationGroups {
+                access: Access {
                     stream: ReadWrite::read_only(),
-                    ..OperationGroups::default()
+                    ..Access::default()
                 },
                 audiences: [Audience::Pico].into(),
                 ..Scope::default()

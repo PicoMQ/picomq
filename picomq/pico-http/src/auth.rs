@@ -6,7 +6,7 @@
 use axum::http::{HeaderMap, Method, Uri, header};
 use axum::response::Response;
 use bytes::Bytes;
-use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
+use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation, Resource};
 use picomq_protocol::ds::H_STREAM_CLOSED;
 use picomq_protocol::pico::{H_CLOSED, H_TRIM_SEQ};
 
@@ -43,7 +43,7 @@ pub async fn gate(
     let caller = authenticate(authorizer, audience, headers).await?;
     let client_name =
         auth_resource(audience, uri).map_err(|error| Box::new(service_error(audience, error)))?;
-    let stored = caller.resolve(authorizer, &client_name)?;
+    let stored = caller.resolve(Resource::Stream, &client_name)?;
     for op in ops {
         caller.authorize(authorizer, op, Some(&stored))?;
     }
@@ -61,7 +61,7 @@ pub(crate) struct Caller {
 
 impl Caller {
     // Anonymous scope denials are 401, not 403: the remedy is a credential.
-    fn demote(&self, err: AuthError) -> Box<Response> {
+    pub(crate) fn demote(&self, err: AuthError) -> Box<Response> {
         let err = match err {
             AuthError::Store(_) => err,
             _ if self.anonymous => AuthError::Unauthenticated,
@@ -72,11 +72,12 @@ impl Caller {
 
     pub(crate) fn resolve(
         &self,
-        authorizer: &Authorizer,
+        resource: Resource,
         client_name: &str,
     ) -> Result<String, Box<Response>> {
-        authorizer
-            .resolve_stream_name(&self.principal, client_name)
+        self.principal
+            .scope
+            .resolve(resource, client_name)
             .map_err(|err| self.demote(err))
     }
 
@@ -272,7 +273,7 @@ pub(crate) fn status_code(err: &AuthError) -> (u16, &'static str, &'static str) 
 mod tests {
     use super::*;
     use picomq_auth::{
-        AccessToken, MemoryTokenStore, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord,
+        Access, AccessToken, MemoryTokenStore, ReadWrite, ResourceSet, Scope, TokenRecord,
         TokenStore,
     };
     use serde_json::Value;
@@ -424,9 +425,9 @@ mod tests {
     fn read_scope() -> Scope {
         Scope {
             streams: ResourceSet::prefix("/acct/"),
-            groups: OperationGroups {
+            access: Access {
                 stream: ReadWrite::read_only(),
-                ..OperationGroups::default()
+                ..Access::default()
             },
             audiences: [Audience::Pico, Audience::DurableStreams].into(),
             ..Scope::default()

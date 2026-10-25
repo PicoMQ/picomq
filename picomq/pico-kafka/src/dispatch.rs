@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use picomq_auth::{AuthPrincipal, Authorizer, Operation};
+use picomq_auth::{AuthPrincipal, Authorizer, Operation, Scope};
 
 use kafka_protocol::protocol::decode_request_header_from_buffer;
 
@@ -29,6 +29,10 @@ impl RequestContext {
                 .as_ref()
                 .is_some_and(|principal| authorizer.authorize(principal, op, resource).is_ok()),
         }
+    }
+
+    pub fn scope(&self) -> Option<&Scope> {
+        self.principal.as_ref().map(|principal| &principal.scope)
     }
 
     pub fn allows_operation(&self, authorizer: Option<&Authorizer>, op: Operation) -> bool {

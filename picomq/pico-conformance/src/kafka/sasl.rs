@@ -1,19 +1,23 @@
 use bytes::Bytes;
 use kafka_protocol::messages::create_topics_request::CreatableTopic;
 use kafka_protocol::messages::fetch_request::{FetchPartition, FetchTopic};
+use kafka_protocol::messages::leave_group_request::MemberIdentity;
 use kafka_protocol::messages::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
 use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
 use kafka_protocol::messages::{
     ApiKey, ApiVersionsRequest, ApiVersionsResponse, CreateTopicsRequest, CreateTopicsResponse,
-    FetchRequest, FetchResponse, ListOffsetsRequest, ListOffsetsResponse, MetadataRequest,
-    ProduceRequest, ProduceResponse, SaslAuthenticateRequest, SaslAuthenticateResponse,
-    SaslHandshakeRequest, SaslHandshakeResponse, TopicName,
+    FetchRequest, FetchResponse, GroupId, LeaveGroupRequest, LeaveGroupResponse,
+    ListOffsetsRequest, ListOffsetsResponse, MetadataRequest, ProduceRequest, ProduceResponse,
+    SaslAuthenticateRequest, SaslAuthenticateResponse, SaslHandshakeRequest, SaslHandshakeResponse,
+    TopicName,
 };
 use kafka_protocol::protocol::{Encodable, StrBytes};
 
 use crate::kafka::clients::{CERTIFICATES, Clients, KCAT};
 use crate::kafka::raw::{self, Connection, Reply, decode, describe, encode};
+use crate::kafka::scenario::{delete_group_offsets, group_records};
 
+pub const READER_GROUPS: &str = "readers";
 const PLAIN: &str = "PLAIN";
 const RECORDS: &str = "k1:v1\nk2:v2\nk3:v3\n";
 const HANDSHAKE_VERSION: i16 = 1;
@@ -23,6 +27,7 @@ const METADATA_VERSION: i16 = 12;
 const PRODUCE_VERSION: i16 = 9;
 const FETCH_VERSION: i16 = 12;
 const LIST_OFFSETS_VERSION: i16 = 7;
+const LEAVE_GROUP_VERSION: i16 = 4;
 const CREATE_TOPICS_VERSION: i16 = 7;
 
 pub struct Credentials {
@@ -48,6 +53,7 @@ pub enum Scenario {
     ProduceConsume,
     Reader,
     Writer,
+    Group,
     SslProduceConsume,
     SslRequired,
 }
@@ -61,6 +67,7 @@ impl Scenario {
         Scenario::ProduceConsume,
         Scenario::Reader,
         Scenario::Writer,
+        Scenario::Group,
     ];
 
     pub const SSL: &[Scenario] = &[Scenario::SslProduceConsume, Scenario::SslRequired];
@@ -74,6 +81,7 @@ impl Scenario {
             Scenario::ProduceConsume => "sasl-produce-consume",
             Scenario::Reader => "sasl-reader",
             Scenario::Writer => "sasl-writer",
+            Scenario::Group => "sasl-group",
             Scenario::SslProduceConsume => "sasl-ssl-produce-consume",
             Scenario::SslRequired => "sasl-ssl-required",
         }
@@ -88,6 +96,7 @@ impl Scenario {
             Scenario::ProduceConsume => produce_consume(clients, listener, topic).await,
             Scenario::Reader => reader(clients, listener, topic).await,
             Scenario::Writer => writer(clients, listener, topic).await,
+            Scenario::Group => group(clients, listener, topic).await,
             Scenario::SslProduceConsume => produce_consume(clients, listener, topic).await,
             Scenario::SslRequired => ssl_required(clients, listener).await,
         }
@@ -367,6 +376,40 @@ async fn writer(clients: &Clients, listener: &Listener<'_>, topic: &str) -> Vec<
     lines
 }
 
+async fn group(clients: &Clients, listener: &Listener<'_>, topic: &str) -> Vec<String> {
+    let own = format!("{READER_GROUPS}-{topic}");
+    let other = format!("others-{topic}");
+    let mut lines = vec![
+        create(clients, listener, listener.root, topic).await,
+        produce(clients, listener, listener.root, topic).await,
+    ];
+
+    let reader = listener.properties(listener.reader);
+    for (name, group) in [("own group", &own), ("other group", &other)] {
+        let records = group_records(clients, listener.bootstrap, topic, group, Some(&reader)).await;
+        lines.push(format!("{name}: {} records", records.len()));
+        lines.extend(records);
+    }
+
+    if let Some(mut connection) = Connection::open(listener.host_address).await {
+        handshake_on(&mut connection, HANDSHAKE_VERSION, PLAIN).await;
+        authenticate_on(&mut connection, listener.reader).await;
+        lines.push(format!(
+            "raw leave other group: {}",
+            leave_group_on(&mut connection, &other).await
+        ));
+    }
+
+    for (name, credentials) in [("reader", listener.reader), ("root", listener.root)] {
+        let config = listener.properties(credentials);
+        let (_, rows) =
+            delete_group_offsets(clients, listener.bootstrap, topic, &own, Some(&config)).await;
+        lines.extend(rows.into_iter().map(|row| format!("{name}: {row}")));
+    }
+
+    lines
+}
+
 async fn create(
     clients: &Clients,
     listener: &Listener<'_>,
@@ -616,6 +659,40 @@ async fn list_offsets_on(connection: &mut Connection, topic: &str) -> String {
                     .and_then(|topic| topic.partitions.first())
                     .map(|partition| format!("error {}", partition.error_code))
                     .unwrap_or_else(|| "no partitions".to_owned()),
+                Err(_) => "unreadable".to_owned(),
+            }
+        }
+        reply => describe(reply),
+    }
+}
+
+async fn leave_group_on(connection: &mut Connection, group: &str) -> String {
+    let request = LeaveGroupRequest::default()
+        .with_group_id(GroupId(StrBytes::from(group.to_owned())))
+        .with_members(vec![
+            MemberIdentity::default().with_member_id(StrBytes::from_static_str("ghost")),
+        ]);
+
+    match send(
+        connection,
+        ApiKey::LeaveGroup,
+        LEAVE_GROUP_VERSION,
+        &request,
+    )
+    .await
+    {
+        Reply::Frame(mut frame) => {
+            match decode::<LeaveGroupResponse>(&mut frame, ApiKey::LeaveGroup, LEAVE_GROUP_VERSION)
+            {
+                Ok(response) => format!(
+                    "error {} members {:?}",
+                    response.error_code,
+                    response
+                        .members
+                        .iter()
+                        .map(|member| member.error_code)
+                        .collect::<Vec<_>>()
+                ),
                 Err(_) => "unreadable".to_owned(),
             }
         }

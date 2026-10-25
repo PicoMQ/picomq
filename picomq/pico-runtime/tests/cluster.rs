@@ -420,7 +420,11 @@ async fn a_narrow_token_is_enforced_over_kafka() {
     let scope = |read: bool, write: bool| {
         serde_json::json!({
             "streams": [{ "prefix": format!("/{topic}") }],
-            "groups": { "stream": { "read": read, "write": write } },
+            "groups": [{ "prefix": "narrow-" }],
+            "access": {
+                "stream": { "read": read, "write": write },
+                "group": { "read": read }
+            },
             "audiences": ["kafka"]
         })
     };

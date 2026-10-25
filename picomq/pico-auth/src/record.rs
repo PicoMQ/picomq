@@ -9,9 +9,7 @@ use std::collections::BTreeSet;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::AuthError;
-use crate::scope::{
-    Audience, Operation, OperationGroups, ReadWrite, ResourceMatcher, ResourceSet, Scope,
-};
+use crate::scope::{Access, Audience, Operation, ReadWrite, ResourceMatcher, ResourceSet, Scope};
 use crate::token::{ID_MAX_LEN, ID_MIN_LEN, VERIFIER_LEN, Verifier};
 
 /// Server-side token record. Never contains the secret.
@@ -80,7 +78,8 @@ fn validate_id(id: &str) -> Result<(), AuthError> {
 fn encode_scope(buf: &mut BytesMut, scope: &Scope) {
     encode_resource_set(buf, &scope.streams);
     encode_resource_set(buf, &scope.tokens);
-    encode_groups(buf, &scope.groups);
+    encode_resource_set(buf, &scope.groups);
+    encode_access(buf, &scope.access);
     buf.put_i32(scope.ops.len() as i32);
     for op in &scope.ops {
         buf.put_u8(operation_tag(*op));
@@ -89,7 +88,7 @@ fn encode_scope(buf: &mut BytesMut, scope: &Scope) {
     for audience in &scope.audiences {
         buf.put_u8(audience_tag(*audience));
     }
-    buf.put_u8(scope.auto_prefix_streams as u8);
+    buf.put_u8(scope.auto_prefix as u8);
     buf.put_u8(scope.expires_at_ms.is_some() as u8);
     buf.put_i64(scope.expires_at_ms.unwrap_or(0));
 }
@@ -97,7 +96,8 @@ fn encode_scope(buf: &mut BytesMut, scope: &Scope) {
 fn decode_scope(buf: &mut &[u8]) -> Result<Scope, AuthError> {
     let streams = decode_resource_set(buf)?;
     let tokens = decode_resource_set(buf)?;
-    let groups = decode_groups(buf)?;
+    let groups = decode_resource_set(buf)?;
+    let access = decode_access(buf)?;
     let ops_len = get_i32(buf)?;
     if ops_len < 0 {
         return Err(AuthError::Malformed);
@@ -114,7 +114,7 @@ fn decode_scope(buf: &mut &[u8]) -> Result<Scope, AuthError> {
     for _ in 0..audiences_len {
         audiences.insert(audience_from_tag(get_u8(buf)?)?);
     }
-    let auto_prefix_streams = get_u8(buf)? == 1;
+    let auto_prefix = get_u8(buf)? == 1;
     let expires_flag = get_u8(buf)? == 1;
     let expires_raw = get_i64(buf)?;
     let expires_at_ms = expires_flag.then_some(expires_raw);
@@ -122,9 +122,10 @@ fn decode_scope(buf: &mut &[u8]) -> Result<Scope, AuthError> {
         streams,
         tokens,
         groups,
+        access,
         ops,
         audiences,
-        auto_prefix_streams,
+        auto_prefix,
         expires_at_ms,
     })
 }
@@ -163,16 +164,18 @@ fn decode_resource_set(buf: &mut &[u8]) -> Result<ResourceSet, AuthError> {
     Ok(ResourceSet::any_of(matchers))
 }
 
-fn encode_groups(buf: &mut BytesMut, groups: &OperationGroups) {
-    encode_rw(buf, groups.stream);
-    encode_rw(buf, groups.tokens);
-    encode_rw(buf, groups.admin);
+fn encode_access(buf: &mut BytesMut, access: &Access) {
+    encode_rw(buf, access.stream);
+    encode_rw(buf, access.tokens);
+    encode_rw(buf, access.group);
+    encode_rw(buf, access.admin);
 }
 
-fn decode_groups(buf: &mut &[u8]) -> Result<OperationGroups, AuthError> {
-    Ok(OperationGroups {
+fn decode_access(buf: &mut &[u8]) -> Result<Access, AuthError> {
+    Ok(Access {
         stream: decode_rw(buf)?,
         tokens: decode_rw(buf)?,
+        group: decode_rw(buf)?,
         admin: decode_rw(buf)?,
     })
 }
@@ -208,6 +211,8 @@ fn operation_tag(op: Operation) -> u8 {
         Operation::TransferStream => 15,
         Operation::UpdateNodeSlots => 16,
         Operation::DeleteGroup => 17,
+        Operation::Consume => 18,
+        Operation::DescribeGroup => 19,
     }
 }
 
@@ -230,6 +235,8 @@ fn operation_from_tag(tag: u8) -> Result<Operation, AuthError> {
         15 => Operation::TransferStream,
         16 => Operation::UpdateNodeSlots,
         17 => Operation::DeleteGroup,
+        18 => Operation::Consume,
+        19 => Operation::DescribeGroup,
         _ => return Err(AuthError::Malformed),
     })
 }
@@ -312,13 +319,15 @@ mod tests {
                 ResourceMatcher::Exact("/shared".into()),
             ]),
             tokens: ResourceSet::prefix("acct/"),
-            groups: OperationGroups {
+            groups: ResourceSet::exact("acct/billing"),
+            access: Access {
                 stream: ReadWrite::read_only(),
-                ..OperationGroups::default()
+                group: ReadWrite::read_only(),
+                ..Access::default()
             },
-            ops: [Operation::IssueToken].into(),
+            ops: [Operation::IssueToken, Operation::DescribeGroup].into(),
             audiences: [Audience::Pico, Audience::Admin].into(),
-            auto_prefix_streams: false,
+            auto_prefix: false,
             expires_at_ms: Some(1_700_000_000_000),
         }
     }
@@ -422,7 +431,8 @@ mod tests {
         (
             arb_resource_set(),
             arb_resource_set(),
-            (arb_rw(), arb_rw(), arb_rw()),
+            arb_resource_set(),
+            (arb_rw(), arb_rw(), arb_rw(), arb_rw()),
             proptest::collection::btree_set(
                 proptest::sample::select(Operation::ALL.to_vec()),
                 0..6,
@@ -439,18 +449,31 @@ mod tests {
             proptest::option::of(any::<i64>()),
         )
             .prop_map(
-                |(streams, tokens, (stream, tokens_rw, admin), ops, audiences, auto, exp)| Scope {
+                |(
                     streams,
                     tokens,
-                    groups: OperationGroups {
-                        stream,
-                        tokens: tokens_rw,
-                        admin,
-                    },
+                    groups,
+                    (stream, tokens_rw, group, admin),
                     ops,
                     audiences,
-                    auto_prefix_streams: auto,
-                    expires_at_ms: exp,
+                    auto,
+                    exp,
+                )| {
+                    Scope {
+                        streams,
+                        tokens,
+                        groups,
+                        access: Access {
+                            stream,
+                            tokens: tokens_rw,
+                            group,
+                            admin,
+                        },
+                        ops,
+                        audiences,
+                        auto_prefix: auto,
+                        expires_at_ms: exp,
+                    }
                 },
             )
     }

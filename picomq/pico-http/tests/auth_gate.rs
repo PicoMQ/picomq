@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use picomq_auth::{
-    AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
+    Access, AccessToken, Audience, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
 use picomq_http::{HttpProtocol, RoutingMode, ServeOptions, serve};
 use picomq_listener::Listener;
@@ -16,12 +16,12 @@ use picomq_server::PicoNode;
 fn full_stream_scope(prefix: &str, auto_prefix: bool) -> Scope {
     Scope {
         streams: ResourceSet::prefix(prefix),
-        groups: OperationGroups {
+        access: Access {
             stream: ReadWrite::all(),
-            ..OperationGroups::default()
+            ..Access::default()
         },
         audiences: [Audience::Pico, Audience::DurableStreams].into(),
-        auto_prefix_streams: auto_prefix,
+        auto_prefix,
         ..Scope::default()
     }
 }
@@ -333,9 +333,9 @@ async fn anonymous_grant_scopes_uncredentialed_access() {
         verifier,
         scope: Scope {
             streams: ResourceSet::prefix("/public/"),
-            groups: OperationGroups {
+            access: Access {
                 stream: picomq_auth::ReadWrite::read_only(),
-                ..OperationGroups::default()
+                ..Access::default()
             },
             audiences: [Audience::Pico].into(),
             ..Scope::default()
@@ -514,17 +514,20 @@ async fn seed(node: &PicoNode, id: &str, scope: Scope) -> String {
 }
 
 #[tokio::test]
-async fn deleting_a_group_takes_admin_write() {
-    let manager = Scope {
-        groups: OperationGroups {
+async fn deleting_a_group_takes_delete_group_on_it() {
+    let groups = |prefix: &str, group: ReadWrite| Scope {
+        groups: ResourceSet::prefix(prefix),
+        access: Access {
             stream: ReadWrite::all(),
-            admin: ReadWrite::all(),
-            ..OperationGroups::default()
+            group,
+            ..Access::default()
         },
         ..full_stream_scope("/g/", false)
     };
-    let (server, admin, node) = gated_server(HttpProtocol::Pico, manager).await;
-    let reader = seed(&node, "it/reader", full_stream_scope("/g/", false)).await;
+    let (server, manager, node) =
+        gated_server(HttpProtocol::Pico, groups("g", ReadWrite::all())).await;
+    let consumer = seed(&node, "it/consumer", groups("g", ReadWrite::read_only())).await;
+    let stranger = seed(&node, "it/stranger", groups("h", ReadWrite::all())).await;
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::new();
     node.topics()
@@ -534,7 +537,7 @@ async fn deleting_a_group_takes_admin_write() {
 
     let joined: serde_json::Value = client
         .post(format!("{base}/_groups/g/members"))
-        .bearer_auth(&admin)
+        .bearer_auth(&consumer)
         .json(&serde_json::json!({ "subscription": ["/g/a"] }))
         .send()
         .await
@@ -550,19 +553,20 @@ async fn deleting_a_group_takes_admin_write() {
             .send()
     };
 
-    assert_eq!(delete(&reader).await.unwrap().status(), 403);
+    assert_eq!(delete(&consumer).await.unwrap().status(), 403);
+    assert_eq!(delete(&stranger).await.unwrap().status(), 403);
     assert_eq!(
-        delete(&admin).await.unwrap().status(),
+        delete(&manager).await.unwrap().status(),
         409,
         "still has a member"
     );
     client
         .delete(format!("{base}/_groups/g/members/{member}"))
-        .bearer_auth(&admin)
+        .bearer_auth(&consumer)
         .send()
         .await
         .unwrap();
-    assert_eq!(delete(&admin).await.unwrap().status(), 204);
+    assert_eq!(delete(&manager).await.unwrap().status(), 204);
 }
 
 #[tokio::test]
@@ -601,9 +605,9 @@ async fn an_exact_scope_lists_only_its_stream() {
 #[tokio::test]
 async fn a_stream_reader_reads_its_stream_config() {
     let reader = Scope {
-        groups: OperationGroups {
+        access: Access {
             stream: ReadWrite::read_only(),
-            ..OperationGroups::default()
+            ..Access::default()
         },
         ..full_stream_scope("/cfg/", false)
     };

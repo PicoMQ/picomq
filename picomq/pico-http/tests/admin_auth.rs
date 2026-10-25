@@ -128,7 +128,7 @@ async fn token_lifecycle_issue_list_revoke() {
             "id": "svc/reader",
             "scope": {
                 "streams": [{ "prefix": "/acct/" }],
-                "groups": { "stream": { "read": true } },
+                "access": { "stream": { "read": true } },
                 "audiences": ["pico"],
             },
         }))
@@ -147,7 +147,7 @@ async fn token_lifecycle_issue_list_revoke() {
         .bearer_auth(&wire)
         .json(&json!({
             "id": "svc/reader",
-            "scope": { "groups": { "stream": { "read": true } }, "streams": [{ "prefix": "" }], "audiences": ["pico"] },
+            "scope": { "access": { "stream": { "read": true } }, "streams": [{ "prefix": "" }], "audiences": ["pico"] },
         }))
         .send()
         .await
@@ -160,7 +160,7 @@ async fn token_lifecycle_issue_list_revoke() {
         .bearer_auth(&child)
         .json(&json!({
             "id": "svc/other",
-            "scope": { "groups": { "stream": { "read": true } }, "streams": [{ "prefix": "" }], "audiences": ["pico"] },
+            "scope": { "access": { "stream": { "read": true } }, "streams": [{ "prefix": "" }], "audiences": ["pico"] },
         }))
         .send()
         .await
@@ -237,7 +237,7 @@ async fn revocation_propagates_to_the_gate() {
             "id": "svc/doomed",
             "scope": {
                 "streams": [{ "prefix": "/" }],
-                "groups": { "stream": { "read": true, "write": true } },
+                "access": { "stream": { "read": true, "write": true } },
                 "audiences": ["pico"],
             },
         }))
@@ -294,7 +294,7 @@ async fn anonymous_grant_cannot_carry_the_admin_audience() {
             "id": "anonymous",
             "scope": {
                 "streams": [{ "prefix": "/public/" }],
-                "groups": { "stream": { "read": true }, "admin": { "read": true } },
+                "access": { "stream": { "read": true }, "admin": { "read": true } },
                 "audiences": ["pico", "admin"],
             },
         }))
@@ -320,7 +320,7 @@ async fn issuance_rejects_widening_and_dead_scopes() {
             "scope": {
                 "streams": [{ "prefix": "/acct/" }],
                 "tokens": [{ "prefix": "svc/" }],
-                "groups": { "stream": { "read": true, "write": true }, "tokens": { "read": true, "write": true } },
+                "access": { "stream": { "read": true, "write": true }, "tokens": { "read": true, "write": true } },
                 "audiences": ["pico", "admin"],
             },
         }))
@@ -338,7 +338,7 @@ async fn issuance_rejects_widening_and_dead_scopes() {
             "id": "svc/wide",
             "scope": {
                 "streams": [{ "prefix": "/" }],
-                "groups": { "stream": { "read": true } },
+                "access": { "stream": { "read": true } },
                 "audiences": ["pico"],
             },
         }))

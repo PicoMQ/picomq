@@ -19,7 +19,7 @@ use bytes::Bytes;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
 
-use picomq_auth::{Audience, Authorizer};
+use picomq_auth::{Audience, Authorizer, Resource};
 use picomq_protocol::mime::mime_of;
 use picomq_protocol::pico::{
     CT_BATCH_BINARY, CT_BATCH_JSON, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT, E_BAD_REQUEST, E_CLOSED,
@@ -417,7 +417,7 @@ impl PicoFrontend {
                 permit
                     .principal
                     .scope
-                    .resolve_stream_name(&after)
+                    .resolve(Resource::Stream, &after)
                     .map_err(|_| bad_request("invalid start_after"))?,
             ),
             (_, after) => after,
@@ -442,7 +442,7 @@ impl PicoFrontend {
                 .map(|meta| {
                     let spelling = meta.topic.name.spelling();
                     let name = match permit {
-                        Some(permit) => permit.principal.scope.strip_stream_name(spelling),
+                        Some(permit) => permit.principal.scope.strip(Resource::Stream, spelling),
                         None => spelling,
                     };
                     let single = (meta.partitions.len() == 1).then(|| &meta.partitions[0]);

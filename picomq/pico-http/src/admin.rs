@@ -475,7 +475,7 @@ async fn list_tokens(State(state): State<AdminState>, headers: HeaderMap) -> Res
     let tokens: Vec<Value> = records
         .iter()
         .filter(|record| match &principal {
-            Some(principal) => principal.scope.allows_token_id(&record.id),
+            Some(principal) => principal.scope.tokens.matches(&record.id),
             None => true,
         })
         .map(token_json)
