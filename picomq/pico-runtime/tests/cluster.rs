@@ -17,6 +17,7 @@ use picomq_client::producer::{Producer, ProducerConfig};
 use picomq_client::{CreateOptions, Live, PicoClient, ReadLimits, RetryPolicy, StreamApi};
 use rdkafka::admin::{AdminOptions, NewTopic, ResourceSpecifier, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, StreamConsumer};
+use rdkafka::error::KafkaError;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::types::RDKafkaErrorCode;
 use rdkafka::{Message, Offset, TopicPartitionList};
@@ -683,6 +684,15 @@ async fn kafka_clients_survive_a_killed_coordinator_and_owner() {
         return;
     };
 
+    let outcome = tokio::spawn(survive_a_killed_coordinator_and_owner(kill)).await;
+    run(&start);
+    wait_ready(&second_admin()).await;
+    if let Err(failure) = outcome {
+        std::panic::resume_unwind(failure.into_panic());
+    }
+}
+
+async fn survive_a_killed_coordinator_and_owner(kill: String) {
     let h = cluster();
     let survivor = Harness::new();
     let topic = unique("kafka-failover");
@@ -737,7 +747,10 @@ async fn kafka_clients_survive_a_killed_coordinator_and_owner() {
         .collect();
     assert!(unseen.is_empty(), "the group never saw {unseen:?}");
 
-    consumer.commit_consumer_state(CommitMode::Sync).unwrap();
+    match consumer.commit_consumer_state(CommitMode::Sync) {
+        Ok(()) | Err(KafkaError::ConsumerCommit(RDKafkaErrorCode::NoOffset)) => {}
+        Err(error) => panic!("final commit failed: {error}"),
+    }
     let committed = consumer.committed(Duration::from_secs(10)).unwrap();
     for element in committed.elements() {
         let (_, high) = consumer
@@ -750,9 +763,6 @@ async fn kafka_clients_survive_a_killed_coordinator_and_owner() {
             element.partition()
         );
     }
-
-    run(&start);
-    wait_ready(&second_admin()).await;
 }
 
 /// An idempotent producer keeps writing while one partition is moved to the

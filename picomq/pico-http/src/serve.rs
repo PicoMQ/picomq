@@ -15,9 +15,8 @@ use std::time::Duration;
 
 use axum::Router;
 use picomq_auth::{Audience, Authorizer};
+use picomq_listener::{Listener, Stream};
 use picomq_server::PicoNode;
-use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
-use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -34,11 +33,11 @@ pub enum HttpProtocol {
     Ds,
 }
 
+pub const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
+
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
     pub protocol: HttpProtocol,
-    /// Where `/health` and `/ready` bind. `None` disables the admin listener
-    pub admin_addr: Option<SocketAddr>,
     pub routing_mode: RoutingMode,
     pub long_poll_timeout: Duration,
     pub sse_max_duration: Duration,
@@ -48,8 +47,7 @@ pub struct ServeOptions {
     /// How long to keep failing readiness before closing listeners, so a
     /// load balancer can drain traffic first.
     pub shutdown_drain: Duration,
-    /// The listener accept queue size.
-    pub backlog: i32,
+    pub shutdown_timeout: Duration,
     /// Maintenance-lease holdership for the admin API, when the host runs a
     /// lease keeper. `None` reports `leaseHolder: null`.
     pub leadership: Option<watch::Receiver<bool>>,
@@ -61,14 +59,13 @@ impl Default for ServeOptions {
     fn default() -> Self {
         Self {
             protocol: HttpProtocol::Pico,
-            admin_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9090))),
             routing_mode: RoutingMode::Redirect,
             long_poll_timeout: Duration::from_secs(25),
             sse_max_duration: Duration::from_secs(55),
             max_chunk_size: 64 * 1024,
             max_request_size: 32 * 1024 * 1024,
             shutdown_drain: Duration::ZERO,
-            backlog: 1024,
+            shutdown_timeout: Duration::from_secs(10),
             leadership: None,
             authorizer: None,
         }
@@ -85,19 +82,21 @@ pub struct RunningServer {
     stop: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
     shutdown_drain: Duration,
+    shutdown_timeout: Duration,
 }
 
-/// Serve `options.protocol` on `listener` and, when configured, the admin
-/// routes on `options.admin_addr`.
+/// Serve `options.protocol` on `listener` and, when given, the admin routes
+/// on `admin`.
 ///
 /// The node is constructed by the caller, which lets one node be served by
 /// different sockets in tests and keeps this crate free of metadata-backend
 /// choices.
 pub async fn serve(
     node: Arc<PicoNode>,
-    listener: TcpListener,
+    listener: Listener,
+    admin: Option<Listener>,
     options: ServeOptions,
-) -> std::io::Result<RunningServer> {
+) -> RunningServer {
     let audience = match options.protocol {
         HttpProtocol::Pico => Audience::Pico,
         HttpProtocol::Ds => Audience::DurableStreams,
@@ -155,18 +154,17 @@ pub async fn serve(
     };
 
     let (stop, _) = watch::channel(false);
-    let admin = AdminState::new(node.clone())
+    let admin_state = AdminState::new(node.clone())
         .with_leadership(options.leadership.clone())
         .with_authorizer(options.authorizer.clone());
     let mut tasks = Vec::with_capacity(2);
 
-    let (local_addr, task) = spawn_listener(listener, protocol_router, &stop)?;
+    let (local_addr, task) = spawn_listener(listener, protocol_router, &stop);
     tasks.push(task);
 
     let mut admin_addr = None;
-    if let Some(addr) = options.admin_addr {
-        let listener = bind(addr, options.backlog)?;
-        let (bound, task) = spawn_listener(listener, admin::router(admin.clone()), &stop)?;
+    if let Some(listener) = admin {
+        let (bound, task) = spawn_listener(listener, admin::router(admin_state.clone()), &stop);
         admin_addr = Some(bound);
         tasks.push(task);
     }
@@ -179,44 +177,27 @@ pub async fn serve(
         advertised = node.advertised_address(),
         "picomq server started"
     );
-    Ok(RunningServer {
+    RunningServer {
         node,
-        admin,
+        admin: admin_state,
         local_addr,
         admin_addr,
         stop,
         tasks,
         shutdown_drain: options.shutdown_drain,
-    })
-}
-
-/// Bind a listener with an explicit accept queue. `TcpListener::bind` gives
-/// no way to set the backlog, so the socket is built by hand for the one
-/// call that matters (`listen`).
-pub fn bind(addr: SocketAddr, backlog: i32) -> std::io::Result<TcpListener> {
-    let domain = if addr.is_ipv6() {
-        Domain::IPV6
-    } else {
-        Domain::IPV4
-    };
-    let socket = Socket::new(domain, Type::STREAM, Some(SockProtocol::TCP))?;
-    // Restarting a node should not have to wait out TIME_WAIT.
-    socket.set_reuse_address(true)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&addr.into())?;
-    socket.listen(backlog)?;
-    TcpListener::from_std(socket.into())
+        shutdown_timeout: options.shutdown_timeout,
+    }
 }
 
 fn spawn_listener(
-    listener: TcpListener,
+    listener: Listener,
     router: Router,
     stop: &watch::Sender<bool>,
-) -> std::io::Result<(SocketAddr, JoinHandle<()>)> {
-    let bound = listener.local_addr()?;
+) -> (SocketAddr, JoinHandle<()>) {
+    let bound = listener.local_addr();
     let mut stop = stop.subscribe();
     let task = tokio::spawn(async move {
-        let result = axum::serve(listener, router)
+        let result = axum::serve(HttpListener(listener), router)
             .with_graceful_shutdown(async move {
                 // Only the shutdown path sends, and the sender outlives these
                 // tasks, so a receive error cannot mean "stop" was missed.
@@ -227,7 +208,25 @@ fn spawn_listener(
             tracing::error!(%bound, error = %e, "listener stopped");
         }
     });
-    Ok((bound, task))
+    (bound, task)
+}
+
+struct HttpListener(Listener);
+
+impl axum::serve::Listener for HttpListener {
+    type Io = Stream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Stream, SocketAddr) {
+        match self.0.accept().await {
+            Some(connection) => connection,
+            None => std::future::pending().await,
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        Ok(self.0.local_addr())
+    }
 }
 
 impl RunningServer {
@@ -259,8 +258,13 @@ impl RunningServer {
         }
         self.node.service().stop_live_reads();
         let _ = self.stop.send(true);
+        let deadline = tokio::time::Instant::now() + self.shutdown_timeout;
         for task in self.tasks {
-            let _ = task.await;
+            let listener = task.abort_handle();
+            if tokio::time::timeout_at(deadline, task).await.is_err() {
+                tracing::warn!(timeout = ?self.shutdown_timeout, "connections still open at the shutdown timeout, handing off without them");
+                listener.abort();
+            }
         }
         self.node.close().await;
     }

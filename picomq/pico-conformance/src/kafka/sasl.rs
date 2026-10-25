@@ -11,7 +11,7 @@ use kafka_protocol::messages::{
 };
 use kafka_protocol::protocol::{Encodable, StrBytes};
 
-use crate::kafka::clients::{Clients, KCAT};
+use crate::kafka::clients::{CERTIFICATES, Clients, KCAT};
 use crate::kafka::raw::{self, Connection, Reply, decode, describe, encode};
 
 const PLAIN: &str = "PLAIN";
@@ -33,6 +33,7 @@ pub struct Credentials {
 pub struct Listener<'a> {
     pub bootstrap: &'a str,
     pub host_address: &'a str,
+    pub tls: bool,
     pub root: &'a Credentials,
     pub reader: &'a Credentials,
     pub writer: &'a Credentials,
@@ -47,6 +48,8 @@ pub enum Scenario {
     ProduceConsume,
     Reader,
     Writer,
+    SslProduceConsume,
+    SslRequired,
 }
 
 impl Scenario {
@@ -60,6 +63,8 @@ impl Scenario {
         Scenario::Writer,
     ];
 
+    pub const SSL: &[Scenario] = &[Scenario::SslProduceConsume, Scenario::SslRequired];
+
     pub fn name(self) -> &'static str {
         match self {
             Scenario::Handshake => "sasl-handshake",
@@ -69,6 +74,8 @@ impl Scenario {
             Scenario::ProduceConsume => "sasl-produce-consume",
             Scenario::Reader => "sasl-reader",
             Scenario::Writer => "sasl-writer",
+            Scenario::SslProduceConsume => "sasl-ssl-produce-consume",
+            Scenario::SslRequired => "sasl-ssl-required",
         }
     }
 
@@ -81,6 +88,8 @@ impl Scenario {
             Scenario::ProduceConsume => produce_consume(clients, listener, topic).await,
             Scenario::Reader => reader(clients, listener, topic).await,
             Scenario::Writer => writer(clients, listener, topic).await,
+            Scenario::SslProduceConsume => produce_consume(clients, listener, topic).await,
+            Scenario::SslRequired => ssl_required(clients, listener).await,
         }
     }
 }
@@ -89,27 +98,50 @@ impl Credentials {
     fn token(&self) -> Bytes {
         Bytes::from(format!("\0{}\0{}", self.username, self.password))
     }
+}
 
-    fn kcat(&self) -> [String; 8] {
-        [
-            "-X".to_owned(),
-            "security.protocol=SASL_PLAINTEXT".to_owned(),
-            "-X".to_owned(),
-            "sasl.mechanisms=PLAIN".to_owned(),
-            "-X".to_owned(),
-            format!("sasl.username={}", self.username),
-            "-X".to_owned(),
-            format!("sasl.password={}", self.password),
-        ]
+impl Listener<'_> {
+    fn security(&self) -> &'static str {
+        if self.tls {
+            "SASL_SSL"
+        } else {
+            "SASL_PLAINTEXT"
+        }
     }
 
-    fn properties(&self) -> String {
-        format!(
-            "security.protocol=SASL_PLAINTEXT\nsasl.mechanism=PLAIN\n\
+    fn kcat(&self, security: &str, credentials: &Credentials) -> Vec<String> {
+        let mut settings = vec![
+            format!("security.protocol={security}"),
+            "sasl.mechanisms=PLAIN".to_owned(),
+            format!("sasl.username={}", credentials.username),
+            format!("sasl.password={}", credentials.password),
+        ];
+        if self.tls {
+            settings.push(format!("ssl.ca.location={CERTIFICATES}/ca.pem"));
+        }
+
+        let mut args = vec!["-b".to_owned(), self.bootstrap.to_owned()];
+        for setting in settings {
+            args.extend(["-X".to_owned(), setting]);
+        }
+        args
+    }
+
+    fn properties(&self, credentials: &Credentials) -> String {
+        let mut properties = format!(
+            "security.protocol={}\nsasl.mechanism=PLAIN\n\
              sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule \
              required username=\"{}\" password=\"{}\";\n",
-            self.username, self.password
-        )
+            self.security(),
+            credentials.username,
+            credentials.password
+        );
+        if self.tls {
+            properties.push_str(&format!(
+                "ssl.truststore.type=PEM\nssl.truststore.location={CERTIFICATES}/ca.pem\n"
+            ));
+        }
+        properties
     }
 }
 
@@ -357,7 +389,7 @@ async fn create(
                 "--replication-factor",
                 "1",
             ],
-            Some(&credentials.properties()),
+            Some(&listener.properties(credentials)),
         )
         .await;
 
@@ -411,10 +443,33 @@ async fn consume(
 }
 
 fn kcat_args(listener: &Listener<'_>, credentials: &Credentials, tail: &[&str]) -> Vec<String> {
-    let mut args = vec!["-b".to_owned(), listener.bootstrap.to_owned()];
-    args.extend(credentials.kcat());
+    let mut args = listener.kcat(listener.security(), credentials);
     args.extend(tail.iter().map(|arg| (*arg).to_owned()));
     args
+}
+
+async fn ssl_required(clients: &Clients, listener: &Listener<'_>) -> Vec<String> {
+    let wrong = Credentials {
+        username: listener.root.username.clone(),
+        password: "not-the-password".to_owned(),
+    };
+    let attempts = [
+        (
+            "without tls",
+            listener.kcat("SASL_PLAINTEXT", listener.root),
+        ),
+        ("wrong password", listener.kcat("SASL_SSL", &wrong)),
+        ("root", listener.kcat("SASL_SSL", listener.root)),
+    ];
+
+    let mut lines = Vec::new();
+    for (name, mut args) in attempts {
+        args.extend(["-L".to_owned(), "-m".to_owned(), "10".to_owned()]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = clients.kcat(KCAT, &args, None).await;
+        lines.push(format!("{name}: {}", status("metadata", output.ok)));
+    }
+    lines
 }
 
 async fn handshake_on(connection: &mut Connection, version: i16, mechanism: &str) -> String {

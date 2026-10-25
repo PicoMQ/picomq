@@ -16,6 +16,7 @@ picomq-sql = { workspace = true }
 picomq-server = { workspace = true }
 picomq-http = { workspace = true }
 picomq-kafka = { workspace = true }
+picomq-listener = { workspace = true }
 picomq-schema = { workspace = true }
 
 thiserror = { workspace = true }
@@ -28,7 +29,10 @@ humantime = { workspace = true }
 picomq-client = { workspace = true }
 picomq-protocol = { workspace = true }
 rdkafka = { workspace = true }
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "rustls", "http2"] }
+picomq-listener = { workspace = true, features = ["testing"] }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 

@@ -73,11 +73,6 @@ One token serves every kind of client. How each one carries it:
 
 ## Deployment notes
 
-Auth controls who may call, not who can read the wire. A token crosses the network as a bearer header on HTTP and as a SASL password on Kafka, so what protects it in transit is the network, not the protocol.
+Auth controls who may call, not who can read the wire. A token crosses the network as a bearer header on HTTP and as a SASL password on Kafka, so outside a network you trust, turn on [TLS](/docs/operations/tls), which covers every listener.
 
-| Listener | Protecting the wire |
-| --- | --- |
-| Stream and admin | Terminate TLS in front of the nodes before sending tokens over untrusted networks |
-| Kafka | There is no TLS form of the listener yet, so keep it on a network you trust, such as a VPC or a private overlay |
-
-The `harness/aio` compose files run with auth off for development, and setting `PICO_AUTH=required` in `.env` turns it on with a known dev bootstrap token. `harness/byo` runs with auth required and refuses to start without a bootstrap token in `.env`. The Fly configs take it as an app secret, and the AWS harness generates one into Secrets Manager.
+The `harness/aio` compose files run with auth off for development, and setting `PICO_AUTH=required` in `.env` turns it on with a known dev bootstrap token. `harness/byo` runs with auth required and refuses to start without a bootstrap token in `.env`. The AWS harness generates one into Secrets Manager.

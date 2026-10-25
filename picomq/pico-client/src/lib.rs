@@ -32,6 +32,7 @@ pub struct ClientConfig {
     pub http2: bool,
     pub retry: RetryPolicy,
     pub token: Option<String>,
+    pub ca_certificate: Option<Vec<u8>>,
 }
 
 pub fn connect(protocol: Protocol, endpoint: &str) -> Result<Box<dyn StreamApi>> {
@@ -66,6 +67,15 @@ pub fn http_client(config: &ClientConfig) -> Result<reqwest::Client> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::AUTHORIZATION, value);
         builder = builder.default_headers(headers);
+    }
+    if let Some(pem) = &config.ca_certificate {
+        let roots = reqwest::Certificate::from_pem_bundle(pem)
+            .ok()
+            .filter(|roots| !roots.is_empty())
+            .ok_or_else(|| ClientError::transport("the CA certificate is not PEM"))?;
+        for root in roots {
+            builder = builder.add_root_certificate(root);
+        }
     }
     builder.build().map_err(ClientError::from)
 }

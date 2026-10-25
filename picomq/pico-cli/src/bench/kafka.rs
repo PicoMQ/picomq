@@ -385,6 +385,7 @@ mod tests {
             protocol: ProtocolArg::Kafka,
             http2: false,
             token: token.map(str::to_owned),
+            ca_certificate: None,
         }
     }
 

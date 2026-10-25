@@ -22,6 +22,7 @@ bytes = { workspace = true }
 clap = { workspace = true }
 crc32fast = { workspace = true }
 kafka-protocol = { workspace = true }
+picomq-listener = { workspace = true, features = ["testing"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

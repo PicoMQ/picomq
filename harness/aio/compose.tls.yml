@@ -1,0 +1,24 @@
+# TLS on every listener of the two-node cluster. Layer it on the cluster file:
+#   PICO_CERTS=<dir with certificate.pem and key.pem> \
+#     docker compose -f compose.cluster.yml -f compose.tls.yml up
+#
+# Clients then use https://localhost:4437, https://localhost:4438, and Kafka
+# over TLS on localhost:9092 and localhost:9093: SSL with auth off, SASL_SSL
+# with PICO_AUTH=required.
+
+services:
+  pico1:
+    environment:
+      PICO_TLS_CERTIFICATE: /certs/certificate.pem
+      PICO_TLS_KEY: /certs/key.pem
+      PICO_HTTP_ADDRESS: https://localhost:4437
+    volumes:
+      - ${PICO_CERTS:?set PICO_CERTS to a directory with certificate.pem and key.pem}:/certs:ro
+
+  pico2:
+    environment:
+      PICO_TLS_CERTIFICATE: /certs/certificate.pem
+      PICO_TLS_KEY: /certs/key.pem
+      PICO_HTTP_ADDRESS: https://localhost:4438
+    volumes:
+      - ${PICO_CERTS:?set PICO_CERTS to a directory with certificate.pem and key.pem}:/certs:ro

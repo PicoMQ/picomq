@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -5,6 +6,7 @@ use crate::kafka::docker::{docker, docker_unchecked, output};
 use crate::kafka::reference::IMAGE;
 
 pub const KCAT: &str = "pico-conformance-kcat";
+pub const CERTIFICATES: &str = "/certs";
 pub const OLD_KCAT: &str = "edenhill/kcat:1.7.1";
 const ADD_HOST: &str = "--add-host=host.docker.internal:host-gateway";
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -17,6 +19,7 @@ const DOCKER_FAILURES: [i32; 3] = [125, 126, 127];
 pub struct Clients {
     network: String,
     container: String,
+    certificates: Vec<String>,
     tooling: Mutex<Vec<String>>,
 }
 
@@ -26,17 +29,21 @@ pub struct Output {
 }
 
 impl Clients {
-    pub async fn start(network: &str) -> anyhow::Result<Self> {
+    pub async fn start(network: &str, certificates: &Path) -> anyhow::Result<Self> {
         let clients = Self {
             network: network.to_owned(),
             container: format!("{network}-clients"),
+            certificates: vec![
+                "-v".to_owned(),
+                format!("{}:{CERTIFICATES}:ro", certificates.display()),
+            ],
             tooling: Mutex::default(),
         };
 
         let context = concat!(env!("CARGO_MANIFEST_DIR"), "/clients/kafka");
         docker(&["build", "-q", "-t", KCAT, context]).await?;
 
-        docker(&[
+        let mut run = vec![
             "run",
             "-d",
             "--name",
@@ -44,12 +51,10 @@ impl Clients {
             "--network",
             network,
             ADD_HOST,
-            "--entrypoint",
-            "sleep",
-            IMAGE,
-            "infinity",
-        ])
-        .await?;
+        ];
+        run.extend(clients.certificates.iter().map(String::as_str));
+        run.extend(["--entrypoint", "sleep", IMAGE, "infinity"]);
+        docker(&run).await?;
 
         Ok(clients)
     }
@@ -94,15 +99,9 @@ impl Clients {
     }
 
     pub async fn kcat(&self, image: &str, args: &[&str], input: Option<&str>) -> Output {
-        let mut command = vec![
-            "run",
-            "--rm",
-            "-i",
-            "--network",
-            &self.network,
-            ADD_HOST,
-            image,
-        ];
+        let mut command = vec!["run", "--rm", "-i", "--network", &self.network, ADD_HOST];
+        command.extend(self.certificates.iter().map(String::as_str));
+        command.push(image);
         command.extend_from_slice(args);
 
         self.run(&command, input).await

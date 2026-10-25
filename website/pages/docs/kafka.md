@@ -87,10 +87,11 @@ With `--auth required` the listener authenticates every connection with SASL PLA
 
 | Client setting | Value |
 | --- | --- |
-| `security.protocol` | `SASL_PLAINTEXT` |
+| `security.protocol` | `SASL_PLAINTEXT`, or `SASL_SSL` when the node runs [TLS](/docs/operations/tls) |
 | `sasl.mechanism` | `PLAIN` |
 | `sasl.username` | The token id, for example `svc/ingest` |
 | `sasl.password` | The token in wire form, `BASE64URL(id).BASE64URL(secret)` |
+| `ssl.ca.location` | With `SASL_SSL` and a private CA, the CA's PEM file |
 
 The token needs the `kafka` audience. A token that has `pico` and `kafka` works over both protocols with one scope, and a token with only `kafka` is a Kafka-only credential.
 
@@ -139,7 +140,7 @@ A refused topic answers `TOPIC_AUTHORIZATION_FAILED`, a refused group `GROUP_AUT
 
 - Groups are not resources of their own, so rights come from the topics. A consumer joins only with `read` on what it subscribes to, but any token with `read` can heartbeat in or leave any group, and commit offsets for any group on the topics it reads, where Kafka would also check `Read` on the group.
 - `DescribeConfigs` needs `head`, where Kafka needs a separate `DescribeConfigs` right. Configs hold retention and schema settings, nothing secret.
-- SASL PLAIN is the only mechanism and `SASL_PLAINTEXT` the only security protocol. SCRAM and a TLS listener are listed under [Deliberately excluded](/docs/design/auth#deliberately-excluded).
+- SASL PLAIN is the only mechanism. SCRAM is listed under [Deliberately excluded](/docs/design/auth#deliberately-excluded).
 - Tokens with `autoPrefixStreams` are refused at authentication rather than half applied, since Kafka names cannot be rewritten per tenant.
 
 ### Auth off

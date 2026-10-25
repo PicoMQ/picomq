@@ -4,10 +4,12 @@
 use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
+use picomq_client::ClientConfig;
 use picomq_protocol::{check_path, stream_path};
 use serde_json::Value;
 
 use crate::io::note;
+use crate::stream::Endpoint;
 
 const TRANSFER_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSFER_WAIT_POLL: Duration = Duration::from_millis(250);
@@ -68,7 +70,7 @@ pub enum AdminCommand {
     },
 }
 
-pub async fn run(args: AdminArgs) -> Result<i32, String> {
+pub async fn run(args: AdminArgs, flags: &Endpoint) -> Result<i32, String> {
     let token = match args.token {
         Some(token) => Some(token),
         None => match std::env::var("PICO_TOKEN") {
@@ -78,7 +80,11 @@ pub async fn run(args: AdminArgs) -> Result<i32, String> {
     };
     let api = Api {
         base: args.admin_endpoint.trim_end_matches('/').to_owned(),
-        http: reqwest::Client::new(),
+        http: picomq_client::http_client(&ClientConfig {
+            ca_certificate: flags.ca_certificate()?,
+            ..Default::default()
+        })
+        .map_err(|error| error.to_string())?,
         token,
     };
     match args.command {

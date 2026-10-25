@@ -5,7 +5,8 @@ use std::net::SocketAddr;
 use picomq_auth::{
     AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
-use picomq_http::{HttpProtocol, RoutingMode, ServeOptions, bind, serve};
+use picomq_http::{HttpProtocol, RoutingMode, ServeOptions, serve};
+use picomq_listener::Listener;
 use picomq_server::{CommittedOffset, CreateCommand, OffsetCommit, Partition};
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -325,17 +326,16 @@ async fn gated(scope: Scope) -> (picomq_http::RunningServer, String) {
         .unwrap();
     let server = serve(
         node.clone(),
-        bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024).unwrap(),
+        Listener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024, None).unwrap(),
+        None,
         ServeOptions {
             protocol: HttpProtocol::Pico,
-            admin_addr: None,
             routing_mode: RoutingMode::LocalAlways,
             authorizer: Some(node.authorizer()),
             ..Default::default()
         },
     )
-    .await
-    .unwrap();
+    .await;
     (server, token.render())
 }
 

@@ -100,7 +100,7 @@ A clean shutdown hands off without waiting for the node timeout.
 1. Readiness fails, so load balancers stop sending traffic.
 2. The node waits `--shutdown-drain-sec`.
 3. Live reads end. Long polls, SSE subscriptions, and Kafka fetches waiting for data answer `503 unavailable`, or Kafka `NOT_LEADER_OR_FOLLOWER`, and their clients reconnect elsewhere.
-4. Listeners stop accepting, and in-flight requests finish.
+4. Listeners stop accepting, and in-flight requests get up to `--shutdown-timeout-sec` to finish. After that the node stops waiting, so a stalled client cannot hold up the handoff.
 5. The node closes its streams, which uploads their buffered records first.
 6. It fences itself. The next failover tick, about a second later, places its streams on live nodes.
 

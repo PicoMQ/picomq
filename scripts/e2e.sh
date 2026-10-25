@@ -18,13 +18,15 @@
 #             no healthy node
 #   ds        two nodes, Durable Streams HTTP + Kafka, auth off
 #             Go Durable Streams live and cluster suites
+#   tls       two nodes, Pico HTTPS + Kafka SASL_SSL, auth required
+#             Rust client cluster suite over HTTPS, redirects included
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCENARIOS=("$@")
 if [ ${#SCENARIOS[@]} -eq 0 ]; then
-  SCENARIOS=(single cluster chaos ds)
+  SCENARIOS=(single cluster chaos ds tls)
 fi
 
 NODE1="http://127.0.0.1:4437"
@@ -42,6 +44,7 @@ compose_files() {
   case "$1" in
     single) echo "-f $ROOT/harness/aio/compose.yml" ;;
     cluster | chaos | ds) echo "-f $ROOT/harness/aio/compose.cluster.yml" ;;
+    tls) echo "-f $ROOT/harness/aio/compose.cluster.yml -f $ROOT/harness/aio/compose.tls.yml" ;;
     *) echo "unknown scenario: $1" >&2; exit 2 ;;
   esac
 }
@@ -54,7 +57,7 @@ compose() {
 wait_ready() {
   local url="$1"
   for _ in $(seq 1 180); do
-    if curl -sf -o /dev/null "$url/ready"; then
+    if curl -sf ${PICO_CA_CERTIFICATE:+--cacert "$PICO_CA_CERTIFICATE"} -o /dev/null "$url/ready"; then
       return 0
     fi
     sleep 2
@@ -134,6 +137,35 @@ run_chaos() {
     rust_chaos_suite chaos
 }
 
+run_tls() {
+  export PICO_PROTOCOL=pico PICO_AUTH=required
+  export PICO_ENDPOINT="https://localhost:4437" PICO_ENDPOINT_2="https://localhost:4438"
+  export PICO_CA_CERTIFICATE="$PICO_CERTS/ca.pem"
+  unset PICOMQ_RESTART_CMD PICOMQ_DS_INTEGRATION
+
+  wait_ready "https://localhost:9090" &&
+    wait_ready "https://localhost:9091" &&
+    rust_client_suite tls
+}
+
+mint_certificates() {
+  local dir
+  dir="$(mktemp -d)" || return 1
+  if openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
+    -subj "/CN=PicoMQ e2e CA" -keyout "$dir/ca-key.pem" -out "$dir/ca.pem" &&
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+      -subj "/CN=PicoMQ e2e" -keyout "$dir/key.pem" -out "$dir/request.pem" &&
+    openssl x509 -req -days 1 -in "$dir/request.pem" -CA "$dir/ca.pem" -CAkey "$dir/ca-key.pem" \
+      -CAcreateserial -out "$dir/certificate.pem" \
+      -extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth') &&
+    chmod 644 "$dir"/*.pem; then
+    echo "$dir"
+  else
+    rm -rf "${dir:?}"
+    return 1
+  fi
+}
+
 run_ds() {
   export PICO_PROTOCOL=ds PICO_AUTH=off
   export PICOMQ_DS_INTEGRATION=1 PICOMQ_DS_ENDPOINT="$NODE1" PICOMQ_DS_ENDPOINT_2="$NODE2"
@@ -152,6 +184,11 @@ run() {
     single) export PICO_PROTOCOL=pico PICO_AUTH=off ;;
     cluster | chaos) export PICO_PROTOCOL=pico PICO_AUTH=required PICO_HEARTBEAT_INTERVAL_SEC=1 PICO_NODE_TIMEOUT_SEC=5 ;;
     ds) export PICO_PROTOCOL=ds PICO_AUTH=off ;;
+    tls)
+      export PICO_PROTOCOL=pico PICO_AUTH=required
+      PICO_CERTS="$(mint_certificates)" || return 1
+      export PICO_CERTS
+      ;;
   esac
 
   log "$scenario: starting stack"
@@ -169,7 +206,11 @@ run() {
   if [ "${KEEP:-0}" != "1" ]; then
     log "$scenario: tearing down"
     compose "$scenario" down --volumes --remove-orphans
+    if [ -n "${PICO_CERTS:-}" ]; then
+      rm -rf "${PICO_CERTS:?}"
+    fi
   fi
+  unset PICO_CERTS PICO_CA_CERTIFICATE
   return "$status"
 }
 

@@ -46,6 +46,7 @@ PICO_TEST_PG_URL=postgres://user:pass@localhost:5432/picomq \
 | `cluster` | Two nodes with auth: redirects, groups and Kafka partitions across nodes, admin APIs, failover of a killed node, HTTP and Kafka producers deduplicated across a transfer and through a killed owner, a Kafka group riding through the kill, every Kafka client authenticating over SASL and a narrow token enforced over Kafka |
 | `chaos` | Two nodes under faults: paused nodes, a paused lease holder, a paused Postgres, and a clean stop. No acknowledged write may be lost and no healthy node fenced |
 | `ds` | Two nodes on Durable Streams: the Go live and cluster suites |
+| `tls` | Two nodes with TLS and auth: the Rust client cluster suite over HTTPS, redirects between nodes included |
 
 ```bash
 scripts/e2e.sh                     # every scenario
@@ -58,7 +59,7 @@ The `e2e` workflow runs the same scenarios on demand from GitHub Actions.
 
 ### Conformance
 
-`picomq-conformance` checks the protocols against outside references. The `ds` suite runs the official Durable Streams client tests. The `kafka` suite runs the same scenarios with the Kafka Java tools, kcat, and raw frames against PicoMQ and against Apache Kafka in Docker, and compares the results. Its SASL scenarios run against a second PicoMQ node with auth required and a SASL listener on the reference broker guarded by its standard authorizer, with matching root, read-only, and write-only identities on both. It needs Docker, and runs locally or from the `conformance` workflow on demand.
+`picomq-conformance` checks the protocols against outside references. The `ds` suite runs the official Durable Streams client tests. The `kafka` suite runs the same scenarios with the Kafka Java tools, kcat, and raw frames against PicoMQ and against Apache Kafka in Docker, and compares the results. Its SASL scenarios run against a second PicoMQ node with auth required and a SASL listener on the reference broker guarded by its standard authorizer, with matching root, read-only, and write-only identities on both. Its `SASL_SSL` scenarios run against a third node with TLS and a TLS listener on the reference broker, both serving a certificate minted for the run. It needs Docker, and runs locally or from the `conformance` workflow on demand.
 
 ```bash
 cargo run -p picomq-conformance -- ds

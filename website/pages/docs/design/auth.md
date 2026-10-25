@@ -57,4 +57,3 @@ The scope encoding is versioned and additive, so these can be added later withou
 - OIDC or mTLS federation.
 - CIDR and time-of-day binding.
 - SCRAM over Kafka, which needs salted keys stored at issue time. PLAIN works from the hash alone.
-- A TLS Kafka listener. For HTTP, TLS belongs to the proxy in front.

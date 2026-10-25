@@ -33,6 +33,7 @@ rdkafka = { workspace = true }
 keyring = { workspace = true }
 
 [dev-dependencies]
+picomq-listener = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
 
 [lints]

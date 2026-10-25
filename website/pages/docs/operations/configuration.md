@@ -27,11 +27,12 @@ The node id is the one value worth care. Each start registers the id at a higher
 | `--listen` | `127.0.0.1:4437` | The HTTP stream protocol listener. |
 | `--admin-listen` | `127.0.0.1:9090` | The admin API and dashboard. |
 | `--no-admin` | off | Disables the admin listener entirely. |
-| `--http-address` | `http://{listen}` | The public URL other nodes redirect clients to. |
+| `--http-address` | `http://{listen}`, `https://` with TLS | The public URL other nodes redirect clients to. |
 | `--kafka-listen` | `127.0.0.1:9092` | The Kafka listener. |
 | `--kafka-advertise` | `{kafka-listen}` | The Kafka address registered in metadata and returned to clients. |
 | `--backlog` | `1024` | Listener accept queue depth. |
 | `--shutdown-drain-sec` | `0` | How long to fail readiness on shutdown before ending live reads and handing off, see [Failover](/docs/design/failover#clean-shutdown). |
+| `--shutdown-timeout-sec` | `10` | How long to wait for open connections once the listeners stop accepting. After that the node stops waiting and hands off, so a stalled client cannot hold up the handoff. |
 
 `--protocol` is a global flag rather than a serve flag. It selects the HTTP protocol the stream listener speaks, `pico` or `ds`. Kafka is a separate listener that is always on, covered on the [Kafka protocol](/docs/kafka) page.
 
@@ -113,6 +114,16 @@ Three things make this setup effective:
 | `--auth-bootstrap-token-file` | none | Read the bootstrap token from a file instead, keeping it out of process listings. Not with `--auth-bootstrap-token`. |
 
 A different token under an already-stored bootstrap id fails startup rather than silently rotating a live credential. Bootstrap, token issuance, and client credentials are covered in [Authentication](/docs/operations/auth).
+
+## TLS
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--tls-certificate` | none | PEM certificate chain for every listener. Turns on TLS. Needs `--tls-key`. |
+| `--tls-key` | none | PEM private key for the certificate. |
+| `--tls-handshake-timeout-sec` | `10` | How long a client has to finish its TLS handshake. |
+
+Certificate names, rotation, and client trust are covered in [TLS](/docs/operations/tls).
 
 ## Behavior
 

@@ -1,0 +1,29 @@
+[package]
+name = "picomq-listener"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Accepts connections for every PicoMQ listener, plain or over TLS"
+repository.workspace = true
+publish = false
+
+[features]
+testing = ["dep:rcgen"]
+
+[dependencies]
+arc-swap = { workspace = true }
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true }
+socket2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util"] }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+picomq-listener = { path = ".", features = ["testing"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

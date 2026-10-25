@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use picomq_auth::AccessToken;
 use picomq_http::HttpProtocol;
-use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, RuntimeError, ServerConfig};
+use picomq_listener::testing::Authority;
+use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, RuntimeError, ServerConfig, TlsConfig};
 
 fn loopback() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 0))
@@ -347,4 +348,91 @@ async fn state_survives_a_restart() {
     assert_eq!(records[0]["body"], "survives");
 
     second.shutdown().await;
+}
+
+fn certificate(dir: &Path) -> (TlsConfig, Authority) {
+    let authority = Authority::new().unwrap();
+    let config = authority.issue(&["localhost"]).unwrap().write(dir).unwrap();
+    (config, authority)
+}
+
+#[tokio::test]
+async fn a_plain_node_can_advertise_a_proxy_that_terminates_tls() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut proxied = config(dir.path(), HttpProtocol::Pico, 1);
+    proxied.advertised_url = Some("https://picomq.example".to_owned());
+
+    let server = picomq_runtime::start(proxied).await.unwrap();
+    assert_eq!(server.base_url(), "https://picomq.example");
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn tls_covers_every_listener() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tls, authority) = certificate(dir.path());
+    let mut secured = config(dir.path(), HttpProtocol::Pico, 1);
+    secured.tls = Some(tls);
+    let server = picomq_runtime::start(secured).await.unwrap();
+    let (stream, admin, kafka) = (
+        server.local_addr(),
+        server.admin_addr().unwrap(),
+        server.kafka_addr(),
+    );
+
+    let http = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_der(authority.root()).unwrap())
+        .resolve("localhost", stream)
+        .build()
+        .unwrap();
+    let ready = http
+        .get(format!("https://localhost:{}/ready", admin.port()))
+        .send()
+        .await
+        .unwrap();
+    assert!(ready.status().is_success());
+    assert_eq!(ready.version(), reqwest::Version::HTTP_2);
+    let created = http
+        .put(format!(
+            "https://localhost:{}/streams/orders",
+            stream.port()
+        ))
+        .header("Content-Type", "text/plain")
+        .send()
+        .await
+        .unwrap();
+    assert!(created.status().is_success());
+    assert_eq!(created.version(), reqwest::Version::HTTP_2);
+    assert!(
+        reqwest::get(format!("http://{stream}/streams/orders"))
+            .await
+            .is_err(),
+        "plain http reached a tls listener"
+    );
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(authority.root().clone()).unwrap();
+    let mut client = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    client.alpn_protocols = vec![b"h2".to_vec()];
+    let handshake = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client))
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            tokio::net::TcpStream::connect(kafka).await.unwrap(),
+        )
+        .await
+        .expect("kafka listener did not speak tls");
+    assert_eq!(
+        handshake.get_ref().1.alpn_protocol(),
+        None,
+        "kafka listener offered an http protocol"
+    );
+
+    server.shutdown().await;
 }

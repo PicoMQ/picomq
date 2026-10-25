@@ -16,9 +16,10 @@ pico --http2 append /streams/orders
 | --- | --- | --- |
 | `--endpoint` | `PICO_ENDPOINT` | The server base URL. Defaults to `http://127.0.0.1:4437` |
 | `--protocol` | `PICO_PROTOCOL` | `pico` or `ds`, since the two differ on the wire. `bench` also takes `kafka` |
-| `--http2` | `PICO_HTTP2` | Speaks HTTP/2 over cleartext, which multiplexes many concurrent appends over one connection |
+| `--http2` | `PICO_HTTP2` | Speaks HTTP/2 only, which multiplexes many concurrent appends over one connection |
 | `--profile` | `PICO_PROFILE` | A saved profile to take the defaults from, see [Profiles](#profiles) |
 | `--token` | `PICO_TOKEN` | The bearer credential |
+| `--ca-certificate` | `PICO_CA_CERTIFICATE` | A PEM file of CA certificates to trust for `https` endpoints, on top of the system's, see [TLS](/docs/operations/tls#clients) |
 
 The token rarely belongs on the command line. `pico auth login` stores it instead, in the OS keyring or a private `credentials.toml` next to the config when no keyring is available (`PICO_NO_KEYRING=1` forces the file, the right setting for CI), and every command attaches the stored credential automatically. An explicit flag or variable wins over storage. `pico auth status` shows where the credential lives, its id, and whether the endpoint accepts it, and `pico auth logout` removes it. Getting a token in the first place is covered in [Authentication](/docs/operations/auth).
 
@@ -103,7 +104,7 @@ pico bench --record-size 1024 --duration 15
 
 It exercises the same client path as `append` and `read`, so the numbers reflect what an application would see, including protocol and redirect behavior. `--help` lists the load shape flags: in-flight requests, batch size, streams, partitions, connections, and a target rate.
 
-`--protocol kafka` benchmarks the Kafka listener instead, through librdkafka. With a token it connects over SASL PLAIN, the token id as the username and the token as the password, so it needs a node with auth required and a token with the `kafka` audience, see [Kafka authentication](/docs/kafka#authentication).
+`--protocol kafka` benchmarks the Kafka listener instead, through librdkafka. With a token it connects over `SASL_PLAINTEXT`, the token id as the username and the token as the password, so it needs a node with auth required and a token with the `kafka` audience, see [Kafka authentication](/docs/kafka#authentication). It cannot speak `SASL_SSL`, so the Kafka listener of a node running TLS is out of its reach.
 
 ## Serving
 

@@ -39,6 +39,10 @@ fn config() -> ClientConfig {
                     "ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY".to_owned()
                 }),
         ),
+        ca_certificate: std::env::var("PICO_CA_CERTIFICATE")
+            .ok()
+            .filter(|path| !path.is_empty())
+            .map(|path| std::fs::read(path).unwrap()),
         ..Default::default()
     }
 }

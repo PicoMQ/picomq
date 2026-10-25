@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore, Verifier};
 use picomq_http::{RunningServer, ServeOptions};
+use picomq_listener::{Listener, Tls};
 use picomq_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
 use picomq_server::wal::ObjectWal;
 use picomq_server::{KvTokenStore, NodeConfig, PicoNode};
@@ -16,6 +17,7 @@ use picomq_sql::{
 use s3stream::{IdUri, ObjectStorageTrait, ObjectStoreAdapter};
 
 pub use config::{AuthMode, KafkaConfig, MetaBackend, ServerConfig};
+pub use picomq_listener::TlsConfig;
 
 /// (`MetadataLifecycle`).
 const LIFECYCLE_TICK: Duration = Duration::from_secs(1);
@@ -57,6 +59,8 @@ pub enum RuntimeError {
         interval: Duration,
         timeout: Duration,
     },
+    #[error("tls: {0}")]
+    Tls(#[from] picomq_listener::TlsError),
 }
 
 /// A running PicoMQ process: metadata log, node, background maintenance and
@@ -133,13 +137,20 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     };
     // Bind before node registration so a default advertise (port 0 configs)
     // carries the real bound port.
-    let addr = config.addr;
-    let http_listener = picomq_http::bind(addr, config.backlog)
-        .map_err(|source| RuntimeError::Bind { addr, source })?;
-    let http_bound = http_listener
-        .local_addr()
-        .map_err(|source| RuntimeError::Bind { addr, source })?;
-    let (kafka_listener, kafka_addr) = bind_kafka(config.kafka.listen).await?;
+    let kafka_tls = config.tls.clone().map(Tls::load).transpose()?;
+    let http_tls = kafka_tls.as_ref().map(|tls| tls.alpn(picomq_http::ALPN));
+    let bind = |addr, tls: &Option<Tls>| {
+        Listener::bind(addr, config.backlog, tls.clone())
+            .map_err(|source| RuntimeError::Bind { addr, source })
+    };
+    let http_listener = bind(config.addr, &http_tls)?;
+    let http_bound = http_listener.local_addr();
+    let admin_listener = config
+        .admin_addr
+        .map(|addr| bind(addr, &http_tls))
+        .transpose()?;
+    let kafka_listener = bind(config.kafka.listen, &kafka_tls)?;
+    let kafka_addr = kafka_listener.local_addr();
     let kafka_advertise = config
         .kafka
         .advertise
@@ -208,33 +219,26 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         AuthMode::Required => Some(node.authorizer()),
         AuthMode::Off => None,
     };
-    let kafka = spawn_kafka(
-        &config,
-        &node,
-        authorizer.clone(),
-        kafka_listener,
-        kafka_addr,
-    );
+    let kafka = spawn_kafka(&config, &node, authorizer.clone(), kafka_listener);
 
     let server = picomq_http::serve(
         node,
         http_listener,
+        admin_listener,
         ServeOptions {
             protocol: config.http_protocol,
-            admin_addr: config.admin_addr,
             routing_mode: config.routing_mode,
             long_poll_timeout: config.long_poll_timeout,
             sse_max_duration: config.sse_max_duration,
             max_chunk_size: config.max_chunk_size,
             max_request_size: config.max_request_size,
             shutdown_drain: config.shutdown_drain,
-            backlog: config.backlog,
+            shutdown_timeout: config.shutdown_timeout,
             leadership: Some(lease.leadership()),
             authorizer,
         },
     )
-    .await
-    .map_err(|source| RuntimeError::Bind { addr, source })?;
+    .await;
 
     Ok(PicoServer {
         server,
@@ -252,40 +256,19 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
     })
 }
 
-async fn bind_kafka(
-    addr: std::net::SocketAddr,
-) -> Result<(tokio::net::TcpListener, std::net::SocketAddr), RuntimeError> {
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|source| RuntimeError::Bind { addr, source })?;
-    let bound = listener
-        .local_addr()
-        .map_err(|source| RuntimeError::Bind { addr, source })?;
-    Ok((listener, bound))
-}
-
 fn spawn_kafka(
     config: &ServerConfig,
     node: &Arc<PicoNode>,
     authorizer: Option<Arc<picomq_auth::Authorizer>>,
-    listener: tokio::net::TcpListener,
-    bound: std::net::SocketAddr,
+    listener: Listener,
 ) -> tokio::task::JoinHandle<()> {
     let broker = Arc::new(picomq_kafka::BrokerContext::new(node, authorizer));
     let listener_config = picomq_kafka::ListenerConfig {
-        addr: bound,
         max_request_bytes: config.max_request_size,
         ..Default::default()
     };
-    tracing::info!(%bound, "kafka listener started");
-    tokio::spawn(async move {
-        if let Err(error) = picomq_kafka::KafkaListener::new(listener_config, broker)
-            .serve(listener)
-            .await
-        {
-            tracing::error!(%error, "kafka listener stopped");
-        }
-    })
+    tracing::info!(bound = %listener.local_addr(), "kafka listener started");
+    tokio::spawn(picomq_kafka::KafkaListener::new(listener_config, broker).serve(listener))
 }
 
 /// Seed the operator's root token. Idempotent: a restart with the same token
