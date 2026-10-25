@@ -125,7 +125,7 @@ async fn ready_fails_while_draining() {
 
 #[tokio::test]
 async fn a_silent_http2_client_cannot_hold_up_shutdown() {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let node = common::start_node().await;
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
@@ -148,7 +148,12 @@ async fn a_silent_http2_client_cannot_hold_up_shutdown() {
         .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0")
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut frame = [0u8; 9];
+    tokio::time::timeout(Duration::from_secs(5), silent.read_exact(&mut frame))
+        .await
+        .expect("the server never answered the http/2 preface")
+        .unwrap();
+    assert_eq!(frame[3], 0x4, "the server's first frame is not SETTINGS");
 
     tokio::time::timeout(Duration::from_secs(5), server.shutdown())
         .await
