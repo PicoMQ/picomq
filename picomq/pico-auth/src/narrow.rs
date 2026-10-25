@@ -3,29 +3,30 @@
 //! A child scope is accepted only when it is contained by the issuer. Requests
 //! that would widen access are rejected. Nothing is silently clamped.
 //!
-//! Operation groups on the child require the same group flags on the parent.
-//! Fine ops on the child may be satisfied by a parent group or an explicit op.
-//! Fine ops on the parent never authorize a child group.
+//! Access flags on the child require the same flags on the parent. Fine ops
+//! on the child may be satisfied by a parent flag or an explicit op. Fine ops
+//! on the parent never authorize a child flag.
 
 use crate::AuthError;
-use crate::scope::{Operation, OperationGroups, ReadWrite, Scope};
+use crate::scope::{Access, Operation, ReadWrite, Scope};
 
 impl Scope {
-    /// True when `child` grants no access beyond `self`.
     pub fn contains(&self, child: &Scope) -> bool {
         self.contains_streams(&child.streams)
             && self.tokens.contains_set(&child.tokens)
-            && contains_groups(&self.groups, &child.groups)
+            && self.groups.contains_set(&child.groups)
+            && contains_access(&self.access, &child.access)
             && child.ops.iter().all(|op| self.allows_operation(*op))
             && child.audiences.iter().all(|a| self.allows_audience(*a))
             && contains_expiry(self.expires_at_ms, child.expires_at_ms)
-            && contains_auto_prefix(self, child)
+            && (!child.auto_prefix || prefixed(child))
     }
 }
 
-fn contains_groups(parent: &OperationGroups, child: &OperationGroups) -> bool {
+fn contains_access(parent: &Access, child: &Access) -> bool {
     contains_rw(parent.stream, child.stream)
         && contains_rw(parent.tokens, child.tokens)
+        && contains_rw(parent.group, child.group)
         && contains_rw(parent.admin, child.admin)
 }
 
@@ -41,26 +42,20 @@ fn contains_expiry(parent: Option<i64>, child: Option<i64>) -> bool {
     }
 }
 
-fn contains_auto_prefix(_parent: &Scope, child: &Scope) -> bool {
-    // Stream containment is checked separately. Auto-prefix only needs a sole
-    // prefix matcher on the child.
-    !child.auto_prefix_streams || child.streams.sole_prefix().is_some()
+fn prefixed(scope: &Scope) -> bool {
+    scope.streams.sole_prefix().is_some() && scope.groups.sole_prefix().is_some()
 }
 
-/// Validate an issue request from `issuer` for a new token with `new_id` and
-/// `requested` scope.
 pub fn check_issue(issuer: &Scope, new_id: &str, requested: &Scope) -> Result<(), AuthError> {
     if !issuer.allows_operation(Operation::IssueToken) {
         return Err(AuthError::Denied);
     }
-    if !issuer.allows_token_id(new_id) {
+    if !issuer.tokens.matches(new_id) {
         return Err(AuthError::NarrowingRejected);
     }
-    if requested.auto_prefix_streams && requested.streams.sole_prefix().is_none() {
+    if requested.auto_prefix && !prefixed(requested) {
         return Err(AuthError::Malformed);
     }
-    // A token with no ops or no audiences can never pass a request. Reject
-    // instead of storing a dead credential.
     if requested.effective_ops().is_empty() {
         return Err(AuthError::Malformed);
     }
@@ -82,11 +77,8 @@ mod tests {
         Scope {
             streams: ResourceSet::prefix(""),
             tokens: ResourceSet::prefix(""),
-            groups: OperationGroups {
-                stream: ReadWrite::all(),
-                tokens: ReadWrite::all(),
-                admin: ReadWrite::all(),
-            },
+            groups: ResourceSet::prefix(""),
+            access: Access::all(),
             audiences: [Audience::Pico, Audience::DurableStreams, Audience::Admin].into(),
             ..Scope::default()
         }
@@ -133,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_fine_ops_do_not_authorize_child_group() {
+    fn parent_fine_ops_do_not_authorize_child_access() {
         let issuer = Scope {
             streams: ResourceSet::prefix(""),
             tokens: ResourceSet::prefix(""),
@@ -150,9 +142,9 @@ mod tests {
 
         let child = Scope {
             streams: ResourceSet::prefix(""),
-            groups: OperationGroups {
+            access: Access {
                 stream: ReadWrite::read_only(),
-                ..OperationGroups::default()
+                ..Access::default()
             },
             audiences: [Audience::Pico].into(),
             ..Scope::default()
@@ -162,14 +154,14 @@ mod tests {
     }
 
     #[test]
-    fn parent_group_authorizes_child_fine_ops() {
+    fn parent_access_authorizes_child_fine_ops() {
         let issuer = Scope {
             streams: ResourceSet::prefix(""),
             tokens: ResourceSet::prefix(""),
-            groups: OperationGroups {
+            access: Access {
                 stream: ReadWrite::read_only(),
                 tokens: ReadWrite::all(),
-                admin: ReadWrite::none(),
+                ..Access::default()
             },
             audiences: [Audience::Pico].into(),
             ..Scope::default()
@@ -208,7 +200,7 @@ mod tests {
     #[test]
     fn issue_requires_issue_token_op() {
         let mut issuer = issuer_root();
-        issuer.groups.tokens = ReadWrite::read_only();
+        issuer.access.tokens = ReadWrite::read_only();
         let child = reader_child(ResourceSet::prefix("/t/"));
         assert!(matches!(
             check_issue(&issuer, "x", &child),
@@ -231,5 +223,37 @@ mod tests {
             check_issue(&issuer, "x", &no_audience),
             Err(AuthError::Malformed)
         ));
+    }
+
+    #[test]
+    fn wider_groups_rejected() {
+        let mut issuer = issuer_root();
+        issuer.groups = ResourceSet::prefix("billing");
+        let consumer = |groups| Scope {
+            groups,
+            ops: [Operation::Consume].into(),
+            audiences: [Audience::Pico].into(),
+            ..Scope::default()
+        };
+
+        check_issue(&issuer, "x", &consumer(ResourceSet::exact("billing-eu"))).unwrap();
+        assert!(matches!(
+            check_issue(&issuer, "x", &consumer(ResourceSet::prefix(""))),
+            Err(AuthError::NarrowingRejected)
+        ));
+    }
+
+    #[test]
+    fn auto_prefix_needs_a_sole_prefix_for_streams_and_groups() {
+        let issuer = issuer_root();
+        let mut tenant = reader_child(ResourceSet::prefix("/t/"));
+        tenant.auto_prefix = true;
+        assert!(matches!(
+            check_issue(&issuer, "x", &tenant),
+            Err(AuthError::Malformed)
+        ));
+
+        tenant.groups = ResourceSet::prefix("t/");
+        check_issue(&issuer, "x", &tenant).unwrap();
     }
 }

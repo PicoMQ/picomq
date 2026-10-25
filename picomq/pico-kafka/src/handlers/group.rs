@@ -63,6 +63,7 @@ fn error_code(error: GroupError) -> i16 {
         GroupError::CapacityExceeded => GROUP_MAX_SIZE_REACHED,
         GroupError::FencedInstance => FENCED_INSTANCE_ID,
         GroupError::Superseded => REBALANCE_IN_PROGRESS,
+        GroupError::Unauthorized => GROUP_AUTHORIZATION_FAILED,
     }
 }
 
@@ -95,14 +96,13 @@ async fn find_coordinator(
     let mut body = Bytes::copy_from_slice(body);
     let request = FindCoordinatorRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
-    let located = match member(ctx, req) {
-        Ok(()) if request.key_type == 0 => ctx
-            .groups
-            .find_coordinator(request.key.as_str())
+    let located = if request.key_type == 0 {
+        ctx.groups
+            .find_coordinator(req.scope(), request.key.as_str())
             .await
-            .map_err(error_code),
-        Ok(()) => Err(error_code(GroupError::InvalidRequest)),
-        Err(code) => Err(code),
+            .map_err(error_code)
+    } else {
+        Err(error_code(GroupError::InvalidRequest))
     };
     let response = match located {
         Ok(node_id) => {
@@ -156,26 +156,29 @@ async fn join_group(
     }
     let outcome = ctx
         .groups
-        .join(JoinInput {
-            group_id: request.group_id.to_string(),
-            member_id: request.member_id.to_string(),
-            instance_id: request.group_instance_id.map(|id| id.to_string()),
-            client_id: req.client_id.clone().unwrap_or_default(),
-            membership: Membership::Client {
-                protocol_type: request.protocol_type.to_string(),
-                protocols: request
-                    .protocols
-                    .into_iter()
-                    .map(|protocol| JoinProtocol {
-                        name: protocol.name.to_string(),
-                        metadata: protocol.metadata,
-                    })
-                    .collect(),
+        .join(
+            req.scope(),
+            JoinInput {
+                group_id: request.group_id.to_string(),
+                member_id: request.member_id.to_string(),
+                instance_id: request.group_instance_id.map(|id| id.to_string()),
+                client_id: req.client_id.clone().unwrap_or_default(),
+                membership: Membership::Client {
+                    protocol_type: request.protocol_type.to_string(),
+                    protocols: request
+                        .protocols
+                        .into_iter()
+                        .map(|protocol| JoinProtocol {
+                            name: protocol.name.to_string(),
+                            metadata: protocol.metadata,
+                        })
+                        .collect(),
+                },
+                session_timeout_ms: request.session_timeout_ms,
+                rebalance_timeout_ms: request.rebalance_timeout_ms,
+                require_known_member_id: req.api_version >= 4,
             },
-            session_timeout_ms: request.session_timeout_ms,
-            rebalance_timeout_ms: request.rebalance_timeout_ms,
-            require_known_member_id: req.api_version >= 4,
-        })
+        )
         .await;
     let mut response = JoinGroupResponse::default()
         .with_generation_id(outcome.generation)
@@ -223,12 +226,6 @@ async fn join_group(
     )))
 }
 
-fn member(ctx: &BrokerContext, req: &RequestContext) -> Result<(), i16> {
-    req.allows_operation(ctx.authorizer.as_deref(), Operation::Read)
-        .then_some(())
-        .ok_or(GROUP_AUTHORIZATION_FAILED)
-}
-
 fn joinable(
     ctx: &BrokerContext,
     req: &RequestContext,
@@ -237,7 +234,6 @@ fn joinable(
     let Some(authorizer) = ctx.authorizer.as_deref() else {
         return Ok(());
     };
-    member(ctx, req)?;
     if request.protocol_type.as_str() != "consumer" {
         return Ok(());
     }
@@ -262,27 +258,22 @@ async fn sync_group(
     let mut body = Bytes::copy_from_slice(body);
     let request = SyncGroupRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
-    if let Err(code) = member(ctx, req) {
-        let response = kafka_protocol::messages::SyncGroupResponse::default().with_error_code(code);
-        return Ok(HandlerOutcome::Response(encode_response(
-            req.correlation_id,
-            req.api_version,
-            &response,
-        )));
-    }
     let result = ctx
         .groups
-        .sync(SyncInput {
-            group_id: request.group_id.to_string(),
-            generation: request.generation_id,
-            member_id: request.member_id.to_string(),
-            instance_id: request.group_instance_id.map(|id| id.to_string()),
-            assignments: request
-                .assignments
-                .into_iter()
-                .map(|assignment| (assignment.member_id.to_string(), assignment.assignment))
-                .collect(),
-        })
+        .sync(
+            req.scope(),
+            SyncInput {
+                group_id: request.group_id.to_string(),
+                generation: request.generation_id,
+                member_id: request.member_id.to_string(),
+                instance_id: request.group_instance_id.map(|id| id.to_string()),
+                assignments: request
+                    .assignments
+                    .into_iter()
+                    .map(|assignment| (assignment.member_id.to_string(), assignment.assignment))
+                    .collect(),
+            },
+        )
         .await;
     let response = match result {
         Ok(outcome) => {
@@ -315,22 +306,20 @@ async fn heartbeat(
     let mut body = Bytes::copy_from_slice(body);
     let request = HeartbeatRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
-    let code = match member(ctx, req) {
-        Ok(()) => ctx
-            .groups
-            .heartbeat(
-                request.group_id.as_str(),
-                MemberFence {
-                    generation: request.generation_id,
-                    member_id: request.member_id.as_str(),
-                    instance_id: request.group_instance_id.as_ref().map(StrBytes::as_str),
-                },
-            )
-            .await
-            .err()
-            .map_or(NO_ERROR, error_code),
-        Err(code) => code,
-    };
+    let code = ctx
+        .groups
+        .heartbeat(
+            req.scope(),
+            request.group_id.as_str(),
+            MemberFence {
+                generation: request.generation_id,
+                member_id: request.member_id.as_str(),
+                instance_id: request.group_instance_id.as_ref().map(StrBytes::as_str),
+            },
+        )
+        .await
+        .err()
+        .map_or(NO_ERROR, error_code);
     let response = HeartbeatResponse::default().with_error_code(code);
     Ok(HandlerOutcome::Response(encode_response(
         req.correlation_id,
@@ -347,14 +336,6 @@ async fn leave_group(
     let mut body = Bytes::copy_from_slice(body);
     let request = LeaveGroupRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
-    if let Err(code) = member(ctx, req) {
-        let response = LeaveGroupResponse::default().with_error_code(code);
-        return Ok(HandlerOutcome::Response(encode_response(
-            req.correlation_id,
-            req.api_version,
-            &response,
-        )));
-    }
     let identities: Vec<(String, Option<String>)> = if req.api_version <= 2 {
         vec![(request.member_id.to_string(), None)]
     } else {
@@ -369,18 +350,21 @@ async fn leave_group(
             })
             .collect()
     };
-    let results = ctx
+    let (top_level, results) = match ctx
         .groups
-        .leave(request.group_id.as_str(), &identities)
-        .await;
-    let top_level = if req.api_version <= 2 {
-        results
-            .first()
-            .copied()
-            .and_then(Result::err)
-            .map_or(NO_ERROR, error_code)
-    } else {
-        NO_ERROR
+        .leave(req.scope(), request.group_id.as_str(), &identities)
+        .await
+    {
+        Ok(results) if req.api_version <= 2 => (
+            results
+                .first()
+                .copied()
+                .and_then(Result::err)
+                .map_or(NO_ERROR, error_code),
+            results,
+        ),
+        Ok(results) => (NO_ERROR, results),
+        Err(error) => (error_code(error), Vec::new()),
     };
     let members = if req.api_version >= 3 {
         identities
@@ -414,21 +398,9 @@ async fn describe_groups(
     let mut body = Bytes::copy_from_slice(body);
     let request = DescribeGroupsRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
-    let inspector = req.allows_operation(ctx.authorizer.as_deref(), Operation::StreamInspect);
     let mut groups = Vec::with_capacity(request.groups.len());
     for group_id in request.groups {
-        if !inspector {
-            groups.push(
-                DescribedGroup::default()
-                    .with_error_code(GROUP_AUTHORIZATION_FAILED)
-                    .with_group_id(group_id)
-                    .with_group_state(StrBytes::from_static_str(""))
-                    .with_protocol_type(StrBytes::from_static_str(""))
-                    .with_protocol_data(StrBytes::from_static_str("")),
-            );
-            continue;
-        }
-        let wire = match ctx.groups.describe(group_id.as_str()).await {
+        let wire = match ctx.groups.describe(req.scope(), group_id.as_str()).await {
             Ok(described) => {
                 let members = described
                     .members
@@ -462,6 +434,12 @@ async fn describe_groups(
                     .with_protocol_data(StrBytes::from(described.protocol_name))
                     .with_members(members)
             }
+            Err(GroupError::Unauthorized) => DescribedGroup::default()
+                .with_error_code(GROUP_AUTHORIZATION_FAILED)
+                .with_group_id(group_id)
+                .with_group_state(StrBytes::from_static_str(""))
+                .with_protocol_type(StrBytes::from_static_str(""))
+                .with_protocol_data(StrBytes::from_static_str("")),
             Err(error) => DescribedGroup::default()
                 .with_error_code(match error {
                     GroupError::GroupNotFound => NO_ERROR,
@@ -490,11 +468,7 @@ async fn list_groups(
     let mut body = Bytes::copy_from_slice(body);
     let request = ListGroupsRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
-    let coordinated = if req.allows_operation(ctx.authorizer.as_deref(), Operation::StreamInspect) {
-        ctx.groups.coordinated().await
-    } else {
-        Vec::new()
-    };
+    let coordinated = ctx.groups.coordinated(req.scope()).await;
     let states: Vec<&str> = request.states_filter.iter().map(StrBytes::as_str).collect();
     let types: Vec<&str> = request.types_filter.iter().map(StrBytes::as_str).collect();
     let groups = coordinated
@@ -574,8 +548,9 @@ async fn offset_commit(
     });
     let result = ctx
         .groups
-        .commit_offsets(request.group_id.as_str(), fence, &commits)
+        .commit_offsets(req.scope(), request.group_id.as_str(), fence, &commits)
         .await;
+    let refused = result == Err(GroupError::Unauthorized);
     let code = result.err().map_or(NO_ERROR, error_code);
     let topics = request
         .topics
@@ -586,9 +561,13 @@ async fn offset_commit(
                 .iter()
                 .map(|partition| {
                     let key = (topic.name.to_string(), partition.partition_index);
+                    let partition_code = match rejected.get(&key) {
+                        Some(topic_code) if !refused => *topic_code,
+                        _ => code,
+                    };
                     OffsetCommitResponsePartition::default()
                         .with_partition_index(partition.partition_index)
-                        .with_error_code(rejected.get(&key).copied().unwrap_or(code))
+                        .with_error_code(partition_code)
                 })
                 .collect();
             OffsetCommitResponseTopic::default()
@@ -636,6 +615,7 @@ async fn offset_fetch(
     let result = ctx
         .groups
         .fetch_offsets(
+            req.scope(),
             request.group_id.as_str(),
             request.topics.is_some().then_some(partitions.as_slice()),
         )
@@ -737,16 +717,11 @@ async fn delete_groups(
     let request = DeleteGroupsRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
 
-    let deleter = req.allows_operation(ctx.authorizer.as_deref(), Operation::DeleteGroup);
     let mut results = Vec::with_capacity(request.groups_names.len());
     for group in request.groups_names {
-        let code = if !deleter {
-            GROUP_AUTHORIZATION_FAILED
-        } else {
-            match ctx.groups.delete(group.as_str()).await {
-                Ok(()) => NO_ERROR,
-                Err(error) => error_code(error),
-            }
+        let code = match ctx.groups.delete(req.scope(), group.as_str()).await {
+            Ok(()) => NO_ERROR,
+            Err(error) => error_code(error),
         };
         results.push(
             DeletableGroupResult::default()
@@ -772,7 +747,7 @@ async fn offset_delete(
     let request = OffsetDeleteRequest::decode(&mut body, req.api_version)
         .map_err(|error| HandlerError::Protocol(error.to_string()))?;
 
-    let response = match subscribed_topics(ctx, request.group_id.as_str()).await {
+    let response = match subscribed_topics(ctx, req, request.group_id.as_str()).await {
         Ok(subscribed) => {
             let mut deletable = Vec::new();
             let mut topics = Vec::with_capacity(request.topics.len());
@@ -809,7 +784,7 @@ async fn offset_delete(
 
             match ctx
                 .groups
-                .delete_offsets(request.group_id.as_str(), &deletable)
+                .delete_offsets(req.scope(), request.group_id.as_str(), &deletable)
                 .await
             {
                 Ok(()) => OffsetDeleteResponse::default()
@@ -843,8 +818,16 @@ fn subscription_topics(metadata: &Bytes) -> Result<Vec<String>, i16> {
         .collect())
 }
 
-async fn subscribed_topics(ctx: &BrokerContext, group_id: &str) -> Result<BTreeSet<String>, i16> {
-    let described = ctx.groups.describe(group_id).await.map_err(error_code)?;
+async fn subscribed_topics(
+    ctx: &BrokerContext,
+    req: &RequestContext,
+    group_id: &str,
+) -> Result<BTreeSet<String>, i16> {
+    let described = ctx
+        .groups
+        .describe(req.scope(), group_id)
+        .await
+        .map_err(error_code)?;
 
     let mut subscribed = BTreeSet::new();
     for member in &described.members {

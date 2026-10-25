@@ -13,6 +13,7 @@ use crate::{
     ErrorKind, LogRecord, MetadataOwnershipService, OffsetToken, OwnershipService, S3StreamService,
 };
 use bytes::Bytes;
+use picomq_auth::{Operation, Scope};
 use picomq_metadata::ViewPublisher;
 use tokio::sync::{Mutex, oneshot};
 
@@ -48,6 +49,8 @@ pub enum GroupError {
     FencedInstance,
     #[error("a newer request from the same member replaced this one")]
     Superseded,
+    #[error("not authorized for this group")]
+    Unauthorized,
 }
 
 pub use offsets::{CommittedOffset, OffsetCommit};
@@ -219,7 +222,12 @@ impl GroupCoordinator {
         Log::Group(group_id.to_owned())
     }
 
-    pub async fn find_coordinator(&self, group_id: &str) -> Result<i32, GroupError> {
+    pub async fn find_coordinator(
+        &self,
+        scope: Option<&Scope>,
+        group_id: &str,
+    ) -> Result<i32, GroupError> {
+        authorize(scope, Operation::DescribeGroup, group_id)?;
         validate_group_id(group_id)?;
         let owner = self
             .ownership
@@ -234,7 +242,10 @@ impl GroupCoordinator {
             .ok_or(GroupError::CoordinatorNotAvailable)
     }
 
-    pub async fn join(self: &Arc<Self>, input: JoinInput) -> JoinOutcome {
+    pub async fn join(self: &Arc<Self>, scope: Option<&Scope>, input: JoinInput) -> JoinOutcome {
+        if let Err(code) = authorize(scope, Operation::Consume, &input.group_id) {
+            return JoinOutcome::error(code, input.member_id);
+        }
         if let Err(code) = validate_join(&input) {
             return JoinOutcome::error(code, input.member_id);
         }
@@ -414,7 +425,12 @@ impl GroupCoordinator {
         }
     }
 
-    pub async fn sync(&self, input: SyncInput) -> Result<SyncOutcome, GroupError> {
+    pub async fn sync(
+        &self,
+        scope: Option<&Scope>,
+        input: SyncInput,
+    ) -> Result<SyncOutcome, GroupError> {
+        authorize(scope, Operation::Consume, &input.group_id)?;
         let group = self.local_group(&input.group_id, false).await?;
         let (receiver, timeout) = {
             let mut state = group.lock().await;
@@ -473,9 +489,11 @@ impl GroupCoordinator {
 
     pub async fn assignment(
         &self,
+        scope: Option<&Scope>,
         group_id: &str,
         fence: MemberFence<'_>,
     ) -> Result<Vec<String>, GroupError> {
+        authorize(scope, Operation::Consume, group_id)?;
         let group = self.local_group(group_id, false).await?;
         let mut state = group.lock().await;
         state.expire_members(Instant::now());
@@ -491,31 +509,13 @@ impl GroupCoordinator {
         }
     }
 
-    pub async fn subscription(
-        &self,
-        group_id: &str,
-        member_id: &str,
-    ) -> Result<Vec<String>, GroupError> {
-        let group = self.local_group(group_id, false).await?;
-        let mut state = group.lock().await;
-        state.expire_members(Instant::now());
-        let member = state
-            .members
-            .get(member_id)
-            .ok_or(GroupError::UnknownMember)?;
-        match &member.role {
-            Role::Subscribed { subscription, .. } => {
-                Ok(subscription.iter().map(|s| s.to_string()).collect())
-            }
-            Role::Client { .. } => Err(GroupError::InvalidRequest),
-        }
-    }
-
     pub async fn heartbeat(
         &self,
+        scope: Option<&Scope>,
         group_id: &str,
         fence: MemberFence<'_>,
     ) -> Result<(), GroupError> {
+        authorize(scope, Operation::Consume, group_id)?;
         let group = self.local_group(group_id, false).await?;
         let mut state = group.lock().await;
         let now = Instant::now();
@@ -534,12 +534,14 @@ impl GroupCoordinator {
 
     pub async fn leave(
         &self,
+        scope: Option<&Scope>,
         group_id: &str,
         members: &[(String, Option<String>)],
-    ) -> Vec<Result<(), GroupError>> {
+    ) -> Result<Vec<Result<(), GroupError>>, GroupError> {
+        authorize(scope, Operation::Consume, group_id)?;
         let group = match self.local_group(group_id, false).await {
             Ok(group) => group,
-            Err(error) => return vec![Err(error); members.len()],
+            Err(error) => return Ok(vec![Err(error); members.len()]),
         };
         let mut state = group.lock().await;
         let now = Instant::now();
@@ -564,15 +566,17 @@ impl GroupCoordinator {
         if removed_any {
             settle(&mut state);
         }
-        results
+        Ok(results)
     }
 
     pub async fn commit_offsets(
         &self,
+        scope: Option<&Scope>,
         group_id: &str,
         fence: Option<MemberFence<'_>>,
         commits: &[OffsetCommit],
     ) -> Result<(), GroupError> {
+        authorize(scope, Operation::Consume, group_id)?;
         let group = self.local_group(group_id, true).await?;
         let log = Self::log(group_id);
         let mut state = group.lock().await;
@@ -609,9 +613,11 @@ impl GroupCoordinator {
 
     pub async fn delete_offsets(
         &self,
+        scope: Option<&Scope>,
         group_id: &str,
         partitions: &[Partition],
     ) -> Result<(), GroupError> {
+        authorize(scope, Operation::DeleteGroup, group_id)?;
         let group = self.local_group(group_id, false).await?;
         let log = Self::log(group_id);
         let mut state = group.lock().await;
@@ -635,7 +641,8 @@ impl GroupCoordinator {
         Ok(())
     }
 
-    pub async fn delete(&self, group_id: &str) -> Result<(), GroupError> {
+    pub async fn delete(&self, scope: Option<&Scope>, group_id: &str) -> Result<(), GroupError> {
+        authorize(scope, Operation::DeleteGroup, group_id)?;
         let group = self.local_group(group_id, false).await?;
         let mut state = group.lock().await;
         state.expire_members(Instant::now());
@@ -698,9 +705,11 @@ impl GroupCoordinator {
 
     pub async fn fetch_offsets(
         &self,
+        scope: Option<&Scope>,
         group_id: &str,
         partitions: Option<&[Partition]>,
     ) -> Result<BTreeMap<Partition, CommittedOffset>, GroupError> {
+        authorize(scope, Operation::DescribeGroup, group_id)?;
         let group = match self.local_group(group_id, false).await {
             Ok(group) => group,
             Err(GroupError::GroupNotFound) => return Ok(BTreeMap::new()),
@@ -722,7 +731,12 @@ impl GroupCoordinator {
         })
     }
 
-    pub async fn describe(&self, group_id: &str) -> Result<GroupDescription, GroupError> {
+    pub async fn describe(
+        &self,
+        scope: Option<&Scope>,
+        group_id: &str,
+    ) -> Result<GroupDescription, GroupError> {
+        authorize(scope, Operation::DescribeGroup, group_id)?;
         let group = self.local_group(group_id, false).await?;
         let mut state = group.lock().await;
         state.expire_members(Instant::now());
@@ -766,18 +780,20 @@ impl GroupCoordinator {
         })
     }
 
-    /// Every group in the cluster, whichever node coordinates it.
-    pub fn list(&self) -> Vec<String> {
+    pub fn list(&self, scope: Option<&Scope>) -> Vec<String> {
         Log::groups(&self.views.load().state)
+            .into_iter()
+            .filter(|group_id| authorize(scope, Operation::DescribeGroup, group_id).is_ok())
+            .collect()
     }
 
-    /// The groups this node coordinates that have members, with their state.
-    pub async fn coordinated(&self) -> Vec<ListedGroup> {
+    pub async fn coordinated(&self, scope: Option<&Scope>) -> Vec<ListedGroup> {
         let groups: Vec<(String, Arc<Mutex<Group>>)> = {
             self.groups
                 .lock()
                 .expect("group map lock")
                 .iter()
+                .filter(|(id, _)| authorize(scope, Operation::DescribeGroup, id).is_ok())
                 .map(|(id, group)| (id.clone(), Arc::clone(group)))
                 .collect()
         };
@@ -923,5 +939,12 @@ fn sync_outcome(state: &Group, member_id: &str) -> SyncOutcome {
             Some(Role::Client { assignment, .. }) => assignment.clone(),
             _ => Bytes::new(),
         },
+    }
+}
+
+fn authorize(scope: Option<&Scope>, op: Operation, group_id: &str) -> Result<(), GroupError> {
+    match scope {
+        Some(scope) if !scope.allows(op, Some(group_id)) => Err(GroupError::Unauthorized),
+        _ => Ok(()),
     }
 }

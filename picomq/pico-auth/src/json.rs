@@ -6,9 +6,7 @@
 use serde_json::{Value, json};
 
 use crate::AuthError;
-use crate::scope::{
-    Audience, Operation, OperationGroups, ReadWrite, ResourceMatcher, ResourceSet, Scope,
-};
+use crate::scope::{Access, Audience, Operation, ReadWrite, ResourceMatcher, ResourceSet, Scope};
 
 pub fn operation_name(op: Operation) -> &'static str {
     match op {
@@ -23,12 +21,14 @@ pub fn operation_name(op: Operation) -> &'static str {
         Operation::IssueToken => "issue_token",
         Operation::RevokeToken => "revoke_token",
         Operation::ListTokens => "list_tokens",
+        Operation::Consume => "consume",
+        Operation::DescribeGroup => "describe_group",
+        Operation::DeleteGroup => "delete_group",
         Operation::ClusterRead => "cluster_read",
         Operation::NodeRead => "node_read",
         Operation::StreamInspect => "stream_inspect",
         Operation::TransferStream => "transfer_stream",
         Operation::UpdateNodeSlots => "update_node_slots",
-        Operation::DeleteGroup => "delete_group",
     }
 }
 
@@ -61,14 +61,16 @@ pub fn scope_to_json(scope: &Scope) -> Value {
     json!({
         "streams": matchers_to_json(&scope.streams),
         "tokens": matchers_to_json(&scope.tokens),
-        "groups": {
-            "stream": rw_to_json(scope.groups.stream),
-            "tokens": rw_to_json(scope.groups.tokens),
-            "admin": rw_to_json(scope.groups.admin),
+        "groups": matchers_to_json(&scope.groups),
+        "access": {
+            "stream": rw_to_json(scope.access.stream),
+            "tokens": rw_to_json(scope.access.tokens),
+            "group": rw_to_json(scope.access.group),
+            "admin": rw_to_json(scope.access.admin),
         },
         "ops": scope.ops.iter().map(|op| operation_name(*op)).collect::<Vec<_>>(),
         "audiences": scope.audiences.iter().map(|a| audience_name(*a)).collect::<Vec<_>>(),
-        "autoPrefixStreams": scope.auto_prefix_streams,
+        "autoPrefix": scope.auto_prefix,
         "expiresAtMs": scope.expires_at_ms,
     })
 }
@@ -81,7 +83,8 @@ pub fn scope_from_json(value: &Value) -> Result<Scope, AuthError> {
         match key.as_str() {
             "streams" => scope.streams = matchers_from_json(value)?,
             "tokens" => scope.tokens = matchers_from_json(value)?,
-            "groups" => scope.groups = groups_from_json(value)?,
+            "groups" => scope.groups = matchers_from_json(value)?,
+            "access" => scope.access = access_from_json(value)?,
             "ops" => {
                 for name in strings_from_json(value)? {
                     let op = operation_from_name(&name).ok_or(AuthError::Malformed)?;
@@ -94,8 +97,8 @@ pub fn scope_from_json(value: &Value) -> Result<Scope, AuthError> {
                     scope.audiences.insert(audience);
                 }
             }
-            "autoPrefixStreams" => {
-                scope.auto_prefix_streams = value.as_bool().ok_or(AuthError::Malformed)?;
+            "autoPrefix" => {
+                scope.auto_prefix = value.as_bool().ok_or(AuthError::Malformed)?;
             }
             "expiresAtMs" => {
                 scope.expires_at_ms = match value {
@@ -155,19 +158,20 @@ fn rw_from_json(value: &Value) -> Result<ReadWrite, AuthError> {
     Ok(rw)
 }
 
-fn groups_from_json(value: &Value) -> Result<OperationGroups, AuthError> {
+fn access_from_json(value: &Value) -> Result<Access, AuthError> {
     let object = value.as_object().ok_or(AuthError::Malformed)?;
-    let mut groups = OperationGroups::default();
+    let mut access = Access::default();
     for (key, value) in object {
         let rw = rw_from_json(value)?;
         match key.as_str() {
-            "stream" => groups.stream = rw,
-            "tokens" => groups.tokens = rw,
-            "admin" => groups.admin = rw,
+            "stream" => access.stream = rw,
+            "tokens" => access.tokens = rw,
+            "group" => access.group = rw,
+            "admin" => access.admin = rw,
             _ => return Err(AuthError::Malformed),
         }
     }
-    Ok(groups)
+    Ok(access)
 }
 
 fn strings_from_json(value: &Value) -> Result<Vec<String>, AuthError> {
@@ -204,13 +208,15 @@ mod tests {
                 ResourceMatcher::Exact("/one".into()),
             ]),
             tokens: ResourceSet::exact("svc/a"),
-            groups: OperationGroups {
+            groups: ResourceSet::prefix("acct/"),
+            access: Access {
                 stream: ReadWrite::read_only(),
-                ..OperationGroups::default()
+                group: ReadWrite::read_only(),
+                ..Access::default()
             },
-            ops: [Operation::Trim, Operation::IssueToken].into(),
+            ops: [Operation::Trim, Operation::IssueToken, Operation::Consume].into(),
             audiences: [Audience::Pico, Audience::Admin].into(),
-            auto_prefix_streams: true,
+            auto_prefix: true,
             expires_at_ms: Some(42),
         };
         let decoded = scope_from_json(&scope_to_json(&scope)).unwrap();
@@ -231,7 +237,10 @@ mod tests {
             json!({ "audiences": ["telnet"] }),
             json!({ "streams": [{ "regex": ".*" }] }),
             json!({ "streams": [{ "exact": "/a", "prefix": "/b" }] }),
-            json!({ "groups": { "stream": { "read": 1 } } }),
+            json!({ "access": { "stream": { "read": 1 } } }),
+            json!({ "access": { "groups": { "read": true } } }),
+            json!({ "groups": { "stream": { "read": true } } }),
+            json!({ "autoPrefixStreams": true }),
             json!({ "expiresAtMs": "soon" }),
         ] {
             assert!(

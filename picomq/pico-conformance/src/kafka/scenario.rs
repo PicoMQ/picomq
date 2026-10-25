@@ -558,28 +558,59 @@ async fn consume_as_group(
         produce(clients, KCAT, broker, topic, RECORDS).await,
     ];
 
-    let received = clients
-        .java(
-            "kafka-console-consumer",
-            &[
-                "--bootstrap-server",
-                broker,
-                "--topic",
-                topic,
-                "--group",
-                group,
-                "--from-beginning",
-                "--max-messages",
-                "3",
-                "--timeout-ms",
-                "30000",
-            ],
-            None,
-        )
-        .await;
-    lines.extend(self::lines(&received.stdout));
+    lines.extend(group_records(clients, broker, topic, group, None).await);
 
     lines
+}
+
+pub(super) async fn group_records(
+    clients: &Clients,
+    broker: &str,
+    topic: &str,
+    group: &str,
+    config: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec!["--bootstrap-server", broker];
+    if config.is_some() {
+        args.extend(["--command-config", "/dev/stdin"]);
+    }
+    args.extend([
+        "--topic",
+        topic,
+        "--group",
+        group,
+        "--from-beginning",
+        "--max-messages",
+        "3",
+        "--timeout-ms",
+        "30000",
+    ]);
+
+    let received = clients.java("kafka-console-consumer", &args, config).await;
+    lines(&received.stdout)
+}
+
+pub(super) async fn delete_group_offsets(
+    clients: &Clients,
+    broker: &str,
+    topic: &str,
+    group: &str,
+    config: Option<&str>,
+) -> (bool, Vec<String>) {
+    let mut args = vec!["--bootstrap-server", broker];
+    if config.is_some() {
+        args.extend(["--command-config", "/dev/stdin"]);
+    }
+    args.extend(["--delete-offsets", "--group", group, "--topic", topic]);
+
+    let deleted = clients.java("kafka-consumer-groups", &args, config).await;
+    let rows = deleted
+        .stdout
+        .lines()
+        .map(|row| row.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|row| !row.is_empty())
+        .collect();
+    (deleted.ok, rows)
 }
 
 async fn delete_records(clients: &Clients, broker: &str, topic: &str) -> Vec<String> {
@@ -640,29 +671,9 @@ async fn delete_offsets(clients: &Clients, broker: &str, topic: &str) -> Vec<Str
     let group = format!("{topic}-group");
     let mut lines = consume_as_group(clients, broker, topic, &group).await;
 
-    let deleted = clients
-        .java(
-            "kafka-consumer-groups",
-            &[
-                "--bootstrap-server",
-                broker,
-                "--delete-offsets",
-                "--group",
-                &group,
-                "--topic",
-                topic,
-            ],
-            None,
-        )
-        .await;
-    lines.push(status("delete offsets", deleted.ok));
-    lines.extend(
-        deleted
-            .stdout
-            .lines()
-            .map(|row| row.split_whitespace().collect::<Vec<_>>().join(" "))
-            .filter(|row| !row.is_empty()),
-    );
+    let (deleted, rows) = delete_group_offsets(clients, broker, topic, &group, None).await;
+    lines.push(status("delete offsets", deleted));
+    lines.extend(rows);
 
     lines
 }

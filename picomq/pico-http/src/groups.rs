@@ -7,7 +7,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::routing::{get, post, put};
-use picomq_auth::{Audience, Authorizer, Operation};
+use picomq_auth::{Audience, AuthError, Authorizer, Operation, Resource, Scope};
 use picomq_protocol::groups::{
     self as wire, AssignmentResponse, CommitRequest, GroupListing, HeartbeatRequest, JoinRequest,
     JoinResponse, OffsetsResponse, Q_GENERATION, Q_INSTANCE_ID, Q_STREAM,
@@ -15,7 +15,7 @@ use picomq_protocol::groups::{
 use picomq_protocol::pico::{
     CT_JSON, E_BAD_REQUEST, E_CAPACITY_EXCEEDED, E_CONFLICT, E_COORDINATOR_UNAVAILABLE,
     E_DURABILITY, E_FENCED, E_ILLEGAL_GENERATION, E_INCONSISTENT_PROTOCOL, E_NOT_FOUND,
-    E_REBALANCE_IN_PROGRESS, E_UNKNOWN_MEMBER,
+    E_PERMISSION_DENIED, E_REBALANCE_IN_PROGRESS, E_UNKNOWN_MEMBER,
 };
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{
@@ -75,61 +75,6 @@ impl GroupState {
         .await
     }
 
-    fn resolve(
-        &self,
-        caller: &Option<Caller>,
-        names: &[String],
-    ) -> Result<Vec<String>, Box<Response>> {
-        let (Some(authorizer), Some(caller)) = (&self.authorizer, caller) else {
-            return Ok(names.to_vec());
-        };
-        names
-            .iter()
-            .map(|name| caller.resolve(authorizer, name))
-            .collect()
-    }
-
-    fn strip<'a>(&self, caller: &Option<Caller>, stored: &'a str) -> &'a str {
-        match (&self.authorizer, caller) {
-            (Some(authorizer), Some(caller)) => {
-                authorizer.strip_stream_name(&caller.principal, stored)
-            }
-            _ => stored,
-        }
-    }
-
-    /// A cluster-wide group operation: listing, describing, deleting.
-    fn allow_admin(&self, caller: &Option<Caller>, op: Operation) -> Result<(), Box<Response>> {
-        let (Some(authorizer), Some(caller)) = (&self.authorizer, caller) else {
-            return Ok(());
-        };
-        caller.authorize(authorizer, op, None)
-    }
-
-    /// `op` on every stream the request names. Naming none needs nothing.
-    fn allow_streams(
-        &self,
-        caller: &Option<Caller>,
-        op: Operation,
-        streams: &[String],
-    ) -> Result<(), Box<Response>> {
-        let (Some(authorizer), Some(caller)) = (&self.authorizer, caller) else {
-            return Ok(());
-        };
-        streams
-            .iter()
-            .try_for_each(|stream| caller.authorize(authorizer, op, Some(stream)))
-    }
-
-    fn allowed(&self, caller: &Option<Caller>, stream: &str) -> bool {
-        match (&self.authorizer, caller) {
-            (Some(authorizer), Some(caller)) => caller
-                .authorize(authorizer, Operation::Read, Some(stream))
-                .is_ok(),
-            _ => true,
-        }
-    }
-
     async fn topic(&self, name: &str) -> Result<Option<Topic>, Box<Response>> {
         match self.topics.get(name).await {
             Ok(Some(topic)) if topic.partitions > 1 => Err(Box::new(error(
@@ -163,23 +108,6 @@ impl GroupState {
 
         Ok(partitions)
     }
-
-    async fn member_streams(
-        &self,
-        caller: &Option<Caller>,
-        group: &str,
-        member: &str,
-    ) -> Result<(), Box<Response>> {
-        if self.authorizer.is_none() {
-            return Ok(());
-        }
-        let subscription = self
-            .groups
-            .subscription(group, member)
-            .await
-            .map_err(|error| Box::new(group_error(error)))?;
-        self.allow_streams(caller, Operation::Read, &subscription)
-    }
 }
 
 async fn list(State(state): State<GroupState>, headers: HeaderMap) -> Response {
@@ -187,10 +115,12 @@ async fn list(State(state): State<GroupState>, headers: HeaderMap) -> Response {
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow_admin(&caller, Operation::StreamInspect) {
-        return *response;
-    }
-    let groups = state.groups.list();
+    let groups = state
+        .groups
+        .list(scope(&caller))
+        .iter()
+        .map(|group| strip_group(&caller, group).to_owned())
+        .collect();
     ok(GroupListing { groups }.encode())
 }
 
@@ -204,15 +134,16 @@ async fn describe(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow_admin(&caller, Operation::StreamInspect) {
-        return *response;
-    }
+    let group = match resolve_group(&caller, &group) {
+        Ok(group) => group,
+        Err(response) => return *response,
+    };
     if let Some(response) = state.redirect(&uri, &group).await {
         return response;
     }
-    match state.groups.describe(&group).await {
-        Ok(described) => ok(description(&state, &caller, described).encode()),
-        Err(error) => group_error(error),
+    match state.groups.describe(scope(&caller), &group).await {
+        Ok(described) => ok(description(&caller, described).encode()),
+        Err(error) => refused(&caller, error),
     }
 }
 
@@ -226,15 +157,16 @@ async fn remove(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow_admin(&caller, Operation::DeleteGroup) {
-        return *response;
-    }
+    let group = match resolve_group(&caller, &group) {
+        Ok(group) => group,
+        Err(response) => return *response,
+    };
     if let Some(response) = state.redirect(&uri, &group).await {
         return response;
     }
-    match state.groups.delete(&group).await {
+    match state.groups.delete(scope(&caller), &group).await {
         Ok(()) => no_content(),
-        Err(error) => group_error(error),
+        Err(error) => refused(&caller, error),
     }
 }
 
@@ -253,11 +185,15 @@ async fn join(
         Ok(request) => request,
         Err(error) => return bad_request(&error.message),
     };
-    let subscription = match state.resolve(&caller, &request.subscription) {
+    let group = match resolve_group(&caller, &request.group) {
+        Ok(group) => group,
+        Err(response) => return *response,
+    };
+    let subscription = match resolve_streams(&caller, &request.subscription) {
         Ok(subscription) => subscription,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow_streams(&caller, Operation::Read, &subscription) {
+    if let Err(response) = allow_streams(&caller, Operation::Read, &subscription) {
         return *response;
     }
     let mut subscribed = Vec::with_capacity(subscription.len());
@@ -268,23 +204,26 @@ async fn join(
             Err(response) => return *response,
         }
     }
-    if let Some(response) = state.redirect(&uri, &request.group).await {
+    if let Some(response) = state.redirect(&uri, &group).await {
         return response;
     }
     let outcome = state
         .groups
-        .join(JoinInput {
-            group_id: request.group,
-            member_id: request.member_id.unwrap_or_default(),
-            instance_id: request.instance_id,
-            client_id: request.client_id.unwrap_or_else(|| "pico".to_owned()),
-            membership: Membership::Subscribed(subscribed),
-            session_timeout_ms: request
-                .session_timeout_ms
-                .map_or(wire::DEFAULT_SESSION_TIMEOUT_MS as i32, saturating_i32),
-            rebalance_timeout_ms: request.rebalance_timeout_ms.map_or(0, saturating_i32),
-            require_known_member_id: false,
-        })
+        .join(
+            scope(&caller),
+            JoinInput {
+                group_id: group,
+                member_id: request.member_id.unwrap_or_default(),
+                instance_id: request.instance_id,
+                client_id: request.client_id.unwrap_or_else(|| "pico".to_owned()),
+                membership: Membership::Subscribed(subscribed),
+                session_timeout_ms: request
+                    .session_timeout_ms
+                    .map_or(wire::DEFAULT_SESSION_TIMEOUT_MS as i32, saturating_i32),
+                rebalance_timeout_ms: request.rebalance_timeout_ms.map_or(0, saturating_i32),
+                require_known_member_id: false,
+            },
+        )
         .await;
     match outcome.result {
         Ok(Joined::Subscribed {
@@ -293,12 +232,12 @@ async fn join(
         }) => ok(JoinResponse {
             member_id: outcome.member_id,
             generation: outcome.generation,
-            assignment: stripped(&state, &caller, &assignment),
+            assignment: stripped(&caller, &assignment),
             members,
         }
         .encode()),
         Ok(Joined::Client { .. }) => group_error(GroupError::InconsistentProtocol),
-        Err(error) => group_error(error),
+        Err(error) => refused(&caller, error),
     }
 }
 
@@ -323,24 +262,25 @@ async fn assignment(
         Ok(instance_id) => instance_id,
         Err(response) => return *response,
     };
+    let group = match resolve_group(&caller, &group) {
+        Ok(group) => group,
+        Err(response) => return *response,
+    };
     if let Some(response) = state.redirect(&uri, &group).await {
         return response;
-    }
-    if let Err(response) = state.member_streams(&caller, &group, &member).await {
-        return *response;
     }
     let fence = MemberFence {
         generation,
         member_id: &member,
         instance_id: instance_id.as_deref(),
     };
-    match state.groups.assignment(&group, fence).await {
+    match state.groups.assignment(scope(&caller), &group, fence).await {
         Ok(assignment) => ok(AssignmentResponse {
             generation,
-            assignment: stripped(&state, &caller, &assignment),
+            assignment: stripped(&caller, &assignment),
         }
         .encode()),
-        Err(error) => group_error(error),
+        Err(error) => refused(&caller, error),
     }
 }
 
@@ -359,24 +299,21 @@ async fn heartbeat(
         Ok(request) => request,
         Err(error) => return bad_request(&error.message),
     };
-    let group = &request.group;
-    if let Some(response) = state.redirect(&uri, group).await {
+    let group = match resolve_group(&caller, &request.group) {
+        Ok(group) => group,
+        Err(response) => return *response,
+    };
+    if let Some(response) = state.redirect(&uri, &group).await {
         return response;
-    }
-    if let Err(response) = state
-        .member_streams(&caller, group, &request.fence.member_id)
-        .await
-    {
-        return *response;
     }
     let fence = MemberFence {
         generation: request.fence.generation,
         member_id: &request.fence.member_id,
         instance_id: request.fence.instance_id.as_deref(),
     };
-    match state.groups.heartbeat(group, fence).await {
+    match state.groups.heartbeat(scope(&caller), &group, fence).await {
         Ok(()) => no_content(),
-        Err(error) => group_error(error),
+        Err(error) => refused(&caller, error),
     }
 }
 
@@ -390,11 +327,12 @@ async fn leave(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
+    let group = match resolve_group(&caller, &group) {
+        Ok(group) => group,
+        Err(response) => return *response,
+    };
     if let Some(response) = state.redirect(&uri, &group).await {
         return response;
-    }
-    if let Err(response) = state.member_streams(&caller, &group, &member).await {
-        return *response;
     }
     let instance_id = match param(&uri, Q_INSTANCE_ID) {
         Ok(instance_id) => instance_id,
@@ -402,13 +340,12 @@ async fn leave(
     };
     match state
         .groups
-        .leave(&group, &[(member, instance_id)])
+        .leave(scope(&caller), &group, &[(member, instance_id)])
         .await
-        .pop()
-        .expect("one result per member")
+        .and_then(|mut results| results.pop().expect("one result per member"))
     {
         Ok(()) => no_content(),
-        Err(error) => group_error(error),
+        Err(error) => refused(&caller, error),
     }
 }
 
@@ -427,12 +364,16 @@ async fn commit(
         Ok(request) => request,
         Err(error) => return bad_request(&error.message),
     };
+    let group = match resolve_group(&caller, &request.group) {
+        Ok(group) => group,
+        Err(response) => return *response,
+    };
     let streams: Vec<String> = request.offsets.keys().cloned().collect();
-    let streams = match state.resolve(&caller, &streams) {
+    let streams = match resolve_streams(&caller, &streams) {
         Ok(streams) => streams,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow_streams(&caller, Operation::Read, &streams) {
+    if let Err(response) = allow_streams(&caller, Operation::Read, &streams) {
         return *response;
     }
     let partitions = match state.partitions(&streams).await {
@@ -457,16 +398,16 @@ async fn commit(
         member_id: &fence.member_id,
         instance_id: fence.instance_id.as_deref(),
     });
-    if let Some(response) = state.redirect(&uri, &request.group).await {
+    if let Some(response) = state.redirect(&uri, &group).await {
         return response;
     }
     match state
         .groups
-        .commit_offsets(&request.group, fence, &commits)
+        .commit_offsets(scope(&caller), &group, fence, &commits)
         .await
     {
         Ok(()) => no_content(),
-        Err(error) => group_error(error),
+        Err(error) => refused(&caller, error),
     }
 }
 
@@ -480,15 +421,19 @@ async fn fetch(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
+    let group = match resolve_group(&caller, &group) {
+        Ok(group) => group,
+        Err(response) => return *response,
+    };
     let requested = match params(&uri, Q_STREAM) {
         Ok(requested) => requested,
         Err(response) => return *response,
     };
-    let requested = match state.resolve(&caller, &requested) {
+    let requested = match resolve_streams(&caller, &requested) {
         Ok(requested) => requested,
         Err(response) => return *response,
     };
-    if let Err(response) = state.allow_streams(&caller, Operation::Read, &requested) {
+    if let Err(response) = allow_streams(&caller, Operation::Read, &requested) {
         return *response;
     }
     let partitions = match state.partitions(&requested).await {
@@ -502,13 +447,14 @@ async fn fetch(
     let offsets = match state
         .groups
         .fetch_offsets(
+            scope(&caller),
             &group,
             (!requested.is_empty()).then_some(partitions.as_slice()),
         )
         .await
     {
         Ok(offsets) => offsets,
-        Err(error) => return group_error(error),
+        Err(error) => return refused(&caller, error),
     };
 
     let mut named = BTreeMap::new();
@@ -521,11 +467,11 @@ async fn fetch(
         }
 
         let stream = topic.name.spelling();
-        if !state.allowed(&caller, stream) {
+        if !allowed(&caller, stream) {
             continue;
         }
         named.insert(
-            state.strip(&caller, stream).to_owned(),
+            strip_stream(&caller, stream).to_owned(),
             wire::CommittedOffset {
                 position: value.position,
                 metadata: value.metadata,
@@ -535,11 +481,7 @@ async fn fetch(
     ok(OffsetsResponse { offsets: named }.encode())
 }
 
-fn description(
-    state: &GroupState,
-    caller: &Option<Caller>,
-    described: GroupDescription,
-) -> wire::GroupDescription {
+fn description(caller: &Option<Caller>, described: GroupDescription) -> wire::GroupDescription {
     let members = described
         .members
         .into_iter()
@@ -549,8 +491,8 @@ fn description(
                     subscription,
                     assignment,
                 } => (
-                    Some(stripped(state, caller, &subscription)),
-                    Some(stripped(state, caller, &assignment)),
+                    Some(stripped(caller, &subscription)),
+                    Some(stripped(caller, &assignment)),
                 ),
                 MemberRole::Client { .. } => (None, None),
             };
@@ -564,7 +506,7 @@ fn description(
         })
         .collect();
     wire::GroupDescription {
-        group: described.group_id,
+        group: strip_group(caller, &described.group_id).to_owned(),
         state: described.state.as_str().to_owned(),
         generation: described.generation,
         protocol_type: (!described.protocol_type.is_empty()).then_some(described.protocol_type),
@@ -572,11 +514,75 @@ fn description(
     }
 }
 
-fn stripped(state: &GroupState, caller: &Option<Caller>, streams: &[String]) -> Vec<String> {
+fn stripped(caller: &Option<Caller>, streams: &[String]) -> Vec<String> {
     streams
         .iter()
-        .map(|stream| state.strip(caller, stream).to_owned())
+        .map(|stream| strip_stream(caller, stream).to_owned())
         .collect()
+}
+
+fn scope(caller: &Option<Caller>) -> Option<&Scope> {
+    caller.as_ref().map(|caller| &caller.principal.scope)
+}
+
+fn resolve_streams(
+    caller: &Option<Caller>,
+    names: &[String],
+) -> Result<Vec<String>, Box<Response>> {
+    match caller {
+        Some(caller) => names
+            .iter()
+            .map(|name| caller.resolve(Resource::Stream, name))
+            .collect(),
+        None => Ok(names.to_vec()),
+    }
+}
+
+fn resolve_group(caller: &Option<Caller>, client: &str) -> Result<String, Box<Response>> {
+    match caller {
+        Some(caller) => caller.resolve(Resource::Group, client),
+        None => Ok(client.to_owned()),
+    }
+}
+
+fn strip_stream<'a>(caller: &Option<Caller>, stored: &'a str) -> &'a str {
+    match caller {
+        Some(caller) => caller.principal.scope.strip(Resource::Stream, stored),
+        None => stored,
+    }
+}
+
+fn strip_group<'a>(caller: &Option<Caller>, stored: &'a str) -> &'a str {
+    match caller {
+        Some(caller) => caller.principal.scope.strip(Resource::Group, stored),
+        None => stored,
+    }
+}
+
+fn allow_streams(
+    caller: &Option<Caller>,
+    op: Operation,
+    streams: &[String],
+) -> Result<(), Box<Response>> {
+    match caller {
+        Some(caller) => streams
+            .iter()
+            .try_for_each(|stream| caller.authorize(op, Some(stream))),
+        None => Ok(()),
+    }
+}
+
+fn allowed(caller: &Option<Caller>, stream: &str) -> bool {
+    caller
+        .as_ref()
+        .is_none_or(|caller| caller.principal.scope.allows(Operation::Read, Some(stream)))
+}
+
+fn refused(caller: &Option<Caller>, error: GroupError) -> Response {
+    match (error, caller) {
+        (GroupError::Unauthorized, Some(caller)) => *caller.demote(AuthError::Denied),
+        _ => group_error(error),
+    }
 }
 
 fn saturating_i32(value: u32) -> i32 {
@@ -625,6 +631,7 @@ fn group_error(err: GroupError) -> Response {
         GroupError::CapacityExceeded => (429, E_CAPACITY_EXCEEDED),
         GroupError::FencedInstance => (403, E_FENCED),
         GroupError::Superseded => (409, E_CONFLICT),
+        GroupError::Unauthorized => (403, E_PERMISSION_DENIED),
     };
     error(status, code, &err.to_string(), None)
 }

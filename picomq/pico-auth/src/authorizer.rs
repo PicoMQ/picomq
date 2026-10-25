@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::AuthError;
 use crate::record::TokenRecord;
-use crate::scope::{Audience, Operation};
+use crate::scope::Audience;
 use crate::store::TokenStore;
 use crate::token::AccessToken;
 
@@ -126,56 +126,6 @@ impl Authorizer {
         Ok(self.intern(fresh))
     }
 
-    /// Check that `principal` may perform `op`, optionally on `resource`.
-    ///
-    /// Stream ops require a stream name. Token ops require a token id. Admin
-    /// ops do not take a resource.
-    pub fn authorize(
-        &self,
-        principal: &TokenRecord,
-        op: Operation,
-        resource: Option<&str>,
-    ) -> Result<(), AuthError> {
-        if !principal.scope.allows_operation(op) {
-            return Err(AuthError::Denied);
-        }
-
-        if op.is_stream_read() || op.is_stream_write() {
-            let name = resource.ok_or(AuthError::Denied)?;
-            if !principal.scope.allows_stream(name) {
-                return Err(AuthError::Denied);
-            }
-            return Ok(());
-        }
-
-        if op.is_tokens_read() || op.is_tokens_write() {
-            let id = resource.ok_or(AuthError::Denied)?;
-            if !principal.scope.allows_token_id(id) {
-                return Err(AuthError::Denied);
-            }
-            return Ok(());
-        }
-
-        // Admin ops: permission is the op alone.
-        let _ = resource;
-        Ok(())
-    }
-
-    /// Map a client-facing stream name to the stored name using the principal
-    /// auto-prefix rules.
-    pub fn resolve_stream_name(
-        &self,
-        principal: &TokenRecord,
-        client_name: &str,
-    ) -> Result<String, AuthError> {
-        principal.scope.resolve_stream_name(client_name)
-    }
-
-    /// Strip the auto-prefix from a stored stream name for responses.
-    pub fn strip_stream_name<'a>(&self, principal: &TokenRecord, stored_name: &'a str) -> &'a str {
-        principal.scope.strip_stream_name(stored_name)
-    }
-
     /// Drop a cached entry. Hosts may call this after a local revoke.
     pub fn invalidate(&self, id: &str) {
         self.drop_cached(id);
@@ -211,7 +161,7 @@ fn strip_bearer(raw: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scope::{OperationGroups, ReadWrite, ResourceSet, Scope};
+    use crate::scope::{Access, Operation, ReadWrite, Resource, ResourceSet, Scope};
     use crate::store::MemoryTokenStore;
     use crate::token::{AccessToken, Verifier};
 
@@ -234,13 +184,14 @@ mod tests {
         let scope = Scope {
             streams: ResourceSet::prefix("/acct/"),
             tokens: ResourceSet::prefix("svc/"),
-            groups: OperationGroups {
+            groups: ResourceSet::prefix("acct/"),
+            access: Access {
                 stream: ReadWrite::read_only(),
-                tokens: ReadWrite::none(),
-                admin: ReadWrite::none(),
+                group: ReadWrite::read_only(),
+                ..Access::default()
             },
             audiences: [Audience::Pico].into(),
-            auto_prefix_streams: true,
+            auto_prefix: true,
             ..Scope::default()
         };
         store
@@ -279,7 +230,7 @@ mod tests {
         let mut scope = Scope::default();
         scope.audiences.insert(Audience::Pico);
         scope.expires_at_ms = Some(100);
-        scope.groups.stream = ReadWrite::read_only();
+        scope.access.stream = ReadWrite::read_only();
         scope.streams = ResourceSet::prefix("");
         store
             .put_if_absent(principal_record(&token.id, verifier, scope))
@@ -304,23 +255,32 @@ mod tests {
         let (auth, wire, _) = seeded().await;
         let principal = auth.authenticate(&wire, Audience::Pico, 0).await.unwrap();
 
-        let stored = auth.resolve_stream_name(&principal, "orders").unwrap();
+        let stored = principal.scope.resolve(Resource::Stream, "orders").unwrap();
         assert_eq!(stored, "/acct/orders");
-        auth.authorize(&principal, Operation::Read, Some(&stored))
-            .unwrap();
-        assert!(matches!(
-            auth.authorize(&principal, Operation::Read, Some("/other/x")),
-            Err(AuthError::Denied)
-        ));
-        assert!(matches!(
-            auth.authorize(&principal, Operation::Append, Some(&stored)),
-            Err(AuthError::Denied)
-        ));
-        assert!(matches!(
-            auth.authorize(&principal, Operation::IssueToken, Some("svc/x")),
-            Err(AuthError::Denied)
-        ));
-        assert_eq!(auth.strip_stream_name(&principal, "/acct/orders"), "orders");
+        assert!(principal.scope.allows(Operation::Read, Some(&stored)));
+        assert!(!principal.scope.allows(Operation::Read, Some("/other/x")));
+        assert!(!principal.scope.allows(Operation::Append, Some(&stored)));
+        assert!(!principal.scope.allows(Operation::IssueToken, Some("svc/x")));
+        assert_eq!(
+            principal.scope.strip(Resource::Stream, "/acct/orders"),
+            "orders"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_group_resources() {
+        let (auth, wire, _) = seeded().await;
+        let principal = auth.authenticate(&wire, Audience::Pico, 0).await.unwrap();
+
+        let group = principal.scope.resolve(Resource::Group, "workers").unwrap();
+        assert_eq!(group, "acct/workers");
+        assert!(principal.scope.allows(Operation::Consume, Some(&group)));
+        assert!(
+            !principal
+                .scope
+                .allows(Operation::Consume, Some("other/workers"))
+        );
+        assert!(!principal.scope.allows(Operation::DeleteGroup, Some(&group)));
     }
 
     #[tokio::test]
@@ -338,7 +298,7 @@ mod tests {
         let mut scope = Scope::default();
         scope.audiences.insert(Audience::Pico);
         scope.streams = ResourceSet::prefix("");
-        scope.groups.stream = ReadWrite::read_only();
+        scope.access.stream = ReadWrite::read_only();
         let record = principal_record(&token.id, verifier, scope);
         let expected = record.verifier;
         store.put_if_absent(record).await.unwrap();
@@ -365,7 +325,7 @@ mod tests {
         let mut scope = Scope::default();
         scope.audiences.insert(Audience::Pico);
         scope.streams = ResourceSet::prefix("/public/");
-        scope.groups.stream = ReadWrite::read_only();
+        scope.access.stream = ReadWrite::read_only();
         scope.expires_at_ms = Some(100);
         let record = principal_record(ANONYMOUS_TOKEN_ID, verifier, scope);
         let expected = record.verifier;

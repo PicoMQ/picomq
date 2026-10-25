@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 
 use picomq_common::name::{canonical, canonical_eq, canonical_starts_with, strip_canonical_prefix};
 
-/// Fine-grained operations. Hosts map HTTP methods onto these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Operation {
     Read,
@@ -18,17 +17,25 @@ pub enum Operation {
     IssueToken,
     RevokeToken,
     ListTokens,
+    Consume,
+    DescribeGroup,
+    DeleteGroup,
     ClusterRead,
     NodeRead,
     StreamInspect,
     TransferStream,
     UpdateNodeSlots,
-    DeleteGroup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resource {
+    Stream,
+    Token,
+    Group,
 }
 
 impl Operation {
-    /// Every operation. Keep in declaration order when adding variants.
-    pub const ALL: [Operation; 17] = [
+    pub const ALL: [Operation; 19] = [
         Operation::Read,
         Operation::Head,
         Operation::List,
@@ -40,49 +47,57 @@ impl Operation {
         Operation::IssueToken,
         Operation::RevokeToken,
         Operation::ListTokens,
+        Operation::Consume,
+        Operation::DescribeGroup,
+        Operation::DeleteGroup,
         Operation::ClusterRead,
         Operation::NodeRead,
         Operation::StreamInspect,
         Operation::TransferStream,
         Operation::UpdateNodeSlots,
-        Operation::DeleteGroup,
     ];
 
-    pub fn is_stream_read(self) -> bool {
-        matches!(self, Self::Read | Self::Head | Self::List)
+    pub fn resource(self) -> Option<Resource> {
+        match self {
+            Self::Read
+            | Self::Head
+            | Self::List
+            | Self::Create
+            | Self::Append
+            | Self::Trim
+            | Self::Close
+            | Self::Delete => Some(Resource::Stream),
+            Self::IssueToken | Self::RevokeToken | Self::ListTokens => Some(Resource::Token),
+            Self::Consume | Self::DescribeGroup | Self::DeleteGroup => Some(Resource::Group),
+            Self::ClusterRead
+            | Self::NodeRead
+            | Self::StreamInspect
+            | Self::TransferStream
+            | Self::UpdateNodeSlots => None,
+        }
     }
 
-    pub fn is_stream_write(self) -> bool {
+    pub fn writes(self) -> bool {
         matches!(
             self,
-            Self::Create | Self::Append | Self::Trim | Self::Close | Self::Delete
+            Self::Create
+                | Self::Append
+                | Self::Trim
+                | Self::Close
+                | Self::Delete
+                | Self::IssueToken
+                | Self::RevokeToken
+                | Self::DeleteGroup
+                | Self::TransferStream
+                | Self::UpdateNodeSlots
         )
     }
 
-    pub fn is_tokens_read(self) -> bool {
-        matches!(self, Self::ListTokens)
-    }
-
-    pub fn is_tokens_write(self) -> bool {
-        matches!(self, Self::IssueToken | Self::RevokeToken)
-    }
-
-    pub fn is_admin_read(self) -> bool {
-        matches!(
-            self,
-            Self::ClusterRead | Self::NodeRead | Self::StreamInspect
-        )
-    }
-
-    pub fn is_admin_write(self) -> bool {
-        matches!(
-            self,
-            Self::TransferStream | Self::UpdateNodeSlots | Self::DeleteGroup
-        )
+    pub fn describes(self) -> bool {
+        matches!(self, Self::Head | Self::DescribeGroup)
     }
 }
 
-/// Read/write flags for one operation group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ReadWrite {
     pub read: bool,
@@ -110,14 +125,42 @@ impl ReadWrite {
             write: true,
         }
     }
+
+    pub fn allows(self, write: bool) -> bool {
+        if write { self.write } else { self.read }
+    }
+
+    pub fn any(self) -> bool {
+        self.read || self.write
+    }
 }
 
-/// Coarse permissions. Defaults are all false (deny).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct OperationGroups {
+pub struct Access {
     pub stream: ReadWrite,
     pub tokens: ReadWrite,
+    pub group: ReadWrite,
     pub admin: ReadWrite,
+}
+
+impl Access {
+    pub const fn all() -> Self {
+        Self {
+            stream: ReadWrite::all(),
+            tokens: ReadWrite::all(),
+            group: ReadWrite::all(),
+            admin: ReadWrite::all(),
+        }
+    }
+
+    pub fn of(&self, resource: Option<Resource>) -> ReadWrite {
+        match resource {
+            Some(Resource::Stream) => self.stream,
+            Some(Resource::Token) => self.tokens,
+            Some(Resource::Group) => self.group,
+            None => self.admin,
+        }
+    }
 }
 
 /// Which listener or protocol a token may call.
@@ -219,18 +262,15 @@ impl ResourceSet {
     }
 }
 
-/// Full token scope. Defaults deny all resources, ops, and audiences.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
     pub streams: ResourceSet,
     pub tokens: ResourceSet,
-    pub groups: OperationGroups,
+    pub groups: ResourceSet,
+    pub access: Access,
     pub ops: BTreeSet<Operation>,
     pub audiences: BTreeSet<Audience>,
-    /// When true, `streams` must be a single prefix. Client stream names are
-    /// relative to that prefix.
-    pub auto_prefix_streams: bool,
-    /// Absolute expiry in unix milliseconds. `None` means no expiry.
+    pub auto_prefix: bool,
     pub expires_at_ms: Option<i64>,
 }
 
@@ -239,26 +279,23 @@ impl Default for Scope {
         Self {
             streams: ResourceSet::empty(),
             tokens: ResourceSet::empty(),
-            groups: OperationGroups::default(),
+            groups: ResourceSet::empty(),
+            access: Access::default(),
             ops: BTreeSet::new(),
             audiences: BTreeSet::new(),
-            auto_prefix_streams: false,
+            auto_prefix: false,
             expires_at_ms: None,
         }
     }
 }
 
 impl Scope {
-    /// Every stream, token, operation, and audience. No expiry.
     pub fn root() -> Self {
         Self {
             streams: ResourceSet::prefix(""),
             tokens: ResourceSet::prefix(""),
-            groups: OperationGroups {
-                stream: ReadWrite::all(),
-                tokens: ReadWrite::all(),
-                admin: ReadWrite::all(),
-            },
+            groups: ResourceSet::prefix(""),
+            access: Access::all(),
             audiences: [
                 Audience::Pico,
                 Audience::DurableStreams,
@@ -279,32 +316,30 @@ impl Scope {
     }
 
     pub fn allows_operation(&self, op: Operation) -> bool {
-        if self.ops.contains(&op) {
+        if self.ops.contains(&op) || self.access.of(op.resource()).allows(op.writes()) {
             return true;
         }
-        let g = &self.groups;
-        match op {
-            Operation::Head => self.allows_any_stream_operation(),
-            o if o.is_stream_read() => g.stream.read,
-            o if o.is_stream_write() => g.stream.write,
-            o if o.is_tokens_read() => g.tokens.read,
-            o if o.is_tokens_write() => g.tokens.write,
-            o if o.is_admin_read() => g.admin.read,
-            o if o.is_admin_write() => g.admin.write,
-            _ => false,
+
+        op.describes() && self.any_right_on(op.resource())
+    }
+
+    fn any_right_on(&self, resource: Option<Resource>) -> bool {
+        self.access.of(resource).any() || self.ops.iter().any(|op| op.resource() == resource)
+    }
+
+    pub fn allows(&self, op: Operation, name: Option<&str>) -> bool {
+        if !self.allows_operation(op) {
+            return false;
+        }
+
+        match op.resource() {
+            Some(Resource::Stream) => name.is_some_and(|name| self.allows_stream(name)),
+            Some(Resource::Token) => name.is_some_and(|name| self.tokens.matches(name)),
+            Some(Resource::Group) => name.is_some_and(|name| self.groups.matches(name)),
+            None => true,
         }
     }
 
-    fn allows_any_stream_operation(&self) -> bool {
-        self.groups.stream.read
-            || self.groups.stream.write
-            || self
-                .ops
-                .iter()
-                .any(|op| op.is_stream_read() || op.is_stream_write())
-    }
-
-    /// Effective operation set (groups expanded union explicit ops).
     pub fn effective_ops(&self) -> BTreeSet<Operation> {
         Operation::ALL
             .into_iter()
@@ -319,8 +354,6 @@ impl Scope {
         })
     }
 
-    /// True when every stream `child` allows is allowed here, comparing the
-    /// canonical names stream access is checked on.
     pub fn contains_streams(&self, child: &ResourceSet) -> bool {
         let canonical_set = |set: &ResourceSet| {
             ResourceSet::any_of(set.matchers().iter().map(|matcher| match matcher {
@@ -332,25 +365,26 @@ impl Scope {
         canonical_set(&self.streams).contains_set(&canonical_set(child))
     }
 
-    pub fn allows_token_id(&self, id: &str) -> bool {
-        self.tokens.matches(id)
+    fn set(&self, resource: Resource) -> &ResourceSet {
+        match resource {
+            Resource::Stream => &self.streams,
+            Resource::Token => &self.tokens,
+            Resource::Group => &self.groups,
+        }
     }
 
-    /// Map a client-facing stream name to the stored name.
-    ///
-    /// With auto-prefix, the scope must be a single stream prefix. Relative
-    /// names are joined to it. Absolute names that already start with the
-    /// prefix are accepted as-is.
-    pub fn resolve_stream_name(&self, client_name: &str) -> Result<String, crate::AuthError> {
-        if !self.auto_prefix_streams {
+    pub fn resolve(
+        &self,
+        resource: Resource,
+        client_name: &str,
+    ) -> Result<String, crate::AuthError> {
+        if !self.auto_prefix {
             return Ok(client_name.to_owned());
         }
-        let Some(prefix) = self.streams.sole_prefix() else {
+        let Some(prefix) = self.set(resource).sole_prefix() else {
             return Err(crate::AuthError::Denied);
         };
-        if strip_canonical_prefix(client_name, prefix).is_some() {
-            return Ok(client_name.to_owned());
-        }
+
         let name = client_name.trim_start_matches('/');
         if prefix.ends_with('/') {
             Ok(format!("{prefix}{name}"))
@@ -361,15 +395,19 @@ impl Scope {
         }
     }
 
-    /// Strip the auto-prefix for responses that echo stream names.
-    pub fn strip_stream_name<'a>(&self, stored_name: &'a str) -> &'a str {
-        if !self.auto_prefix_streams {
+    pub fn strip<'a>(&self, resource: Resource, stored_name: &'a str) -> &'a str {
+        if !self.auto_prefix {
             return stored_name;
         }
-        let Some(prefix) = self.streams.sole_prefix() else {
+        let Some(prefix) = self.set(resource).sole_prefix() else {
             return stored_name;
         };
-        strip_canonical_prefix(stored_name, prefix).unwrap_or(stored_name)
+
+        let stripped = match resource {
+            Resource::Stream => strip_canonical_prefix(stored_name, prefix),
+            Resource::Token | Resource::Group => stored_name.strip_prefix(prefix),
+        };
+        stripped.unwrap_or(stored_name)
     }
 }
 
@@ -397,12 +435,13 @@ mod tests {
     }
 
     #[test]
-    fn groups_expand_to_ops() {
+    fn access_expands_to_ops() {
         let mut scope = Scope::default();
-        scope.groups.stream = ReadWrite::read_only();
+        scope.access.stream = ReadWrite::read_only();
         assert!(scope.allows_operation(Operation::Read));
         assert!(scope.allows_operation(Operation::List));
         assert!(!scope.allows_operation(Operation::Append));
+
         scope.ops.insert(Operation::Append);
         assert!(scope.allows_operation(Operation::Append));
     }
@@ -410,7 +449,7 @@ mod tests {
     #[test]
     fn any_stream_right_grants_head() {
         let mut scope = Scope::default();
-        scope.groups.stream = ReadWrite {
+        scope.access.stream = ReadWrite {
             read: false,
             write: true,
         };
@@ -433,35 +472,119 @@ mod tests {
     }
 
     #[test]
+    fn group_operations_need_a_matching_group() {
+        let scope = Scope {
+            groups: ResourceSet::prefix("billing"),
+            access: Access {
+                group: ReadWrite::read_only(),
+                ..Access::default()
+            },
+            ..Scope::default()
+        };
+
+        assert!(scope.allows(Operation::Consume, Some("billing-eu")));
+        assert!(scope.allows(Operation::DescribeGroup, Some("billing-eu")));
+        assert!(!scope.allows(Operation::Consume, Some("analytics")));
+        assert!(!scope.allows(Operation::Consume, None));
+        assert!(!scope.allows(Operation::DeleteGroup, Some("billing-eu")));
+    }
+
+    #[test]
+    fn any_group_right_grants_describe() {
+        let deleter = Scope {
+            ops: [Operation::DeleteGroup].into(),
+            ..Scope::default()
+        };
+        assert!(deleter.allows_operation(Operation::DescribeGroup));
+        assert!(!deleter.allows_operation(Operation::Consume));
+
+        let writer = Scope {
+            access: Access {
+                group: ReadWrite {
+                    read: false,
+                    write: true,
+                },
+                ..Access::default()
+            },
+            ..Scope::default()
+        };
+        assert!(writer.allows_operation(Operation::DescribeGroup));
+
+        let reader = Scope {
+            access: Access {
+                stream: ReadWrite::read_only(),
+                ..Access::default()
+            },
+            ..Scope::default()
+        };
+        assert!(!reader.allows_operation(Operation::DescribeGroup));
+    }
+
+    #[test]
+    fn admin_operations_take_no_resource() {
+        let scope = Scope {
+            access: Access {
+                admin: ReadWrite::read_only(),
+                ..Access::default()
+            },
+            ..Scope::default()
+        };
+
+        assert!(scope.allows(Operation::ClusterRead, None));
+        assert!(!scope.allows(Operation::TransferStream, None));
+    }
+
+    #[test]
     fn auto_prefix_resolve_and_strip() {
         let scope = Scope {
             streams: ResourceSet::prefix("/acct/"),
-            auto_prefix_streams: true,
+            groups: ResourceSet::prefix("acct/"),
+            auto_prefix: true,
             ..Scope::default()
         };
-        assert_eq!(scope.resolve_stream_name("orders").unwrap(), "/acct/orders");
+
         assert_eq!(
-            scope.resolve_stream_name("/acct/orders").unwrap(),
+            scope.resolve(Resource::Stream, "orders").unwrap(),
             "/acct/orders"
         );
-        assert_eq!(scope.strip_stream_name("/acct/orders"), "orders");
+        assert_eq!(scope.strip(Resource::Stream, "/acct/orders"), "orders");
+        assert_eq!(
+            scope.resolve(Resource::Group, "workers").unwrap(),
+            "acct/workers"
+        );
+        assert_eq!(scope.strip(Resource::Group, "acct/workers"), "workers");
+    }
+
+    #[test]
+    fn auto_prefixed_names_are_always_relative() {
+        let scope = Scope {
+            streams: ResourceSet::prefix("/acct/"),
+            groups: ResourceSet::prefix("acct/"),
+            auto_prefix: true,
+            ..Scope::default()
+        };
+
+        assert_eq!(
+            scope.resolve(Resource::Stream, "/acct/orders").unwrap(),
+            "/acct/acct/orders"
+        );
+        assert_eq!(
+            scope.resolve(Resource::Group, "acct/workers").unwrap(),
+            "acct/acct/workers"
+        );
     }
 
     #[test]
     fn stream_scopes_match_either_spelling() {
         let scope = Scope {
             streams: ResourceSet::prefix("/acct/"),
-            auto_prefix_streams: true,
+            auto_prefix: true,
             ..Scope::default()
         };
         assert!(scope.allows_stream("/acct/orders"));
         assert!(scope.allows_stream("/acct.orders"));
         assert!(!scope.allows_stream("/other/orders"));
-        assert_eq!(
-            scope.resolve_stream_name("/acct.orders").unwrap(),
-            "/acct.orders"
-        );
-        assert_eq!(scope.strip_stream_name("/acct.orders"), "orders");
+        assert_eq!(scope.strip(Resource::Stream, "/acct.orders"), "orders");
 
         let exact = Scope {
             streams: ResourceSet::exact("/a/b"),
@@ -471,17 +594,36 @@ mod tests {
     }
 
     #[test]
+    fn group_names_match_exactly() {
+        let scope = Scope {
+            groups: ResourceSet::prefix("acct/"),
+            access: Access {
+                group: ReadWrite::read_only(),
+                ..Access::default()
+            },
+            ..Scope::default()
+        };
+
+        assert!(scope.allows(Operation::Consume, Some("acct/workers")));
+        assert!(!scope.allows(Operation::Consume, Some("acct.workers")));
+    }
+
+    #[test]
     fn auto_prefix_requires_sole_prefix() {
         let scope = Scope {
             streams: ResourceSet::any_of([
                 ResourceMatcher::Prefix("/a/".into()),
                 ResourceMatcher::Prefix("/b/".into()),
             ]),
-            auto_prefix_streams: true,
+            auto_prefix: true,
             ..Scope::default()
         };
         assert!(matches!(
-            scope.resolve_stream_name("x"),
+            scope.resolve(Resource::Stream, "x"),
+            Err(crate::AuthError::Denied)
+        ));
+        assert!(matches!(
+            scope.resolve(Resource::Group, "x"),
             Err(crate::AuthError::Denied)
         ));
     }
@@ -490,6 +632,7 @@ mod tests {
     fn default_scope_denies_all() {
         let scope = Scope::default();
         assert!(!scope.allows_operation(Operation::Read));
+        assert!(!scope.allows_operation(Operation::DescribeGroup));
         assert!(!scope.allows_stream("/x"));
         assert!(!scope.allows_audience(Audience::Pico));
         assert!(!scope.is_expired(0));

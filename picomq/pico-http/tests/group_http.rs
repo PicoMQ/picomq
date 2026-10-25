@@ -3,11 +3,11 @@ mod common;
 use std::net::SocketAddr;
 
 use picomq_auth::{
-    AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
+    Access, AccessToken, Audience, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
 use picomq_http::{HttpProtocol, RoutingMode, ServeOptions, serve};
 use picomq_listener::Listener;
-use picomq_server::{CommittedOffset, CreateCommand, OffsetCommit, Partition};
+use picomq_server::{CommittedOffset, CreateCommand, OffsetCommit, Partition, PicoNode};
 use reqwest::Client;
 use serde_json::{Value, json};
 
@@ -290,22 +290,23 @@ async fn bad_requests_are_rejected() {
     assert_eq!(undecodable.status(), 400);
 }
 
-fn read_scope(prefix: &str, auto_prefix: bool) -> Scope {
+fn read_scope(prefix: &str, groups: &str, auto_prefix: bool) -> Scope {
     Scope {
         streams: ResourceSet::prefix(prefix),
-        groups: OperationGroups {
+        groups: ResourceSet::prefix(groups),
+        access: Access {
             stream: ReadWrite::read_only(),
-            ..OperationGroups::default()
+            group: ReadWrite::read_only(),
+            ..Access::default()
         },
         audiences: [Audience::Pico].into(),
-        auto_prefix_streams: auto_prefix,
+        auto_prefix,
         ..Scope::default()
     }
 }
 
-async fn gated(scope: Scope) -> (picomq_http::RunningServer, String) {
-    let node = common::start_node().await;
-    let (token, verifier) = AccessToken::issue("it/consumer").unwrap();
+async fn issue(node: &PicoNode, id: &str, scope: Scope) -> String {
+    let (token, verifier) = AccessToken::issue(id).unwrap();
     node.tokens()
         .store()
         .put_if_absent(TokenRecord {
@@ -317,6 +318,12 @@ async fn gated(scope: Scope) -> (picomq_http::RunningServer, String) {
         })
         .await
         .unwrap();
+    token.render()
+}
+
+async fn gated(scope: Scope) -> (picomq_http::RunningServer, String) {
+    let node = common::start_node().await;
+    let wire = issue(&node, "it/consumer", scope).await;
     node.topics()
         .create(picomq_server::CreateCommand::new(
             "/acct/orders",
@@ -336,12 +343,12 @@ async fn gated(scope: Scope) -> (picomq_http::RunningServer, String) {
         },
     )
     .await;
-    (server, token.render())
+    (server, wire)
 }
 
 #[tokio::test]
-async fn group_routes_require_read_on_the_streams() {
-    let (server, wire) = gated(read_scope("/acct/", false)).await;
+async fn group_routes_require_the_group_and_read_on_the_streams() {
+    let (server, wire) = gated(read_scope("/acct/", "g", false)).await;
     let base = format!("http://{}", server.local_addr());
     let client = Client::new();
 
@@ -361,6 +368,15 @@ async fn group_routes_require_read_on_the_streams() {
         .await
         .unwrap();
     assert_eq!(denied.status(), 403);
+
+    let other_group = client
+        .post(format!("{base}/_groups/other/members"))
+        .bearer_auth(&wire)
+        .json(&json!({ "subscription": ["/acct/orders"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_group.status(), 403);
 
     let joined: Value = client
         .post(format!("{base}/_groups/g/members"))
@@ -391,6 +407,14 @@ async fn group_routes_require_read_on_the_streams() {
         .await
         .unwrap();
     assert_eq!(elsewhere.status(), 403);
+    let other_offsets = client
+        .put(format!("{base}/_groups/other/offsets"))
+        .bearer_auth(&wire)
+        .json(&json!({ "offsets": { "/acct/orders": { "position": 3 } } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_offsets.status(), 403);
 
     let beat = client
         .post(format!("{base}/_groups/g/members/{member}/heartbeat"))
@@ -401,20 +425,19 @@ async fn group_routes_require_read_on_the_streams() {
         .unwrap();
     assert_eq!(beat.status(), 204);
 
-    let describe = client
-        .get(format!("{base}/_groups/g"))
-        .bearer_auth(&wire)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(describe.status(), 403);
+    let describe = |group: &str| {
+        client
+            .get(format!("{base}/_groups/{group}"))
+            .bearer_auth(&wire)
+            .send()
+    };
+    assert_eq!(describe("g").await.unwrap().status(), 200);
+    assert_eq!(describe("other").await.unwrap().status(), 403);
 }
 
-/// Group access is derived from the streams a request names, so a request
-/// naming none must be refused rather than pass with nothing to check.
 #[tokio::test]
 async fn empty_bodies_are_refused() {
-    let (server, wire) = gated(read_scope("/acct/", false)).await;
+    let (server, wire) = gated(read_scope("/acct/", "g", false)).await;
     let base = format!("http://{}", server.local_addr());
     let client = Client::new();
 
@@ -439,7 +462,7 @@ async fn empty_bodies_are_refused() {
 
 #[tokio::test]
 async fn auto_prefix_scopes_see_relative_names() {
-    let (server, wire) = gated(read_scope("/acct/", true)).await;
+    let (server, wire) = gated(read_scope("/acct/", "acct/", true)).await;
     let base = format!("http://{}", server.local_addr());
     let client = Client::new();
 
@@ -486,13 +509,58 @@ async fn auto_prefix_scopes_see_relative_names() {
     let stored = server
         .node()
         .groups()
-        .fetch_offsets("g", None)
+        .fetch_offsets(None, "acct/g", None)
         .await
         .unwrap();
     assert_eq!(
         stored[&picomq_server::Partition::new(topic.id, 0)].position,
         11
     );
+}
+
+#[tokio::test]
+async fn auto_prefix_tenants_get_separate_groups() {
+    let (server, first) = gated(read_scope("/acct/", "acct/", true)).await;
+    let second = issue(
+        &server.node(),
+        "it/second",
+        read_scope("/other/", "other/", true),
+    )
+    .await;
+    server
+        .node()
+        .topics()
+        .create(CreateCommand::new("/other/orders", "text/plain"))
+        .await
+        .unwrap();
+    let base = format!("http://{}", server.local_addr());
+    let client = Client::new();
+
+    for wire in [&first, &second] {
+        let joined = client
+            .post(format!("{base}/_groups/workers/members"))
+            .bearer_auth(wire)
+            .json(&json!({ "subscription": ["orders"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(joined.status(), 200);
+    }
+
+    let mut groups = server.node().groups().list(None);
+    groups.sort();
+    assert_eq!(groups, ["acct/workers", "other/workers"]);
+
+    let listed: Value = client
+        .get(format!("{base}/_groups"))
+        .bearer_auth(&first)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["groups"], json!(["workers"]));
 }
 
 #[tokio::test]
@@ -548,6 +616,7 @@ async fn groups_over_http_refuse_multi_partition_topics() {
         .node
         .groups()
         .commit_offsets(
+            None,
             "readers",
             None,
             &[0, 1].map(|index| OffsetCommit {

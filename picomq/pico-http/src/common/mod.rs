@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation};
+use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation, Resource};
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{ErrorKind, ServiceError, Topics};
 use serde_json::json;
@@ -58,8 +58,8 @@ impl CommonState {
             return Ok(name.to_owned());
         };
         let caller = crate::auth::authenticate(authorizer, self.audience, headers).await?;
-        let name = caller.resolve(authorizer, name)?;
-        caller.authorize(authorizer, op, Some(&name))?;
+        let name = caller.resolve(Resource::Stream, name)?;
+        caller.authorize(op, Some(&name))?;
         Ok(name)
     }
 
@@ -74,7 +74,7 @@ impl CommonState {
             return Ok(());
         };
         let caller = crate::auth::authenticate(authorizer, self.audience, headers).await?;
-        caller.authorize(authorizer, op, Some(name))
+        caller.authorize(op, Some(name))
     }
 }
 
@@ -87,11 +87,10 @@ pub(crate) async fn gate(
     resource: Option<&str>,
 ) -> Result<Option<AuthPrincipal>, Box<Response>> {
     let principal = authenticate(authorizer, headers).await?;
-    if let Some(principal) = &principal {
-        authorizer
-            .expect("principal implies authorizer")
-            .authorize(principal, op, resource)
-            .map_err(|err| Box::new(auth_error(&err)))?;
+    if let Some(principal) = &principal
+        && !principal.scope.allows(op, resource)
+    {
+        return Err(Box::new(auth_error(&AuthError::Denied)));
     }
     Ok(principal)
 }

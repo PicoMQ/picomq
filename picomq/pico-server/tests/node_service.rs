@@ -2007,12 +2007,12 @@ async fn a_restarted_coordinator_keeps_the_members_that_join_it() {
         wal_storage.clone(),
     )
     .await;
-    assert!(node.groups().join(join()).await.result.is_ok());
+    assert!(node.groups().join(None, join()).await.result.is_ok());
     node.close().await;
 
     let restarted = start_shared_node(1, 2, sink, views, object_storage, wal_storage).await;
-    assert!(restarted.groups().join(join()).await.result.is_ok());
-    let described = restarted.groups().describe("g").await.unwrap();
+    assert!(restarted.groups().join(None, join()).await.result.is_ok());
+    let described = restarted.groups().describe(None, "g").await.unwrap();
     assert_eq!(described.members.len(), 1);
 
     restarted.close().await;

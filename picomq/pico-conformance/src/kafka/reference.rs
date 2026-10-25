@@ -5,7 +5,7 @@ use tempfile::TempDir;
 use crate::certificates::Certificates;
 use crate::kafka::clients::Clients;
 use crate::kafka::docker::{docker, docker_unchecked};
-use crate::kafka::sasl::Credentials;
+use crate::kafka::sasl::{Credentials, READER_GROUPS};
 
 pub const IMAGE: &str = "apache/kafka:4.3.1";
 
@@ -163,6 +163,32 @@ impl Reference {
                 output.stdout
             );
         }
+
+        let principal = format!("User:{}", self.reader.username);
+        let output = clients
+            .java(
+                "kafka-acls",
+                &[
+                    "--bootstrap-server",
+                    &self.bootstrap,
+                    "--add",
+                    "--allow-principal",
+                    &principal,
+                    "--operation",
+                    "Read",
+                    "--group",
+                    READER_GROUPS,
+                    "--resource-pattern-type",
+                    "prefixed",
+                ],
+                None,
+            )
+            .await;
+        anyhow::ensure!(
+            output.ok,
+            "granting group Read to {principal} failed:\n{}",
+            output.stdout
+        );
 
         Ok(())
     }

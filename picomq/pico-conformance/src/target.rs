@@ -3,14 +3,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use picomq_auth::{
-    AccessToken, Audience, OperationGroups, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
+    Access, AccessToken, Audience, ReadWrite, ResourceSet, Scope, TokenRecord, TokenStore,
 };
 use picomq_http::HttpProtocol;
 use picomq_runtime::{AuthMode, KafkaConfig, MetaBackend, PicoServer, ServerConfig, TlsConfig};
 use tempfile::TempDir;
 
 use crate::certificates::Certificates;
-use crate::kafka::sasl::Credentials;
+use crate::kafka::sasl::{Credentials, READER_GROUPS};
 use crate::suite::Suite;
 
 const ROOT_ID: &str = "conformance/root";
@@ -152,7 +152,20 @@ impl Secured {
         })
         .await?;
 
-        let reader = issue(&server, READER_ID, stream_scope(ReadWrite::read_only())).await?;
+        let reader = issue(
+            &server,
+            READER_ID,
+            Scope {
+                groups: ResourceSet::prefix(READER_GROUPS),
+                access: Access {
+                    stream: ReadWrite::read_only(),
+                    group: ReadWrite::read_only(),
+                    ..Access::default()
+                },
+                ..stream_scope(ReadWrite::read_only())
+            },
+        )
+        .await?;
         let writer = issue(
             &server,
             WRITER_ID,
@@ -204,9 +217,9 @@ fn credentials(token: &AccessToken) -> Credentials {
 fn stream_scope(stream: ReadWrite) -> Scope {
     Scope {
         streams: ResourceSet::prefix(""),
-        groups: OperationGroups {
+        access: Access {
             stream,
-            ..OperationGroups::default()
+            ..Access::default()
         },
         audiences: [Audience::Kafka].into(),
         ..Scope::default()
