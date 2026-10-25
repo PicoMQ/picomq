@@ -121,6 +121,9 @@ Until a connection authenticates, the listener holds it to the same limits a Kaf
 
 Each request needs an operation from the token's scope on the topics it names, and a group request also needs one on its group. The operations are defined under [Scopes](/docs/design/auth#scopes). A topic is matched under its HTTP name, so a scope with the prefix `/orders/` covers the Kafka topics `orders.eu` and `orders.us`.
 
+- **A `group.id` means group requests.** librdkafka's consumer needs a `group.id` even to assign partitions itself, and with one set it sends `FindCoordinator` for that group. A consumer that tracks its own offsets therefore still needs `describe_group` on its `group.id`. Without it, records arrive but the client reports `GroupAuthorizationFailed`.
+- **Reading with no group** needs only `read`, through a low-level consumer such as `kcat -C`.
+
 | Request | On the group | On the topics |
 | --- | --- | --- |
 | `Produce` | none | `append` |
