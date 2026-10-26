@@ -16,7 +16,7 @@ use s3stream::StreamState;
 use serde_json::{Value, json};
 
 use super::offsets::{self, Offsets};
-use super::{AdminState, allowed, missing_topic};
+use super::{AdminState, allowed, authorized_topic, missing_partition, missing_topic};
 use crate::common::streams::update_command;
 use crate::common::{
     auth_error, authenticate, error_response, json_body, read_json, service_error,
@@ -143,10 +143,7 @@ async fn partition(
         Err(response) => return *response,
     };
     if index >= topic.partitions {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            format!("partition {index} not found"),
-        );
+        return missing_partition(index);
     }
 
     let view = state.node.views().load();
@@ -244,17 +241,10 @@ async fn trim(
         Ok(topic) => topic,
         Err(response) => return *response,
     };
-    let view = state.node.views().load();
-    let Some(row) = offsets::row_of(&state, &view.state, &topic, index) else {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            format!("partition {index} not found"),
-        );
-    };
-
-    let local = state.node.config().node_id;
-    if row.node_id != -1 && row.node_id != local {
-        return state.forward_to(row.node_id, request).await;
+    match state.remote_owner(&topic, index).await {
+        Ok(Some(owner)) => return state.forward_to(owner, request).await,
+        Ok(None) => {}
+        Err(response) => return *response,
     }
 
     let body = match read_json(request, TRIM_BODY).await {
@@ -274,24 +264,6 @@ async fn trim(
         Ok(start) => (StatusCode::OK, Json(json!({ "startOffset": start }))).into_response(),
         Err(error) => service_error(error),
     }
-}
-
-async fn authorized_topic(
-    state: &AdminState,
-    headers: &HeaderMap,
-    op: Operation,
-    name: &str,
-) -> Result<Topic, Box<Response>> {
-    let principal = authenticate(state.authorizer.as_deref(), headers).await?;
-    let topic = match state.node.topics().get(name).await {
-        Ok(Some(topic)) => topic,
-        Ok(None) => return Err(Box::new(missing_topic(name))),
-        Err(error) => return Err(Box::new(service_error(error))),
-    };
-    if !allowed(principal.as_ref(), op, &topic) {
-        return Err(Box::new(auth_error(&AuthError::Denied)));
-    }
-    Ok(topic)
 }
 
 fn owner_id(node: i32) -> Option<i32> {

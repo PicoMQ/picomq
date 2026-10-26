@@ -510,7 +510,7 @@ impl DsFrontend {
                     let payloads: Vec<Bytes> = read
                         .records
                         .iter()
-                        .map(|r| r.record.value.clone())
+                        .map(|r| r.record.value.clone().unwrap_or_default())
                         .collect();
                     if tx.send(encoder.data_event(&payloads)).await.is_err() {
                         return;
@@ -612,8 +612,11 @@ impl DsFrontend {
 
         if !(empty_tail && live) {
             let body = if json {
-                let payloads: Vec<Bytes> =
-                    out.records.iter().map(|r| r.record.value.clone()).collect();
+                let payloads: Vec<Bytes> = out
+                    .records
+                    .iter()
+                    .map(|r| r.record.value.clone().unwrap_or_default())
+                    .collect();
                 encode_json_array(&payloads)
             } else {
                 out.concatenated_values()

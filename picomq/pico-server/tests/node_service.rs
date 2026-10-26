@@ -96,7 +96,10 @@ async fn create_append_read_close_via_topics() {
         .await
         .unwrap();
     assert_eq!(batch.records.len(), 1);
-    assert_eq!(&batch.records[0].record.value[..], b"hello");
+    assert_eq!(
+        batch.records[0].record.value.as_deref(),
+        Some(&b"hello"[..])
+    );
     assert!(batch.up_to_date);
 
     let closed = topics.close("/streams/demo").await.unwrap();
@@ -123,7 +126,11 @@ async fn create_append_read_close_via_topics() {
         .read("/streams/batch", 0, OffsetToken::beginning(), 1024, 0)
         .await
         .unwrap();
-    let values: Vec<&[u8]> = all.records.iter().map(|r| &r.record.value[..]).collect();
+    let values: Vec<&[u8]> = all
+        .records
+        .iter()
+        .map(|r| r.record.value.as_deref().unwrap())
+        .collect();
     assert_eq!(values, [b"a".as_slice(), b"bb", b"ccc"]);
     let offsets: Vec<u64> = all
         .records
@@ -144,7 +151,7 @@ async fn create_append_read_close_via_topics() {
         .await
         .unwrap();
     assert_eq!(tail.records.len(), 2);
-    assert_eq!(&tail.records[0].record.value[..], b"bb");
+    assert_eq!(tail.records[0].record.value.as_deref(), Some(&b"bb"[..]));
 
     let limited = topics
         .read("/streams/batch", 0, OffsetToken::beginning(), 1024, 2)
@@ -171,7 +178,10 @@ async fn create_append_read_close_via_topics() {
         .await
         .unwrap();
     assert_eq!(trimmed.records.len(), 1);
-    assert_eq!(&trimmed.records[0].record.value[..], b"ccc");
+    assert_eq!(
+        trimmed.records[0].record.value.as_deref(),
+        Some(&b"ccc"[..])
+    );
 
     node.close().await;
 }
@@ -218,8 +228,8 @@ async fn concurrent_producers_on_one_topic_pipeline() {
         let seen: Vec<u8> = all
             .records
             .iter()
-            .filter(|r| r.record.value[0] == producer)
-            .map(|r| r.record.value[1])
+            .filter(|r| r.record.value.as_ref().unwrap()[0] == producer)
+            .map(|r| r.record.value.as_ref().unwrap()[1])
             .collect();
         assert_eq!(
             seen,
@@ -326,8 +336,14 @@ async fn core_flow_on_sql_sink() {
         .await
         .unwrap();
     assert_eq!(read.records.len(), 2);
-    assert_eq!(&read.records[0].record.value[..], br#"{"a":1}"#);
-    assert_eq!(&read.records[1].record.value[..], br#"{"b":2}"#);
+    assert_eq!(
+        read.records[0].record.value.as_deref(),
+        Some(&br#"{"a":1}"#[..])
+    );
+    assert_eq!(
+        read.records[1].record.value.as_deref(),
+        Some(&br#"{"b":2}"#[..])
+    );
 
     assert!(topics.delete("/sql/demo").await.unwrap());
     assert!(topics.get("/sql/demo").await.unwrap().is_none());
@@ -664,8 +680,11 @@ async fn transfer_moves_partition_to_target_node() {
         .await
         .unwrap();
     assert_eq!(all.records.len() as u64, 2 + raced);
-    assert_eq!(&all.records[0].record.value[..], b"before");
-    assert_eq!(&all.records.last().unwrap().record.value[..], b"after");
+    assert_eq!(all.records[0].record.value.as_deref(), Some(&b"before"[..]));
+    assert_eq!(
+        all.records.last().unwrap().record.value.as_deref(),
+        Some(&b"after"[..])
+    );
 
     let after = node2.topics().watermarks(&topic, 0).await.unwrap().epoch;
     assert!(after > before, "epoch {before} -> {after}");
@@ -788,7 +807,7 @@ async fn topics_survive_restart() {
         .await
         .unwrap();
     assert_eq!(read.records.len(), 1);
-    assert_eq!(&read.records[0].record.value[..], b"kept");
+    assert_eq!(read.records[0].record.value.as_deref(), Some(&b"kept"[..]));
 
     node.close().await;
 }
@@ -868,7 +887,7 @@ async fn kafka_batch_append_read_and_idempotency() {
     let values: Vec<&[u8]> = records
         .records
         .iter()
-        .map(|r| &r.record.value[..])
+        .map(|r| r.record.value.as_deref().unwrap())
         .collect();
     assert_eq!(values, [b"k2", b"k3"]);
     assert_eq!(records.records[0].offset.record_offset(), 1);
@@ -987,7 +1006,11 @@ async fn http_and_kafka_writers_share_one_log() {
         .read("/mixed/log", 0, OffsetToken::beginning(), 0, 0)
         .await
         .unwrap();
-    let values: Vec<&[u8]> = all.records.iter().map(|r| &r.record.value[..]).collect();
+    let values: Vec<&[u8]> = all
+        .records
+        .iter()
+        .map(|r| r.record.value.as_deref().unwrap())
+        .collect();
     assert_eq!(values, [b"h1", b"h2", b"k1", b"h3"]);
     let offsets: Vec<u64> = all
         .records
@@ -1459,7 +1482,7 @@ async fn partitions_grow_and_stay_independent() {
         .await
         .unwrap();
     assert!(first.records.is_empty());
-    assert_eq!(&second.records[0].record.value[..], b"one");
+    assert_eq!(second.records[0].record.value.as_deref(), Some(&b"one"[..]));
 
     let grown = grow(&topics, "/parts", 4, &[]).await.unwrap();
     assert_eq!(grown.partitions, 4);
@@ -2275,7 +2298,7 @@ async fn values(topics: &Topics, name: &str) -> Vec<Bytes> {
         .unwrap()
         .records
         .into_iter()
-        .map(|record| record.record.value)
+        .map(|record| record.record.value.unwrap())
         .collect()
 }
 
@@ -2456,6 +2479,95 @@ async fn timestamp_lookups_skip_records_trimmed_inside_a_batch() {
         .unwrap()
         .unwrap();
     assert_eq!(newest.offset.record_offset(), 1);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn timestamp_lookups_find_records_across_objects_and_the_wal() {
+    let node = uploading_node().await;
+    let topics = node.topics();
+    topics
+        .create(create("/stamped", "text/plain"))
+        .await
+        .unwrap();
+    for objects in 1..=3 {
+        append_object(&node, "/stamped", b"uploaded", objects).await;
+    }
+    topics
+        .append("/stamped", 0, append(&[b"tail"], "text/plain"))
+        .await
+        .unwrap();
+    let topic = topics.get("/stamped").await.unwrap().unwrap();
+    let written = topics
+        .read("/stamped", 0, OffsetToken::of_record_offset(0), 0, 0)
+        .await
+        .unwrap()
+        .records;
+    assert_eq!(written.len(), 4);
+
+    for record in &written {
+        let found = topics
+            .record_at_or_after(&topic, 0, record.record.timestamp_ms)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.offset, record.offset);
+    }
+    let newest = written.last().unwrap();
+    assert!(
+        topics
+            .record_at_or_after(&topic, 0, newest.record.timestamp_ms + 1)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let found = topics
+        .record_with_max_timestamp(&topic, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.offset, newest.offset);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn the_max_timestamp_is_found_before_a_later_older_batch() {
+    let node = uploading_node().await;
+    let topics = node.topics();
+    topics
+        .create(create("/skewed", "application/octet-stream"))
+        .await
+        .unwrap();
+    for (timestamp_ms, values) in [(100, &[&b"a"[..]][..]), (500, &[b"b", b"c"])] {
+        produce(
+            &topics,
+            "/skewed",
+            Bytes::from(timed_batch(timestamp_ms, values)),
+        )
+        .await
+        .unwrap();
+    }
+    let log = log_of(&topics, "/skewed").await;
+    let stream_id = node.service().stream_id(&log).unwrap().unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while node.views().load().state.object_spans(stream_id).is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "no upload");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    produce(&topics, "/skewed", Bytes::from(timed_batch(300, &[b"d"])))
+        .await
+        .unwrap();
+    let topic = topics.get("/skewed").await.unwrap().unwrap();
+
+    let newest = topics
+        .record_with_max_timestamp(&topic, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(newest.offset.record_offset(), 1);
+    assert_eq!(newest.record.timestamp_ms, 500);
 
     node.close().await;
 }

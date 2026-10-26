@@ -623,3 +623,111 @@ async fn groups_are_described_by_their_coordinator() {
     second.server.shutdown().await;
     first.server.shutdown().await;
 }
+
+#[tokio::test]
+async fn records_are_read_on_their_owner() {
+    let shared = Shared::new();
+    let options = || Options {
+        advertise_admin: true,
+        ..Options::default()
+    };
+    let first = start(1, &shared, options()).await;
+    let second = start(2, &shared, options()).await;
+    let client = reqwest::Client::new();
+    let mut command = CreateCommand::new("/owned", "text/plain");
+    command.owners = vec![2];
+    first.node.topics().create(command).await.unwrap();
+    for record in ["a", "b", "c"] {
+        let appended = client
+            .post(format!("http://{}/owned", second.server.local_addr()))
+            .header("Content-Type", "text/plain")
+            .body(record)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(appended.status(), 200);
+    }
+    let records = format!(
+        "{}/admin/topics/%2Fowned/partitions/0/records",
+        first.admin()
+    );
+
+    let page: serde_json::Value = client
+        .get(&records)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let values: Vec<&str> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["value"]["data"].as_str().unwrap())
+        .collect();
+    assert_eq!(values, ["a", "b", "c"]);
+
+    let one: serde_json::Value = client
+        .get(format!("{records}/1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(one["value"]["data"], "b");
+    let owners: Vec<i32> = first
+        .node
+        .views()
+        .load()
+        .state
+        .streams()
+        .values()
+        .map(|row| row.node_id)
+        .collect();
+    assert_eq!(owners, [2], "the first node never opened the partition");
+
+    second.server.shutdown().await;
+    first.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_trim_is_not_sent_to_a_fenced_owner() {
+    let shared = Shared::new();
+    let first = start(
+        1,
+        &shared,
+        Options {
+            advertise_admin: true,
+            ..Options::default()
+        },
+    )
+    .await;
+    let dark = start(2, &shared, Options::default()).await;
+    let mut command = CreateCommand::new("/stranded", "text/plain");
+    command.owners = vec![2];
+    first.node.topics().create(command).await.unwrap();
+    let row = first.node.views().load().state.nodes()[&2].clone();
+    first
+        .node
+        .metadata()
+        .fence_node(2, row.epoch, row.heartbeats)
+        .await
+        .unwrap();
+
+    let trimmed = reqwest::Client::new()
+        .post(format!(
+            "{}/admin/topics/%2Fstranded/partitions/0/trim",
+            first.admin()
+        ))
+        .json(&serde_json::json!({ "before": 0 }))
+        .send()
+        .await
+        .unwrap();
+    let status = trimmed.status();
+    assert_eq!(status, 200, "{}", trimmed.text().await.unwrap());
+
+    dark.server.shutdown().await;
+    first.server.shutdown().await;
+}

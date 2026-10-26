@@ -94,7 +94,7 @@ impl DsClient {
                 timestamp: None,
                 key: None,
                 headers: Vec::new(),
-                body,
+                body: Some(body),
             }]
         };
         Ok(ReadPage {

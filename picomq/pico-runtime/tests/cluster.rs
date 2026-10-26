@@ -80,7 +80,7 @@ async fn bodies(client: &PicoClient, name: &str) -> Vec<String> {
         .unwrap();
     page.records
         .into_iter()
-        .map(|record| String::from_utf8(record.body.to_vec()).unwrap())
+        .map(|record| String::from_utf8(record.body.unwrap().to_vec()).unwrap())
         .collect()
 }
 
@@ -389,10 +389,10 @@ async fn admin_apis_reach_partitions_on_both_nodes() {
 #[ignore]
 async fn a_dead_node_fails_over_and_committed_offsets_survive() {
     let (Ok(kill), Ok(start)) = (
-        std::env::var("PICOMQ_KILL_CMD"),
-        std::env::var("PICOMQ_START_CMD"),
+        std::env::var("PICO_KILL_CMD"),
+        std::env::var("PICO_START_CMD"),
     ) else {
-        eprintln!("set PICOMQ_KILL_CMD and PICOMQ_START_CMD to run the failover test");
+        eprintln!("set PICO_KILL_CMD and PICO_START_CMD to run the failover test");
         return;
     };
 
@@ -609,10 +609,10 @@ async fn an_http_producer_retry_is_deduplicated_across_a_transfer() {
 #[ignore]
 async fn an_http_producer_survives_a_killed_owner_exactly_once() {
     let (Ok(kill), Ok(start)) = (
-        std::env::var("PICOMQ_KILL_CMD"),
-        std::env::var("PICOMQ_START_CMD"),
+        std::env::var("PICO_KILL_CMD"),
+        std::env::var("PICO_START_CMD"),
     ) else {
-        eprintln!("set PICOMQ_KILL_CMD and PICOMQ_START_CMD to run the failover test");
+        eprintln!("set PICO_KILL_CMD and PICO_START_CMD to run the failover test");
         return;
     };
 
@@ -716,10 +716,10 @@ fn consume_continuously(
 #[ignore]
 async fn kafka_clients_survive_a_killed_coordinator_and_owner() {
     let (Ok(kill), Ok(start)) = (
-        std::env::var("PICOMQ_KILL_CMD"),
-        std::env::var("PICOMQ_START_CMD"),
+        std::env::var("PICO_KILL_CMD"),
+        std::env::var("PICO_START_CMD"),
     ) else {
-        eprintln!("set PICOMQ_KILL_CMD and PICOMQ_START_CMD to run the failover test");
+        eprintln!("set PICO_KILL_CMD and PICO_START_CMD to run the failover test");
         return;
     };
 

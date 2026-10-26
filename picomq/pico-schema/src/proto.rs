@@ -15,7 +15,7 @@
 
 use std::{io::Write, sync::LazyLock};
 
-use crate::{Error, Result, Validator, record::Batch};
+use crate::{Error, MessageKind, Result, Validator, record::Batch};
 use bytes::{BufMut, Bytes, BytesMut};
 use protobuf::{
     CodedInputStream, MessageDyn, descriptor, reflect::FileDescriptor, reflect::MessageDescriptor,
@@ -26,18 +26,10 @@ use serde_json::Value;
 use tempfile::{NamedTempFile, tempdir};
 use tracing::{debug, error};
 
-#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum MessageKind {
-    Key,
-    Value,
-}
-
-impl AsRef<str> for MessageKind {
-    fn as_ref(&self) -> &str {
-        match self {
-            MessageKind::Key => "Key",
-            MessageKind::Value => "Value",
-        }
+fn message_name(message_kind: MessageKind) -> &'static str {
+    match message_kind {
+        MessageKind::Key => "Key",
+        MessageKind::Value => "Value",
     }
 }
 
@@ -53,7 +45,7 @@ impl Schema {
     ) -> Option<MessageDescriptor> {
         self.file_descriptors
             .iter()
-            .find_map(|fd| fd.message_by_package_relative_name(message_kind.as_ref()))
+            .find_map(|fd| fd.message_by_package_relative_name(message_name(message_kind)))
     }
 
     fn value_to_message(
@@ -63,7 +55,7 @@ impl Schema {
     ) -> Result<Box<dyn MessageDyn>> {
         self.file_descriptors
             .iter()
-            .find_map(|fd| fd.message_by_package_relative_name(message_kind.as_ref()))
+            .find_map(|fd| fd.message_by_package_relative_name(message_name(message_kind)))
             .ok_or(Error::Message(format!(
                 "message {message_kind:?} not found"
             )))
@@ -79,6 +71,23 @@ impl Schema {
     pub fn encode_from_value(&self, message_kind: MessageKind, json: &Value) -> Result<Bytes> {
         self.value_to_message(message_kind, json)
             .and_then(message_to_bytes)
+    }
+
+    pub(crate) fn decode(
+        &self,
+        message_kind: MessageKind,
+        encoded: &Bytes,
+    ) -> Result<Option<Value>> {
+        decode(
+            self.message_by_package_relative_name(message_kind),
+            Some(encoded.clone()),
+        )?
+        .map(|message| {
+            protobuf_json_mapping::print_to_string(&*message)
+                .map_err(Error::from)
+                .and_then(|json| serde_json::from_str(&json).map_err(Error::from))
+        })
+        .transpose()
     }
 }
 
@@ -125,10 +134,12 @@ impl Validator for Schema {
                 self.message_by_package_relative_name(MessageKind::Key),
                 record.key.clone(),
             )
-            .and(validate(
-                self.message_by_package_relative_name(MessageKind::Value),
-                record.value.clone(),
-            ))
+            .and(record.value.clone().map_or(Ok(()), |value| {
+                validate(
+                    self.message_by_package_relative_name(MessageKind::Value),
+                    Some(value),
+                )
+            }))
             .inspect_err(|err| error!(?err))?
         }
 

@@ -70,11 +70,12 @@ pub struct AppendAck {
 pub struct Record {
     pub position: String,
     pub timestamp: Option<i64>,
-    /// Kafka-shaped: an optional key and ordered headers with byte values.
-    /// DS reads carry neither.
+    /// Kafka-shaped: an optional key, ordered headers whose values may be
+    /// null, and a body that is null for a Kafka tombstone. DS reads carry a
+    /// body only.
     pub key: Option<Bytes>,
-    pub headers: Vec<(String, Bytes)>,
-    pub body: Bytes,
+    pub headers: Vec<(String, Option<Bytes>)>,
+    pub body: Option<Bytes>,
 }
 
 #[derive(Debug, Clone)]

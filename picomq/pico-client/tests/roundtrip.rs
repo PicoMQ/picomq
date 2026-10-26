@@ -93,7 +93,7 @@ async fn lifecycle(protocol: Protocol) {
         .await
         .unwrap();
     assert_eq!(page.records.len(), 1);
-    assert_eq!(page.records[0].body.as_ref(), b"first");
+    assert_eq!(page.records[0].body.as_deref(), Some(&b"first"[..]));
     assert_eq!(page.next, ack.next);
 
     // Tailing an idle stream: the long poll returns caught-up and empty.

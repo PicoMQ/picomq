@@ -10,6 +10,7 @@
 
 mod groups;
 mod offsets;
+mod records;
 mod topics;
 
 use std::sync::Arc;
@@ -28,7 +29,9 @@ use picomq_auth::{
 };
 use picomq_metadata::{MetadataState, NodeRow, Proposer};
 use picomq_metrics::Metrics;
-use picomq_server::{Log, Page, PicoNode, ServiceError, Topic, partition_log};
+use picomq_server::{
+    Log, OwnershipService as _, Page, PicoNode, ServiceError, Topic, partition_log,
+};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
@@ -118,6 +121,39 @@ impl AdminState {
             .post_json(&self.node, target, path, headers, body)
             .await
     }
+
+    async fn remote_owner(&self, topic: &Topic, index: u32) -> Result<Option<i32>, Box<Response>> {
+        if index >= topic.partitions {
+            return Err(Box::new(missing_partition(index)));
+        }
+
+        let log = partition_log(topic, index).map_err(|error| Box::new(service_error(error)))?;
+        let owner = self
+            .node
+            .ownership()
+            .owner_of(&log)
+            .await
+            .map_err(|error| Box::new(service_error(error)))?;
+        Ok(owner.owner_node_id.filter(|_| !owner.local))
+    }
+}
+
+async fn authorized_topic(
+    state: &AdminState,
+    headers: &HeaderMap,
+    op: Operation,
+    name: &str,
+) -> Result<Topic, Box<Response>> {
+    let principal = authenticate(state.authorizer.as_deref(), headers).await?;
+    let topic = match state.node.topics().get(name).await {
+        Ok(Some(topic)) => topic,
+        Ok(None) => return Err(Box::new(missing_topic(name))),
+        Err(error) => return Err(Box::new(service_error(error))),
+    };
+    if !allowed(principal.as_ref(), op, &topic) {
+        return Err(Box::new(auth_error(&AuthError::Denied)));
+    }
+    Ok(topic)
 }
 
 fn allowed(principal: Option<&AuthPrincipal>, op: Operation, topic: &Topic) -> bool {
@@ -126,6 +162,13 @@ fn allowed(principal: Option<&AuthPrincipal>, op: Operation, topic: &Topic) -> b
 
 fn missing_topic(name: &str) -> Response {
     error_response(StatusCode::NOT_FOUND, format!("topic {name} not found"))
+}
+
+fn missing_partition(index: u32) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        format!("partition {index} not found"),
+    )
 }
 
 #[derive(rust_embed::RustEmbed)]
@@ -155,6 +198,7 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/tokens", get(list_tokens).post(issue_token))
         .route("/admin/tokens/{*id}", delete(revoke_token))
         .merge(topics::routes())
+        .merge(records::routes())
         .merge(groups::routes())
         .route("/", get(|| async { asset("index.html") }))
         .fallback(get(|uri: Uri| async move {

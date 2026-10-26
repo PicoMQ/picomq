@@ -98,11 +98,44 @@ pub trait Validator {
     fn validate(&self, batch: &Batch) -> Result<()>;
 }
 
+#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum MessageKind {
+    Key,
+    Value,
+}
+
+impl AsRef<str> for MessageKind {
+    fn as_ref(&self) -> &str {
+        match self {
+            MessageKind::Key => "key",
+            MessageKind::Value => "value",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Schema {
     Avro(Box<avro::Schema>),
     Json(Arc<json::Schema>),
     Proto(Box<proto::Schema>),
+}
+
+impl Schema {
+    pub fn format(&self) -> SchemaFormat {
+        match self {
+            Self::Avro(_) => SchemaFormat::Avro,
+            Self::Json(_) => SchemaFormat::Json,
+            Self::Proto(_) => SchemaFormat::Protobuf,
+        }
+    }
+
+    pub fn decode(&self, kind: MessageKind, encoded: &Bytes) -> Result<Option<serde_json::Value>> {
+        match self {
+            Self::Avro(schema) => schema.decode(kind, encoded),
+            Self::Json(_) => Ok(None),
+            Self::Proto(schema) => schema.decode(kind, encoded),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -499,6 +532,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_record_without_a_value_skips_value_validation() -> Result<()> {
+        let store = InMemory::new();
+        store
+            .put(
+                &Path::from("people.json"),
+                PutPayload::from(Bytes::from_static(
+                    br#"{"properties": {"value": {"type": "object", "required": ["name"]}}}"#,
+                )),
+            )
+            .await?;
+        let registry = Registry::new(store);
+
+        let tombstone = Batch::builder()
+            .record(Record::builder().key(Bytes::from_static(b"k")).build())
+            .build();
+        registry.validate("people", &tombstone).await?;
+
+        let empty = Batch::builder()
+            .record(Record::builder().value(Bytes::new()).build())
+            .build();
+        assert!(registry.validate("people", &empty).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn missing_schema_skips_validation() -> Result<()> {
         let registry = Registry::new(InMemory::new());
         let batch = Batch::builder()
@@ -538,18 +596,80 @@ message Value { string name = 1; }
 
         let encoded = {
             let schema = proto::Schema::try_from(Bytes::from_static(schema))?;
-            let key =
-                schema.encode_from_value(proto::MessageKind::Key, &serde_json::json!({"id": 1}))?;
-            let value = schema.encode_from_value(
-                proto::MessageKind::Value,
-                &serde_json::json!({"name": "bob"}),
-            )?;
+            let key = schema.encode_from_value(MessageKind::Key, &serde_json::json!({"id": 1}))?;
+            let value = schema
+                .encode_from_value(MessageKind::Value, &serde_json::json!({"name": "bob"}))?;
             (key, value)
         };
         let ok = Batch::builder()
             .record(Record::builder().key(encoded.0).value(encoded.1).build())
             .build();
         registry.validate("employee", &ok).await?;
+        Ok(())
+    }
+
+    #[test]
+    fn avro_records_decode_to_json() -> Result<()> {
+        let schema = avro::Schema::try_from(Bytes::from_static(
+            br#"{
+                "type": "record",
+                "name": "Person",
+                "fields": [
+                    {"name": "key", "type": "long"},
+                    {"name": "value", "type": {
+                        "type": "record",
+                        "name": "Body",
+                        "fields": [{"name": "name", "type": "string"}]
+                    }}
+                ]
+            }"#,
+        ))?;
+        let key = avro::schema_write(schema.key().unwrap(), apache_avro::types::Value::Long(7))?;
+        let value = avro::schema_write(
+            schema.value().unwrap(),
+            avro::r(
+                schema.value().unwrap(),
+                [("name", apache_avro::types::Value::String("bob".into()))],
+            )
+            .into(),
+        )?;
+        let schema = Schema::Avro(Box::new(schema));
+
+        assert_eq!(schema.format(), SchemaFormat::Avro);
+        assert_eq!(
+            schema.decode(MessageKind::Key, &key)?,
+            Some(serde_json::json!(7))
+        );
+        assert_eq!(
+            schema.decode(MessageKind::Value, &value)?,
+            Some(serde_json::json!({"name": "bob"}))
+        );
+        assert!(
+            schema
+                .decode(MessageKind::Value, &Bytes::from_static(b"not avro"))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn protobuf_records_decode_to_json() -> Result<()> {
+        let proto = proto::Schema::try_from(Bytes::from_static(
+            br#"
+syntax = "proto3";
+message Value { string name = 1; }
+"#,
+        ))?;
+        let value =
+            proto.encode_from_value(MessageKind::Value, &serde_json::json!({"name": "bob"}))?;
+        let schema = Schema::Proto(Box::new(proto));
+
+        assert_eq!(schema.format(), SchemaFormat::Protobuf);
+        assert_eq!(
+            schema.decode(MessageKind::Value, &value)?,
+            Some(serde_json::json!({"name": "bob"}))
+        );
+        assert_eq!(schema.decode(MessageKind::Key, &value)?, None);
         Ok(())
     }
 

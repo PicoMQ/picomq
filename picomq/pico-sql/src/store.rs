@@ -498,7 +498,7 @@ impl MetaStore for PgStore {
 }
 
 /// Behavioral contract, run against every backend (SQLite always, Postgres
-/// when `PICOMQ_PG_URL` is set. See `tests/pg_contract.rs`).
+/// when `PICO_TEST_PG_URL` is set. See `tests/pg_contract.rs`).
 #[doc(hidden)]
 pub async fn contract_suite(store: &dyn MetaStore) {
     // Empty store.

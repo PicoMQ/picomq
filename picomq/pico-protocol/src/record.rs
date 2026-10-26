@@ -10,14 +10,14 @@ use crate::error::CodecError;
 pub struct PicoRecord {
     pub timestamp: i64,
     pub key: Option<Bytes>,
-    pub headers: Vec<(String, Bytes)>,
-    pub body: Bytes,
+    pub headers: Vec<(String, Option<Bytes>)>,
+    pub body: Option<Bytes>,
 }
 
 impl PicoRecord {
     pub fn new(body: impl Into<Bytes>) -> Self {
         Self {
-            body: body.into(),
+            body: Some(body.into()),
             ..Default::default()
         }
     }
@@ -33,7 +33,7 @@ impl PicoRecord {
     }
 
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<Bytes>) -> Self {
-        self.headers.push((name.into(), value.into()));
+        self.headers.push((name.into(), Some(value.into())));
         self
     }
 
@@ -41,7 +41,8 @@ impl PicoRecord {
         self.headers
             .iter()
             .find(|(n, _)| n == name)
-            .and_then(|(_, v)| std::str::from_utf8(v).ok())
+            .and_then(|(_, v)| v.as_deref())
+            .and_then(|v| std::str::from_utf8(v).ok())
     }
 }
 
@@ -63,46 +64,43 @@ fn record_size(record: &PicoRecord) -> usize {
         + record
             .headers
             .iter()
-            .map(|(k, v)| 8 + k.len() + v.len())
+            .map(|(k, v)| 8 + k.len() + v.as_ref().map_or(0, Bytes::len))
             .sum::<usize>()
         + 4
-        + record.body.len()
+        + record.body.as_ref().map_or(0, Bytes::len)
 }
 
 fn put_record(buf: &mut BytesMut, record: &PicoRecord) {
-    match &record.key {
-        Some(key) => {
-            buf.put_i32(key.len() as i32);
-            buf.put_slice(key);
-        }
-        None => buf.put_i32(-1),
-    }
+    put_nullable(buf, record.key.as_ref());
     buf.put_u32(record.headers.len() as u32);
     for (name, value) in &record.headers {
         buf.put_u32(name.len() as u32);
         buf.put_slice(name.as_bytes());
-        buf.put_u32(value.len() as u32);
-        buf.put_slice(value);
+        put_nullable(buf, value.as_ref());
     }
-    buf.put_u32(record.body.len() as u32);
-    buf.put_slice(&record.body);
+    put_nullable(buf, record.body.as_ref());
+}
+
+fn put_nullable(buf: &mut BytesMut, bytes: Option<&Bytes>) {
+    match bytes {
+        Some(bytes) => {
+            buf.put_i32(bytes.len() as i32);
+            buf.put_slice(bytes);
+        }
+        None => buf.put_i32(-1),
+    }
 }
 
 fn get_record(buf: &mut &[u8], timestamp: i64) -> Result<PicoRecord, CodecError> {
-    let key_len = get_i32(buf)?;
-    let key = if key_len < 0 {
-        None
-    } else {
-        Some(get_exact(buf, key_len as usize)?)
-    };
+    let key = get_nullable(buf)?;
     let count = get_u32(buf)?;
     let mut headers = Vec::with_capacity(count.min(1024) as usize);
     for _ in 0..count {
         let name = get_string(buf)?;
-        let value = get_bytes(buf)?;
+        let value = get_nullable(buf)?;
         headers.push((name, value));
     }
-    let body = get_bytes(buf)?;
+    let body = get_nullable(buf)?;
     Ok(PicoRecord {
         timestamp,
         key,
@@ -197,24 +195,30 @@ fn put_json_record(node: &mut Map<String, Value>, record: &PicoRecord) {
     if let Some(key) = &record.key {
         put_json_bytes(node, "key", key);
     }
-    let mut text = Map::new();
-    let mut binary = Map::new();
-    for (name, value) in &record.headers {
-        match std::str::from_utf8(value) {
-            Ok(v) => text.insert(name.clone(), json!(v)),
-            Err(_) => binary.insert(
-                name.clone(),
-                json!(base64::engine::general_purpose::STANDARD.encode(value)),
-            ),
-        };
+    if !record.headers.is_empty() {
+        let headers = record
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                let mut header = Map::new();
+                header.insert("name".into(), json!(name));
+                match value {
+                    Some(value) => put_json_bytes(&mut header, "value", value),
+                    None => {
+                        header.insert("value".into(), Value::Null);
+                    }
+                }
+                Value::Object(header)
+            })
+            .collect();
+        node.insert("headers".into(), Value::Array(headers));
     }
-    if !text.is_empty() {
-        node.insert("headers".into(), Value::Object(text));
+    match &record.body {
+        Some(body) => put_json_bytes(node, "body", body),
+        None => {
+            node.insert("body".into(), Value::Null);
+        }
     }
-    if !binary.is_empty() {
-        node.insert("headers_b64".into(), Value::Object(binary));
-    }
-    put_json_bytes(node, "body", &record.body);
 }
 
 fn put_json_bytes(node: &mut Map<String, Value>, field: &str, bytes: &[u8]) {
@@ -231,44 +235,37 @@ fn json_record(node: &Value) -> Result<PicoRecord, CodecError> {
     if !node.is_object() {
         return Err(malformed("record must be an object"));
     }
-    let key = match (node.get("key"), node.get("key_b64")) {
-        (None, None) => None,
-        (key, b64) => Some(json_bytes(key, b64, "key")?),
-    };
+    let key = json_nullable(node, "key")?;
     let mut headers = Vec::new();
-    if let Some(text) = node.get("headers") {
-        let Some(text) = text.as_object() else {
-            return Err(malformed("headers must be an object"));
+    if let Some(list) = node.get("headers") {
+        let Some(list) = list.as_array() else {
+            return Err(malformed("headers must be a list"));
         };
-        for (name, value) in text {
-            let value = match value {
-                Value::String(s) => Bytes::copy_from_slice(s.as_bytes()),
-                other => Bytes::from(other.to_string()),
+        for header in list {
+            let Some(name) = header.get("name").and_then(Value::as_str) else {
+                return Err(malformed("every header needs a string name"));
             };
-            headers.push((name.clone(), value));
+            headers.push((name.to_owned(), json_nullable(header, "value")?));
         }
     }
-    if let Some(binary) = node.get("headers_b64") {
-        let Some(binary) = binary.as_object() else {
-            return Err(malformed("headers_b64 must be an object"));
-        };
-        for (name, value) in binary {
-            let Some(b64) = value.as_str() else {
-                return Err(malformed("headers_b64 values must be strings"));
-            };
-            let value = base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .map_err(|_| malformed(format!("invalid base64 in headers_b64.{name}")))?;
-            headers.push((name.clone(), Bytes::from(value)));
-        }
-    }
-    let body = json_bytes(node.get("body"), node.get("body_b64"), "body")?;
+    let body = json_nullable(node, "body")?;
     Ok(PicoRecord {
         timestamp: 0,
         key,
         headers,
         body,
     })
+}
+
+fn json_nullable(node: &Value, field: &str) -> Result<Option<Bytes>, CodecError> {
+    let text = node.get(field).filter(|text| !text.is_null());
+    let b64 = node
+        .get(format!("{field}_b64"))
+        .filter(|b64| !b64.is_null());
+    if text.is_none() && b64.is_none() {
+        return Ok(None);
+    }
+    json_bytes(text, b64, field).map(Some)
 }
 
 fn json_bytes(text: Option<&Value>, b64: Option<&Value>, field: &str) -> Result<Bytes, CodecError> {
@@ -282,9 +279,8 @@ fn json_bytes(text: Option<&Value>, b64: Option<&Value>, field: &str) -> Result<
             .map_err(|_| malformed(format!("invalid {field}_b64")));
     }
     match text {
-        None | Some(Value::Null) => Ok(Bytes::new()),
         Some(Value::String(s)) => Ok(Bytes::copy_from_slice(s.as_bytes())),
-        Some(_) => Err(malformed(format!("{field} must be a string"))),
+        _ => Err(malformed(format!("{field} must be a string"))),
     }
 }
 
@@ -336,6 +332,14 @@ fn get_exact(buf: &mut &[u8], len: usize) -> Result<Bytes, CodecError> {
     Ok(out)
 }
 
+fn get_nullable(buf: &mut &[u8]) -> Result<Option<Bytes>, CodecError> {
+    let len = get_i32(buf)?;
+    if len < 0 {
+        return Ok(None);
+    }
+    get_exact(buf, len as usize).map(Some)
+}
+
 fn get_bytes(buf: &mut &[u8]) -> Result<Bytes, CodecError> {
     let len = get_u32(buf)? as usize;
     get_exact(buf, len)
@@ -356,8 +360,18 @@ mod tests {
                 .with_key("k1")
                 .with_header("h", "v")
                 .with_header("h", Bytes::from_static(&[0xff, 0x00])),
-            PicoRecord::new(Bytes::new()),
+            PicoRecord {
+                headers: vec![
+                    ("flag".to_owned(), None),
+                    ("empty".to_owned(), Some(Bytes::new())),
+                ],
+                ..PicoRecord::new(Bytes::new())
+            },
             PicoRecord::new(Bytes::from_static(&[0xfe])).with_key(Bytes::new()),
+            PicoRecord {
+                body: None,
+                ..PicoRecord::new(Bytes::new()).with_key("gone")
+            },
         ]
     }
 
@@ -395,9 +409,28 @@ mod tests {
         assert_eq!(json[0]["seq"], 1);
         assert_eq!(json[0]["timestamp"], 5);
         assert_eq!(json[0]["key"], "k1");
-        assert_eq!(json[0]["headers"]["h"], "v");
-        assert_eq!(json[0]["headers_b64"]["h"], "/wA=");
+        assert_eq!(
+            json[0]["headers"],
+            json!([{"name": "h", "value": "v"}, {"name": "h", "value_b64": "/wA="}])
+        );
         assert_eq!(json[0]["body"], "one");
+        let nulls = vec![SequencedRecord {
+            seq: 2,
+            record: records()[1].clone(),
+        }];
+        let json: Value = serde_json::from_slice(&encode_json_read(&nulls)).unwrap();
+        assert_eq!(
+            json[0]["headers"],
+            json!([{"name": "flag", "value": null}, {"name": "empty", "value": ""}])
+        );
+        assert_eq!(json[0]["body"], "");
+        let tombstone = vec![SequencedRecord {
+            seq: 3,
+            record: records()[3].clone(),
+        }];
+        let json: Value = serde_json::from_slice(&encode_json_read(&tombstone)).unwrap();
+        assert_eq!(json[0]["key"], "gone");
+        assert_eq!(json[0]["body"], Value::Null);
 
         let binary = vec![SequencedRecord {
             seq: 2,
@@ -409,27 +442,41 @@ mod tests {
         assert_eq!(json[0]["key_b64"], "gA==");
         let decoded = decode_json_append(
             format!(
-                r#"{{"records":[{{"key_b64":"gA==","body_b64":"{}","headers":{{"a":"1"}},"headers_b64":{{"b":"/w=="}}}}]}}"#,
+                r#"{{"records":[{{"key_b64":"gA==","body_b64":"{}","headers":[{{"name":"a","value":"1"}},{{"name":"b","value_b64":"/w=="}},{{"name":"a","value":null}}]}}]}}"#,
                 json[0]["body_b64"].as_str().unwrap()
             )
             .as_bytes(),
         )
         .unwrap();
-        assert_eq!(&decoded[0].body[..], &[0xff, 0xfe]);
+        assert_eq!(decoded[0].body.as_deref(), Some(&[0xff, 0xfe][..]));
         assert_eq!(decoded[0].key.as_deref(), Some(&[0x80][..]));
         assert_eq!(decoded[0].header_str("a"), Some("1"));
         assert_eq!(
-            decoded[0].headers[1],
-            ("b".to_owned(), Bytes::from_static(&[0xff]))
+            decoded[0].headers,
+            [
+                ("a".to_owned(), Some(Bytes::from_static(b"1"))),
+                ("b".to_owned(), Some(Bytes::from_static(&[0xff]))),
+                ("a".to_owned(), None),
+            ]
         );
 
         let plain = decode_json_append(br#"{"records":[{"body":"x"}]}"#).unwrap();
         assert_eq!(plain[0].key, None);
-        assert_eq!(&plain[0].body[..], b"x");
+        assert_eq!(plain[0].body.as_deref(), Some(&b"x"[..]));
+
+        let nulls = decode_json_append(
+            br#"{"records":[{"key":null,"body":null},{"body":""},{"key":"k"}]}"#,
+        )
+        .unwrap();
+        assert_eq!((nulls[0].key.clone(), nulls[0].body.clone()), (None, None));
+        assert_eq!(nulls[1].body, Some(Bytes::new()));
+        assert_eq!(nulls[2].body, None, "an absent body is null");
 
         assert!(decode_json_append(br#"{"records":[]}"#).is_err());
         assert!(decode_json_append(br#"{"records":[{"body":1}]}"#).is_err());
         assert!(decode_json_append(br#"{"records":[{"key_b64":"!!"}]}"#).is_err());
+        assert!(decode_json_append(br#"{"records":[{"headers":{"a":"1"}}]}"#).is_err());
+        assert!(decode_json_append(br#"{"records":[{"headers":[{"value":"1"}]}]}"#).is_err());
         assert!(decode_json_append(b"not json").is_err());
     }
 

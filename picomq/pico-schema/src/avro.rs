@@ -20,22 +20,7 @@ use crate::record::Batch;
 use serde_json::Value as JsonValue;
 use tracing::{debug, error, info};
 
-use crate::{Error, Result, Validator};
-
-#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) enum MessageKind {
-    Key,
-    Value,
-}
-
-impl AsRef<str> for MessageKind {
-    fn as_ref(&self) -> &str {
-        match self {
-            MessageKind::Key => "key",
-            MessageKind::Value => "value",
-        }
-    }
-}
+use crate::{Error, MessageKind, Result, Validator};
 
 #[derive(Clone, Debug, Default)]
 pub struct Schema {
@@ -50,6 +35,17 @@ impl Schema {
 
     pub fn value(&self) -> Option<&AvroSchema> {
         self.value.as_ref()
+    }
+
+    pub(crate) fn decode(&self, kind: MessageKind, encoded: &Bytes) -> Result<Option<JsonValue>> {
+        let schema = match kind {
+            MessageKind::Key => self.key(),
+            MessageKind::Value => self.value(),
+        };
+        decode(schema, Some(encoded.clone()))?
+            .map(JsonValue::try_from)
+            .transpose()
+            .map_err(Into::into)
     }
 }
 
@@ -153,7 +149,12 @@ impl Validator for Schema {
             debug!(?record);
 
             validate(self.key.as_ref(), record.key.clone())
-                .and(validate(self.value.as_ref(), record.value.clone()))
+                .and(
+                    record
+                        .value
+                        .clone()
+                        .map_or(Ok(()), |value| validate(self.value.as_ref(), Some(value))),
+                )
                 .inspect_err(|err| info!(?err, ?batch))?
         }
 

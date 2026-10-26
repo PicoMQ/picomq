@@ -1047,7 +1047,11 @@ async fn rust_client_addresses_kafka_partitions() {
         )
         .await
         .unwrap();
-    let bodies: Vec<&[u8]> = page.records.iter().map(|r| &r.body[..]).collect();
+    let bodies: Vec<&[u8]> = page
+        .records
+        .iter()
+        .map(|r| r.body.as_deref().unwrap())
+        .collect();
     assert_eq!(bodies, [&b"a"[..], b"b", b"c"]);
 
     let without_partition = client

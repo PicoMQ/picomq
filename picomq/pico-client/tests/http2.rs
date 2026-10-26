@@ -78,7 +78,7 @@ async fn appends_over_h2c_negotiate_http2() {
         )
         .await
         .unwrap();
-    assert_eq!(page.records[0].body.as_ref(), b"over h2c");
+    assert_eq!(page.records[0].body.as_deref(), Some(&b"over h2c"[..]));
     assert_eq!(page.next, ack.next);
 
     server.shutdown().await;

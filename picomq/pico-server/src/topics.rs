@@ -1114,9 +1114,12 @@ fn schema_batch(records: &[LogRecord]) -> picomq_schema::Batch {
         records: records
             .iter()
             .map(|record| {
-                let mut builder = picomq_schema::Record::builder().value(record.value.clone());
+                let mut builder = picomq_schema::Record::builder();
                 if let Some(key) = &record.key {
                     builder = builder.key(key.clone());
+                }
+                if let Some(value) = &record.value {
+                    builder = builder.value(value.clone());
                 }
                 builder.build()
             })

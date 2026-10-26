@@ -1,8 +1,8 @@
 //! Postgres sink e2e. The SqlSink behaviors that matter in the clustered
-//! posture, against a real Postgres when `PICOMQ_PG_URL` is set:
+//! posture, against a real Postgres when `PICO_TEST_PG_URL` is set:
 //!
 //! ```text
-//! PICOMQ_PG_URL=postgres://user:pass@localhost:5432/picomq \
+//! PICO_TEST_PG_URL=postgres://user:pass@localhost:5432/picomq \
 //!     cargo test -p picomq-sql --test pg_e2e
 //! ```
 //!
@@ -40,8 +40,8 @@ fn register(node_id: i32, node_epoch: i64) -> MetadataCommand {
 
 #[tokio::test]
 async fn postgres_sink_multi_writer_snapshot_and_lease() {
-    let Ok(url) = std::env::var("PICOMQ_PG_URL") else {
-        eprintln!("PICOMQ_PG_URL not set; skipping postgres e2e");
+    let Ok(url) = std::env::var("PICO_TEST_PG_URL") else {
+        eprintln!("PICO_TEST_PG_URL not set; skipping postgres e2e");
         return;
     };
 

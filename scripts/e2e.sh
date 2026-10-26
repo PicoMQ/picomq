@@ -98,10 +98,9 @@ go_suite() {
 
 run_single() {
   export PICO_PROTOCOL=pico PICO_AUTH=off
-  export PICO_ENDPOINT="$NODE1" PICO_KAFKA="$KAFKA"
-  export PICOMQ_INTEGRATION=1 PICOMQ_ENDPOINT="$NODE1"
-  export PICOMQ_RESTART_CMD="docker compose $(compose_files single) restart pico"
-  unset PICO_ENDPOINT_2 PICOMQ_ENDPOINT_2 PICOMQ_AUTH_REQUIRED PICOMQ_DS_INTEGRATION
+  export PICO_INTEGRATION=1 PICO_ENDPOINT="$NODE1" PICO_KAFKA="$KAFKA"
+  export PICO_RESTART_CMD="docker compose $(compose_files single) restart pico"
+  unset PICO_ENDPOINT_2 PICO_DS_INTEGRATION
 
   wait_ready "$ADMIN1" &&
     rust_protocol_suite single &&
@@ -112,12 +111,11 @@ run_single() {
 
 run_cluster() {
   export PICO_PROTOCOL=pico PICO_AUTH=required
-  export PICO_ENDPOINT="$NODE1" PICO_ENDPOINT_2="$NODE2" PICO_KAFKA="$KAFKA"
-  export PICOMQ_INTEGRATION=1 PICOMQ_AUTH_REQUIRED=1 PICOMQ_ENDPOINT="$NODE1" PICOMQ_ENDPOINT_2="$NODE2"
+  export PICO_INTEGRATION=1 PICO_ENDPOINT="$NODE1" PICO_ENDPOINT_2="$NODE2" PICO_KAFKA="$KAFKA"
   export PICO_KAFKA_2="$KAFKA2" PICO_ADMIN_2="$ADMIN2"
-  export PICOMQ_KILL_CMD="docker compose $(compose_files cluster) kill -s KILL pico2"
-  export PICOMQ_START_CMD="docker compose $(compose_files cluster) up --detach pico2"
-  unset PICOMQ_RESTART_CMD PICOMQ_DS_INTEGRATION
+  export PICO_KILL_CMD="docker compose $(compose_files cluster) kill -s KILL pico2"
+  export PICO_START_CMD="docker compose $(compose_files cluster) up --detach pico2"
+  unset PICO_RESTART_CMD PICO_DS_INTEGRATION
 
   wait_ready "$ADMIN1" &&
     wait_ready "$ADMIN2" &&
@@ -130,7 +128,7 @@ run_cluster() {
 run_chaos() {
   export PICO_PROTOCOL=pico PICO_AUTH=required
   export PICO_ENDPOINT="$NODE1" PICO_KAFKA="$KAFKA" PICO_KAFKA_2="$KAFKA2" PICO_ADMIN_2="$ADMIN2"
-  export PICOMQ_COMPOSE="docker compose $(compose_files chaos)"
+  export PICO_COMPOSE="docker compose $(compose_files chaos)"
 
   wait_ready "$ADMIN1" &&
     wait_ready "$ADMIN2" &&
@@ -141,7 +139,7 @@ run_tls() {
   export PICO_PROTOCOL=pico PICO_AUTH=required
   export PICO_ENDPOINT="https://localhost:4437" PICO_ENDPOINT_2="https://localhost:4438"
   export PICO_CA_CERTIFICATE="$PICO_CERTS/ca.pem"
-  unset PICOMQ_RESTART_CMD PICOMQ_DS_INTEGRATION
+  unset PICO_RESTART_CMD PICO_DS_INTEGRATION
 
   export PICO_ADMIN="https://localhost:9090" PICO_ADMIN_2="https://localhost:9091"
 
@@ -171,8 +169,8 @@ mint_certificates() {
 
 run_ds() {
   export PICO_PROTOCOL=ds PICO_AUTH=off
-  export PICOMQ_DS_INTEGRATION=1 PICOMQ_DS_ENDPOINT="$NODE1" PICOMQ_DS_ENDPOINT_2="$NODE2"
-  unset PICO_ENDPOINT PICO_ENDPOINT_2 PICOMQ_INTEGRATION PICOMQ_AUTH_REQUIRED PICOMQ_ENDPOINT PICOMQ_ENDPOINT_2 PICOMQ_RESTART_CMD
+  export PICO_DS_INTEGRATION=1 PICO_DS_ENDPOINT="$NODE1" PICO_DS_ENDPOINT_2="$NODE2"
+  unset PICO_ENDPOINT PICO_ENDPOINT_2 PICO_INTEGRATION PICO_RESTART_CMD
 
   wait_ready "$ADMIN1" &&
     wait_ready "$ADMIN2" &&

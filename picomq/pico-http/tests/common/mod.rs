@@ -129,7 +129,10 @@ pub struct Console {
 #[allow(dead_code)]
 impl Console {
     pub async fn start() -> Self {
-        let node = start_node().await;
+        Self::on(start_node().await).await
+    }
+
+    pub async fn on(node: Arc<PicoNode>) -> Self {
         let root = issue(&node, "ops/root", Scope::root()).await;
         let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
         let server = serve(

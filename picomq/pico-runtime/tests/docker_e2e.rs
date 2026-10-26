@@ -20,8 +20,8 @@ const CT_BATCH_BINARY: &str = "application/vnd.picomq.batch";
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn kafka_clients_ride_through_a_node_restart() {
-    let Ok(restart) = std::env::var("PICOMQ_RESTART_CMD") else {
-        eprintln!("set PICOMQ_RESTART_CMD to run the restart test");
+    let Ok(restart) = std::env::var("PICO_RESTART_CMD") else {
+        eprintln!("set PICO_RESTART_CMD to run the restart test");
         return;
     };
 
@@ -221,21 +221,46 @@ async fn consumer_group_is_shared_by_kafka_and_pico_members() {
         .unwrap();
     assert_eq!(offsets["offsets"][format!("/{topic}")]["position"], 5);
 
-    let rewind = h
+    let rewind = || {
+        h.http
+            .put(h.url(&format!("/_groups/{group}/offsets")))
+            .json(&serde_json::json!({ "offsets": { format!("/{topic}"): { "position": 2 } } }))
+            .send()
+    };
+    assert_eq!(
+        rewind().await.unwrap().status(),
+        404,
+        "an active group keeps its offsets"
+    );
+    drop(subscriber);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let described: Value = h
+            .http
+            .get(h.url(&format!("/_groups/{group}")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if described["state"] == "Empty" {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{described}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(rewind().await.unwrap().status(), 204);
+    let rewound: Value = h
         .http
-        .put(h.url(&format!("/_groups/{group}/offsets")))
-        .json(&serde_json::json!({ "offsets": { format!("/{topic}"): { "position": 2 } } }))
+        .get(h.url(&format!("/_groups/{group}/offsets")))
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
-    assert_eq!(rewind.status(), 204);
-    let mut partitions = rdkafka::TopicPartitionList::new();
-    partitions.add_partition(&topic, 0);
-    let committed = subscriber
-        .committed_offsets(partitions, Duration::from_secs(10))
-        .unwrap();
-    assert_eq!(committed.elements()[0].offset(), rdkafka::Offset::Offset(2));
-    drop(subscriber);
+    assert_eq!(rewound["offsets"][format!("/{topic}")]["position"], 2);
 
     let pico_group = unique("e2e-pico");
     let joined: Value = h

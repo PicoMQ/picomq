@@ -1,13 +1,14 @@
 //! Kafka RecordBatch v2 encode/decode.
 
-use bytes::{BufMut, Bytes, BytesMut};
-use kafka_protocol::records::RecordBatchDecoder;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use kafka_protocol::compression::{self as codec, Decompressor};
 
 use crate::types::{NumericProducer, OffsetToken};
 
 pub const BATCH_HEADER_PREFIX: usize = 12;
 pub const BATCH_HEADER_LEN: usize = 61;
 const MAGIC_V2: i8 = 2;
+const ATTR_COMPRESSION: i16 = 0x07;
 const ATTR_LOG_APPEND_TIME: i16 = 1 << 3;
 const ATTR_TRANSACTIONAL: i16 = 1 << 4;
 const ATTR_CONTROL: i16 = 1 << 5;
@@ -19,14 +20,14 @@ const NO_SEQUENCE: i32 = -1;
 pub struct LogRecord {
     pub timestamp_ms: i64,
     pub key: Option<Bytes>,
-    pub value: Bytes,
-    pub headers: Vec<(String, Bytes)>,
+    pub value: Option<Bytes>,
+    pub headers: Vec<(String, Option<Bytes>)>,
 }
 
 impl LogRecord {
     pub fn value(value: impl Into<Bytes>) -> Self {
         Self {
-            value: value.into(),
+            value: Some(value.into()),
             ..Default::default()
         }
     }
@@ -37,17 +38,17 @@ impl LogRecord {
     }
 
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<Bytes>) -> Self {
-        self.headers.push((name.into(), value.into()));
+        self.headers.push((name.into(), Some(value.into())));
         self
     }
 
     pub fn size_hint(&self) -> usize {
         self.key.as_ref().map_or(0, Bytes::len)
-            + self.value.len()
+            + self.value.as_ref().map_or(0, Bytes::len)
             + self
                 .headers
                 .iter()
-                .map(|(name, value)| name.len() + value.len())
+                .map(|(name, value)| name.len() + value.as_ref().map_or(0, Bytes::len))
                 .sum::<usize>()
     }
 }
@@ -63,7 +64,9 @@ pub struct BatchHeader {
     pub base_offset: u64,
     pub leader_epoch: i32,
     pub record_count: u32,
+    pub first_timestamp_ms: i64,
     pub max_timestamp_ms: i64,
+    pub compression: i16,
     pub log_append_time: bool,
     pub transactional_or_control: bool,
     pub producer: Option<NumericProducer>,
@@ -144,14 +147,24 @@ fn put_record(buf: &mut BytesMut, offset_delta: i32, record: &LogRecord) {
         }
         None => put_varint(&mut body, -1),
     }
-    put_varint(&mut body, record.value.len() as i32);
-    body.put_slice(&record.value);
+    match &record.value {
+        Some(value) => {
+            put_varint(&mut body, value.len() as i32);
+            body.put_slice(value);
+        }
+        None => put_varint(&mut body, -1),
+    }
     put_varint(&mut body, record.headers.len() as i32);
     for (name, value) in &record.headers {
         put_varint(&mut body, name.len() as i32);
         body.put_slice(name.as_bytes());
-        put_varint(&mut body, value.len() as i32);
-        body.put_slice(value);
+        match value {
+            Some(value) => {
+                put_varint(&mut body, value.len() as i32);
+                body.put_slice(value);
+            }
+            None => put_varint(&mut body, -1),
+        }
     }
     put_varint(buf, body.len() as i32);
     buf.put_slice(&body);
@@ -192,6 +205,7 @@ pub fn batch_header(payload: &[u8]) -> Result<BatchHeader, RecordError> {
         return Err(RecordError::Truncated);
     }
     let attributes = i16::from_be_bytes(payload[21..23].try_into().expect("2 bytes"));
+    let first_timestamp_ms = i64::from_be_bytes(payload[27..35].try_into().expect("8 bytes"));
     let max_timestamp_ms = i64::from_be_bytes(payload[35..43].try_into().expect("8 bytes"));
     let producer_id = i64::from_be_bytes(payload[43..51].try_into().expect("8 bytes"));
     let producer_epoch = i16::from_be_bytes(payload[51..53].try_into().expect("2 bytes"));
@@ -209,7 +223,9 @@ pub fn batch_header(payload: &[u8]) -> Result<BatchHeader, RecordError> {
         base_offset: base_offset.max(0) as u64,
         leader_epoch,
         record_count: record_count as u32,
+        first_timestamp_ms,
         max_timestamp_ms,
+        compression: attributes & ATTR_COMPRESSION,
         log_append_time: attributes & ATTR_LOG_APPEND_TIME != 0,
         transactional_or_control: attributes & (ATTR_TRANSACTIONAL | ATTR_CONTROL) != 0,
         producer,
@@ -249,34 +265,112 @@ pub fn batch_headers(payload: &[u8]) -> Result<Vec<BatchHeader>, RecordError> {
 pub fn decode_batches(payload: &Bytes) -> Result<Vec<StreamRecord>, RecordError> {
     let mut out = Vec::new();
     let mut pos = 0;
+
     while pos < payload.len() {
-        let header = batch_header(&payload[pos..])?;
-        let mut batch = payload.slice(pos..pos + header.len);
-        pos += header.len;
-        let set = RecordBatchDecoder::decode(&mut batch)
-            .map_err(|error| RecordError::Decode(error.to_string()))?;
-        out.reserve(set.records.len());
-        for record in set.records {
-            out.push(StreamRecord {
-                offset: OffsetToken::of_record_offset(record.offset.max(0) as u64),
-                record: LogRecord {
-                    timestamp_ms: if header.log_append_time {
-                        header.max_timestamp_ms
-                    } else {
-                        record.timestamp
-                    },
-                    key: record.key,
-                    value: record.value.unwrap_or_default(),
-                    headers: record
-                        .headers
-                        .into_iter()
-                        .map(|(name, value)| (name.to_string(), value.unwrap_or_default()))
-                        .collect(),
+        let batch = batch_header(&payload[pos..])?;
+        verify_crc(&payload[pos..pos + batch.len])?;
+        let mut section = payload.slice(pos + BATCH_HEADER_LEN..pos + batch.len);
+        pos += batch.len;
+
+        let records = match batch.compression {
+            0 => codec::None::decompress(&mut section, |buf| Ok(decode_records(buf, &batch))),
+            1 => codec::Gzip::decompress(&mut section, |buf| Ok(decode_records(buf, &batch))),
+            2 => codec::Snappy::decompress(&mut section, |buf| Ok(decode_records(buf, &batch))),
+            3 => codec::Lz4::decompress(&mut section, |buf| Ok(decode_records(buf, &batch))),
+            4 => codec::Zstd::decompress(&mut section, |buf| Ok(decode_records(buf, &batch))),
+            other => return Err(RecordError::Decode(format!("unknown compression {other}"))),
+        };
+        out.extend(records.map_err(|error| RecordError::Decode(error.to_string()))??);
+    }
+
+    Ok(out)
+}
+
+fn decode_records(buf: &mut Bytes, batch: &BatchHeader) -> Result<Vec<StreamRecord>, RecordError> {
+    let mut records = Vec::with_capacity(batch.record_count as usize);
+
+    for _ in 0..batch.record_count {
+        let length = usize::try_from(get_varint(buf)?)
+            .map_err(|_| RecordError::Decode("negative record length".to_owned()))?;
+        let mut encoded = split(buf, length)?;
+        if !encoded.has_remaining() {
+            return Err(RecordError::Truncated);
+        }
+        let _attributes = encoded.get_i8();
+
+        let timestamp_delta = get_varlong(&mut encoded)?;
+        let offset_delta = u64::try_from(get_varint(&mut encoded)?)
+            .map_err(|_| RecordError::Decode("negative offset delta".to_owned()))?;
+        let key = get_nullable(&mut encoded)?;
+        let value = get_nullable(&mut encoded)?;
+
+        let header_count = get_varint(&mut encoded)?;
+        let mut headers = Vec::new();
+        for _ in 0..header_count {
+            let name = get_nullable(&mut encoded)?
+                .ok_or_else(|| RecordError::Decode("header name is null".to_owned()))?;
+            let name = String::from_utf8(name.to_vec())
+                .map_err(|_| RecordError::Decode("header name is not UTF-8".to_owned()))?;
+            headers.push((name, get_nullable(&mut encoded)?));
+        }
+
+        records.push(StreamRecord {
+            offset: OffsetToken::of_record_offset(batch.base_offset + offset_delta),
+            record: LogRecord {
+                timestamp_ms: if batch.log_append_time {
+                    batch.max_timestamp_ms
+                } else {
+                    batch.first_timestamp_ms + timestamp_delta
                 },
-            });
+                key,
+                value,
+                headers,
+            },
+        });
+    }
+
+    Ok(records)
+}
+
+fn get_nullable(buf: &mut Bytes) -> Result<Option<Bytes>, RecordError> {
+    let Ok(length) = usize::try_from(get_varint(buf)?) else {
+        return Ok(None);
+    };
+    split(buf, length).map(Some)
+}
+
+fn split(buf: &mut Bytes, length: usize) -> Result<Bytes, RecordError> {
+    if length > buf.remaining() {
+        return Err(RecordError::Truncated);
+    }
+    Ok(buf.split_to(length))
+}
+
+fn get_varint(buf: &mut Bytes) -> Result<i32, RecordError> {
+    let raw = get_unsigned_varint(buf, 5)? as u32;
+    Ok((raw >> 1) as i32 ^ -((raw & 1) as i32))
+}
+
+fn get_varlong(buf: &mut Bytes) -> Result<i64, RecordError> {
+    let raw = get_unsigned_varint(buf, 10)?;
+    Ok((raw >> 1) as i64 ^ -((raw & 1) as i64))
+}
+
+fn get_unsigned_varint(buf: &mut Bytes, max_bytes: u32) -> Result<u64, RecordError> {
+    let mut value = 0u64;
+
+    for index in 0..max_bytes {
+        if !buf.has_remaining() {
+            return Err(RecordError::Truncated);
+        }
+        let byte = buf.get_u8();
+        value |= u64::from(byte & 0x7f) << (7 * index);
+        if byte & 0x80 == 0 {
+            return Ok(value);
         }
     }
-    Ok(out)
+
+    Err(RecordError::Decode("varint is too long".to_owned()))
 }
 
 #[cfg(test)]
@@ -296,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_through_the_kafka_decoder() {
+    fn round_trips_through_the_decoder() {
         let encoded = encode_batch(40, 5, 1_700_000_000_000, None, &records());
         let header = batch_header(&encoded).unwrap();
         assert_eq!(header.base_offset, 40);
@@ -317,8 +411,98 @@ mod tests {
         assert_eq!(decoded[0].record.value, expected[0].value);
         assert_eq!(decoded[0].record.headers, expected[0].headers);
         assert_eq!(decoded[1].record.key, None);
-        assert!(decoded[1].record.value.is_empty());
+        assert_eq!(decoded[1].record.value, Some(Bytes::new()));
         assert_eq!(decoded[2].record.headers, expected[2].headers);
+    }
+
+    #[test]
+    fn repeated_header_names_keep_every_value_in_order() {
+        let record = LogRecord::value("v")
+            .with_header("trace", "a")
+            .with_header("span", "x")
+            .with_header("trace", "b");
+        let encoded = encode_batch(0, 1, 1, None, std::slice::from_ref(&record));
+
+        let decoded = decode_batches(&encoded).unwrap();
+        assert_eq!(decoded[0].record.headers, record.headers);
+    }
+
+    #[test]
+    fn a_null_header_name_is_refused() {
+        let record = LogRecord::value("v").with_header("h", "x");
+        let mut encoded = encode_batch(0, 1, 1, None, &[record]).to_vec();
+        let name = encoded
+            .windows(2)
+            .rposition(|window| window == [0x02, b'h'])
+            .unwrap();
+        encoded[name] = 0x01;
+        let crc = crc32c::crc32c(&encoded[21..]);
+        encoded[17..21].copy_from_slice(&crc.to_be_bytes());
+
+        let error = decode_batches(&Bytes::from(encoded)).unwrap_err();
+        assert_eq!(error.to_string(), "record batch: header name is null");
+    }
+
+    #[test]
+    fn compressed_create_time_batches_decode_like_the_kafka_decoder() {
+        use kafka_protocol::indexmap::IndexMap;
+        use kafka_protocol::protocol::StrBytes;
+        use kafka_protocol::records::{
+            Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
+        };
+
+        let written: Vec<Record> = (0..3)
+            .map(|n| Record {
+                transactional: false,
+                control: false,
+                delete_horizon: false,
+                partition_leader_epoch: 0,
+                producer_id: -1,
+                producer_epoch: -1,
+                timestamp_type: TimestampType::Creation,
+                offset: 10 + n,
+                sequence: -1,
+                timestamp: 1_000 - n * 7,
+                key: (n != 1).then(|| Bytes::from(format!("k{n}"))),
+                value: Some(Bytes::from(format!("value {n}"))),
+                headers: IndexMap::from([(
+                    StrBytes::from_static_str("h"),
+                    Some(Bytes::from(format!("{n}"))),
+                )]),
+            })
+            .collect();
+
+        for compression in [
+            Compression::None,
+            Compression::Gzip,
+            Compression::Snappy,
+            Compression::Lz4,
+            Compression::Zstd,
+        ] {
+            let mut encoded = BytesMut::new();
+            RecordBatchEncoder::encode(
+                &mut encoded,
+                &written,
+                &RecordEncodeOptions {
+                    version: 2,
+                    compression,
+                },
+            )
+            .unwrap();
+
+            let decoded = decode_batches(&encoded.freeze()).unwrap();
+            assert_eq!(decoded.len(), 3, "{compression:?}");
+            for (record, stream_record) in written.iter().zip(&decoded) {
+                assert_eq!(stream_record.offset.record_offset(), record.offset as u64);
+                assert_eq!(stream_record.record.timestamp_ms, record.timestamp);
+                assert_eq!(stream_record.record.key, record.key);
+                assert_eq!(stream_record.record.value, record.value);
+                assert_eq!(
+                    stream_record.record.headers,
+                    [("h".to_owned(), record.headers[0].clone())]
+                );
+            }
+        }
     }
 
     #[test]
@@ -342,7 +526,7 @@ mod tests {
         corrupted[last] ^= 0x01;
         assert!(matches!(
             decode_batches(&Bytes::from(corrupted)),
-            Err(RecordError::Decode(_))
+            Err(RecordError::Crc)
         ));
     }
 

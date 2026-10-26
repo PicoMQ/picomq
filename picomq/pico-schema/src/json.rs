@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use crate::record::Batch;
-use crate::{Error, Result, Validator};
+use crate::{Error, MessageKind, Result, Validator};
 use bytes::Bytes;
 use serde_json::Value;
 use tracing::{debug, instrument, warn};
@@ -23,21 +23,6 @@ use tracing::{debug, instrument, warn};
 pub struct Schema {
     key: Option<jsonschema::Validator>,
     value: Option<jsonschema::Validator>,
-}
-
-#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) enum MessageKind {
-    Key,
-    Value,
-}
-
-impl AsRef<str> for MessageKind {
-    fn as_ref(&self) -> &str {
-        match self {
-            MessageKind::Key => "key",
-            MessageKind::Value => "value",
-        }
-    }
 }
 
 fn validate(validator: Option<&jsonschema::Validator>, encoded: Option<Bytes>) -> Result<()> {
@@ -95,8 +80,12 @@ impl Validator for Schema {
         for record in &batch.records {
             debug!(?record);
 
-            validate(self.key.as_ref(), record.key.clone())
-                .and(validate(self.value.as_ref(), record.value.clone()))?
+            validate(self.key.as_ref(), record.key.clone()).and(
+                record
+                    .value
+                    .clone()
+                    .map_or(Ok(()), |value| validate(self.value.as_ref(), Some(value))),
+            )?
         }
 
         Ok(())

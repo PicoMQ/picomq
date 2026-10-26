@@ -341,9 +341,13 @@ pub struct ReadResult {
 
 impl ReadResult {
     pub fn concatenated_values(&self) -> Bytes {
-        let mut out = Vec::with_capacity(self.records.iter().map(|r| r.record.value.len()).sum());
-        for record in &self.records {
-            out.extend_from_slice(&record.record.value);
+        let values = self
+            .records
+            .iter()
+            .filter_map(|record| record.record.value.as_deref());
+        let mut out = Vec::with_capacity(values.clone().map(<[u8]>::len).sum());
+        for value in values {
+            out.extend_from_slice(value);
         }
         Bytes::from(out)
     }

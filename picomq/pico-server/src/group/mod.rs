@@ -1025,8 +1025,11 @@ impl GroupCoordinator {
                 break;
             }
             for record in read.records {
-                decode_into(&record.record.value, &mut offsets)
-                    .map_err(|_| GroupError::NotCoordinator)?;
+                decode_into(
+                    record.record.value.as_deref().unwrap_or_default(),
+                    &mut offsets,
+                )
+                .map_err(|_| GroupError::NotCoordinator)?;
                 replayed += 1;
             }
             cursor = read.next_offset.record_offset();

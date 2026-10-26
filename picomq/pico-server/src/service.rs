@@ -5,7 +5,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use picomq_common::now_ms;
 use picomq_metadata::state::StreamRow;
-use picomq_metadata::{MetadataKvClient, ViewPublisher};
+use picomq_metadata::{MetadataKvClient, ObjectSpan, ViewPublisher};
 use s3stream::{AppendContext, FetchContext, PendingAppend, RecordBatch, Stream, StreamState};
 
 use crate::error::{ErrorKind, ServiceError};
@@ -523,6 +523,11 @@ impl S3StreamService {
             .into_iter()
             .map(|(epoch, start_offset)| (epoch.max(0) as u64, start_offset))
             .collect())
+    }
+
+    pub(crate) fn object_spans(&self, log: &Log) -> Result<Vec<ObjectSpan>, ServiceError> {
+        let stream_id = self.require_stream_id(&log.key())?;
+        Ok(self.views.load().state.object_spans(stream_id))
     }
 
     pub async fn live_offsets(&self, log: &Log) -> Result<LogOffsets, ServiceError> {
@@ -1300,7 +1305,11 @@ mod tests {
         let batches = [batch(0, &["aa", "bb", "cc"]), batch(3, &["dd", "ee"])];
 
         let read = collect_records(&batches, 1, 5, usize::MAX, usize::MAX).unwrap();
-        let values: Vec<&[u8]> = read.records.iter().map(|r| &r.record.value[..]).collect();
+        let values: Vec<&[u8]> = read
+            .records
+            .iter()
+            .map(|r| r.record.value.as_deref().unwrap())
+            .collect();
         assert_eq!(values, [b"bb", b"cc", b"dd", b"ee"]);
         assert_eq!(read.next_offset.record_offset(), 5);
         assert!(read.up_to_date);
@@ -1347,7 +1356,7 @@ mod tests {
 
         let decoded = record::decode_batches(&stamped[1].payload).unwrap();
         assert_eq!(decoded[0].offset.record_offset(), 102);
-        assert_eq!(&decoded[0].record.value[..], b"c");
+        assert_eq!(decoded[0].record.value.as_deref(), Some(&b"c"[..]));
 
         let all = record::decode_batches(&stored).unwrap();
         let offsets: Vec<u64> = all.iter().map(|r| r.offset.record_offset()).collect();
