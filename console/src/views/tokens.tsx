@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/preact-query'
-import { Copy, KeyRound, Plus, X } from 'lucide-preact'
+import { Copy, KeyRound, Plus } from 'lucide-preact'
 import { useLocation } from 'preact-iso'
 import { useState } from 'preact/hooks'
 
@@ -23,8 +23,10 @@ import { Confirm } from '../components/confirm'
 import { Checkbox, Input, Select } from '../components/control'
 import { DateTime } from '../components/datetime'
 import { Dialog } from '../components/dialog'
+import { Fieldset } from '../components/fieldset'
 import { Form, Label } from '../components/form'
 import { List } from '../components/list'
+import { Rows } from '../components/rows'
 import { Search } from '../components/search'
 import type { Column } from '../components/table'
 import { Toolbar } from '../components/toolbar'
@@ -166,10 +168,7 @@ function Issue({ onDone }: { onDone: () => void }) {
       <Label text="Token id">
         <Input value={id} required placeholder="svc/billing" onInput={(event) => setId(event.currentTarget.value)} />
       </Label>
-      <fieldset class="tokens-group">
-        <legend>
-          <small>Audiences</small>
-        </legend>
+      <Fieldset label="Audiences" kind="wrap">
         {AUDIENCES.map((audience) => (
           <Checkbox
             key={audience}
@@ -178,11 +177,8 @@ function Issue({ onDone }: { onDone: () => void }) {
             onChange={() => setScope((current) => ({ ...current, audiences: toggle(current.audiences, audience) }))}
           />
         ))}
-      </fieldset>
-      <fieldset class="tokens-access">
-        <legend>
-          <small>Access</small>
-        </legend>
+      </Fieldset>
+      <Fieldset label="Access">
         {ACCESS.map(({ key, label }) => (
           <div key={key} class="tokens-row">
             <span>{label}</span>
@@ -201,7 +197,7 @@ function Issue({ onDone }: { onDone: () => void }) {
             ))}
           </div>
         ))}
-      </fieldset>
+      </Fieldset>
       <Matchers
         label="Streams"
         matchers={scope.streams}
@@ -217,10 +213,7 @@ function Issue({ onDone }: { onDone: () => void }) {
         matchers={scope.tokens}
         onChange={(update) => setScope((current) => ({ ...current, tokens: update(current.tokens) }))}
       />
-      <fieldset class="tokens-group">
-        <legend>
-          <small>Single operations</small>
-        </legend>
+      <Fieldset label="Single operations" kind="wrap">
         {OPERATIONS.map((operation) => (
           <Checkbox
             key={operation}
@@ -229,7 +222,7 @@ function Issue({ onDone }: { onDone: () => void }) {
             onChange={() => setScope((current) => ({ ...current, ops: toggle(current.ops, operation) }))}
           />
         ))}
-      </fieldset>
+      </Fieldset>
       <Checkbox
         label="Auto prefix: names are relative to its one stream prefix and one group prefix"
         checked={scope.autoPrefix}
@@ -247,31 +240,20 @@ function Issue({ onDone }: { onDone: () => void }) {
   )
 }
 
-interface MatchersProps {
-  label: string
-  matchers: Matcher[]
-  onChange: (update: (current: Matcher[]) => Matcher[]) => void
-}
-
-function Matchers({ label, matchers, onChange }: MatchersProps) {
+function Matchers({ label, matchers, onChange }: { label: string; matchers: Matcher[]; onChange: (update: (current: Matcher[]) => Matcher[]) => void }) {
   const kind = (matcher: Matcher) => ('exact' in matcher ? 'exact' : 'prefix')
   const text = (matcher: Matcher) => ('exact' in matcher ? matcher.exact : matcher.prefix)
   const make = (chosen: string, value: string): Matcher => (chosen === 'exact' ? { exact: value } : { prefix: value })
-  const replace = (index: number, change: (matcher: Matcher) => Matcher) =>
-    onChange((current) => current.map((each, at) => (at === index ? change(each) : each)))
 
   return (
-    <fieldset class="tokens-matchers">
-      <legend>
-        <small>{label}</small>
-      </legend>
-      {matchers.map((matcher, index) => (
-        <div key={index} class="tokens-matcher">
+    <Rows label={label} items={matchers} blank={{ prefix: '' }} onChange={onChange}>
+      {(matcher, update) => (
+        <>
           <Select
             value={kind(matcher)}
             onChange={(event) => {
               const chosen = event.currentTarget.value
-              replace(index, (each) => make(chosen, text(each)))
+              update((each) => make(chosen, text(each)))
             }}
           >
             <option value="prefix">Prefix</option>
@@ -281,21 +263,12 @@ function Matchers({ label, matchers, onChange }: MatchersProps) {
             value={text(matcher)}
             onInput={(event) => {
               const value = event.currentTarget.value
-              replace(index, (each) => make(kind(each), value))
+              update((each) => make(kind(each), value))
             }}
           />
-          <Button aria-label={`Remove ${label} matcher`} onClick={() => onChange((current) => current.filter((_, at) => at !== index))}>
-            <X size={14} />
-          </Button>
-        </div>
-      ))}
-      <Actions>
-        <Button onClick={() => onChange((current) => [...current, { prefix: '' }])}>
-          <Plus size={14} />
-          Add
-        </Button>
-      </Actions>
-    </fieldset>
+        </>
+      )}
+    </Rows>
   )
 }
 

@@ -7,7 +7,7 @@ const KIB = 1024
 const LIMITS: Record<string, number> = {
   initial: 90,
   lazy: 40,
-  viewer: 160,
+  editor: 160,
   chart: 30,
   total: 400,
 }

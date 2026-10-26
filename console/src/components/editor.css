@@ -1,0 +1,9 @@
+.editor {
+  border: var(--line);
+  overflow: auto;
+}
+
+.editor:focus-within {
+  outline: var(--line-active);
+  outline-offset: 1px;
+}

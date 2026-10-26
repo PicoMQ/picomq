@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/preact-query'
-import { ListFilter, Radio, RefreshCw, X } from 'lucide-preact'
+import { ListFilter, Radio, RefreshCw, Send, X } from 'lucide-preact'
 import { ErrorBoundary, lazy, useLocation } from 'preact-iso'
 import { useMemo, useState } from 'preact/hooks'
 
@@ -23,20 +23,21 @@ import { Dialog } from '../components/dialog'
 import { Field, pretty } from '../components/field'
 import { Form, Label, useDraft } from '../components/form'
 import { List } from '../components/list'
+import { PartitionPicker } from '../components/partition'
 import { Notice, Pending } from '../components/notice'
 import { Table, type Column } from '../components/table'
 import { Tag } from '../components/tag'
 import { Toolbar } from '../components/toolbar'
 import * as format from '../format'
 import { withQuery } from '../location'
+import { Produce } from './produce'
 
 import './messages.css'
 
-const Viewer = lazy(() => import('../components/viewer'))
+const Editor = lazy(() => import('../components/editor'))
 
 const LIMITS = ['50', '100', '500']
 const TAIL_PAGE = 100
-const PARTITION_CHOICES = 100
 
 const COLUMNS: Column<LogRecord>[] = [
   { name: 'offset', header: 'Offset', width: '9rem', kind: 'number', cell: (shown) => format.count(shown.offset) },
@@ -61,7 +62,7 @@ export function Messages({ name, topic }: { name: string; topic: TopicDetail }) 
 
   return (
     <>
-      <Controls partitions={topic.partitions} index={index} detail={detail.data} onRefresh={refresh} />
+      <Controls name={name} topic={topic} index={index} detail={detail.data} onRefresh={refresh} />
       <Filters />
       {detail.error && <Notice kind="danger">{detail.error.message}</Notice>}
       {detail.data &&
@@ -75,15 +76,18 @@ export function Messages({ name, topic }: { name: string; topic: TopicDetail }) 
 }
 
 interface ControlsProps {
-  partitions: number
+  name: string
+  topic: TopicDetail
   index: number
   detail: Partition | undefined
   onRefresh: () => void
 }
 
-function Controls({ partitions, index, detail, onRefresh }: ControlsProps) {
+function Controls({ name, topic, index, detail, onRefresh }: ControlsProps) {
   const { path, query, route } = useLocation()
   const [filtering, setFiltering] = useState(false)
+  const [producing, setProducing] = useState(false)
+  const partitions = topic.partitions
   const start = query.start ?? 'latest'
   const live = query.live !== undefined
   const set = (changes: Record<string, string | number | undefined>) =>
@@ -94,6 +98,10 @@ function Controls({ partitions, index, detail, onRefresh }: ControlsProps) {
       <Toolbar
         actions={
           <>
+            <Button kind="primary" onClick={() => setProducing(true)}>
+              <Send size={16} />
+              Produce
+            </Button>
             <Button onClick={() => setFiltering(true)}>
               <ListFilter size={16} />
               Filter
@@ -111,25 +119,7 @@ function Controls({ partitions, index, detail, onRefresh }: ControlsProps) {
           </>
         }
       >
-        {partitions <= PARTITION_CHOICES ? (
-          <Select prefix="Partition" value={String(index)} onChange={(event) => set({ partition: event.currentTarget.value })}>
-            {Array.from({ length: partitions }, (_, each) => (
-              <option key={each} value={String(each)}>
-                {each}
-              </option>
-            ))}
-          </Select>
-        ) : (
-          <Input
-            prefix="Partition"
-            type="number"
-            min={0}
-            max={partitions - 1}
-            size={6}
-            value={String(index)}
-            onChange={(event) => set({ partition: event.currentTarget.value })}
-          />
-        )}
+        <PartitionPicker partitions={partitions} value={index} prefix="Partition" onChange={(chosen) => set({ partition: chosen })} />
         <Select prefix="Start" value={start} onChange={(event) => set({ start: event.currentTarget.value, at: undefined })}>
           <option value="latest">Latest</option>
           <option value="earliest">Earliest</option>
@@ -157,6 +147,18 @@ function Controls({ partitions, index, detail, onRefresh }: ControlsProps) {
           ))}
         </Select>
       </Toolbar>
+      <Dialog title="Produce a record" open={producing} onClose={() => setProducing(false)}>
+        <Produce
+          name={name}
+          topic={topic}
+          index={index}
+          onDone={() => setProducing(false)}
+          onShow={(chosen, offset) => {
+            setProducing(false)
+            route(withQuery(path, query, { partition: chosen, start: 'offset', at: offset, record: offset, live: undefined }))
+          }}
+        />
+      </Dialog>
       <Dialog title="Filter records" open={filtering} onClose={() => setFiltering(false)}>
         <FilterForm filter={recordFilter(query)} onApply={(filter) => set({ ...filter })} onDone={() => setFiltering(false)} />
       </Dialog>
@@ -324,7 +326,7 @@ function Section({ title, field }: { title: string; field: LogRecord['value'] })
         <Notice>null</Notice>
       ) : (
         <ErrorBoundary>
-          <Viewer {...pretty(field)} />
+          <Editor {...pretty(field)} />
         </ErrorBoundary>
       )}
     </div>

@@ -1,7 +1,7 @@
 import type * as records from '../api/records'
 import * as format from '../format'
 import { Tag } from './tag'
-import type { Language } from './viewer'
+import type { Language } from './editor'
 
 import './field.css'
 
@@ -53,7 +53,7 @@ export function Field({ field }: { field: records.Field | null }) {
   )
 }
 
-function indent(text: string): string | null {
+export function indent(text: string): string | null {
   try {
     return JSON.stringify(JSON.parse(text), null, 2)
   } catch {

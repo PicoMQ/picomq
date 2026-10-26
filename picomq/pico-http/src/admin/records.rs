@@ -9,16 +9,20 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use picomq_auth::Operation;
-use picomq_server::{Log, OffsetToken, Page, ServiceError, StreamRecord, Topic, partition_log};
+use picomq_server::{
+    AppendCommand, Log, LogRecord, OffsetToken, Page, ServiceError, StreamRecord, Topic,
+    partition_log,
+};
 use serde_json::{Value, json};
 
 use super::{AdminState, authorized_topic};
-use crate::common::{error_response, service_error};
+use crate::common::{error_response, read_json, service_error};
 use crate::http::query_param;
 use crate::paging::Paging;
 
 const PREVIEW_BYTES: usize = 4 * 1024;
 const RECORD_BYTES: usize = 1 << 20;
+const PRODUCE_BODY_BYTES: usize = 2 * RECORD_BYTES;
 const READ_BYTES: usize = 1 << 20;
 const SCAN_BYTES: usize = 16 << 20;
 const MAX_WAIT_MS: u64 = 5_000;
@@ -26,7 +30,10 @@ const FILTERS: [&str; 4] = ["key", "header", "headerValue", "value"];
 
 pub(crate) fn routes() -> Router<AdminState> {
     Router::new()
-        .route("/admin/topics/{name}/partitions/{index}/records", get(list))
+        .route(
+            "/admin/topics/{name}/partitions/{index}/records",
+            get(list).post(produce),
+        )
         .route(
             "/admin/topics/{name}/partitions/{index}/records/{offset}",
             get(record),
@@ -124,6 +131,49 @@ async fn record(
             StatusCode::NOT_FOUND,
             format!("no record at offset {offset}"),
         ),
+        Err(error) => service_error(error),
+    }
+}
+
+async fn produce(
+    State(state): State<AdminState>,
+    Path((name, index)): Path<(String, u32)>,
+    request: Request,
+) -> Response {
+    let topic = match authorized_topic(&state, request.headers(), Operation::Append, &name).await {
+        Ok(topic) => topic,
+        Err(response) => return *response,
+    };
+    match state.remote_owner(&topic, index).await {
+        Ok(Some(owner)) => return state.forward_to(owner, request).await,
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
+
+    let body = match read_json(request, PRODUCE_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    let record = match record_from_json(&body) {
+        Ok(record) => record,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+    };
+
+    let command = AppendCommand {
+        records: vec![record],
+        ..Default::default()
+    };
+    match state
+        .node
+        .topics()
+        .append(topic.name.spelling(), index, command)
+        .await
+    {
+        Ok(appended) => {
+            let offset = appended.next_offset.record_offset().saturating_sub(1);
+            let body = json!({ "offset": offset, "timestamp": appended.timestamp_ms });
+            (StatusCode::CREATED, Json(body)).into_response()
+        }
         Err(error) => service_error(error),
     }
 }
@@ -307,6 +357,14 @@ impl Encoding {
             Self::Base64 => "base64",
         }
     }
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "utf8" => Some(Self::Utf8),
+            "base64" => Some(Self::Base64),
+            _ => None,
+        }
+    }
 }
 
 fn contains(haystack: &[u8], needle: &str) -> bool {
@@ -377,4 +435,63 @@ fn field_json(field: &Field, limit: usize) -> Value {
         "size": field.size,
         "truncated": field.data.len() > limit,
     })
+}
+
+fn record_from_json(body: &Value) -> Result<LogRecord, String> {
+    only(body, &["key", "value", "headers"], "the record")?;
+
+    let headers = match &body["headers"] {
+        Value::Null => Vec::new(),
+        Value::Array(headers) => headers
+            .iter()
+            .map(|header| {
+                only(header, &["name", "value"], "a header")?;
+                let name = header["name"]
+                    .as_str()
+                    .ok_or("every header needs a name")?
+                    .to_owned();
+                Ok((name, field_from_json(&header["value"], "header value")?))
+            })
+            .collect::<Result<_, String>>()?,
+        _ => return Err("headers must be a list".to_owned()),
+    };
+
+    Ok(LogRecord {
+        timestamp_ms: 0,
+        key: field_from_json(&body["key"], "key")?,
+        value: field_from_json(&body["value"], "value")?,
+        headers,
+    })
+}
+
+fn field_from_json(field: &Value, name: &str) -> Result<Option<Bytes>, String> {
+    if field.is_null() {
+        return Ok(None);
+    }
+    only(field, &["data", "encoding"], name)?;
+
+    let data = field["data"]
+        .as_str()
+        .ok_or_else(|| format!("{name} needs a data string or null"))?;
+    let encoding = field["encoding"]
+        .as_str()
+        .and_then(Encoding::parse)
+        .ok_or_else(|| format!("{name} needs an encoding of utf8 or base64"))?;
+    match encoding {
+        Encoding::Utf8 => Ok(Some(Bytes::copy_from_slice(data.as_bytes()))),
+        Encoding::Base64 => STANDARD
+            .decode(data)
+            .map(|bytes| Some(Bytes::from(bytes)))
+            .map_err(|_| format!("{name} is not valid base64")),
+    }
+}
+
+fn only(object: &Value, allowed: &[&str], what: &str) -> Result<(), String> {
+    let object = object
+        .as_object()
+        .ok_or_else(|| format!("{what} must be a JSON object"))?;
+    match object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        Some(unknown) => Err(format!("{what} has an unknown field {unknown}")),
+        None => Ok(()),
+    }
 }

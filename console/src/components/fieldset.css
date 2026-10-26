@@ -1,0 +1,12 @@
+.fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  padding: var(--space-3);
+  border: var(--line);
+}
+
+.fieldset[data-kind="wrap"] {
+  flex-flow: row wrap;
+}

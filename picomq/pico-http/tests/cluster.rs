@@ -624,7 +624,7 @@ async fn groups_are_described_by_their_coordinator() {
 }
 
 #[tokio::test]
-async fn records_are_read_on_their_owner() {
+async fn records_are_read_and_produced_on_their_owner() {
     let shared = Shared::new();
     let options = || Options {
         advertise_admin: true,
@@ -676,6 +676,27 @@ async fn records_are_read_on_their_owner() {
         .await
         .unwrap();
     assert_eq!(one["value"]["data"], "b");
+
+    let produced = client
+        .post(&records)
+        .json(&serde_json::json!({ "value": { "data": "d", "encoding": "utf8" } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(produced.status(), 201);
+    assert_eq!(
+        produced.json::<serde_json::Value>().await.unwrap()["offset"],
+        3
+    );
+    let last: serde_json::Value = client
+        .get(format!("{records}/3"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(last["value"]["data"], "d");
     let owners: Vec<i32> = first
         .node
         .views()

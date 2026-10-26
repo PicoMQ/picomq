@@ -407,3 +407,140 @@ async fn record_pages_stay_bounded_on_a_large_partition() {
 
     console.server.shutdown().await;
 }
+
+#[tokio::test]
+async fn produced_records_read_back_with_keys_headers_and_nulls() {
+    let console = Console::start().await;
+    create(&console.node, "/made", 1).await;
+    let produce = |body: Value| {
+        console
+            .http
+            .post(console.admin("/admin/topics/%2Fmade/partitions/0/records"))
+            .bearer_auth(&console.root)
+            .json(&body)
+            .send()
+    };
+
+    let first = produce(json!({
+        "key": { "data": "cust-1", "encoding": "utf8" },
+        "value": { "data": "{\"amount\":7}", "encoding": "utf8" },
+        "headers": [
+            { "name": "trace-id", "value": { "data": "abc", "encoding": "utf8" } },
+            { "name": "empty", "value": null },
+        ],
+    }))
+    .await
+    .unwrap();
+    assert_eq!(first.status(), 201);
+    let first: Value = first.json().await.unwrap();
+    assert_eq!(first["offset"], 0);
+    assert!(first["timestamp"].as_i64().unwrap() > 0);
+
+    let second = produce(json!({
+        "key": { "data": "AP8Q", "encoding": "base64" },
+        "value": null,
+    }))
+    .await
+    .unwrap();
+    assert_eq!(second.status(), 201);
+    assert_eq!(second.json::<Value>().await.unwrap()["offset"], 1);
+
+    let (_, read) = console
+        .get(
+            "/admin/topics/%2Fmade/partitions/0/records/0",
+            &console.root,
+        )
+        .await;
+    assert_eq!(read["key"]["data"], "cust-1");
+    assert_eq!(read["value"]["data"], "{\"amount\":7}");
+    assert_eq!(read["headers"][0]["name"], "trace-id");
+    assert_eq!(read["headers"][0]["value"]["data"], "abc");
+    assert_eq!(
+        read["headers"][1],
+        json!({ "name": "empty", "value": null })
+    );
+
+    let (_, read) = console
+        .get(
+            "/admin/topics/%2Fmade/partitions/0/records/1",
+            &console.root,
+        )
+        .await;
+    assert_eq!(read["key"]["encoding"], "base64");
+    assert_eq!(read["key"]["data"], "AP8Q");
+    assert_eq!(read["value"], Value::Null);
+
+    console.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn produce_refuses_malformed_bodies_and_missing_partitions() {
+    let console = Console::start().await;
+    create(&console.node, "/made", 1).await;
+    let produce = |path: &str, body: Value| {
+        console
+            .http
+            .post(console.admin(path))
+            .bearer_auth(&console.root)
+            .json(&body)
+            .send()
+    };
+    let records = "/admin/topics/%2Fmade/partitions/0/records";
+
+    for body in [
+        json!({ "value": { "data": "x", "encoding": "hex" } }),
+        json!({ "value": { "data": "not base64!", "encoding": "base64" } }),
+        json!({ "value": "x" }),
+        json!({ "value": { "data": "x" } }),
+        json!({ "value": { "data": "x", "encoding": "utf8", "size": 1 } }),
+        json!({ "headers": [{ "value": null }] }),
+        json!({ "headers": [{ "name": "a", "value": null, "extra": 1 }] }),
+        json!({ "offset": 3 }),
+        json!([1]),
+    ] {
+        let response = produce(records, body.clone()).await.unwrap();
+        assert_eq!(response.status(), 400, "{body}");
+    }
+    for path in [
+        "/admin/topics/%2Fabsent/partitions/0/records",
+        "/admin/topics/%2Fmade/partitions/1/records",
+    ] {
+        let response = produce(path, json!({ "value": null })).await.unwrap();
+        assert_eq!(response.status(), 404, "{path}");
+    }
+
+    console.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn produce_needs_append_on_the_topic() {
+    let console = Console::start().await;
+    create(&console.node, "/guarded", 1).await;
+    let token = |id: &'static str, op: Operation| {
+        issue(
+            &console.node,
+            id,
+            Scope {
+                streams: ResourceSet::prefix("/guarded"),
+                ops: [op].into(),
+                audiences: [Audience::Admin].into(),
+                ..Scope::default()
+            },
+        )
+    };
+    let reader = token("reader", Operation::Read).await;
+    let producer = token("producer", Operation::Append).await;
+    let produce = |bearer: String| {
+        console
+            .http
+            .post(console.admin("/admin/topics/%2Fguarded/partitions/0/records"))
+            .bearer_auth(bearer)
+            .json(&json!({ "value": { "data": "x", "encoding": "utf8" } }))
+            .send()
+    };
+
+    assert_eq!(produce(reader).await.unwrap().status(), 403);
+    assert_eq!(produce(producer).await.unwrap().status(), 201);
+
+    console.server.shutdown().await;
+}

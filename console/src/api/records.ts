@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks'
 
 import { keep } from '../ring'
+import { admin, request } from './client'
 import { listing, read, type Listing } from './query'
 import type { Partition } from './topics'
 
@@ -79,6 +80,22 @@ export const records = (name: string, index: number, { filter, start, limit, wai
     limit,
     wait,
   })
+
+export type FieldWrite = Pick<Field, 'data' | 'encoding'>
+
+export interface RecordWrite {
+  key: FieldWrite | null
+  value: FieldWrite | null
+  headers: { name: string; value: FieldWrite | null }[]
+}
+
+export interface Produced {
+  offset: number
+  timestamp: number | null
+}
+
+export const produce = (name: string, index: number, body: RecordWrite) =>
+  request<Produced>('POST', admin('topics', name, 'partitions', index, 'records'), { body })
 
 export const record = (name: string, index: number, offset: number) =>
   read<LogRecord>(['topics', name, 'partitions', index, 'records', offset])
