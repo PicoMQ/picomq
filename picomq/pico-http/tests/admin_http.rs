@@ -242,6 +242,21 @@ async fn cluster_nodes_and_stream_detail() {
     assert_eq!(list[0]["openingCount"], 1, "stream opened by the append");
     assert!(list[0]["slots"].as_u64().unwrap() > 0);
 
+    let node = client
+        .get(format!("{}/admin/nodes/1", server.admin_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(node.status(), 200);
+    assert_eq!(node.json::<serde_json::Value>().await.unwrap(), list[0]);
+
+    let unknown = client
+        .get(format!("{}/admin/nodes/99", server.admin_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+
     let partition = client
         .get(format!(
             "{}/admin/topics/%2Forders%2Flive/partitions/0",

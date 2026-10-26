@@ -288,6 +288,10 @@ impl PicoNode {
             .ok_or_else(unregistered)
     }
 
+    pub fn node(&self, node_id: i32) -> Option<NodeRow> {
+        self.views.load().state.nodes().get(&node_id).cloned()
+    }
+
     pub fn nodes(
         &self,
         after: Option<i32>,

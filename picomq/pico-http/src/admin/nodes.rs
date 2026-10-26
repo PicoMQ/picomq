@@ -18,7 +18,7 @@ pub(crate) fn routes() -> Router<AdminState> {
     Router::new()
         .route("/metrics", get(metrics))
         .route("/admin/nodes", get(nodes))
-        .route("/admin/nodes/{id}", post(update_node))
+        .route("/admin/nodes/{id}", get(node).post(update_node))
         .route("/admin/nodes/{id}/metrics", get(node_metrics))
         .route("/admin/nodes/{id}/offsets", post(offsets::owned_offsets))
 }
@@ -55,6 +55,37 @@ async fn nodes(State(state): State<AdminState>, uri: Uri, headers: HeaderMap) ->
     let local_id = state.node.config().node_id;
     let view = state.node.views().load();
     paging.reply(page, |_, node| node_json(&view.state, node, local_id))
+}
+
+async fn node(
+    State(state): State<AdminState>,
+    Path(id): Path<i32>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = gate(
+        state.authorizer.as_deref(),
+        &headers,
+        Operation::NodeRead,
+        None,
+    )
+    .await
+    {
+        return *response;
+    }
+
+    let Some(node) = state.node.node(id) else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            format!("node {id} is not registered"),
+        );
+    };
+    let view = state.node.views().load();
+    let local_id = state.node.config().node_id;
+    (
+        StatusCode::OK,
+        Json(node_json(&view.state, &node, local_id)),
+    )
+        .into_response()
 }
 
 async fn metrics(State(state): State<AdminState>, headers: HeaderMap) -> Response {
