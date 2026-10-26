@@ -37,13 +37,18 @@ export interface RecordsOptions extends PartitionOptions {
 
 export type HeaderValue = string | Uint8Array
 
+export interface Header {
+  name: string
+  value: HeaderValue | null
+}
+
 export type AppendInput =
   | Uint8Array
   | string
   | {
-      body: Uint8Array | string
+      body: Uint8Array | string | null
       key?: Uint8Array | string
-      headers?: { [key: string]: HeaderValue }
+      headers?: Header[]
       timestamp?: number | bigint
     }
 
@@ -114,8 +119,8 @@ export interface StreamRecord {
   position: string
   timestamp?: number
   key?: Uint8Array
-  headers: { [key: string]: HeaderValue }
-  body: Uint8Array
+  headers: Header[]
+  body: Uint8Array | null
 }
 
 export interface ReadPage {

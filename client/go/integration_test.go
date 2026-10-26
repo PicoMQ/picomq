@@ -24,7 +24,7 @@ func liveEndpoint(variable string) string {
 }
 
 func liveToken() string {
-	if token := os.Getenv("PICOMQ_TOKEN"); token != "" {
+	if token := os.Getenv("PICO_TOKEN"); token != "" {
 		return token
 	}
 	return "ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY"
@@ -108,10 +108,10 @@ func collectBodies(subscription *Subscription, want int) []string {
 
 var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	ginkgo.It("round trips through a running Pico server", func() {
-		if os.Getenv("PICOMQ_INTEGRATION") == "" {
-			ginkgo.Skip("set PICOMQ_INTEGRATION=1 to run live tests")
+		if os.Getenv("PICO_INTEGRATION") == "" {
+			ginkgo.Skip("set PICO_INTEGRATION=1 to run live tests")
 		}
-		client, err := NewPico(liveEndpoint("PICOMQ_ENDPOINT"), liveOptions()...)
+		client, err := NewPico(liveEndpoint("PICO_ENDPOINT"), liveOptions()...)
 		Expect(err).NotTo(HaveOccurred())
 		name := fmt.Sprintf("/go-client-tests/%d", time.Now().UnixNano())
 		stream := client.Stream(name)
@@ -119,7 +119,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		created, err := stream.Create(context.Background(), CreateOptions{ContentType: "application/octet-stream"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(created).To(BeTrue())
-		ack, err := stream.Append(context.Background(), AppendRecord{Body: []byte("hello"), Headers: map[string][]byte{"source": []byte("go")}})
+		ack, err := stream.Append(context.Background(), AppendRecord{Body: []byte("hello"), Headers: []Header{{Name: "source", Value: []byte("go")}}})
 		Expect(err).NotTo(HaveOccurred())
 		page, err := stream.Read(context.Background(), client.Beginning(), ReadOptions{})
 		Expect(err).NotTo(HaveOccurred())
@@ -151,11 +151,11 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("sets, reads, and changes topic settings and schemas on a running Pico server", func() {
-		if os.Getenv("PICOMQ_INTEGRATION") == "" {
-			ginkgo.Skip("set PICOMQ_INTEGRATION=1 to run live tests")
+		if os.Getenv("PICO_INTEGRATION") == "" {
+			ginkgo.Skip("set PICO_INTEGRATION=1 to run live tests")
 		}
 		ctx := context.Background()
-		client, err := NewPico(liveEndpoint("PICOMQ_ENDPOINT"), liveOptions()...)
+		client, err := NewPico(liveEndpoint("PICO_ENDPOINT"), liveOptions()...)
 		Expect(err).NotTo(HaveOccurred())
 		suffix := time.Now().UnixNano()
 		name := fmt.Sprintf("/go-client-tests/settings-%d", suffix)
@@ -198,11 +198,11 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("covers paging, now, trim, close, and producer resume on a running Pico server", func() {
-		if os.Getenv("PICOMQ_INTEGRATION") == "" {
-			ginkgo.Skip("set PICOMQ_INTEGRATION=1 to run live tests")
+		if os.Getenv("PICO_INTEGRATION") == "" {
+			ginkgo.Skip("set PICO_INTEGRATION=1 to run live tests")
 		}
 		ctx := context.Background()
-		client, err := NewPico(liveEndpoint("PICOMQ_ENDPOINT"), liveOptions()...)
+		client, err := NewPico(liveEndpoint("PICO_ENDPOINT"), liveOptions()...)
 		Expect(err).NotTo(HaveOccurred())
 		name := fmt.Sprintf("/go-client-tests/features-%d", time.Now().UnixNano())
 		stream := client.Stream(name)
@@ -304,11 +304,11 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("bounds SSE event sizes on a running Pico server", func() {
-		if os.Getenv("PICOMQ_INTEGRATION") == "" {
-			ginkgo.Skip("set PICOMQ_INTEGRATION=1 to run live tests")
+		if os.Getenv("PICO_INTEGRATION") == "" {
+			ginkgo.Skip("set PICO_INTEGRATION=1 to run live tests")
 		}
 		ctx := context.Background()
-		client, err := NewPico(liveEndpoint("PICOMQ_ENDPOINT"), liveOptions()...)
+		client, err := NewPico(liveEndpoint("PICO_ENDPOINT"), liveOptions()...)
 		Expect(err).NotTo(HaveOccurred())
 		name := fmt.Sprintf("/go-client-tests/sse-%d", time.Now().UnixNano())
 		stream := client.Stream(name)
@@ -346,11 +346,11 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("coordinates consumer groups on a running Pico server", func() {
-		if os.Getenv("PICOMQ_INTEGRATION") == "" {
-			ginkgo.Skip("set PICOMQ_INTEGRATION=1 to run live tests")
+		if os.Getenv("PICO_INTEGRATION") == "" {
+			ginkgo.Skip("set PICO_INTEGRATION=1 to run live tests")
 		}
 		ctx := context.Background()
-		client, err := NewPico(liveEndpoint("PICOMQ_ENDPOINT"), liveOptions()...)
+		client, err := NewPico(liveEndpoint("PICO_ENDPOINT"), liveOptions()...)
 		Expect(err).NotTo(HaveOccurred())
 
 		run := fmt.Sprintf("%d", time.Now().UnixNano())
@@ -466,11 +466,11 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("enforces bearer tokens on a running Pico server", func() {
-		if os.Getenv("PICOMQ_INTEGRATION") == "" || os.Getenv("PICOMQ_AUTH_REQUIRED") == "" {
-			ginkgo.Skip("set PICOMQ_INTEGRATION=1 and PICOMQ_AUTH_REQUIRED=1 against a server started with --auth required")
+		if os.Getenv("PICO_INTEGRATION") == "" || os.Getenv("PICO_AUTH") != "required" {
+			ginkgo.Skip("set PICO_INTEGRATION=1 and PICO_AUTH=required against a server started with --auth required")
 		}
 		ctx := context.Background()
-		endpoint := liveEndpoint("PICOMQ_ENDPOINT")
+		endpoint := liveEndpoint("PICO_ENDPOINT")
 		name := fmt.Sprintf("/go-client-tests/auth-%d", time.Now().UnixNano())
 		anonymous, err := NewPico(endpoint)
 		Expect(err).NotTo(HaveOccurred())
@@ -514,11 +514,11 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("follows ownership redirects across a running two-node Pico cluster", func() {
-		if os.Getenv("PICOMQ_INTEGRATION") == "" || os.Getenv("PICOMQ_ENDPOINT_2") == "" {
-			ginkgo.Skip("set PICOMQ_INTEGRATION=1 and PICOMQ_ENDPOINT_2 to run cluster tests")
+		if os.Getenv("PICO_INTEGRATION") == "" || os.Getenv("PICO_ENDPOINT_2") == "" {
+			ginkgo.Skip("set PICO_INTEGRATION=1 and PICO_ENDPOINT_2 to run cluster tests")
 		}
 		ctx := context.Background()
-		endpoints := [2]string{liveEndpoint("PICOMQ_ENDPOINT"), os.Getenv("PICOMQ_ENDPOINT_2")}
+		endpoints := [2]string{liveEndpoint("PICO_ENDPOINT"), os.Getenv("PICO_ENDPOINT_2")}
 		clients := [2]*PicoClient{}
 		for i, endpoint := range endpoints {
 			client, err := NewPico(endpoint, liveOptions()...)
@@ -547,7 +547,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		Expect(page.Records).To(HaveLen(1))
 		Expect(page.Records[0].Body).To(Equal([]byte("r1")))
 		Expect(page.Next).To(Equal("2"))
-		ack, err = follower.Append(ctx, AppendRecord{Body: []byte("r3"), Key: []byte("k"), Headers: map[string][]byte{"via": []byte("follower")}})
+		ack, err = follower.Append(ctx, AppendRecord{Body: []byte("r3"), Key: []byte("k"), Headers: []Header{{Name: "via", Value: []byte("follower")}}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ack.Start).To(Equal("3"))
 		producerAck, err := follower.AppendAs(ctx, []AppendRecord{{Body: []byte("r4")}}, ProducerRef{ID: "cluster", Epoch: 1, Seq: 0})
@@ -588,7 +588,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		record4, err := owner.Read(ctx, "3", ReadOptions{Limits: ReadLimits{Count: 1}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(record4.Records[0].Key).To(Equal([]byte("k")))
-		Expect(record4.Records[0].Headers["via"]).To(Equal([]byte("follower")))
+		Expect(record4.Records[0].Headers).To(Equal([]Header{{Name: "via", Value: []byte("follower")}}))
 
 		for _, client := range clients {
 			listing, err := client.List(ctx, "/go-client-tests/cluster-", 100, "")
@@ -626,12 +626,12 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("coordinates consumer groups across a running two-node Pico cluster", func() {
-		if os.Getenv("PICOMQ_INTEGRATION") == "" || os.Getenv("PICOMQ_ENDPOINT_2") == "" {
-			ginkgo.Skip("set PICOMQ_INTEGRATION=1 and PICOMQ_ENDPOINT_2 to run cluster tests")
+		if os.Getenv("PICO_INTEGRATION") == "" || os.Getenv("PICO_ENDPOINT_2") == "" {
+			ginkgo.Skip("set PICO_INTEGRATION=1 and PICO_ENDPOINT_2 to run cluster tests")
 		}
 		ctx := context.Background()
 		clients := [2]*PicoClient{}
-		for i, endpoint := range [2]string{liveEndpoint("PICOMQ_ENDPOINT"), os.Getenv("PICOMQ_ENDPOINT_2")} {
+		for i, endpoint := range [2]string{liveEndpoint("PICO_ENDPOINT"), os.Getenv("PICO_ENDPOINT_2")} {
 			client, err := NewPico(endpoint, liveOptions()...)
 			Expect(err).NotTo(HaveOccurred())
 			clients[i] = client
@@ -721,13 +721,13 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("resumes subscriptions and producers across a Pico server restart", func() {
-		if os.Getenv("PICOMQ_INTEGRATION") == "" || os.Getenv("PICOMQ_RESTART_CMD") == "" {
-			ginkgo.Skip("set PICOMQ_INTEGRATION=1 and PICOMQ_RESTART_CMD to run restart tests")
+		if os.Getenv("PICO_INTEGRATION") == "" || os.Getenv("PICO_RESTART_CMD") == "" {
+			ginkgo.Skip("set PICO_INTEGRATION=1 and PICO_RESTART_CMD to run restart tests")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		options := append(liveOptions(), WithRetryPolicy(RetryAttempts(6)))
-		client, err := NewPico(liveEndpoint("PICOMQ_ENDPOINT"), options...)
+		client, err := NewPico(liveEndpoint("PICO_ENDPOINT"), options...)
 		Expect(err).NotTo(HaveOccurred())
 		name := fmt.Sprintf("/go-client-tests/restart-%d", time.Now().UnixNano())
 		stream := client.Stream(name)
@@ -775,7 +775,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 			Expect(result.err).NotTo(HaveOccurred())
 			seqs = append(seqs, result.seq)
 		}
-		restart := exec.CommandContext(ctx, "sh", "-c", os.Getenv("PICOMQ_RESTART_CMD"))
+		restart := exec.CommandContext(ctx, "sh", "-c", os.Getenv("PICO_RESTART_CMD"))
 		output, err := restart.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), string(output))
 		for len(seqs) < produced {
@@ -801,11 +801,11 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("follows ownership redirects across a running two-node Durable Streams cluster", func() {
-		if os.Getenv("PICOMQ_DS_INTEGRATION") == "" || os.Getenv("PICOMQ_DS_ENDPOINT_2") == "" {
-			ginkgo.Skip("set PICOMQ_DS_INTEGRATION=1 and PICOMQ_DS_ENDPOINT_2 to run cluster tests")
+		if os.Getenv("PICO_DS_INTEGRATION") == "" || os.Getenv("PICO_DS_ENDPOINT_2") == "" {
+			ginkgo.Skip("set PICO_DS_INTEGRATION=1 and PICO_DS_ENDPOINT_2 to run cluster tests")
 		}
 		ctx := context.Background()
-		endpoints := [2]string{liveEndpoint("PICOMQ_DS_ENDPOINT"), os.Getenv("PICOMQ_DS_ENDPOINT_2")}
+		endpoints := [2]string{liveEndpoint("PICO_DS_ENDPOINT"), os.Getenv("PICO_DS_ENDPOINT_2")}
 		clients := [2]*DurableStreamsClient{}
 		for i, endpoint := range endpoints {
 			client, err := NewDurableStreams(endpoint, liveOptions()...)
@@ -865,11 +865,11 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("covers TTL, now, and closing on a running Durable Streams server", func() {
-		if os.Getenv("PICOMQ_DS_INTEGRATION") == "" {
-			ginkgo.Skip("set PICOMQ_DS_INTEGRATION=1 to run live Durable Streams tests")
+		if os.Getenv("PICO_DS_INTEGRATION") == "" {
+			ginkgo.Skip("set PICO_DS_INTEGRATION=1 to run live Durable Streams tests")
 		}
 		ctx := context.Background()
-		client, err := NewDurableStreams(liveEndpoint("PICOMQ_DS_ENDPOINT"), liveOptions()...)
+		client, err := NewDurableStreams(liveEndpoint("PICO_DS_ENDPOINT"), liveOptions()...)
 		Expect(err).NotTo(HaveOccurred())
 		name := fmt.Sprintf("/go-client-tests/ds-features-%d", time.Now().UnixNano())
 		stream := client.Stream(name)
@@ -931,10 +931,10 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 	})
 
 	ginkgo.It("round trips through a running Durable Streams server", func() {
-		if os.Getenv("PICOMQ_DS_INTEGRATION") == "" {
-			ginkgo.Skip("set PICOMQ_DS_INTEGRATION=1 to run live Durable Streams tests")
+		if os.Getenv("PICO_DS_INTEGRATION") == "" {
+			ginkgo.Skip("set PICO_DS_INTEGRATION=1 to run live Durable Streams tests")
 		}
-		client, err := NewDurableStreams(liveEndpoint("PICOMQ_DS_ENDPOINT"), liveOptions()...)
+		client, err := NewDurableStreams(liveEndpoint("PICO_DS_ENDPOINT"), liveOptions()...)
 		Expect(err).NotTo(HaveOccurred())
 		name := fmt.Sprintf("/go-client-tests/ds-%d", time.Now().UnixNano())
 		stream := client.Stream(name)

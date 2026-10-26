@@ -7,16 +7,7 @@ const TOKEN =
   process.env.PICO_TOKEN ?? 'ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY'
 const CT = 'application/octet-stream'
 
-async function reachable(url: string): Promise<boolean> {
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(1500) })
-    return response.status < 500
-  } catch {
-    return false
-  }
-}
-
-const up = (await reachable(NODE1)) && (await reachable(NODE2))
+const live = Boolean(process.env.PICO_INTEGRATION) && process.env.PICO_ENDPOINT_2 !== undefined
 const text = (body: Uint8Array) => new TextDecoder().decode(body)
 
 async function head(node: string, path: string): Promise<Response> {
@@ -60,7 +51,7 @@ async function waitForGroup(client: PicoClient, group: string): Promise<void> {
   }
 }
 
-describe.runIf(up)('live pico cluster', () => {
+describe.runIf(live)('live pico cluster', () => {
   const node1 = connect('pico', NODE1, { token: TOKEN })
   const node2 = connect('pico', NODE2, { token: TOKEN })
   const anon = connect('pico', NODE2)
@@ -92,10 +83,10 @@ describe.runIf(up)('live pico cluster', () => {
 
     const page = await other.read(name, '0', 'off')
     expect(page.records).toHaveLength(1)
-    expect(text(page.records[0]!.body)).toBe('from-other-node')
+    expect(text(page.records[0]!.body!)).toBe('from-other-node')
 
     const viaOwner = await owner.read(name, '0', 'off')
-    expect(text(viaOwner.records[0]!.body)).toBe('from-other-node')
+    expect(text(viaOwner.records[0]!.body!)).toBe('from-other-node')
   })
 
   it('creates on node 2 and reads through a redirect from the non-owner', async () => {
@@ -106,7 +97,7 @@ describe.runIf(up)('live pico cluster', () => {
 
     const page = await other.read(name, '0', 'off')
     expect(page.records).toHaveLength(1)
-    expect(text(page.records[0]!.body)).toBe('seed')
+    expect(text(page.records[0]!.body!)).toBe('seed')
   })
 
   it('produces through the non-owner and keeps sequence', async () => {
@@ -120,7 +111,7 @@ describe.runIf(up)('live pico cluster', () => {
 
     const seen: string[] = []
     for await (const record of other.stream(name).records()) {
-      seen.push(text(record.body))
+      seen.push(text(record.body!))
     }
     expect(seen).toEqual(['a', 'b'])
   })
@@ -210,8 +201,8 @@ describe.runIf(up)('live pico cluster', () => {
   })
 })
 
-describe.runIf(!up)('live pico cluster (skipped)', () => {
-  it(`skips because ${NODE1} and ${NODE2} are not both reachable`, () => {
-    expect(up).toBe(false)
+describe.runIf(!live)('live pico cluster (skipped)', () => {
+  it('skips unless PICO_INTEGRATION and PICO_ENDPOINT_2 are set', () => {
+    expect(live).toBe(false)
   })
 })

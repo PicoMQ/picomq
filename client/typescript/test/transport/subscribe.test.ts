@@ -19,7 +19,7 @@ describe('PicoClient.subscribe', () => {
         [
           'event: data',
           'id: 2',
-          'data:[{"seq":1,"timestamp":1,"headers":{},"body":"hi"}]',
+          'data:[{"seq":1,"timestamp":1,"headers":[{"name":"via","value":"sse"},{"name":"bin","value_b64":"/wA="},{"name":"flag","value":null}],"body":"hi"},{"seq":2,"key":null,"body":null}]',
           '',
           'event: control',
           'id: 2',
@@ -43,8 +43,16 @@ describe('PicoClient.subscribe', () => {
     expect(events[0]).toMatchObject({
       type: 'data',
       id: '2',
-      records: [{ position: '1', body: new TextEncoder().encode('hi') }],
+      records: [
+        { position: '1', body: new TextEncoder().encode('hi') },
+        { position: '2', headers: [], body: null },
+      ],
     })
+    expect(events[0]!.type === 'data' && events[0]!.records[0]!.headers).toEqual([
+      { name: 'via', value: 'sse' },
+      { name: 'bin', value: new Uint8Array([0xff, 0x00]) },
+      { name: 'flag', value: null },
+    ])
     expect(events[1]).toEqual({
       type: 'control',
       id: '2',

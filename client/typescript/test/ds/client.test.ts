@@ -17,8 +17,14 @@ describe('DsClient', () => {
 
   it('rejects record headers', async () => {
     await expect(
-      client.append('/s', [{ body: 'x', headers: { a: 'b' } }]),
+      client.append('/s', [{ body: 'x', headers: [{ name: 'a', value: 'b' }] }]),
     ).rejects.toMatchObject({ kind: 'unsupported' })
+  })
+
+  it('rejects null record bodies', async () => {
+    await expect(client.append('/s', [{ body: null }])).rejects.toMatchObject({
+      kind: 'unsupported',
+    })
   })
 
   it('rejects list', async () => {

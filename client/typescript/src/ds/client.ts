@@ -106,11 +106,14 @@ export class DsClient implements StreamApi {
       )
     }
     const envelope = toEnvelope(records[0]!)
-    if (Object.keys(envelope.headers).length > 0) {
+    if (envelope.headers.length > 0) {
       throw ClientError.unsupported('the Durable Streams protocol has no record headers')
     }
     if (envelope.key !== undefined) {
       throw ClientError.unsupported('the Durable Streams protocol has no record keys')
+    }
+    if (envelope.body === null) {
+      throw ClientError.unsupported('the Durable Streams protocol has no null record bodies')
     }
     const response = await expectDs(
       await this.http.send({
@@ -158,7 +161,7 @@ export class DsClient implements StreamApi {
       onData: (raw, ctx): StreamRecord[] => [
         {
           position: '',
-          headers: {},
+          headers: [],
           body: decodeDsData(raw.data, ctx.encoding),
         },
       ],
@@ -313,7 +316,7 @@ export class DsClient implements StreamApi {
         : [
             {
               position: next,
-              headers: {},
+              headers: [],
               body,
             },
           ]

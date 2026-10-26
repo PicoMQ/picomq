@@ -43,7 +43,7 @@ import type {
   GroupAssignment,
   GroupDescription,
   GroupMembership,
-  HeaderValue,
+  Header,
   JoinOptions,
   Live,
   MemberDescription,
@@ -833,28 +833,24 @@ function parsePicoData(data: string): StreamRecord[] {
     const row = node as {
       seq?: number | string
       timestamp?: number
-      key?: string
-      key_b64?: string
-      headers?: { [key: string]: string }
-      headers_b64?: { [key: string]: string }
-      body?: string
-      body_b64?: string
+      key?: string | null
+      key_b64?: string | null
+      headers?: { name: string; value?: string | null; value_b64?: string }[]
+      body?: string | null
+      body_b64?: string | null
     }
-    const headers: { [key: string]: HeaderValue } = { ...(row.headers ?? {}) }
-    for (const [name, value] of Object.entries(row.headers_b64 ?? {})) {
-      headers[name] = base64Decode(value)
-    }
+    const headers: Header[] = (row.headers ?? []).map(({ name, value, value_b64 }) => ({
+      name,
+      value: value_b64 !== undefined ? base64Decode(value_b64) : (value ?? null),
+    }))
     const record: StreamRecord = {
       position: String(row.seq ?? ''),
       headers,
-      body:
-        row.body_b64 !== undefined
-          ? base64Decode(row.body_b64)
-          : new TextEncoder().encode(row.body ?? ''),
+      body: nullableBytes(row.body, row.body_b64),
     }
     if (row.timestamp !== undefined) record.timestamp = row.timestamp
-    if (row.key_b64 !== undefined) record.key = base64Decode(row.key_b64)
-    else if (row.key !== undefined) record.key = new TextEncoder().encode(row.key)
+    const key = nullableBytes(row.key, row.key_b64)
+    if (key !== null) record.key = key
     return record
   })
 }
@@ -871,4 +867,10 @@ function parsePicoControl(data: string): { next: string; upToDate: boolean; clos
     upToDate: parsed.up_to_date === true,
     closed: parsed.closed === true,
   }
+}
+
+function nullableBytes(text?: string | null, b64?: string | null): Uint8Array | null {
+  if (b64 !== undefined && b64 !== null) return base64Decode(b64)
+  if (text !== undefined && text !== null) return new TextEncoder().encode(text)
+  return null
 }

@@ -79,6 +79,9 @@ func (c *DurableStreamsClient) append(ctx context.Context, name string, partitio
 	if records[0].Key != nil {
 		return AppendAck{}, unsupported("the Durable Streams protocol does not support record keys")
 	}
+	if records[0].Body == nil {
+		return AppendAck{}, unsupported("the Durable Streams protocol does not support null record bodies")
+	}
 	h := make(http.Header)
 	contentType := records[0].ContentType
 	if contentType == "" {
@@ -117,7 +120,7 @@ func (c *DurableStreamsClient) read(ctx context.Context, name string, partition 
 		next := defaultString(response.Header.Get("Stream-Next-Offset"), from)
 		page = ReadPage{Next: next, UpToDate: headerBool(response.Header, "Stream-Up-To-Date") || response.StatusCode == http.StatusNoContent, Closed: headerBool(response.Header, "Stream-Closed")}
 		if len(data) > 0 {
-			page.Records = []Record{{Position: next, Headers: map[string][]byte{}, Body: data}}
+			page.Records = []Record{{Position: next, Body: data}}
 		}
 		return nil
 	})

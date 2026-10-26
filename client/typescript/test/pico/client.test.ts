@@ -20,7 +20,7 @@ describe('PicoClient.append', () => {
 
     const client = new PicoClient('http://example.test')
     const ack = await client.append('/s', [
-      { body: 'hello', headers: { kind: 'greeting' } },
+      { body: 'hello', headers: [{ name: 'kind', value: 'greeting' }] },
       new TextEncoder().encode('raw'),
     ])
 
@@ -28,9 +28,9 @@ describe('PicoClient.append', () => {
     const body = fetch.mock.calls[0]![1]!.body as ArrayBuffer
     const decoded = decodeBatchAppend(new Uint8Array(body))
     expect(decoded).toHaveLength(2)
-    expect(decoded[0]!.headers).toEqual({ kind: 'greeting' })
-    expect(new TextDecoder().decode(decoded[0]!.body)).toBe('hello')
-    expect(new TextDecoder().decode(decoded[1]!.body)).toBe('raw')
+    expect(decoded[0]!.headers).toEqual([{ name: 'kind', value: 'greeting' }])
+    expect(new TextDecoder().decode(decoded[0]!.body!)).toBe('hello')
+    expect(new TextDecoder().decode(decoded[1]!.body!)).toBe('raw')
   })
 
   it('does not retry appends', async () => {

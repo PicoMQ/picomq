@@ -301,8 +301,8 @@ func producerRetryable(err error) bool {
 
 func recordBytes(record AppendRecord) int {
 	size := len(record.Body) + len(record.Key)
-	for name, value := range record.Headers {
-		size += len(name) + len(value)
+	for _, header := range record.Headers {
+		size += len(header.Name) + len(header.Value)
 	}
 	if size < 1 {
 		return 1

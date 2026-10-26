@@ -68,10 +68,15 @@ type Schema struct {
 	Body        []byte
 }
 
+type Header struct {
+	Name  string
+	Value []byte
+}
+
 type AppendRecord struct {
 	Body        []byte
 	Key         []byte
-	Headers     map[string][]byte
+	Headers     []Header
 	Timestamp   int64
 	ContentType string
 }
@@ -80,7 +85,7 @@ type Record struct {
 	Position  string
 	Timestamp int64
 	Key       []byte
-	Headers   map[string][]byte
+	Headers   []Header
 	Body      []byte
 }
 

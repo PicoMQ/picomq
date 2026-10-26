@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"sort"
 	"unicode/utf8"
 )
 
@@ -23,43 +22,25 @@ func encodeBatch(records []AppendRecord) ([]byte, error) {
 		return nil, err
 	}
 	for _, record := range records {
-		if record.Key == nil {
-			if err := binary.Write(&out, binary.BigEndian, int32(-1)); err != nil {
-				return nil, err
-			}
-		} else {
-			if uint64(len(record.Key)) > uint64(^uint32(0)>>1) {
-				return nil, fmt.Errorf("record key is too large")
-			}
-			if err := binary.Write(&out, binary.BigEndian, int32(len(record.Key))); err != nil {
-				return nil, err
-			}
-			if _, err := out.Write(record.Key); err != nil {
-				return nil, err
-			}
+		if err := writeNullable(&out, record.Key); err != nil {
+			return nil, fmt.Errorf("record key: %w", err)
 		}
-		keys := make([]string, 0, len(record.Headers))
-		for key := range record.Headers {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		if err := binary.Write(&out, binary.BigEndian, uint32(len(keys))); err != nil {
+		if err := binary.Write(&out, binary.BigEndian, uint32(len(record.Headers))); err != nil {
 			return nil, err
 		}
-		for _, key := range keys {
-			value := record.Headers[key]
-			if !utf8.ValidString(key) {
+		for _, header := range record.Headers {
+			if !utf8.ValidString(header.Name) {
 				return nil, fmt.Errorf("record header names must be valid UTF-8")
 			}
-			if err := writeBytes(&out, []byte(key)); err != nil {
+			if err := writeBytes(&out, []byte(header.Name)); err != nil {
 				return nil, err
 			}
-			if err := writeBytes(&out, value); err != nil {
-				return nil, err
+			if err := writeNullable(&out, header.Value); err != nil {
+				return nil, fmt.Errorf("record header %q: %w", header.Name, err)
 			}
 		}
-		if err := writeBytes(&out, record.Body); err != nil {
-			return nil, err
+		if err := writeNullable(&out, record.Body); err != nil {
+			return nil, fmt.Errorf("record body: %w", err)
 		}
 	}
 	return out.Bytes(), nil
@@ -91,7 +72,7 @@ func decodeBatch(data []byte) ([]Record, error) {
 		if err != nil {
 			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
-		key, err := readKey(r)
+		key, err := readNullable(r)
 		if err != nil {
 			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
@@ -99,7 +80,7 @@ func decodeBatch(data []byte) ([]Record, error) {
 		if err != nil {
 			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
-		body, err := readBytes(r)
+		body, err := readNullable(r)
 		if err != nil {
 			return nil, fmt.Errorf("record %d: %w", i, err)
 		}
@@ -109,6 +90,20 @@ func decodeBatch(data []byte) ([]Record, error) {
 		return nil, fmt.Errorf("batch has %d trailing bytes", r.Len())
 	}
 	return records, nil
+}
+
+func writeNullable(w io.Writer, data []byte) error {
+	if data == nil {
+		return binary.Write(w, binary.BigEndian, int32(-1))
+	}
+	if uint64(len(data)) > uint64(^uint32(0)>>1) {
+		return fmt.Errorf("value is too large")
+	}
+	if err := binary.Write(w, binary.BigEndian, int32(len(data))); err != nil {
+		return err
+	}
+	_, err := w.Write(data)
+	return err
 }
 
 func writeBytes(w io.Writer, data []byte) error {
@@ -142,7 +137,7 @@ func readI32(r io.Reader) (int32, error) {
 	err := binary.Read(r, binary.BigEndian, &v)
 	return v, err
 }
-func readKey(r *bytes.Reader) ([]byte, error) {
+func readNullable(r *bytes.Reader) ([]byte, error) {
 	n, err := readI32(r)
 	if err != nil {
 		return nil, err
@@ -169,7 +164,7 @@ func readBytes(r *bytes.Reader) ([]byte, error) {
 	_, err = io.ReadFull(r, data)
 	return data, err
 }
-func readHeaders(r *bytes.Reader) (map[string][]byte, error) {
+func readHeaders(r *bytes.Reader) ([]Header, error) {
 	n, err := readU32(r)
 	if err != nil {
 		return nil, err
@@ -177,20 +172,20 @@ func readHeaders(r *bytes.Reader) (map[string][]byte, error) {
 	if uint64(n)*minHeaderBytes > uint64(r.Len()) {
 		return nil, io.ErrUnexpectedEOF
 	}
-	headers := make(map[string][]byte, n)
+	headers := make([]Header, 0, n)
 	for i := uint32(0); i < n; i++ {
-		key, err := readBytes(r)
+		name, err := readBytes(r)
 		if err != nil {
 			return nil, err
 		}
-		value, err := readBytes(r)
+		value, err := readNullable(r)
 		if err != nil {
 			return nil, err
 		}
-		if !utf8.Valid(key) {
+		if !utf8.Valid(name) {
 			return nil, fmt.Errorf("invalid UTF-8 in header name")
 		}
-		headers[string(key)] = value
+		headers = append(headers, Header{Name: string(name), Value: value})
 	}
 	return headers, nil
 }

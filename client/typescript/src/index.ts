@@ -10,6 +10,7 @@ export type {
   GroupAssignment,
   GroupDescription,
   GroupMembership,
+  Header,
   HeaderValue,
   JoinOptions,
   Live,

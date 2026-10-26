@@ -1,5 +1,5 @@
 import { toBytes, type RecordEnvelope } from '../record'
-import type { HeaderValue } from '../types'
+import type { Header, HeaderValue } from '../types'
 
 const BATCH_VERSION = 1
 
@@ -21,17 +21,18 @@ export interface SequencedRecord {
 interface EncodedRecord {
   size: number
   key: Uint8Array | undefined
-  headers: [Uint8Array, Uint8Array][]
-  body: Uint8Array
+  headers: [Uint8Array, Uint8Array | null][]
+  body: Uint8Array | null
 }
 
 function encodeRecord(record: RecordEnvelope): EncodedRecord {
-  const headers = Object.entries(record.headers).map(
-    ([name, value]) => [ENC.encode(name), toBytes(value)] as [Uint8Array, Uint8Array],
+  const headers = record.headers.map(
+    ({ name, value }) =>
+      [ENC.encode(name), value === null ? null : toBytes(value)] as [Uint8Array, Uint8Array | null],
   )
-  let size = 4 + (record.key?.length ?? 0) + 4 + 4 + record.body.length
+  let size = 4 + (record.key?.length ?? 0) + 4 + 4 + (record.body?.length ?? 0)
   for (const [name, value] of headers) {
-    size += 8 + name.length + value.length
+    size += 8 + name.length + (value?.length ?? 0)
   }
   return { size, key: record.key, headers, body: record.body }
 }
@@ -75,22 +76,24 @@ class Writer {
     this.offset += value.length
   }
 
-  record(encoded: EncodedRecord): void {
-    if (encoded.key === undefined) {
+  nullable(value: Uint8Array | null | undefined): void {
+    if (value === null || value === undefined) {
       this.i32(-1)
     } else {
-      this.i32(encoded.key.length)
-      this.bytes(encoded.key)
+      this.i32(value.length)
+      this.bytes(value)
     }
+  }
+
+  record(encoded: EncodedRecord): void {
+    this.nullable(encoded.key)
     this.u32(encoded.headers.length)
     for (const [name, value] of encoded.headers) {
       this.u32(name.length)
       this.bytes(name)
-      this.u32(value.length)
-      this.bytes(value)
+      this.nullable(value)
     }
-    this.u32(encoded.body.length)
-    this.bytes(encoded.body)
+    this.nullable(encoded.body)
   }
 }
 
@@ -152,6 +155,11 @@ class Reader {
     return this.bytes(this.u32())
   }
 
+  nullable(): Uint8Array | null {
+    const len = this.i32()
+    return len < 0 ? null : this.bytes(len)
+  }
+
   string(): string {
     try {
       return STRICT_UTF8.decode(this.sized())
@@ -161,17 +169,17 @@ class Reader {
   }
 
   record(timestamp: bigint): RecordEnvelope {
-    const keyLen = this.i32()
-    const key = keyLen < 0 ? undefined : this.bytes(keyLen)
+    const key = this.nullable()
     const count = this.u32()
-    const headers: { [key: string]: HeaderValue } = {}
+    const headers: Header[] = []
     for (let i = 0; i < count; i++) {
       const name = this.string()
-      headers[name] = headerValue(this.sized())
+      const value = this.nullable()
+      headers.push({ name, value: value === null ? null : headerValue(value) })
     }
-    const body = this.sized()
+    const body = this.nullable()
     const envelope: RecordEnvelope = { timestamp, headers, body }
-    if (key !== undefined) envelope.key = key
+    if (key !== null) envelope.key = key
     return envelope
   }
 
