@@ -5,10 +5,9 @@
   padding: var(--space-5);
 }
 
-.login-form {
+.login-card {
   display: grid;
   gap: var(--space-4);
-  justify-items: start;
   width: min(100%, 26rem);
   padding: var(--space-6);
   border: var(--line);
@@ -17,13 +16,4 @@
 
 .login-note {
   color: var(--color-text-3);
-}
-
-.login-input {
-  width: 100%;
-  padding: var(--space-2) var(--space-3);
-  border: var(--line-strong);
-  background: var(--color-surface-0);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
 }

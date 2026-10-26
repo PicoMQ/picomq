@@ -1,0 +1,16 @@
+.dialog {
+  width: min(100% - var(--space-6), 32rem);
+  padding: var(--space-5);
+  border: var(--line-strong);
+  background: var(--color-surface-1);
+  color: inherit;
+}
+
+.dialog[open] {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.dialog::backdrop {
+  background: var(--color-backdrop);
+}

@@ -1,0 +1,41 @@
+.node-live {
+  border: var(--line);
+}
+
+.node-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+}
+
+.node-metric {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: var(--line);
+  background: var(--color-surface-1);
+  color: var(--color-text-1);
+}
+
+.node-metric + .node-metric {
+  border-left: var(--line);
+}
+
+.node-metric:hover {
+  background: var(--color-surface-2);
+}
+
+.node-metric[aria-current="page"] {
+  border-bottom-color: var(--color-surface-0);
+  background: var(--color-surface-0);
+}
+
+.node-chart {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-5);
+}
+
+.node-note {
+  justify-self: end;
+  font-family: var(--font-mono);
+}

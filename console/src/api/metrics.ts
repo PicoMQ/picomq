@@ -1,3 +1,8 @@
+import { useEffect, useState } from 'preact/hooks'
+
+import { keep } from '../ring'
+import { nodeMetrics } from './nodes'
+
 export interface Sample {
   name: string
   labels: Record<string, string>
@@ -48,6 +53,46 @@ export function rate(
     return null
   }
   return delta / seconds
+}
+
+export function series(scrapes: Scrape[], name: string, labels: Record<string, string> = {}): (number | null)[] {
+  return scrapes.slice(1).map((scrape, index) => rate(scrapes[index]!, scrape, name, labels))
+}
+
+export function gauge(scrapes: Scrape[], name: string, labels: Record<string, string> = {}): number[] {
+  return scrapes.map((scrape) => total(scrape, name, labels))
+}
+
+export function useScrapes(node: number, intervalMs: number, max: number): { scrapes: Scrape[]; error: Error | null } {
+  const [scrapes, setScrapes] = useState<Scrape[]>([])
+  const [error, setError] = useState<Error | null>(null)
+
+  useEffect(() => {
+    setScrapes([])
+    setError(null)
+    const abort = new AbortController()
+
+    const scrape = () =>
+      nodeMetrics(node, abort.signal)
+        .then((text) => {
+          setError(null)
+          setScrapes((shown) => keep(shown, [parse(text, Date.now())], max))
+        })
+        .catch((failure: Error) => {
+          if (!abort.signal.aborted) {
+            setError(failure)
+          }
+        })
+    const timer = setInterval(scrape, intervalMs)
+    void scrape()
+
+    return () => {
+      clearInterval(timer)
+      abort.abort()
+    }
+  }, [node, intervalMs, max])
+
+  return { scrapes, error }
 }
 
 function parseLabels(text: string): Record<string, string> {

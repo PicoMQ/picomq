@@ -7,7 +7,7 @@ import './field.css'
 
 const HEX_PREVIEW = 64
 
-export interface Shape {
+interface Shape {
   kind: 'text' | 'binary'
   text: string
 }

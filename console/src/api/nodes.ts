@@ -1,5 +1,5 @@
 import { admin, request, requestText } from './client'
-import { listing } from './query'
+import { listing, read } from './query'
 
 export interface ClusterNode {
   nodeId: number
@@ -12,8 +12,9 @@ export interface ClusterNode {
   fenced: boolean
 }
 
-export const nodes = (fenced?: boolean) =>
-  listing<ClusterNode>(['nodes'], { fenced })
+export const nodes = (fenced?: boolean) => listing<ClusterNode>(['nodes'], { fenced })
+
+export const node = (id: number) => read<ClusterNode>(['nodes', id])
 
 export const updateNode = (id: number, slots: number) =>
   request<ClusterNode>('POST', admin('nodes', id), { body: { slots } })

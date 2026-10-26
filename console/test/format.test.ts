@@ -35,3 +35,26 @@ describe('ago', () => {
     expect(format.ago(5000, 0)).toBe('0s')
   })
 })
+
+describe('duration', () => {
+  it('shows the two largest units', () => {
+    expect(format.duration(500)).toBe('500ms')
+    expect(format.duration(60_000)).toBe('1m')
+    expect(format.duration(5_400_000)).toBe('1h 30m')
+    expect(format.duration(7 * 86_400_000)).toBe('7d')
+    expect(format.duration(86_400_000 + 61_000)).toBe('1d 1m')
+  })
+})
+
+describe('clock', () => {
+  it('shows the local time of day to the second', () => {
+    expect(format.clock(new Date(2026, 9, 26, 9, 5, 7, 42).getTime())).toBe('09:05:07')
+  })
+})
+
+describe('limit', () => {
+  it('reads null as unlimited', () => {
+    expect(format.limit(null, format.bytes)).toBe('unlimited')
+    expect(format.limit(2048, format.bytes)).toBe('2.0 KiB')
+  })
+})

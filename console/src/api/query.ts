@@ -1,7 +1,9 @@
-import { queryOptions, useInfiniteQuery } from '@tanstack/preact-query'
+import { queryOptions, useInfiniteQuery, useQueryClient } from '@tanstack/preact-query'
 import { useMemo } from 'preact/hooks'
 
 import { admin, request, type Query, type Segments } from './client'
+
+export const REFRESH_MS = 10_000
 
 export interface Page<T> {
   items: T[]
@@ -19,6 +21,7 @@ export interface Pages<T> {
   loading: boolean
   error: Error | null
   next: () => void
+  refresh: () => void
 }
 
 export function read<T>(segments: Segments, query: Query = {}) {
@@ -37,6 +40,7 @@ export function listing<T>(segments: Segments, query: Query = {}): Listing<T> {
 }
 
 export function usePages<T>(listing: Listing<T>): Pages<T> {
+  const client = useQueryClient()
   const query = useInfiniteQuery({
     queryKey: listing.key,
     queryFn: ({ pageParam, signal }) => listing.fetch(pageParam, signal),
@@ -55,6 +59,9 @@ export function usePages<T>(listing: Listing<T>): Pages<T> {
       if (query.hasNextPage && !query.isFetchingNextPage) {
         void query.fetchNextPage()
       }
+    },
+    refresh: () => {
+      void client.resetQueries({ queryKey: listing.key, exact: true })
     },
   }
 }

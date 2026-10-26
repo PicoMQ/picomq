@@ -54,3 +54,20 @@ describe('rate', () => {
     expect(metrics.rate(before, metrics.parse('pico_records_in_total 200', 1000), 'pico_records_in_total')).toBeNull()
   })
 })
+
+describe('series', () => {
+  it('turns consecutive scrapes into per-second rates', () => {
+    const at = (atMs: number, value: number) => metrics.parse(`m_total ${value}`, atMs)
+
+    expect(metrics.series([at(0, 0), at(2000, 10), at(4000, 30), at(6000, 5)], 'm_total')).toEqual([5, 10, null])
+  })
+})
+
+describe('gauge', () => {
+  it('reads the summed value of every scrape', () => {
+    const at = (value: number) => metrics.parse(`c{l="a"} ${value}\nc{l="b"} 1`, 0)
+
+    expect(metrics.gauge([at(2), at(5)], 'c')).toEqual([3, 6])
+    expect(metrics.gauge([at(2), at(5)], 'c', { l: 'a' })).toEqual([2, 5])
+  })
+})

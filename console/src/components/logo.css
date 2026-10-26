@@ -1,7 +1,7 @@
 .logo {
   display: block;
-  width: 1.5rem;
-  height: 1.5rem;
+  width: 1.75rem;
+  height: 1.75rem;
   flex: none;
 }
 
@@ -10,5 +10,5 @@
 }
 
 .logo-glyph {
-  fill: var(--color-surface-0);
+  fill: var(--color-surface-1);
 }

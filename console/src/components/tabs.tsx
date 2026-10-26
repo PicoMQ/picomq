@@ -4,7 +4,7 @@ import { current } from '../location'
 
 import './tabs.css'
 
-export interface Tab {
+interface Tab {
   href: string
   label: string
 }

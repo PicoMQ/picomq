@@ -1,0 +1,7 @@
+.notice {
+  color: var(--color-text-3);
+}
+
+.notice[data-kind="danger"] {
+  color: var(--color-danger);
+}

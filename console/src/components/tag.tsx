@@ -3,7 +3,7 @@ import type { ComponentChildren } from 'preact'
 import './tag.css'
 
 interface Props {
-  kind?: 'plain' | 'danger'
+  kind?: 'plain' | 'success' | 'danger'
   children: ComponentChildren
 }
 

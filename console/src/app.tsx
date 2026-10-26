@@ -1,9 +1,11 @@
 import { MutationCache, QueryCache, QueryClient, QueryClientProvider, useQuery } from '@tanstack/preact-query'
-import { LocationProvider, useLocation } from 'preact-iso'
+import { ArrowLeftRight, KeyRound, Layers, LayoutDashboard, LogOut, Server, Users } from 'lucide-preact'
+import { LocationProvider, Route, Router, lazy, useLocation } from 'preact-iso'
 import { useState } from 'preact/hooks'
 
 import { ApiError, AuthRequired, token } from './api/client'
 import { cluster } from './api/cluster'
+import { REFRESH_MS } from './api/query'
 import { Button } from './components/button'
 import { Login } from './components/login'
 import { Logo } from './components/logo'
@@ -13,13 +15,20 @@ import { current } from './location'
 import './app.css'
 
 const SECTIONS = [
-  { href: '/', label: 'Overview' },
-  { href: '/topics', label: 'Topics' },
-  { href: '/groups', label: 'Groups' },
-  { href: '/nodes', label: 'Nodes' },
-  { href: '/transfers', label: 'Transfers' },
-  { href: '/tokens', label: 'Tokens' },
+  { href: '/', label: 'Overview', icon: LayoutDashboard },
+  { href: '/topics', label: 'Topics', icon: Layers },
+  { href: '/groups', label: 'Groups', icon: Users },
+  { href: '/nodes', label: 'Nodes', icon: Server },
+  { href: '/transfers', label: 'Transfers', icon: ArrowLeftRight },
+  { href: '/tokens', label: 'Tokens', icon: KeyRound },
 ]
+
+const Overview = lazy(() => import('./views/overview'))
+const Topics = lazy(() => import('./views/topics'))
+const TopicView = lazy(() => import('./views/topic'))
+const Nodes = lazy(() => import('./views/nodes'))
+const NodeView = lazy(() => import('./views/node'))
+const Missing = lazy(() => import('./views/missing'))
 
 export function App() {
   const [locked, setLocked] = useState(false)
@@ -60,18 +69,51 @@ export function App() {
     <QueryClientProvider client={client}>
       <LocationProvider>
         <div class="app">
-          <a class="app-brand" href="/">
-            <Logo />
-            PicoMQ
-          </a>
-          <Navigation />
           <Header onSignOut={signOut} />
+          <Navigation />
           <main class="app-main">
-            <Missing />
+            <Router>
+              <Route path="/" component={Overview} />
+              <Route path="/topics" component={Topics} />
+              <Route path="/topics/:name" component={TopicView} />
+              <Route path="/topics/:name/:tab" component={TopicView} />
+              <Route path="/nodes" component={Nodes} />
+              <Route path="/nodes/:id" component={NodeView} />
+              <Route default component={Missing} />
+            </Router>
           </main>
         </div>
       </LocationProvider>
     </QueryClientProvider>
+  )
+}
+
+function Header({ onSignOut }: { onSignOut: () => void }) {
+  const { data } = useQuery({ ...cluster(), refetchInterval: REFRESH_MS })
+
+  return (
+    <header class="app-header">
+      <a class="app-brand" href="/">
+        <Logo />
+        {data?.clusterId ?? 'PicoMQ'}
+      </a>
+      {data && (
+        <>
+          <span class="app-separator">/</span>
+          <span class="app-node">node {data.nodeId}</span>
+          {data.leaseHolder && <Tag>lease holder</Tag>}
+          {data.fenced && <Tag kind="danger">fenced</Tag>}
+        </>
+      )}
+      {token.get() && (
+        <span class="app-account">
+          <Button onClick={onSignOut}>
+            <LogOut size={16} />
+            Sign out
+          </Button>
+        </span>
+      )}
+    </header>
   )
 }
 
@@ -81,42 +123,12 @@ function Navigation() {
 
   return (
     <nav class="app-nav">
-      {SECTIONS.map((section) => (
-        <a
-          key={section.href}
-          class="app-section"
-          href={section.href}
-          aria-current={section.href === active ? 'page' : undefined}
-        >
-          {section.label}
+      {SECTIONS.map(({ href, label, icon: Icon }) => (
+        <a key={href} class="app-section" href={href} aria-current={href === active ? 'page' : undefined}>
+          <Icon size={18} />
+          {label}
         </a>
       ))}
     </nav>
   )
-}
-
-function Header({ onSignOut }: { onSignOut: () => void }) {
-  const { data } = useQuery(cluster())
-
-  return (
-    <header class="app-header">
-      {data && (
-        <>
-          <code>{data.clusterId}</code>
-          <span class="app-node">node {data.nodeId}</span>
-          {data.fenced && <Tag kind="danger">fenced</Tag>}
-          {data.leaseHolder && <Tag>lease holder</Tag>}
-        </>
-      )}
-      {token.get() && (
-        <span class="app-account">
-          <Button onClick={onSignOut}>Sign out</Button>
-        </span>
-      )}
-    </header>
-  )
-}
-
-function Missing() {
-  return <h1>No such page</h1>
 }

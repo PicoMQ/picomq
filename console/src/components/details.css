@@ -1,0 +1,39 @@
+.details {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+  margin: 0;
+  border-top: var(--line);
+  border-left: var(--line);
+}
+
+.details-item {
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-3) var(--space-4);
+  border-right: var(--line);
+  border-bottom: var(--line);
+}
+
+.details-item[data-kind="wide"] {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.details-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.details-value {
+  overflow: hidden;
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: var(--text-lg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -27,12 +27,6 @@ export default {
   },
   overrides: [
     {
-      files: ['src/styles/fonts.css'],
-      rules: {
-        'declaration-property-value-allowed-list': null,
-      },
-    },
-    {
       files: ['src/styles/tokens.css'],
       rules: {
         'color-no-hex': null,

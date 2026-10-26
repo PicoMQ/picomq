@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { current } from '../src/location'
+import { current, page, withQuery } from '../src/location'
 
 describe('current', () => {
   const sections = ['/', '/topics', '/groups']
@@ -17,5 +17,21 @@ describe('current', () => {
   it('matches whole segments only', () => {
     expect(current('/topicsx', sections)).toBe('/')
     expect(current('/topics/orders2', tabs)).toBeUndefined()
+  })
+})
+
+describe('page', () => {
+  it('encodes each segment and drops its leading slash', () => {
+    expect(page('topics', '/acct/payments', 'partitions', 3)).toBe('/topics/acct%2Fpayments/partitions/3')
+    expect(page('groups', 'billing team')).toBe('/groups/billing%20team')
+    expect(page('topics', 'orders', undefined)).toBe('/topics/orders')
+  })
+})
+
+describe('withQuery', () => {
+  it('sets, replaces and removes parameters', () => {
+    expect(withQuery('/topics', {}, { prefix: 'acct' })).toBe('/topics?prefix=acct')
+    expect(withQuery('/topics', { prefix: 'acct' }, { prefix: '' })).toBe('/topics')
+    expect(withQuery('/p', { start: 'offset', at: '5' }, { at: 9, record: undefined })).toBe('/p?start=offset&at=9')
   })
 })

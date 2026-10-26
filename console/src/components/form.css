@@ -1,0 +1,9 @@
+.form {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.form-label {
+  display: grid;
+  gap: var(--space-2);
+}

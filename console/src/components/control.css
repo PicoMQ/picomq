@@ -1,0 +1,57 @@
+.control {
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: var(--line-strong);
+  background: var(--color-surface-1);
+  line-height: 1.25;
+}
+
+.control::placeholder {
+  color: var(--color-text-3);
+}
+
+.control:hover {
+  border-color: var(--color-text-3);
+}
+
+.control:disabled {
+  opacity: 0.5;
+}
+
+.control-prefixed {
+  display: flex;
+  min-width: 0;
+  border: var(--line-strong);
+}
+
+.control-prefix {
+  padding: var(--space-2) var(--space-3);
+  border-right: var(--line-strong);
+  background: var(--color-surface-1);
+  color: var(--color-text-1);
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.control-prefixed .control {
+  border: 0;
+  background: var(--color-surface-0);
+}
+
+.control-select {
+  display: flex;
+  position: relative;
+  align-items: center;
+  min-width: 0;
+}
+
+.control-select .control {
+  padding-right: var(--space-6);
+}
+
+.control-select svg {
+  position: absolute;
+  right: var(--space-3);
+  pointer-events: none;
+}

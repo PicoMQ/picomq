@@ -1,0 +1,16 @@
+.overview-section {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.overview-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.overview-rankings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr));
+  gap: var(--space-5);
+}

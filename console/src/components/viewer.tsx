@@ -29,13 +29,11 @@ const theme = EditorView.theme(
       backgroundColor: 'var(--color-surface-3)',
     },
   },
-  { dark: true },
 )
 
 const highlight = HighlightStyle.define([
   { tag: tags.propertyName, color: 'var(--color-text-2)' },
   { tag: tags.string, color: 'var(--color-text-1)' },
-  { tag: [tags.number, tags.bool, tags.null], color: 'var(--color-text-1)', fontWeight: '600' },
   { tag: [tags.punctuation, tags.bracket], color: 'var(--color-text-3)' },
 ])
 

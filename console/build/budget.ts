@@ -9,7 +9,6 @@ const LIMITS: Record<string, number> = {
   lazy: 40,
   viewer: 160,
   chart: 30,
-  fonts: 110,
   total: 400,
 }
 
@@ -30,7 +29,6 @@ export function budget(): Plugin {
       )
       const initial = initialChunks(chunks)
       const lazy = chunks.filter((chunk) => !initial.includes(chunk))
-      const fonts = Object.values(bundle).filter((output) => output.fileName.endsWith('.woff2'))
 
       const measured: Measured[] = [
         { name: 'initial', limit: 'initial', bytes: loaded(bundle, initial) },
@@ -39,7 +37,6 @@ export function budget(): Plugin {
           limit: chunk.name in LIMITS ? chunk.name : 'lazy',
           bytes: loaded(bundle, [chunk]),
         })),
-        { name: 'fonts', limit: 'fonts', bytes: fonts.reduce((sum, font) => sum + Buffer.byteLength(source(font)), 0) },
         { name: 'total', limit: 'total', bytes: loaded(bundle, chunks) },
       ]
 

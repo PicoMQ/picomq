@@ -1,6 +1,6 @@
 .table {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: none;
+  max-height: 75vh;
   overflow: auto;
   border: var(--line);
 }
@@ -14,15 +14,11 @@
 .table-header {
   position: sticky;
   top: 0;
-  padding: var(--space-2) var(--space-3);
-  border-bottom: var(--line-strong);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: var(--line);
   background: var(--color-surface-1);
   text-align: left;
   white-space: nowrap;
-}
-
-.table-row + .table-row {
-  border-top: var(--line);
 }
 
 .table-row:hover {
@@ -31,7 +27,7 @@
 
 .table-cell {
   overflow: hidden;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -45,4 +41,29 @@
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
+}
+
+.table tbody + tbody {
+  border-top: var(--line);
+}
+
+.table-row[data-kind="selectable"] {
+  cursor: pointer;
+}
+
+.table-row[aria-expanded="true"] {
+  background: var(--color-surface-2);
+}
+
+.table-expanded {
+  background: var(--color-surface-1);
+}
+
+.table-expanded > td {
+  padding: var(--space-4);
+}
+
+.table-empty {
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text-3);
 }
