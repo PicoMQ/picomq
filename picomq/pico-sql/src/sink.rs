@@ -493,8 +493,14 @@ async fn commit_batch(
                             }));
                         }
                     }
-                    // Sender dropped: the tailer poisoned and cleared the map.
-                    Err(_) => fail_all(waiters, "metadata log is poisoned (corrupt row)"),
+                    Err(_) if shared.pending.lock().expect("pending lock").poisoned => {
+                        fail_all(waiters, "metadata log is poisoned (corrupt row)");
+                    }
+                    Err(_) => unavailable(
+                        waiters,
+                        "the write committed, but another node's snapshot covered it before \
+                         this node applied it, so its result is unknown",
+                    ),
                 }
                 return;
             }
@@ -571,6 +577,7 @@ mod tests {
         inner: Arc<SqliteStore>,
         snapshots: Option<tokio::sync::watch::Receiver<bool>>,
         lagging: std::sync::atomic::AtomicBool,
+        catch_up_on_append: bool,
     }
 
     impl TestStore {
@@ -583,7 +590,9 @@ mod tests {
     impl MetaStore for TestStore {
         async fn append(&self, idx: u64, payload: &[u8]) -> Result<bool, StoreError> {
             let appended = self.inner.append(idx, payload).await;
-            self.lagging.store(false, Ordering::SeqCst);
+            if self.catch_up_on_append {
+                self.lagging.store(false, Ordering::SeqCst);
+            }
             appended
         }
         async fn last_idx(&self) -> Result<u64, StoreError> {
@@ -640,16 +649,24 @@ mod tests {
     #[tokio::test]
     async fn a_lagging_writer_never_appends_below_another_writers_snapshot() {
         let inner = Arc::new(SqliteStore::memory().await.unwrap());
+        let (snapshots, gate) = tokio::sync::watch::channel(true);
+        let writing = Arc::new(TestStore {
+            inner: inner.clone(),
+            snapshots: Some(gate),
+            lagging: std::sync::atomic::AtomicBool::new(false),
+            catch_up_on_append: true,
+        });
         let config = SqlSinkConfig {
             snapshot_every: 2,
             ..fast_config()
         };
-        let (writer, _) = SqlSink::open(inner.clone(), config).await.unwrap();
+        let (writer, _) = SqlSink::open(writing, config).await.unwrap();
         writer.propose(register(1, 10)).await.unwrap();
         let lagging = Arc::new(TestStore {
             inner: inner.clone(),
             snapshots: None,
             lagging: std::sync::atomic::AtomicBool::new(true),
+            catch_up_on_append: true,
         });
         let (behind, _) = SqlSink::open(lagging, fast_config()).await.unwrap();
         let put = |key: &str| MetadataCommand::PutKv {
@@ -674,6 +691,7 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        snapshots.send(false).unwrap();
 
         let proposed = behind.propose(put("late")).await.unwrap();
         assert_eq!(
@@ -689,6 +707,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_write_another_writers_snapshot_covers_reports_an_unknown_result() {
+        let inner = Arc::new(SqliteStore::memory().await.unwrap());
+        let config = SqlSinkConfig {
+            snapshot_every: 2,
+            ..fast_config()
+        };
+        let (writer, _) = SqlSink::open(inner.clone(), config).await.unwrap();
+        writer.propose(register(1, 10)).await.unwrap();
+        let held = Arc::new(TestStore {
+            inner: inner.clone(),
+            snapshots: None,
+            lagging: std::sync::atomic::AtomicBool::new(true),
+            catch_up_on_append: false,
+        });
+        let (behind, _) = SqlSink::open(held.clone(), fast_config()).await.unwrap();
+        let behind = Arc::new(behind);
+
+        let proposing = behind.clone();
+        let proposal = tokio::spawn(async move {
+            proposing
+                .propose(MetadataCommand::PutKv {
+                    proposer: Proposer::new(1, 10),
+                    key: "late".to_owned(),
+                    value: Bytes::from_static(b"v"),
+                })
+                .await
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = inner.snapshot_idx().await.unwrap().unwrap_or(0);
+            if snapshot >= 2 && inner.fetch_after(0, 1).await.unwrap().is_empty() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the writer never covered the late write"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        held.lagging.store(false, Ordering::SeqCst);
+
+        let error = proposal.await.unwrap().unwrap_err();
+        assert!(
+            matches!(&error, MetadataError::Unavailable { message } if message.contains("result is unknown")),
+            "{error}"
+        );
+        let (_reader, views) = SqlSink::open(inner, fast_config()).await.unwrap();
+        assert_eq!(
+            views.load().state.get_kv("late"),
+            Some(Bytes::from_static(b"v"))
+        );
+    }
+
     /// Proposals keep applying while a snapshot store hangs.
     #[tokio::test]
     async fn apply_never_waits_on_snapshot_store() {
@@ -697,6 +769,7 @@ mod tests {
             inner: Arc::new(SqliteStore::memory().await.unwrap()),
             snapshots: Some(gate),
             lagging: std::sync::atomic::AtomicBool::new(false),
+            catch_up_on_append: true,
         });
         let config = SqlSinkConfig {
             snapshot_every: 5,
