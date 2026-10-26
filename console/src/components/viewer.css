@@ -1,0 +1,4 @@
+.viewer {
+  border: var(--line);
+  overflow: auto;
+}

@@ -105,8 +105,9 @@ async fn partitions(
     let Ok(node) = paging.filter("node").map(str::parse::<i32>).transpose() else {
         return error_response(StatusCode::BAD_REQUEST, "node must be a node id");
     };
-    let Ok(after) = paging.after.as_deref().map(str::parse::<u32>).transpose() else {
-        return error_response(StatusCode::BAD_REQUEST, "the cursor is not valid");
+    let after = match paging.after_as::<u32>() {
+        Ok(after) => after,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
     };
 
     let view = state.node.views().load();
@@ -276,7 +277,7 @@ fn topic_json(topic: &Topic) -> Value {
         "id": topic.id.hex(),
         "partitions": topic.partitions,
         "contentType": topic.content_type,
-        "kafkaName": topic.name.kafka(),
+        "kafkaTopic": topic.name.kafka(),
         "retentionMs": topic.retention.ms,
         "retentionBytes": topic.retention.bytes,
         "ttlSeconds": topic.ttl_seconds,

@@ -1,0 +1,28 @@
+.tabs {
+  display: flex;
+  width: fit-content;
+  border: var(--line);
+}
+
+.tabs-item {
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-surface-0);
+  color: var(--color-text-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.tabs-item + .tabs-item {
+  border-left: var(--line);
+}
+
+.tabs-item:hover {
+  background: var(--color-surface-1);
+  color: var(--color-text-1);
+}
+
+.tabs-item[aria-current="page"] {
+  background: var(--color-text-1);
+  color: var(--color-surface-0);
+}

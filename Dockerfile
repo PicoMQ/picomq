@@ -2,12 +2,12 @@
 # PicoMQ node image: the `pico` binary (serve + CLI).
 # Protocol / meta / storage are runtime config (flags or PICO_* env).
 
-# Dashboard assets, embedded into the binary by the build stage.
-FROM node:22-bookworm-slim AS dashboard
-WORKDIR /src/dashboard
-COPY dashboard/package.json dashboard/package-lock.json ./
+# Console assets, embedded into the binary by the build stage.
+FROM node:24-bookworm-slim AS console
+WORKDIR /src/console
+COPY console/package.json console/package-lock.json ./
 RUN npm ci --no-audit --no-fund
-COPY dashboard/ ./
+COPY console/ ./
 RUN npm run build
 
 FROM rust:1-bookworm AS build
@@ -22,7 +22,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY . .
-COPY --from=dashboard /src/picomq/pico-http/_dashboard /src/picomq/pico-http/_dashboard
+COPY --from=console /src/picomq/pico-http/_console /src/picomq/pico-http/_console
 # target/ and cargo caches live on the BuildKit host so rebuilds stay incremental.
 RUN --mount=type=cache,id=picomq-target,sharing=locked,target=/src/target \
     --mount=type=cache,id=picomq-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \

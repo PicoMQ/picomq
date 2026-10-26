@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use super::offsets;
 use super::{AdminState, allowed, missing_topic};
 use crate::common::{auth_error, authenticate, error_response, read_json, service_error};
+use crate::http::query_param;
 use crate::paging::Paging;
 
 const MAX_LISTED: usize = 1_000;
@@ -369,16 +370,14 @@ async fn delete_offsets(
         Ok(local) => local,
         Err(response) => return *response,
     };
-    let paging = match Paging::from_query(request.uri(), &["topic"]) {
-        Ok(paging) => paging,
-        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+    let name = match query_param(request.uri(), "topic") {
+        Ok(Some(name)) => name,
+        Ok(None) => return error_response(StatusCode::BAD_REQUEST, "topic is required"),
+        Err(error) => return service_error(error),
     };
-    let Some(name) = paging.filter("topic") else {
-        return error_response(StatusCode::BAD_REQUEST, "topic is required");
-    };
-    let topic = match state.node.topics().get(name).await {
+    let topic = match state.node.topics().get(&name).await {
         Ok(Some(topic)) => topic,
-        Ok(None) => return missing_topic(name),
+        Ok(None) => return missing_topic(&name),
         Err(error) => return service_error(error),
     };
     let groups = state.node.groups();

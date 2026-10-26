@@ -132,12 +132,8 @@ async fn issue_token(State(state): State<AdminState>, headers: HeaderMap, body: 
     if !stored {
         return error_response(StatusCode::CONFLICT, format!("token {id} already exists"));
     }
-    let body = json!({
-        "id": id,
-        "token": token.render(),
-        "scope": scope_to_json(&record.scope),
-        "createdAtMs": record.created_at_ms,
-    });
+    let mut body = token_json(&record);
+    body["token"] = json!(token.render());
     (StatusCode::CREATED, Json(body)).into_response()
 }
 

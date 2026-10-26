@@ -1,0 +1,48 @@
+.table {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  border: var(--line);
+}
+
+.table-grid {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.table-header {
+  position: sticky;
+  top: 0;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--line-strong);
+  background: var(--color-surface-1);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.table-row + .table-row {
+  border-top: var(--line);
+}
+
+.table-row:hover {
+  background: var(--color-surface-1);
+}
+
+.table-cell {
+  overflow: hidden;
+  padding: var(--space-2) var(--space-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table-header[data-kind="number"],
+.table-cell[data-kind="number"] {
+  text-align: right;
+}
+
+.table-cell[data-kind="number"] {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}

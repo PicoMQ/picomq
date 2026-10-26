@@ -350,18 +350,18 @@ async fn transfer_validation() {
     assert_eq!(malformed.status(), 400);
 }
 
-/// Passes with or without a built dist: `/` serves the dashboard when the
-/// assets were embedded and a hint page otherwise.
 #[tokio::test]
-async fn dashboard_is_served_at_root() {
+async fn console_is_served_at_root_and_every_page_path() {
     let server = common::picomq_server().await;
     let client = reqwest::Client::new();
+    let get = |path: &str, encoding: &str| {
+        client
+            .get(format!("{}{path}", server.admin_url))
+            .header("Accept-Encoding", encoding)
+            .send()
+    };
 
-    let index = client
-        .get(format!("{}/", server.admin_url))
-        .send()
-        .await
-        .unwrap();
+    let index = get("/", "identity").await.unwrap();
     assert_eq!(index.status(), 200);
     assert!(
         index.headers()["Content-Type"]
@@ -372,26 +372,41 @@ async fn dashboard_is_served_at_root() {
     let body = index.text().await.unwrap();
     assert!(body.contains("PicoMQ"), "{body}");
 
-    if let Some(start) = body.find("assets/") {
+    let page = get("/topics/orders/partitions", "identity").await.unwrap();
+    assert_eq!(page.status(), 200);
+    assert_eq!(page.text().await.unwrap(), body);
+
+    assert_eq!(
+        get("/admin/absent", "identity").await.unwrap().status(),
+        404
+    );
+    assert_eq!(
+        get("/assets/absent.js", "identity").await.unwrap().status(),
+        404
+    );
+
+    if let Some(script) = body.find("src=\"/assets/") {
+        let start = script + "src=\"".len();
         let end = start + body[start..].find('"').unwrap();
-        let asset = client
-            .get(format!("{}/{}", server.admin_url, &body[start..end]))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(asset.status(), 200);
+        let path = &body[start..end];
+
+        let plain = get(path, "identity").await.unwrap();
+        assert_eq!(plain.status(), 200);
         assert_eq!(
-            asset.headers()["Cache-Control"],
+            plain.headers()["Cache-Control"],
             "public, max-age=31536000, immutable"
         );
-    }
+        assert!(plain.headers().get("Content-Encoding").is_none());
+        let plain = plain.bytes().await.unwrap();
 
-    let missing = client
-        .get(format!("{}/assets/absent.js", server.admin_url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), 404);
+        let compressed = get(path, "br, gzip").await.unwrap();
+        assert_eq!(compressed.headers()["Content-Encoding"], "gzip");
+        assert_eq!(compressed.headers()["Content-Type"], "text/javascript");
+        assert!(compressed.bytes().await.unwrap().len() < plain.len());
+
+        let refused = get(path, "gzip;q=0").await.unwrap();
+        assert!(refused.headers().get("Content-Encoding").is_none());
+    }
 }
 
 #[tokio::test]

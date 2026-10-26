@@ -69,7 +69,7 @@ async fn probes_and_assets_open_admin_routes_gated() {
     assert_eq!(
         client.get(&admin).send().await.unwrap().status(),
         200,
-        "dashboard shell stays open"
+        "console shell stays open"
     );
 
     let denied = client
@@ -138,6 +138,7 @@ async fn token_lifecycle_issue_list_revoke() {
     assert_eq!(issued.status(), 201);
     let body: Value = issued.json().await.unwrap();
     assert_eq!(body["id"], "svc/reader");
+    assert_eq!(body["issuedBy"], "ops/root");
     let child = body["token"].as_str().unwrap().to_owned();
     assert!(!child.is_empty());
 

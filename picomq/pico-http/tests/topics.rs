@@ -168,6 +168,7 @@ async fn topics_are_created_changed_and_deleted() {
     assert_eq!(changed.status(), 200);
     let (_, detail) = console.get("/admin/topics/made", &console.root).await;
     assert_eq!(detail["partitions"], 6);
+    assert_eq!(detail["kafkaTopic"], "made");
     assert_eq!(detail["contentType"], "application/json");
     assert_eq!(detail["retentionMs"], 60_000);
     assert_eq!(detail["retentionBytes"], 1_000_000);

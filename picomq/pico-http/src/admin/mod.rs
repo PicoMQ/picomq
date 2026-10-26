@@ -1,6 +1,6 @@
 //! The admin surface over a node: liveness, readiness, cluster and node
 //! introspection, admin writes (stream transfer, slot updates), and the
-//! embedded dashboard. [`serve`](crate::serve) binds this router on the
+//! embedded console. [`serve`](crate::serve) binds this router on the
 //! admin address.
 //!
 //! The shape is lease/SQL-native. Raft-shaped endpoints (`/admin/peers`,
@@ -9,6 +9,7 @@
 //! log, and maintenance leadership is a lease, reported as `leaseHolder`.
 
 mod cluster;
+mod console;
 mod groups;
 mod nodes;
 mod offsets;
@@ -21,7 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -166,18 +167,7 @@ fn missing_partition(index: u32) -> Response {
     )
 }
 
-#[derive(rust_embed::RustEmbed)]
-#[folder = "_dashboard/"]
-struct Dashboard;
-
-const DASHBOARD_HINT: &str = "<!doctype html><html><body style=\"font-family: sans-serif\">\
-<h3>PicoMQ admin</h3>\
-<p>This binary was built without the dashboard. Build it with\
-<code> cd dashboard && npm install && npm run build</code> and recompile,\
-or use the Docker image. The <code>/admin</code> API is available.</p>\
-</body></html>";
-
-/// Probes and dashboard assets are open. `/admin` routes are gated when an
+/// Probes and console assets are open. `/admin` routes are gated when an
 /// authorizer is set: the asset shell carries no data, it prompts for a token.
 pub fn router(state: AdminState) -> Router {
     Router::new()
@@ -190,15 +180,12 @@ pub fn router(state: AdminState) -> Router {
         .merge(topics::routes())
         .merge(records::routes())
         .merge(groups::routes())
-        .route("/", get(|| async { asset("index.html") }))
-        .fallback(get(|uri: Uri| async move {
-            asset(uri.path().trim_start_matches('/'))
-        }))
+        .fallback(get(console::serve))
         .layer(axum::middleware::from_fn(cors))
         .with_state(state)
 }
 
-/// OPTIONS preflight plus CORS headers, so a dashboard served from another
+/// OPTIONS preflight plus CORS headers, so a console served from another
 /// origin can send `Authorization`.
 async fn cors(request: Request, next: Next) -> Response {
     if request.method() == Method::OPTIONS {
@@ -221,37 +208,6 @@ fn cors_headers(headers: &mut HeaderMap) {
         "Access-Control-Allow-Headers",
         HeaderValue::from_static("authorization, content-type"),
     );
-}
-
-fn asset(path: &str) -> Response {
-    let Some(file) = Dashboard::get(path) else {
-        if path == "index.html" {
-            return (
-                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                DASHBOARD_HINT,
-            )
-                .into_response();
-        }
-        return error_response(StatusCode::NOT_FOUND, format!("no such path /{path}"));
-    };
-    let mime = match path.rsplit_once('.').map(|(_, ext)| ext) {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js") => "text/javascript",
-        Some("css") => "text/css",
-        Some("svg") => "image/svg+xml",
-        Some("map" | "json") => "application/json",
-        _ => "application/octet-stream",
-    };
-    let cache = if path.starts_with("assets/") {
-        "public, max-age=31536000, immutable"
-    } else {
-        "no-cache"
-    };
-    (
-        [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, cache)],
-        file.data.into_owned(),
-    )
-        .into_response()
 }
 
 async fn health() -> Response {
