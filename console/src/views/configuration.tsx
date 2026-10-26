@@ -1,9 +1,8 @@
 import { useMutation, useQueryClient } from '@tanstack/preact-query'
-import { useState } from 'preact/hooks'
 
 import { createTopic, updateTopic, type Topic, type TopicDetail } from '../api/topics'
 import { Input, numberOf } from '../components/control'
-import { Form, Label } from '../components/form'
+import { Form, Label, useDraft } from '../components/form'
 import { Notice } from '../components/notice'
 
 import './configuration.css'
@@ -25,15 +24,13 @@ export function Configuration({ topic }: { name: string; topic: TopicDetail }) {
 export function TopicForm({ topic, onSaved, onCancel }: Props) {
   const client = useQueryClient()
   const creating = topic === undefined
-  const [draft, setDraft] = useState({
+  const { draft, edit } = useDraft({
     name: '',
     partitions: String(topic?.partitions ?? 1),
     contentType: topic?.contentType ?? 'application/octet-stream',
     retentionMs: text(topic?.retentionMs),
     retentionBytes: text(topic?.retentionBytes),
   })
-  const edit = (field: keyof typeof draft) => (event: { currentTarget: { value: string } }) =>
-    setDraft({ ...draft, [field]: event.currentTarget.value })
 
   const mutation = useMutation({
     mutationFn: () =>

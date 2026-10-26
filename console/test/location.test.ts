@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { current, page, withQuery } from '../src/location'
+import { current, page, topicPage, withQuery } from '../src/location'
 
 describe('current', () => {
   const sections = ['/', '/topics', '/groups']
@@ -21,10 +21,16 @@ describe('current', () => {
 })
 
 describe('page', () => {
-  it('encodes each segment and drops its leading slash', () => {
-    expect(page('topics', '/acct/payments', 'partitions', 3)).toBe('/topics/acct%2Fpayments/partitions/3')
-    expect(page('groups', 'billing team')).toBe('/groups/billing%20team')
-    expect(page('topics', 'orders', undefined)).toBe('/topics/orders')
+  it('encodes every segment as is and skips missing ones', () => {
+    expect(page('groups', '/team a')).toBe('/groups/%2Fteam%20a')
+    expect(page('nodes', 3, undefined)).toBe('/nodes/3')
+  })
+})
+
+describe('topicPage', () => {
+  it('drops the leading slash of a topic name the API accepts either way', () => {
+    expect(topicPage('/acct/payments', 'partitions')).toBe('/topics/acct%2Fpayments/partitions')
+    expect(topicPage('orders', undefined)).toBe('/topics/orders')
   })
 })
 

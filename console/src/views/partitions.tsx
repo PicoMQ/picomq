@@ -9,7 +9,8 @@ import type { Column } from '../components/table'
 import { Tag } from '../components/tag'
 import { Toolbar } from '../components/toolbar'
 import * as format from '../format'
-import { page, withQuery } from '../location'
+import { topicPage, withQuery } from '../location'
+import { nodeLink } from './nodes'
 
 export function Partitions({ name, topic }: { name: string; topic: TopicDetail }) {
   const { path, query, route } = useLocation()
@@ -21,18 +22,18 @@ export function Partitions({ name, topic }: { name: string; topic: TopicDetail }
       header: 'Partition',
       width: '8rem',
       kind: 'number',
-      cell: (partition) => <a href={withQuery(page('topics', name), {}, { partition: partition.index })}>{partition.index}</a>,
+      cell: (partition) => <a href={withQuery(topicPage(name), {}, { partition: partition.index })}>{partition.index}</a>,
     },
-    { name: 'owner', header: 'Owner', width: '9rem', cell: owner },
+    { name: 'owner', header: 'Owner', width: '9rem', cell: (partition) => nodeLink(partition.ownerNodeId, 'unassigned') },
     { name: 'epoch', header: 'Epoch', width: '7rem', kind: 'number', cell: (partition) => partition.epoch },
-    { name: 'start', header: 'Start offset', kind: 'number', cell: (partition) => offset(partition.startOffset) },
-    { name: 'next', header: 'Next offset', kind: 'number', cell: (partition) => offset(partition.nextOffset) },
+    { name: 'start', header: 'Start offset', kind: 'number', cell: (partition) => format.count(partition.startOffset) },
+    { name: 'next', header: 'Next offset', kind: 'number', cell: (partition) => format.count(partition.nextOffset) },
     { name: 'records', header: 'Records', kind: 'number', cell: records },
     {
       name: 'stored',
       header: 'Stored',
       kind: 'number',
-      cell: (partition) => (partition.storedBytes === null ? '' : format.bytes(partition.storedBytes)),
+      cell: (partition) => (partition.storedBytes === null ? 'unknown' : format.bytes(partition.storedBytes)),
     },
     { name: 'state', header: 'State', width: '15rem', cell: state },
   ]
@@ -54,23 +55,15 @@ export function Partitions({ name, topic }: { name: string; topic: TopicDetail }
             ))}
         </Select>
       </Toolbar>
-      <List pages={pages} columns={columns} rowKey={(partition) => String(partition.index)} noun="partitions" />
+      <List pages={pages} columns={columns} rowKey={(partition) => String(partition.index)} noun="partition" />
     </>
   )
 }
 
-function owner(partition: Partition) {
-  return partition.ownerNodeId === null ? 'unassigned' : <a href={page('nodes', partition.ownerNodeId)}>node {partition.ownerNodeId}</a>
-}
-
-function offset(value: number | null): string {
-  return value === null ? '' : format.count(value)
-}
-
 function records(partition: Partition): string {
-  return partition.startOffset === null || partition.nextOffset === null
-    ? ''
-    : format.count(partition.nextOffset - partition.startOffset)
+  return format.count(
+    partition.startOffset === null || partition.nextOffset === null ? null : partition.nextOffset - partition.startOffset,
+  )
 }
 
 function state(partition: Partition) {

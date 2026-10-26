@@ -29,13 +29,13 @@ export function List<T>({ pages, columns, rowKey, noun, onSelect, expanded }: Pr
 }
 
 function Status<T>({ pages, noun }: { pages: Pages<T>; noun: string }) {
-  const shown = `${format.count(pages.items.length)} ${noun}`
+  const shown = format.counted(pages.items.length, noun)
 
   if (pages.error) {
     return <Notice kind="danger">{pages.error.message}</Notice>
   }
   if (pages.items.length === 0) {
-    return <Notice>{pages.loading ? 'Loading' : `No ${noun}`}</Notice>
+    return <Notice>{pages.loading ? 'Loading' : `No ${noun}s`}</Notice>
   }
   if (pages.more) {
     return <Notice>{pages.loading ? `${shown}, loading more` : `${shown} so far, scroll for more`}</Notice>

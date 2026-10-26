@@ -17,25 +17,25 @@ const partition = (startOffset: number, nextOffset: number): Partition => ({
 })
 
 describe('recordStart', () => {
-  it('starts newest at the last window and never before the log start', () => {
+  it('starts latest at the last window and never before the log start', () => {
     expect(recordStart({}, partition(0, 430), 50)).toEqual({ offset: 380 })
-    expect(recordStart({ start: 'newest' }, partition(400, 430), 50)).toEqual({ offset: 400 })
+    expect(recordStart({ start: 'latest' }, partition(400, 430), 50)).toEqual({ offset: 400 })
   })
 
-  it('reads oldest, offset and time starts', () => {
-    expect(recordStart({ start: 'oldest' }, partition(0, 430), 50)).toBeNull()
+  it('reads earliest, offset and time starts', () => {
+    expect(recordStart({ start: 'earliest' }, partition(0, 430), 50)).toBeNull()
     expect(recordStart({ start: 'offset', at: '12' }, partition(0, 430), 50)).toEqual({ offset: 12 })
     expect(recordStart({ start: 'time', at: '1700000000000' }, partition(0, 430), 50)).toEqual({ timestamp: 1700000000000 })
   })
 
-  it('falls back to newest when the position is missing', () => {
+  it('falls back to latest when the position is missing', () => {
     expect(recordStart({ start: 'offset', at: '' }, partition(0, 430), 50)).toEqual({ offset: 380 })
   })
 })
 
 describe('recordFilter', () => {
   it('keeps only the filter fields', () => {
-    expect(recordFilter({ start: 'oldest', key: 'k', headerValue: 'v' })).toEqual({
+    expect(recordFilter({ start: 'earliest', key: 'k', headerValue: 'v' })).toEqual({
       key: 'k',
       value: undefined,
       header: undefined,

@@ -8,27 +8,32 @@ export interface Access {
   write: boolean
 }
 
-export type Operation =
-  | 'read'
-  | 'head'
-  | 'list'
-  | 'create'
-  | 'append'
-  | 'trim'
-  | 'close'
-  | 'delete'
-  | 'issue_token'
-  | 'revoke_token'
-  | 'list_tokens'
-  | 'consume'
-  | 'describe_group'
-  | 'delete_group'
-  | 'cluster_read'
-  | 'node_read'
-  | 'transfer_stream'
-  | 'update_node_slots'
+export const OPERATIONS = [
+  'read',
+  'head',
+  'list',
+  'create',
+  'append',
+  'trim',
+  'close',
+  'delete',
+  'consume',
+  'describe_group',
+  'delete_group',
+  'issue_token',
+  'revoke_token',
+  'list_tokens',
+  'cluster_read',
+  'node_read',
+  'transfer_stream',
+  'update_node_slots',
+] as const
 
-export type Audience = 'pico' | 'durable_streams' | 'admin' | 'kafka'
+export type Operation = (typeof OPERATIONS)[number]
+
+export const AUDIENCES = ['pico', 'durable_streams', 'kafka', 'admin'] as const
+
+export type Audience = (typeof AUDIENCES)[number]
 
 export interface Scope {
   streams: Matcher[]

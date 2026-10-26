@@ -60,7 +60,7 @@ export function recordFilter({ key, value, header, headerValue }: Browse): Recor
 export function recordStart({ start, at }: Browse, partition: Partition, limit: number): RecordStart {
   const position = at === undefined || at === '' ? undefined : Number(at)
 
-  if (start === 'oldest') {
+  if (start === 'earliest') {
     return null
   }
   if (start === 'offset' && position !== undefined) {

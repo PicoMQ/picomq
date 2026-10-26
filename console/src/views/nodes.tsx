@@ -13,13 +13,17 @@ import * as format from '../format'
 import { page, withQuery } from '../location'
 
 export const NODE_COLUMNS: Column<ClusterNode>[] = [
-  { name: 'node', header: 'Node', width: '8rem', cell: (node) => <a href={page('nodes', node.nodeId)}>node {node.nodeId}</a> },
+  { name: 'node', header: 'Node', width: '8rem', cell: (node) => nodeLink(node.nodeId) },
   { name: 'status', header: 'Status', width: '14rem', cell: status },
   { name: 'address', header: 'Address', cell: (node) => node.advertisedAddress ?? 'none' },
   { name: 'placed', header: 'Logs placed', width: '10rem', kind: 'number', cell: (node) => format.count(node.placedCount) },
   { name: 'opening', header: 'Opening', width: '8rem', kind: 'number', cell: (node) => format.count(node.openingCount) },
   { name: 'slots', header: 'Slots', width: '7rem', kind: 'number', cell: (node) => format.count(node.slots) },
 ]
+
+export function nodeLink(id: number | null, absent = 'none') {
+  return id === null ? absent : <a href={page('nodes', id)}>node {id}</a>
+}
 
 export function status(node: ClusterNode) {
   return (
@@ -47,7 +51,7 @@ export default function Nodes() {
           <option value="true">Fenced</option>
         </Select>
       </Toolbar>
-      <List pages={pages} columns={NODE_COLUMNS} rowKey={(node) => String(node.nodeId)} noun="nodes" />
+      <List pages={pages} columns={NODE_COLUMNS} rowKey={(node) => String(node.nodeId)} noun="node" />
     </View>
   )
 }

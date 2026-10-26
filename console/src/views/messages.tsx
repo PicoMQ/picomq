@@ -18,9 +18,10 @@ import {
 import { partition, type Partition, type TopicDetail } from '../api/topics'
 import { Button } from '../components/button'
 import { Input, Select, numberOf } from '../components/control'
+import { DateTime } from '../components/datetime'
 import { Dialog } from '../components/dialog'
 import { Field, pretty } from '../components/field'
-import { Form, Label } from '../components/form'
+import { Form, Label, useDraft } from '../components/form'
 import { List } from '../components/list'
 import { Notice, Pending } from '../components/notice'
 import { Table, type Column } from '../components/table'
@@ -83,7 +84,7 @@ interface ControlsProps {
 function Controls({ partitions, index, detail, onRefresh }: ControlsProps) {
   const { path, query, route } = useLocation()
   const [filtering, setFiltering] = useState(false)
-  const start = query.start ?? 'newest'
+  const start = query.start ?? 'latest'
   const live = query.live !== undefined
   const set = (changes: Record<string, string | number | undefined>) =>
     route(withQuery(path, query, { ...changes, record: undefined }))
@@ -130,8 +131,8 @@ function Controls({ partitions, index, detail, onRefresh }: ControlsProps) {
           />
         )}
         <Select prefix="Start" value={start} onChange={(event) => set({ start: event.currentTarget.value, at: undefined })}>
-          <option value="newest">Newest</option>
-          <option value="oldest">Oldest</option>
+          <option value="latest">Latest</option>
+          <option value="earliest">Earliest</option>
           <option value="offset">Offset</option>
           <option value="time">Time</option>
         </Select>
@@ -146,13 +147,7 @@ function Controls({ partitions, index, detail, onRefresh }: ControlsProps) {
           />
         )}
         {start === 'time' && (
-          <Input
-            prefix="From"
-            type="datetime-local"
-            step="0.001"
-            value={query.at === undefined ? '' : format.time(Number(query.at)).replace(' ', 'T')}
-            onChange={(event) => set({ at: new Date(event.currentTarget.value).getTime() })}
-          />
+          <DateTime prefix="From" value={query.at === undefined ? null : Number(query.at)} onChange={(ms) => set({ at: ms ?? undefined })} />
         )}
         <Select prefix="Max" value={query.limit ?? LIMITS[0]} onChange={(event) => set({ limit: event.currentTarget.value })}>
           {LIMITS.map((limit) => (
@@ -170,14 +165,12 @@ function Controls({ partitions, index, detail, onRefresh }: ControlsProps) {
 }
 
 function FilterForm({ filter, onApply, onDone }: { filter: RecordFilter; onApply: (filter: RecordFilter) => void; onDone: () => void }) {
-  const [draft, setDraft] = useState({
+  const { draft, edit } = useDraft({
     key: filter.key ?? '',
     value: filter.value ?? '',
     header: filter.header ?? '',
     headerValue: filter.headerValue ?? '',
   })
-  const edit = (field: keyof typeof draft) => (event: { currentTarget: { value: string } }) =>
-    setDraft({ ...draft, [field]: event.currentTarget.value })
 
   const apply = () => {
     onApply(draft)
@@ -256,7 +249,7 @@ function Browse({ name, index, detail, generation }: { name: string; index: numb
       pages={pages}
       columns={COLUMNS}
       rowKey={(shown) => String(shown.offset)}
-      noun="records"
+      noun="record"
       onSelect={select}
       expanded={opened === undefined ? undefined : { key: opened, content: <FullRecord name={name} index={index} offset={Number(opened)} /> }}
     />
@@ -276,7 +269,7 @@ function Tail({ name, index, from }: { name: string; index: number; from: number
       <Table columns={COLUMNS} rows={tail.items} rowKey={(shown) => String(shown.offset)} follow />
       <Notice kind={tail.error ? 'danger' : 'plain'}>
         {tail.error?.message ??
-          `Live from offset ${format.count(from)}, ${format.count(tail.items.length)} records, keeping the last ${format.count(TAIL_RECORDS)}`}
+          `Live from offset ${format.count(from)}, ${format.counted(tail.items.length, 'record')}, keeping the last ${format.count(TAIL_RECORDS)}`}
       </Notice>
     </>
   )

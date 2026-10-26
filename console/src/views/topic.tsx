@@ -14,7 +14,7 @@ import { Tabs } from '../components/tabs'
 import { Tag } from '../components/tag'
 import { View } from '../components/view'
 import * as format from '../format'
-import { page } from '../location'
+import { topicPage } from '../location'
 import { Configuration } from './configuration'
 import { Messages } from './messages'
 import Missing from './missing'
@@ -77,7 +77,7 @@ export default function TopicView() {
           { label: 'Owners', value: owners(shown) },
         ]}
       />
-      <Tabs tabs={TABS.map((each) => ({ href: page('topics', name, each.path), label: each.label }))} />
+      <Tabs tabs={TABS} href={(path) => topicPage(name, path)} />
       <Content name={name} topic={shown} />
       <Confirm
         title="Delete topic"

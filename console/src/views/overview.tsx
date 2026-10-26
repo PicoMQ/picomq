@@ -14,7 +14,7 @@ import { Table } from '../components/table'
 import { Tag } from '../components/tag'
 import { View } from '../components/view'
 import * as format from '../format'
-import { page } from '../location'
+import { topicPage } from '../location'
 import { NODE_COLUMNS } from './nodes'
 
 import './overview.css'
@@ -55,7 +55,7 @@ export default function Overview() {
       )}
       <section class="overview-section">
         <h2>Nodes</h2>
-        <List pages={pages} columns={NODE_COLUMNS} rowKey={(node) => String(node.nodeId)} noun="nodes" />
+        <List pages={pages} columns={NODE_COLUMNS} rowKey={(node) => String(node.nodeId)} noun="node" />
       </section>
       <section class="overview-section">
         <div class="overview-title">
@@ -70,7 +70,7 @@ export default function Overview() {
           <div class="overview-rankings">
             <Table
               columns={[
-                { name: 'topic', header: 'Largest', cell: (entry) => <a href={page('topics', entry.topic)}>{entry.topic}</a> },
+                { name: 'topic', header: 'Largest', cell: (entry) => <a href={topicPage(entry.topic)}>{entry.topic}</a> },
                 { name: 'size', header: 'Stored', width: '9rem', kind: 'number', cell: (entry) => format.bytes(entry.storedBytes) },
               ]}
               rows={ranking.data.topicsBySize}
@@ -79,7 +79,7 @@ export default function Overview() {
             />
             <Table
               columns={[
-                { name: 'topic', header: 'Busiest', cell: (entry) => <a href={page('topics', entry.topic)}>{entry.topic}</a> },
+                { name: 'topic', header: 'Busiest', cell: (entry) => <a href={topicPage(entry.topic)}>{entry.topic}</a> },
                 {
                   name: 'rate',
                   header: 'Writes',

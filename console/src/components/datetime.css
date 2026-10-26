@@ -1,0 +1,67 @@
+.datetime {
+  position: relative;
+}
+
+.datetime-popup {
+  display: grid;
+  position: absolute;
+  z-index: 1;
+  top: 100%;
+  left: 0;
+  gap: var(--space-3);
+  width: 23rem;
+  margin-top: var(--space-1);
+  padding: var(--space-3);
+  border: var(--line-strong);
+  background: var(--color-surface-0);
+}
+
+.datetime-month {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.datetime-days {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+
+.datetime-weekday {
+  padding: var(--space-1) 0;
+  text-align: center;
+}
+
+.datetime-day {
+  padding: var(--space-2) 0;
+  border: var(--line);
+  border-color: transparent;
+  background: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-align: center;
+  cursor: pointer;
+}
+
+.datetime-day:hover {
+  background: var(--color-surface-2);
+}
+
+.datetime-day[data-kind="outside"] {
+  color: var(--color-text-3);
+}
+
+.datetime-day[aria-current="date"] {
+  border-color: var(--color-border-strong);
+}
+
+.datetime-day[aria-pressed="true"] {
+  background: var(--color-text-1);
+  color: var(--color-surface-0);
+}
+
+.datetime-time {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-2);
+}

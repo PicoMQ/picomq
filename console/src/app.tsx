@@ -1,5 +1,5 @@
 import { MutationCache, QueryCache, QueryClient, QueryClientProvider, useQuery } from '@tanstack/preact-query'
-import { ArrowLeftRight, KeyRound, Layers, LayoutDashboard, LogOut, Server, Users } from 'lucide-preact'
+import { ArrowLeftRight, BookOpen, KeyRound, Layers, LayoutDashboard, LogOut, Server, Users } from 'lucide-preact'
 import { LocationProvider, Route, Router, lazy, useLocation } from 'preact-iso'
 import { useState } from 'preact/hooks'
 
@@ -14,6 +14,8 @@ import { current } from './location'
 
 import './app.css'
 
+const DOCS = 'https://picomq.com/docs/'
+
 const SECTIONS = [
   { href: '/', label: 'Overview', icon: LayoutDashboard },
   { href: '/topics', label: 'Topics', icon: Layers },
@@ -26,8 +28,12 @@ const SECTIONS = [
 const Overview = lazy(() => import('./views/overview'))
 const Topics = lazy(() => import('./views/topics'))
 const TopicView = lazy(() => import('./views/topic'))
+const Groups = lazy(() => import('./views/groups'))
+const GroupView = lazy(() => import('./views/group'))
 const Nodes = lazy(() => import('./views/nodes'))
 const NodeView = lazy(() => import('./views/node'))
+const Transfers = lazy(() => import('./views/transfers'))
+const Tokens = lazy(() => import('./views/tokens'))
 const Missing = lazy(() => import('./views/missing'))
 
 export function App() {
@@ -77,8 +83,13 @@ export function App() {
               <Route path="/topics" component={Topics} />
               <Route path="/topics/:name" component={TopicView} />
               <Route path="/topics/:name/:tab" component={TopicView} />
+              <Route path="/groups" component={Groups} />
+              <Route path="/groups/:id" component={GroupView} />
+              <Route path="/groups/:id/:tab" component={GroupView} />
               <Route path="/nodes" component={Nodes} />
               <Route path="/nodes/:id" component={NodeView} />
+              <Route path="/transfers" component={Transfers} />
+              <Route path="/tokens" component={Tokens} />
               <Route default component={Missing} />
             </Router>
           </main>
@@ -129,6 +140,12 @@ function Navigation() {
           {label}
         </a>
       ))}
+      <div class="app-footer">
+        <a class="app-section" href={DOCS} target="_blank" rel="noreferrer">
+          <BookOpen size={18} />
+          Documentation
+        </a>
+      </div>
     </nav>
   )
 }

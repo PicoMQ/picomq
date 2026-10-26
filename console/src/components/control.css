@@ -55,3 +55,40 @@
   right: var(--space-3);
   pointer-events: none;
 }
+
+.control-check {
+  display: inline-flex;
+  position: relative;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.control-checkbox {
+  position: absolute;
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  opacity: 0;
+}
+
+.control-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  border: var(--line-strong);
+  background: var(--color-surface-0);
+}
+
+.control-checkbox:checked + .control-box {
+  border-color: var(--color-text-1);
+  background: var(--color-text-1);
+  color: var(--color-surface-0);
+}
+
+.control-checkbox:focus-visible + .control-box {
+  outline: var(--line-active);
+  outline-offset: 1px;
+}

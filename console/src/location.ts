@@ -9,7 +9,11 @@ export function current(path: string, hrefs: string[]): string | undefined {
 export function page(...segments: (string | number | undefined)[]): string {
   const present = segments.filter((segment) => segment !== undefined)
 
-  return `/${present.map((segment) => encodeURIComponent(String(segment).replace(/^\//, ''))).join('/')}`
+  return `/${present.map((segment) => encodeURIComponent(segment)).join('/')}`
+}
+
+export function topicPage(name: string, ...rest: (string | number | undefined)[]): string {
+  return page('topics', name.replace(/^\//, ''), ...rest)
 }
 
 export function withQuery(path: string, query: Record<string, string>, changes: Changes): string {

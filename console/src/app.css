@@ -68,6 +68,13 @@
   color: var(--color-text-1);
 }
 
+.app-footer {
+  display: grid;
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: var(--line);
+}
+
 .app-main {
   display: flex;
   grid-area: main;

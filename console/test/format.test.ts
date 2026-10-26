@@ -58,3 +58,16 @@ describe('limit', () => {
     expect(format.limit(2048, format.bytes)).toBe('2.0 KiB')
   })
 })
+
+describe('counted', () => {
+  it('pluralizes regular nouns', () => {
+    expect(format.counted(1, 'node')).toBe('1 node')
+    expect(format.counted(1200, 'record')).toBe('1,200 records')
+  })
+})
+
+describe('time to the second', () => {
+  it('drops the milliseconds', () => {
+    expect(format.time(new Date(2026, 9, 26, 9, 5, 7, 42).getTime(), 'second')).toBe('2026-10-26 09:05:07')
+  })
+})

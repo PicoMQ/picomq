@@ -22,26 +22,31 @@ export function bytes(value: number): string {
   return unit === 0 ? `${Math.round(value)} B` : `${scaled.toFixed(1)} ${UNITS[unit]}`
 }
 
-export function count(value: number): string {
-  return counts.format(value)
+export function count(value: number | null): string {
+  return value === null ? 'unknown' : counts.format(value)
+}
+
+export function counted(value: number, noun: string): string {
+  return `${count(value)} ${value === 1 ? noun : `${noun}s`}`
 }
 
 export function rate(perSecond: number): string {
   return `${rates.format(perSecond)}/s`
 }
 
-export function time(ms: number): string {
+export function time(ms: number, precision: 'second' | 'millisecond' = 'millisecond'): string {
   const date = new Date(ms)
   const pad = (value: number, width = 2) => String(value).padStart(width, '0')
+  const seconds = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 
   return (
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
-    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`
+    (precision === 'second' ? seconds : `${seconds}.${pad(date.getMilliseconds(), 3)}`)
   )
 }
 
 export function clock(ms: number): string {
-  return time(ms).slice(11, 19)
+  return time(ms, 'second').slice(11)
 }
 
 export function ago(ms: number, nowMs: number): string {

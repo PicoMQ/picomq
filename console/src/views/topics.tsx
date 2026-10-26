@@ -13,7 +13,7 @@ import { Tag } from '../components/tag'
 import { Toolbar } from '../components/toolbar'
 import { View } from '../components/view'
 import * as format from '../format'
-import { page } from '../location'
+import { topicPage } from '../location'
 import { TopicForm } from './configuration'
 
 const COLUMNS: Column<Topic>[] = [
@@ -22,7 +22,7 @@ const COLUMNS: Column<Topic>[] = [
     header: 'Name',
     cell: (topic) => (
       <>
-        <a href={page('topics', topic.name)}>{topic.name}</a> {topic.closed && <Tag>closed</Tag>}
+        <a href={topicPage(topic.name)}>{topic.name}</a> {topic.closed && <Tag>closed</Tag>}
       </>
     ),
   },
@@ -61,9 +61,9 @@ export default function Topics() {
       >
         <Search placeholder="Search topics by name prefix" />
       </Toolbar>
-      <List pages={pages} columns={COLUMNS} rowKey={(topic) => topic.id} noun="topics" />
+      <List pages={pages} columns={COLUMNS} rowKey={(topic) => topic.id} noun="topic" />
       <Dialog title="Create topic" open={creating} onClose={() => setCreating(false)}>
-        <TopicForm onCancel={() => setCreating(false)} onSaved={(topic) => route(page('topics', topic.name))} />
+        <TopicForm onCancel={() => setCreating(false)} onSaved={(topic) => route(topicPage(topic.name))} />
       </Dialog>
     </View>
   )

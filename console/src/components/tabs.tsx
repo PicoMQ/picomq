@@ -5,19 +5,20 @@ import { current } from '../location'
 import './tabs.css'
 
 interface Tab {
-  href: string
+  path?: string
   label: string
 }
 
-export function Tabs({ tabs }: { tabs: Tab[] }) {
+export function Tabs({ tabs, href }: { tabs: Tab[]; href: (path: string | undefined) => string }) {
   const { path } = useLocation()
-  const active = current(path, tabs.map((tab) => tab.href))
+  const links = tabs.map((tab) => ({ href: href(tab.path), label: tab.label }))
+  const active = current(path, links.map((link) => link.href))
 
   return (
     <nav class="tabs">
-      {tabs.map((tab) => (
-        <a key={tab.href} class="tabs-item" href={tab.href} aria-current={tab.href === active ? 'page' : undefined}>
-          {tab.label}
+      {links.map((link) => (
+        <a key={link.href} class="tabs-item" href={link.href} aria-current={link.href === active ? 'page' : undefined}>
+          {link.label}
         </a>
       ))}
     </nav>

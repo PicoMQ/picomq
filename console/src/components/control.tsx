@@ -1,4 +1,4 @@
-import { ChevronDown } from 'lucide-preact'
+import { Check, ChevronDown } from 'lucide-preact'
 import type { ComponentChildren, InputHTMLAttributes, SelectHTMLAttributes } from 'preact'
 
 import './control.css'
@@ -23,6 +23,24 @@ export function Select({ prefix, ...props }: Prefixed<SelectHTMLAttributes<HTMLS
         <ChevronDown size={14} />
       </span>
     </Prefix>
+  )
+}
+
+interface CheckboxProps {
+  label: string
+  checked: boolean
+  onChange: () => void
+}
+
+export function Checkbox({ label, checked, onChange }: CheckboxProps) {
+  return (
+    <label class="control-check">
+      <input type="checkbox" class="control-checkbox" checked={checked} onChange={onChange} />
+      <span class="control-box" aria-hidden="true">
+        {checked && <Check size={12} strokeWidth={3} />}
+      </span>
+      {label}
+    </label>
   )
 }
 
