@@ -6,7 +6,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use picomq_common::name::canonical;
 use picomq_common::now_ms;
-use picomq_metadata::{MetadataKvClient, ViewPublisher};
+use picomq_metadata::{MetadataKvClient, MetadataState, ViewPublisher};
 use picomq_protocol::mime::mime_equals;
 use tokio::sync::RwLock;
 
@@ -163,12 +163,9 @@ impl Topics {
     }
 
     pub fn kafka_topics(&self) -> Vec<Topic> {
-        let now = now_ms();
-        self.kv
-            .list_kv(TOPIC_PREFIX)
-            .into_iter()
-            .filter_map(|(_, value)| Topic::decode(&value).ok())
-            .filter(|topic| !topic.expired(now) && topic.name.kafka().is_some())
+        let view = self.views.load();
+        live_topics(&view.state, now_ms())
+            .filter(|topic| topic.name.kafka().is_some())
             .collect()
     }
 
@@ -897,6 +894,15 @@ impl Topics {
         locks.retain(|_, lock| Arc::strong_count(lock) > 1);
         locks.entry(canonical.to_owned()).or_default().clone()
     }
+}
+
+pub fn live_topics(state: &MetadataState, now_ms: i64) -> impl Iterator<Item = Topic> + '_ {
+    state
+        .kv()
+        .range(TOPIC_PREFIX.to_owned()..)
+        .take_while(|(key, _)| key.starts_with(TOPIC_PREFIX))
+        .filter_map(|(_, value)| Topic::decode(value).ok())
+        .filter(move |topic| !topic.expired(now_ms))
 }
 
 pub fn partition_log(topic: &Topic, index: u32) -> Result<Log, ServiceError> {

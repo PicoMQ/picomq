@@ -25,5 +25,5 @@ pub use manager::{
     Registration,
 };
 pub use sink::{CommandSink, LocalSink, SinkStats, SnapshotStats};
-pub use state::{MetadataState, NodeRow, ObjectSpan, StreamOffsetKey, StreamRow};
+pub use state::{MetadataState, NodeRow, ObjectSpan, PendingTransfer, StreamOffsetKey, StreamRow};
 pub use view::{MetadataView, ViewPublisher};

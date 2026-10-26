@@ -643,7 +643,8 @@ async fn transfer_moves_partition_to_target_node() {
             applied
         })
     };
-    let stream_id = node1.transfer(&log, 2).await.unwrap();
+    node1.transfer(&log, 2).await.unwrap();
+    let stream_id = node1.service().stream_id(&log).unwrap().unwrap();
     let raced = racer.await.unwrap();
 
     wait_for_view(&views, "transfer completion", |view| {
@@ -2643,7 +2644,8 @@ async fn grow(
 }
 
 async fn move_log(from: &PicoNode, views: &ViewPublisher, log: &Log, to: i32) {
-    let stream_id = from.transfer(log, to).await.unwrap();
+    from.transfer(log, to).await.unwrap();
+    let stream_id = from.service().stream_id(log).unwrap().unwrap();
     wait_for_view(views, "transfer completion", |view| {
         !view.state.pending_transfers().contains_key(&stream_id)
             && view

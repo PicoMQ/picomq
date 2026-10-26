@@ -8,6 +8,7 @@ pub mod group;
 mod leadership;
 pub mod log;
 pub mod node;
+pub mod overview;
 pub mod ownership;
 pub mod page;
 pub mod partition;

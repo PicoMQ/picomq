@@ -556,9 +556,9 @@ async fn an_http_producer_retry_is_deduplicated_across_a_transfer() {
     let to = 3 - from;
     let accepted = h
         .http
-        .post(format!("{}/admin/transfer", first_admin()))
+        .post(format!("{}/admin/transfers", first_admin()))
         .bearer_auth(token())
-        .json(&serde_json::json!({ "stream": name, "toNode": to }))
+        .json(&serde_json::json!({ "topic": name, "toNode": to }))
         .send()
         .await
         .unwrap();
@@ -821,9 +821,9 @@ async fn a_kafka_producer_is_deduplicated_across_a_transfer() {
 
     let accepted = h
         .http
-        .post(format!("{}/admin/transfer", first_admin()))
+        .post(format!("{}/admin/transfers", first_admin()))
         .bearer_auth(token())
-        .json(&serde_json::json!({ "stream": format!("/{topic}"), "partition": 0, "toNode": to }))
+        .json(&serde_json::json!({ "topic": format!("/{topic}"), "partition": 0, "toNode": to }))
         .send()
         .await
         .unwrap();

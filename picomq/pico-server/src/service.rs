@@ -9,7 +9,7 @@ use picomq_metadata::{MetadataKvClient, ObjectSpan, ViewPublisher};
 use s3stream::{AppendContext, FetchContext, PendingAppend, RecordBatch, Stream, StreamState};
 
 use crate::error::{ErrorKind, ServiceError};
-use crate::log::{Log, decode_stream_id, encode_stream_id};
+use crate::log::{Log, decode_stream_id, encode_stream_id, stream_id_key};
 use crate::producers::{self, Admission, IdLease, ProducerDecision, Producers, Session};
 use crate::record::{self, BatchHeader, LogRecord};
 use crate::retention::Retention;
@@ -260,18 +260,11 @@ impl S3StreamService {
     }
 
     pub fn stream_id(&self, log: &Log) -> Result<Option<u64>, ServiceError> {
-        self.stream_id_at(&log.key())
+        log.stream_id(&self.views.load().state)
     }
 
-    fn stream_id_at(&self, key: &str) -> Result<Option<u64>, ServiceError> {
-        self.kv
-            .get_kv(key)
-            .map(|value| decode_stream_id(&value))
-            .transpose()
-    }
-
-    fn require_stream_id(&self, key: &str) -> Result<u64, ServiceError> {
-        self.stream_id_at(key)?
+    fn require_stream_id(&self, log: &Log) -> Result<u64, ServiceError> {
+        self.stream_id(log)?
             .ok_or_else(|| ServiceError::kind(ErrorKind::NotFound))
     }
 
@@ -280,7 +273,7 @@ impl S3StreamService {
         let gate = self.gate_of(&key);
         let op = gate.op.clone().lock_owned().await;
 
-        let stream_id = self.require_stream_id(&key)?;
+        let stream_id = self.require_stream_id(log)?;
         let stream = self.streams.ensure_open(stream_id).await?;
         let producers = self.load_producers(&stream).await?;
         let held = producers.clone().lock_owned().await;
@@ -322,7 +315,7 @@ impl S3StreamService {
         let gate = self.gate_of(&key);
         let _op = gate.op.lock().await;
 
-        let stream_id = self.require_stream_id(&key)?;
+        let stream_id = self.require_stream_id(log)?;
         let stream = self.streams.ensure_open(stream_id).await?;
         let shared = self.load_producers(&stream).await?;
         let mut producers = shared.lock().await;
@@ -434,7 +427,7 @@ impl S3StreamService {
         max_records: usize,
     ) -> Result<LogRead, ServiceError> {
         let key = log.key();
-        let stream_id = self.require_stream_id(&key)?;
+        let stream_id = self.require_stream_id(log)?;
         let stream = self.streams.ensure_open(stream_id).await?;
 
         let start = from.record_offset();
@@ -470,7 +463,7 @@ impl S3StreamService {
         max_bytes: usize,
     ) -> Result<BatchReadResult, ServiceError> {
         let key = log.key();
-        let stream_id = self.require_stream_id(&key)?;
+        let stream_id = self.require_stream_id(log)?;
         let stream = self.streams.ensure_open(stream_id).await?;
 
         let high_watermark = stream.confirm_offset();
@@ -503,7 +496,7 @@ impl S3StreamService {
     }
 
     pub async fn watermarks(&self, log: &Log) -> Result<StreamWatermarks, ServiceError> {
-        let stream_id = self.require_stream_id(&log.key())?;
+        let stream_id = self.require_stream_id(log)?;
         let stream = self.streams.ensure_open(stream_id).await?;
 
         Ok(StreamWatermarks {
@@ -514,7 +507,7 @@ impl S3StreamService {
     }
 
     pub fn epochs(&self, log: &Log) -> Result<Vec<(u64, u64)>, ServiceError> {
-        let stream_id = self.require_stream_id(&log.key())?;
+        let stream_id = self.require_stream_id(log)?;
         Ok(self
             .views
             .load()
@@ -526,19 +519,19 @@ impl S3StreamService {
     }
 
     pub(crate) fn object_spans(&self, log: &Log) -> Result<Vec<ObjectSpan>, ServiceError> {
-        let stream_id = self.require_stream_id(&log.key())?;
+        let stream_id = self.require_stream_id(log)?;
         Ok(self.views.load().state.object_spans(stream_id))
     }
 
     pub async fn live_offsets(&self, log: &Log) -> Result<LogOffsets, ServiceError> {
-        let stream_id = self.require_stream_id(&log.key())?;
+        let stream_id = self.require_stream_id(log)?;
         let stream = self.streams.ensure_open(stream_id).await?;
 
         Ok(stream_offsets(stream_id, stream.as_ref()))
     }
 
     pub fn offsets(&self, log: &Log) -> Result<LogOffsets, ServiceError> {
-        let stream_id = self.require_stream_id(&log.key())?;
+        let stream_id = self.require_stream_id(log)?;
         match self.streams.held(stream_id) {
             Some(stream) => Ok(stream_offsets(stream_id, stream.as_ref())),
             None => self.committed_offsets(log),
@@ -546,7 +539,7 @@ impl S3StreamService {
     }
 
     fn committed_offsets(&self, log: &Log) -> Result<LogOffsets, ServiceError> {
-        let stream_id = self.require_stream_id(&log.key())?;
+        let stream_id = self.require_stream_id(log)?;
         let committed = self.views.load().state.get_stream(stream_id);
 
         let (start, end) = committed
@@ -580,7 +573,7 @@ impl S3StreamService {
         timeout: Duration,
     ) -> Result<bool, ServiceError> {
         let key = log.key();
-        let Some(stream_id) = self.stream_id_at(&key)? else {
+        let Some(stream_id) = self.stream_id(log)? else {
             return Ok(false);
         };
 
@@ -607,7 +600,7 @@ impl S3StreamService {
         let gate = self.gate_of(&key);
         let _op = gate.op.lock().await;
 
-        let stream_id = self.require_stream_id(&key)?;
+        let stream_id = self.require_stream_id(log)?;
         let stream = self.streams.ensure_open(stream_id).await?;
         self.trim_open(stream.as_ref(), new_start_offset).await
     }
@@ -619,7 +612,7 @@ impl S3StreamService {
         now_ms: i64,
     ) -> Result<(), ServiceError> {
         let key = log.key();
-        let Some(stream_id) = self.stream_id_at(&key)? else {
+        let Some(stream_id) = self.stream_id(log)? else {
             return Ok(());
         };
         if self.retention_start(stream_id, retention, now_ms).is_none() {
@@ -1099,10 +1092,6 @@ impl Append<'_> {
             timestamp_ms: stamped,
         })
     }
-}
-
-pub(crate) fn stream_id_key(stream_id: u64) -> String {
-    format!("idx/sid/{stream_id}")
 }
 
 fn parse_batches(payload: &Bytes) -> Result<Vec<BatchHeader>, ServiceError> {

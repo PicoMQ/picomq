@@ -39,10 +39,12 @@ pub struct AdminArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
-    /// Cluster overview: identity, counts, pending transfers.
+    /// Cluster summary: identity and counts.
     Cluster,
     /// List registered nodes.
     Nodes,
+    /// List in-flight partition moves.
+    Transfers,
     /// One partition of a stream: owner, state, offsets, size.
     Stream {
         stream: String,
@@ -103,25 +105,20 @@ pub async fn run(args: AdminArgs, flags: &Endpoint) -> Result<i32, String> {
                 body["appliedIndex"],
             );
             println!(
-                "streams={} objects={} gcBacklog={} leaseHolder={}",
+                "streams={} objects={} gcBacklog={} pendingTransfers={} leaseHolder={}",
                 body["streamCount"],
                 body["objectCount"],
                 body["gc"]["backlog"],
+                body["pendingTransferCount"],
                 body["leaseHolder"],
             );
-            for pending in body["pendingTransfers"].as_array().into_iter().flatten() {
-                println!(
-                    "transfer stream={} from={} to={}",
-                    pending["streamId"], pending["fromNode"], pending["toNode"],
-                );
-            }
         }
         AdminCommand::Nodes => {
-            let body = api.get("/admin/nodes").await?;
+            let nodes = api.every("/admin/nodes").await?;
             if args.json {
-                return print_json(&body);
+                return print_json(&Value::Array(nodes));
             }
-            for node in body["nodes"].as_array().into_iter().flatten() {
+            for node in &nodes {
                 println!(
                     "node={} epoch={} address={} slots={} opening={} placed={} fenced={}{}",
                     node["nodeId"],
@@ -136,6 +133,24 @@ pub async fn run(args: AdminArgs, flags: &Endpoint) -> Result<i32, String> {
                     } else {
                         ""
                     },
+                );
+            }
+        }
+        AdminCommand::Transfers => {
+            let transfers = api.every("/admin/transfers").await?;
+            if args.json {
+                return print_json(&Value::Array(transfers));
+            }
+            for transfer in &transfers {
+                let log = &transfer["log"];
+                let moved = match (log["topic"].as_str(), log["group"].as_str()) {
+                    (Some(topic), _) => format!("topic={topic} partition={}", log["partition"]),
+                    (None, Some(group)) => format!("group={group}"),
+                    (None, None) => "log=-".to_owned(),
+                };
+                println!(
+                    "{moved} from={} to={}",
+                    transfer["fromNode"], transfer["toNode"],
                 );
             }
         }
@@ -169,15 +184,15 @@ pub async fn run(args: AdminArgs, flags: &Endpoint) -> Result<i32, String> {
             partition,
             wait,
         } => {
-            let mut request = serde_json::json!({ "stream": stream, "toNode": to_node });
+            let mut request = serde_json::json!({ "topic": stream, "toNode": to_node });
             if let Some(partition) = partition {
                 request["partition"] = partition.into();
             }
 
-            let body = api.post("/admin/transfer", &request).await?;
+            let body = api.post("/admin/transfers", &request).await?;
             note(format!(
-                "transfer accepted stream={} partition={} id={} to={}",
-                stream, body["partition"], body["streamId"], to_node
+                "transfer accepted stream={} partition={} to={}",
+                stream, body["partition"], to_node
             ));
             if wait {
                 let moved = body["partition"]
@@ -233,6 +248,23 @@ impl Api {
             .await
             .map_err(|e| e.to_string())?;
         decode(response).await
+    }
+
+    async fn every(&self, path: &str) -> Result<Vec<Value>, String> {
+        let mut items = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let page = match &cursor {
+                Some(cursor) => self.get(&format!("{path}?cursor={cursor}")).await?,
+                None => self.get(path).await?,
+            };
+            items.extend(page["items"].as_array().cloned().unwrap_or_default());
+            match page["next"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => return Ok(items),
+            }
+        }
     }
 
     async fn post(&self, path: &str, body: &Value) -> Result<Value, String> {

@@ -49,6 +49,12 @@ impl MetadataState {
             .collect()
     }
 
+    pub fn opening_count(&self, node_id: i32) -> usize {
+        self.opening_by_node
+            .range((node_id, 0)..=(node_id, u64::MAX))
+            .count()
+    }
+
     pub fn placed_count(&self, node_id: i32) -> usize {
         self.placed_by_node
             .range((node_id, 0)..=(node_id, u64::MAX))

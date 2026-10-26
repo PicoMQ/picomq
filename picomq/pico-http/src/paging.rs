@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use axum::http::{Uri, header};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
@@ -46,6 +48,17 @@ impl Paging {
             after,
             filters: active,
         })
+    }
+
+    pub(crate) fn after_as<T: FromStr>(&self) -> Result<Option<T>, String> {
+        self.after
+            .as_deref()
+            .map(|after| {
+                after
+                    .parse()
+                    .map_err(|_| "the cursor is not valid".to_owned())
+            })
+            .transpose()
     }
 
     pub(crate) fn fetch_count(&self) -> usize {

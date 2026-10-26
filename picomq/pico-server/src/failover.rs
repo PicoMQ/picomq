@@ -16,7 +16,7 @@ use tokio::sync::watch;
 
 use crate::error::ServiceError;
 use crate::leadership;
-use crate::service::stream_id_key;
+use crate::log::stream_id_key;
 use crate::streams::Streams;
 use crate::wal::Wal;
 

@@ -100,7 +100,7 @@ async fn a_fenced_node_is_not_ready() {
         .json()
         .await
         .unwrap();
-    assert_eq!(nodes["nodes"][0]["fenced"], true);
+    assert_eq!(nodes["items"][0]["fenced"], true);
 }
 
 #[tokio::test]
@@ -223,7 +223,7 @@ async fn cluster_nodes_and_stream_detail() {
     assert_eq!(cluster["nodeId"], 1);
     assert_eq!(cluster["registered"], true);
     assert_eq!(cluster["streamCount"], 1);
-    assert_eq!(cluster["pendingTransfers"], serde_json::json!([]));
+    assert_eq!(cluster["pendingTransferCount"], 0);
     assert_eq!(cluster["leaseHolder"], serde_json::Value::Null);
     assert!(cluster["appliedIndex"].as_u64().unwrap() > 0);
 
@@ -235,7 +235,7 @@ async fn cluster_nodes_and_stream_detail() {
         .json()
         .await
         .unwrap();
-    let list = nodes["nodes"].as_array().unwrap();
+    let list = nodes["items"].as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["nodeId"], 1);
     assert_eq!(list[0]["local"], true);
@@ -311,8 +311,8 @@ async fn transfer_validation() {
     let client = reqwest::Client::new();
 
     let absent = client
-        .post(format!("{}/admin/transfer", server.admin_url))
-        .json(&serde_json::json!({ "stream": "/absent", "toNode": 2 }))
+        .post(format!("{}/admin/transfers", server.admin_url))
+        .json(&serde_json::json!({ "topic": "/absent", "toNode": 2 }))
         .send()
         .await
         .unwrap();
@@ -334,16 +334,16 @@ async fn transfer_validation() {
 
     // The target node is not registered, so the proposal is rejected.
     let bad_target = client
-        .post(format!("{}/admin/transfer", server.admin_url))
-        .json(&serde_json::json!({ "stream": "/xfer/a", "toNode": 2 }))
+        .post(format!("{}/admin/transfers", server.admin_url))
+        .json(&serde_json::json!({ "topic": "/xfer/a", "toNode": 2 }))
         .send()
         .await
         .unwrap();
     assert_eq!(bad_target.status(), 400);
 
     let malformed = client
-        .post(format!("{}/admin/transfer", server.admin_url))
-        .json(&serde_json::json!({ "stream": "/xfer/a" }))
+        .post(format!("{}/admin/transfers", server.admin_url))
+        .json(&serde_json::json!({ "topic": "/xfer/a" }))
         .send()
         .await
         .unwrap();

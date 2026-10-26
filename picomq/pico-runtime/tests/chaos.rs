@@ -71,7 +71,7 @@ impl Cluster {
     /// Node `id`'s row as `asker` sees it: (epoch, fenced).
     async fn row(&self, asker: usize, id: i64) -> Option<(i64, bool)> {
         let nodes = self.get(asker, "/admin/nodes").await?;
-        nodes["nodes"].as_array()?.iter().find_map(|node| {
+        nodes["items"].as_array()?.iter().find_map(|node| {
             (node["nodeId"] == id).then(|| {
                 (
                     node["nodeEpoch"].as_i64().unwrap_or_default(),

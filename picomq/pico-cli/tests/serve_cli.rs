@@ -230,7 +230,7 @@ async fn sigterm_hands_the_node_off_and_exits_cleanly() {
             .json()
             .await
             .unwrap();
-        let fenced = nodes["nodes"]
+        let fenced = nodes["items"]
             .as_array()
             .unwrap()
             .iter()

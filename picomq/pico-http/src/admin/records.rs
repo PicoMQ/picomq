@@ -138,12 +138,14 @@ async fn start_of(
     let bad = |message: &str| Box::new(error_response(StatusCode::BAD_REQUEST, message));
     let failed = |error: ServiceError| Box::new(service_error(error));
 
-    if let Some(after) = &paging.after {
-        return after
-            .parse::<u64>()
-            .ok()
-            .and_then(|after| after.checked_add(1))
-            .ok_or_else(|| bad("the cursor is not valid"));
+    match paging.after_as::<u64>() {
+        Ok(Some(after)) => {
+            return after
+                .checked_add(1)
+                .ok_or_else(|| bad("the cursor is not valid"));
+        }
+        Ok(None) => {}
+        Err(message) => return Err(bad(&message)),
     }
 
     let offset = query_param(uri, "offset").map_err(failed)?;

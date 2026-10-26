@@ -10,10 +10,10 @@ use picomq_http::forward::Forward;
 use picomq_http::{HttpProtocol, RoutingMode, RunningServer, ServeOptions, serve};
 use picomq_listener::testing::Authority;
 use picomq_listener::{Listener, Tls};
-use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
+use picomq_metadata::{CommandSink, LocalSink, MetadataCommand, ViewPublisher};
 use picomq_metrics::Metrics;
 use picomq_server::wal::ObjectWal;
-use picomq_server::{CreateCommand, JoinInput, Membership, NodeConfig, PicoNode};
+use picomq_server::{CreateCommand, JoinInput, Log, Membership, NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
 fn loopback() -> SocketAddr {
@@ -446,8 +446,8 @@ async fn a_completed_transfer_is_counted() {
     let before = transfers_completed(&first, &client).await;
 
     let requested = client
-        .post(format!("{}/admin/transfer", first.admin()))
-        .json(&serde_json::json!({ "stream": "/moving", "toNode": 2 }))
+        .post(format!("{}/admin/transfers", first.admin()))
+        .json(&serde_json::json!({ "topic": "/moving", "toNode": 2 }))
         .send()
         .await
         .unwrap();
@@ -728,5 +728,177 @@ async fn a_trim_is_not_sent_to_a_fenced_owner() {
     assert_eq!(status, 200, "{}", trimmed.text().await.unwrap());
 
     dark.server.shutdown().await;
+    first.server.shutdown().await;
+}
+
+async fn every(client: &reqwest::Client, url: &str) -> (Vec<serde_json::Value>, usize) {
+    let mut items = Vec::new();
+    let mut pages = 0;
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let page_url = match &cursor {
+            Some(cursor) => format!("{url}{separator}cursor={cursor}"),
+            None => url.to_owned(),
+        };
+        let page: serde_json::Value = client
+            .get(page_url)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        pages += 1;
+        items.extend(page["items"].as_array().unwrap().iter().cloned());
+        match page["next"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => return (items, pages),
+        }
+    }
+}
+
+#[tokio::test]
+async fn nodes_page_by_id_and_filter_by_fenced() {
+    let shared = Shared::new();
+    let first = start(1, &shared, Options::default()).await;
+    let second = start(2, &shared, Options::default()).await;
+    let third = start(3, &shared, Options::default()).await;
+    let row = first.node.views().load().state.nodes()[&2].clone();
+    first
+        .node
+        .metadata()
+        .fence_node(2, row.epoch, row.heartbeats)
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+    let nodes = format!("{}/admin/nodes", first.admin());
+    let ids = |items: &[serde_json::Value]| -> Vec<i64> {
+        items
+            .iter()
+            .map(|node| node["nodeId"].as_i64().unwrap())
+            .collect()
+    };
+
+    let (all, pages) = every(&client, &format!("{nodes}?limit=1")).await;
+    assert_eq!(ids(&all), [1, 2, 3]);
+    assert_eq!(pages, 3);
+    let (fenced, _) = every(&client, &format!("{nodes}?fenced=true")).await;
+    assert_eq!(ids(&fenced), [2]);
+    let (live, _) = every(&client, &format!("{nodes}?fenced=false")).await;
+    assert_eq!(ids(&live), [1, 3]);
+
+    let refused = client
+        .get(format!("{nodes}?fenced=maybe"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400);
+
+    third.server.shutdown().await;
+    second.server.shutdown().await;
+    first.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn transfers_list_the_partitions_and_group_logs_in_flight() {
+    let shared = Shared::new();
+    let first = start(1, &shared, Options::default()).await;
+    shared
+        .sink
+        .propose(MetadataCommand::RegisterNode {
+            node_id: 9,
+            node_epoch: 1,
+            http_address: String::new(),
+            slots: 1,
+            protocol_addresses: BTreeMap::new(),
+            wal: String::new(),
+        })
+        .await
+        .unwrap();
+    let mut command = CreateCommand::new("/moving", "text/plain");
+    command.partitions = 2;
+    first.node.topics().create(command).await.unwrap();
+    first
+        .node
+        .groups()
+        .commit_offsets(None, "workers", None, &[])
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+    let unopened = client
+        .post(format!("{}/admin/transfers", first.admin()))
+        .json(&serde_json::json!({ "topic": "/moving", "partition": 0, "toNode": 9 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unopened.status(), 409);
+    for partition in 0..2 {
+        first
+            .node
+            .topics()
+            .append(
+                "/moving",
+                partition,
+                picomq_server::AppendCommand {
+                    records: vec![picomq_server::LogRecord::value("x")],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    for partition in 0..2 {
+        let requested = client
+            .post(format!("{}/admin/transfers", first.admin()))
+            .json(&serde_json::json!({ "topic": "/moving", "partition": partition, "toNode": 9 }))
+            .send()
+            .await
+            .unwrap();
+        let status = requested.status();
+        assert_eq!(status, 202, "{}", requested.text().await.unwrap());
+    }
+    first
+        .node
+        .transfer(&Log::Group("workers".into()), 9)
+        .await
+        .unwrap();
+
+    let (transfers, pages) = every(
+        &client,
+        &format!("{}/admin/transfers?limit=2", first.admin()),
+    )
+    .await;
+    assert_eq!(pages, 2);
+    let mut logs: Vec<serde_json::Value> = transfers
+        .iter()
+        .map(|transfer| {
+            assert_eq!(transfer["fromNode"], 1);
+            assert_eq!(transfer["toNode"], 9);
+            transfer["log"].clone()
+        })
+        .collect();
+    logs.sort_by_key(|log| log.to_string());
+    assert_eq!(
+        logs,
+        [
+            serde_json::json!({ "group": "workers" }),
+            serde_json::json!({ "topic": "/moving", "partition": 0 }),
+            serde_json::json!({ "topic": "/moving", "partition": 1 }),
+        ]
+    );
+
+    let cluster: serde_json::Value = client
+        .get(format!("{}/admin/cluster", first.admin()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cluster["pendingTransferCount"], 3);
+
     first.server.shutdown().await;
 }
