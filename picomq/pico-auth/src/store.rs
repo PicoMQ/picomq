@@ -5,6 +5,7 @@
 //! revoke races from clobbering a different generation of the same id.
 
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -31,8 +32,12 @@ pub trait TokenStore: Send + Sync {
     /// replacement credential that reused the id after a recreate.
     async fn delete_if(&self, id: &str, expected: &Verifier) -> Result<bool, AuthError>;
 
-    /// Records whose ids start with `prefix`, ordered by id.
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<TokenRecord>, AuthError>;
+    async fn list_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TokenRecord>, AuthError>;
 
     /// Number of live token records. Informational, never an enforced cap.
     async fn count(&self) -> Result<usize, AuthError>;
@@ -91,11 +96,22 @@ impl TokenStore for MemoryTokenStore {
         }
     }
 
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<TokenRecord>, AuthError> {
+    async fn list_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TokenRecord>, AuthError> {
+        let from = match after {
+            Some(after) if after >= prefix => Bound::Excluded(after.to_owned()),
+            _ => Bound::Included(prefix.to_owned()),
+        };
+
         let map = self.lock()?;
         Ok(map
-            .iter()
-            .filter(|(id, _)| id.starts_with(prefix))
+            .range::<String, _>((from, Bound::Unbounded))
+            .take_while(|(id, _)| id.starts_with(prefix))
+            .take(limit)
             .map(|(_, record)| record.clone())
             .collect())
     }
@@ -150,15 +166,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_prefix_is_ordered() {
+    async fn list_page_is_ordered_bounded_and_resumable() {
         let store = MemoryTokenStore::new();
-        for id in ["t/b", "t/a", "u/x", "t/c"] {
+        for id in ["t/b", "t/a", "u/x", "t/c", "a/z"] {
             store.put_if_absent(record(id)).await.unwrap();
         }
-        let listed = store.list_prefix("t/").await.unwrap();
-        let ids: Vec<_> = listed.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, ["t/a", "t/b", "t/c"]);
-        assert_eq!(store.count().await.unwrap(), 4);
+        let ids = |records: Vec<TokenRecord>| records.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+        assert_eq!(
+            ids(store.list_page("t/", None, 2).await.unwrap()),
+            ["t/a", "t/b"]
+        );
+        assert_eq!(
+            ids(store.list_page("t/", Some("t/b"), 2).await.unwrap()),
+            ["t/c"]
+        );
+        assert_eq!(
+            ids(store.list_page("t/", Some("a/z"), 5).await.unwrap()),
+            ["t/a", "t/b", "t/c"]
+        );
+        assert_eq!(
+            ids(store.list_page("", Some("t/c"), 5).await.unwrap()),
+            ["u/x"]
+        );
+        assert_eq!(store.count().await.unwrap(), 5);
     }
 
     #[tokio::test]

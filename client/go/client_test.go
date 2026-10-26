@@ -134,20 +134,21 @@ var _ = ginkgo.Describe("Pico client", func() {
 		Expect(requests).To(Equal([]string{"HEAD?", "HEAD?2", "POST?2", "POST?2", "GET?2", "POST?2", "GET?2", "GET?2", "POST?2"}))
 	})
 
-	ginkgo.It("lists partition counts and omits offsets the server does not send", func() {
+	ginkgo.It("lists items and returns the next cursor", func() {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = io.WriteString(w, `{"streams":[{"name":"/single","content_type":"application/octet-stream","start_seq":0,"next_seq":5,"partitions":1},{"name":"/multi","content_type":"application/octet-stream","partitions":4}],"has_more":false}`)
+			_, _ = io.WriteString(w, `{"items":[{"name":"/single","content_type":"application/octet-stream","partitions":1},{"name":"/multi","content_type":"application/octet-stream","partitions":4}],"next":"opaque"}`)
 		}))
 		defer server.Close()
 
 		client, err := NewPico(server.URL)
 		Expect(err).NotTo(HaveOccurred())
-		listing, err := client.List(context.Background(), "/", 0)
+		listing, err := client.List(context.Background(), "/", 0, "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(listing.Streams).To(Equal([]StreamInfo{
-			{Name: "/single", ContentType: "application/octet-stream", Start: "0", Next: "5", Partitions: 1},
+			{Name: "/single", ContentType: "application/octet-stream", Partitions: 1},
 			{Name: "/multi", ContentType: "application/octet-stream", Partitions: 4},
 		}))
+		Expect(listing.Next).To(Equal("opaque"))
 	})
 
 	ginkgo.It("authenticates requests without explicit headers", func() {

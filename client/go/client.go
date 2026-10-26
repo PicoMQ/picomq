@@ -48,7 +48,7 @@ type Client interface {
 	Append(context.Context, string, []AppendRecord) (AppendAck, error)
 	Read(context.Context, string, string, ReadOptions) (ReadPage, error)
 	Subscribe(context.Context, string, string, SubscribeOptions) *Subscription
-	List(context.Context, string, uint64) (StreamListing, error)
+	List(context.Context, string, uint64, string) (StreamListing, error)
 	Close(context.Context, string) (string, error)
 	Delete(context.Context, string) (bool, error)
 	Config(context.Context, string) (*TopicConfig, error)

@@ -147,11 +147,14 @@ func (c *PicoClient) read(ctx context.Context, name string, partition *uint32, f
 	return
 }
 
-func (c *PicoClient) List(ctx context.Context, prefix string, limit uint64) (listing StreamListing, err error) {
+func (c *PicoClient) List(ctx context.Context, prefix string, limit uint64, cursor string) (listing StreamListing, err error) {
 	err = c.core.run(ctx, func() error {
 		query := url.Values{"prefix": {prefix}}
 		if limit > 0 {
 			query.Set("limit", strconv.FormatUint(limit, 10))
+		}
+		if cursor != "" {
+			query.Set("cursor", cursor)
 		}
 		response, callErr := c.core.send(ctx, wireRequest{method: http.MethodGet, url: c.core.streamURL("/", query)})
 		if callErr != nil {
@@ -161,31 +164,28 @@ func (c *PicoClient) List(ctx context.Context, prefix string, limit uint64) (lis
 		if callErr != nil {
 			return callErr
 		}
-		// The server uses snake_case; decode explicitly to keep the public model independent.
 		var raw struct {
-			Streams []struct {
-				Name        string  `json:"name"`
-				ContentType string  `json:"content_type"`
-				Start       *uint64 `json:"start_seq"`
-				Next        *uint64 `json:"next_seq"`
-				Partitions  uint64  `json:"partitions"`
-				Closed      bool    `json:"closed"`
-				TTL         uint64  `json:"ttl"`
-				ExpiresAt   string  `json:"expires_at"`
-			} `json:"streams"`
-			HasMore bool `json:"has_more"`
+			Items []struct {
+				Name        string `json:"name"`
+				ContentType string `json:"content_type"`
+				Partitions  uint64 `json:"partitions"`
+				Closed      bool   `json:"closed"`
+				TTL         uint64 `json:"ttl"`
+				ExpiresAt   string `json:"expires_at"`
+			} `json:"items"`
+			Next *string `json:"next"`
 		}
 		if callErr = json.Unmarshal(data, &raw); callErr != nil {
 			return invalidResponse(callErr)
 		}
-		listing = StreamListing{Streams: make([]StreamInfo, 0, len(raw.Streams))}
-		listing.HasMore = raw.HasMore
-		for _, item := range raw.Streams {
+		listing = StreamListing{Streams: make([]StreamInfo, 0, len(raw.Items))}
+		if raw.Next != nil {
+			listing.Next = *raw.Next
+		}
+		for _, item := range raw.Items {
 			listing.Streams = append(listing.Streams, StreamInfo{
 				Name:        item.Name,
 				ContentType: item.ContentType,
-				Start:       formatSeq(item.Start),
-				Next:        formatSeq(item.Next),
 				Partitions:  partitionCount(item.Partitions),
 				Closed:      item.Closed,
 				TTL:         time.Duration(item.TTL) * time.Second,

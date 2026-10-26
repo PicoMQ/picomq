@@ -73,7 +73,7 @@ rust_protocol_suite() {
 
 rust_cluster_suite() {
   log "$1: rust cluster e2e"
-  (cd "$ROOT" && cargo test --locked -p picomq-runtime --test cluster -- --ignored --test-threads=1 --nocapture)
+  (cd "$ROOT" && cargo test --locked -p picomq-runtime --test cluster -- --ignored --test-threads=1 --nocapture "${@:2}")
 }
 
 rust_chaos_suite() {
@@ -143,9 +143,12 @@ run_tls() {
   export PICO_CA_CERTIFICATE="$PICO_CERTS/ca.pem"
   unset PICOMQ_RESTART_CMD PICOMQ_DS_INTEGRATION
 
+  export PICO_ADMIN="https://localhost:9090" PICO_ADMIN_2="https://localhost:9091"
+
   wait_ready "https://localhost:9090" &&
     wait_ready "https://localhost:9091" &&
-    rust_client_suite tls
+    rust_client_suite tls &&
+    rust_cluster_suite tls each_node_answers_for_the_other
 }
 
 mint_certificates() {
@@ -157,7 +160,7 @@ mint_certificates() {
       -subj "/CN=PicoMQ e2e" -keyout "$dir/key.pem" -out "$dir/request.pem" &&
     openssl x509 -req -days 1 -in "$dir/request.pem" -CA "$dir/ca.pem" -CAkey "$dir/ca-key.pem" \
       -CAcreateserial -out "$dir/certificate.pem" \
-      -extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth') &&
+      -extfile <(printf 'subjectAltName=DNS:localhost,DNS:pico1,DNS:pico2,IP:127.0.0.1\nextendedKeyUsage=serverAuth') &&
     chmod 644 "$dir"/*.pem; then
     echo "$dir"
   else
@@ -210,7 +213,7 @@ run() {
       rm -rf "${PICO_CERTS:?}"
     fi
   fi
-  unset PICO_CERTS PICO_CA_CERTIFICATE
+  unset PICO_CERTS PICO_CA_CERTIFICATE PICO_ADMIN
   return "$status"
 }
 

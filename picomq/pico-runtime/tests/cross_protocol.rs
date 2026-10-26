@@ -438,7 +438,7 @@ async fn kafka_writes_pico_reads() {
         .json()
         .await
         .unwrap();
-    let names: Vec<&str> = listing["streams"]
+    let names: Vec<&str> = listing["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -923,8 +923,8 @@ async fn kafka_partitions_are_read_one_at_a_time_over_http() {
         .json()
         .await
         .unwrap();
-    assert_eq!(listing["streams"][0]["partitions"], 3);
-    assert!(listing["streams"][0].get("next_seq").is_none());
+    assert_eq!(listing["items"][0]["partitions"], 3);
+    assert!(listing["items"][0].get("next_seq").is_none());
 
     node.shutdown().await;
 }
@@ -1112,7 +1112,7 @@ async fn kafka_clients_follow_partition_leaders_across_nodes() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while streams
         .iter()
-        .any(|stream_id| node.views().load().state.streams.contains_key(stream_id))
+        .any(|stream_id| node.views().load().state.streams().contains_key(stream_id))
     {
         assert!(
             tokio::time::Instant::now() < deadline,

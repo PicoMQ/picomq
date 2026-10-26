@@ -671,8 +671,8 @@ impl S3StreamService {
         now_ms: i64,
     ) -> Option<(StreamRow, u64)> {
         let view = self.views.load();
-        let row = view.state.streams.get(&stream_id).copied()?;
-        if row.node_id != self.streams.node().node_id() {
+        let row = view.state.streams().get(&stream_id).copied()?;
+        if row.node_id != self.streams.node().node_id() || retention.keeps_all(row.stored_bytes) {
             return None;
         }
 

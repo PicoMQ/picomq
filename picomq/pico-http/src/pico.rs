@@ -28,9 +28,9 @@ use picomq_protocol::pico::{
     FORMAT_JSON, FORMAT_RAW, H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT, H_KAFKA_TOPIC,
     H_KEY, H_MATCH_SEQ, H_NEXT_SEQ, H_PARTITIONS, H_PRODUCER_EPOCH, H_PRODUCER_ID, H_PRODUCER_SEQ,
     H_RECEIVED_SEQ, H_RETENTION_BYTES, H_RETENTION_MS, H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ,
-    H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, Listing, Q_BYTES,
-    Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIMIT, Q_LIVE, Q_PREFIX, Q_SEQ, Q_START_AFTER, SEQ_NOW,
-    StreamEntry, sse_control_event, sse_data_event,
+    H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, Q_BYTES, Q_COUNT,
+    Q_CURSOR, Q_FORMAT, Q_LIVE, Q_PREFIX, Q_SEQ, SEQ_NOW, StreamEntry, sse_control_event,
+    sse_data_event,
 };
 use picomq_protocol::record::{
     PicoRecord, SequencedRecord, decode_batch_append, decode_json_append, encode_batch_read,
@@ -48,6 +48,7 @@ use crate::http::{
     parse_instant_header, parse_partitions_header, parse_retention_headers, parse_strict_u64,
     parse_strict_u64_header, query_param, set_header, truthy,
 };
+use crate::paging::Paging;
 use crate::partition;
 use crate::route::{RoutingMode, is_root, route, stream_name};
 
@@ -406,65 +407,42 @@ impl PicoFrontend {
     }
 
     async fn list(&self, uri: &Uri, permit: Option<&Permit>) -> Result<Response, ServiceError> {
+        let paging =
+            Paging::from_query(uri, &[Q_PREFIX]).map_err(|message| bad_request(&message))?;
         let prefix = match permit {
             Some(permit) => permit.stream_name.clone(),
-            None => query_param(uri, Q_PREFIX)?
-                .filter(|p| !p.is_empty())
-                .unwrap_or_else(|| "/".into()),
-        };
-        let start_after = match (permit, query_param(uri, Q_START_AFTER)?) {
-            (Some(permit), Some(after)) => Some(
-                permit
-                    .principal
-                    .scope
-                    .resolve(Resource::Stream, &after)
-                    .map_err(|_| bad_request("invalid start_after"))?,
-            ),
-            (_, after) => after,
-        };
-        let limit = parse_strict_u64(query_param(uri, Q_LIMIT)?.as_deref(), "invalid limit")?;
-        let result =
-            self.topics
-                .list(&prefix, start_after.as_deref(), limit.unwrap_or(0) as usize)?;
-
-        let listing = Listing {
-            streams: result
-                .topics
-                .iter()
-                .filter(|meta| {
-                    permit.is_none_or(|permit| {
-                        permit
-                            .principal
-                            .scope
-                            .allows_stream(meta.topic.name.spelling())
-                    })
-                })
-                .map(|meta| {
-                    let spelling = meta.topic.name.spelling();
-                    let name = match permit {
-                        Some(permit) => permit.principal.scope.strip(Resource::Stream, spelling),
-                        None => spelling,
-                    };
-                    let single = (meta.partitions.len() == 1).then(|| &meta.partitions[0]);
-                    StreamEntry {
-                        name: name.to_owned(),
-                        content_type: Some(meta.topic.content_type.clone()),
-                        partitions: meta.topic.partitions,
-                        start_seq: single.map(|offsets| offsets.start_offset.record_offset()),
-                        next_seq: single.map(|offsets| offsets.next_offset.record_offset()),
-                        closed: meta.topic.closed,
-                        ttl_seconds: meta.topic.ttl_seconds,
-                        expires_at: meta.topic.expires_at_ms.map(format_instant),
-                    }
-                })
-                .collect(),
-            has_more: result.has_more,
+            None => paging
+                .filter(Q_PREFIX)
+                .filter(|prefix| !prefix.is_empty())
+                .unwrap_or("/")
+                .to_owned(),
         };
 
-        let mut response = base_response(200);
+        let page = self
+            .topics
+            .list(&prefix, paging.after.as_deref(), paging.limit, |topic| {
+                permit.is_none_or(|permit| {
+                    permit.principal.scope.allows_stream(topic.name.spelling())
+                })
+            });
+
+        let mut response = paging.reply(page, |_, topic| {
+            let spelling = topic.name.spelling();
+            let name = match permit {
+                Some(permit) => permit.principal.scope.strip(Resource::Stream, spelling),
+                None => spelling,
+            };
+            StreamEntry {
+                name: name.to_owned(),
+                content_type: Some(topic.content_type.clone()),
+                partitions: topic.partitions,
+                closed: topic.closed,
+                ttl_seconds: topic.ttl_seconds,
+                expires_at: topic.expires_at_ms.map(format_instant),
+            }
+            .encode()
+        });
         set_header(&mut response, header::CACHE_CONTROL.as_str(), "no-store");
-        set_header(&mut response, header::CONTENT_TYPE.as_str(), CT_JSON);
-        *response.body_mut() = Body::from(listing.encode());
         Ok(response)
     }
 
@@ -504,6 +482,7 @@ impl PicoFrontend {
             return Ok(response);
         }
 
+        let _reader = picomq_metrics::live_reader();
         if self
             .topics
             .wait_appended(name, partition, seq, self.long_poll_timeout)
@@ -540,7 +519,9 @@ impl PicoFrontend {
         let name = name.to_owned();
         let max_chunk_size = self.max_chunk_size;
         let deadline = tokio::time::Instant::now() + self.sse_max_duration;
+        let reader = picomq_metrics::live_reader();
         tokio::spawn(async move {
+            let _reader = reader;
             let mut seq = start;
             let mut announced_caught_up = false;
             while tokio::time::Instant::now() < deadline {

@@ -2,13 +2,16 @@
 
 pub mod config;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore, Verifier};
+use picomq_http::forward::{Forward, ForwardError};
 use picomq_http::{RunningServer, ServeOptions};
 use picomq_listener::{Listener, Tls};
 use picomq_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
+use picomq_metrics::{Listener as Kind, Metrics};
 use picomq_server::wal::ObjectWal;
 use picomq_server::{KvTokenStore, NodeConfig, PicoNode};
 use picomq_sql::{
@@ -61,6 +64,10 @@ pub enum RuntimeError {
     },
     #[error("tls: {0}")]
     Tls(#[from] picomq_listener::TlsError),
+    #[error("tls ca certificate {path}: {reason}")]
+    CaCertificate { path: PathBuf, reason: String },
+    #[error("forwarding: {0}")]
+    Forward(#[from] ForwardError),
 }
 
 /// A running PicoMQ process: metadata log, node, background maintenance and
@@ -86,6 +93,9 @@ pub struct PicoServer {
 /// in that order: metadata first (a node must be registered before it can
 /// own streams), then storage and the engine, then listeners.
 pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
+    let metrics = Metrics::install();
+    picomq_kafka::name_operations();
+
     if config.heartbeat_interval.is_zero() || config.node_timeout <= config.heartbeat_interval {
         return Err(RuntimeError::Liveness {
             interval: config.heartbeat_interval,
@@ -135,31 +145,38 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         wal_config: config.wal_uri(),
         ..config.engine.clone()
     };
+    let forward = forward(config.tls_ca_certificate.as_deref())?;
     // Bind before node registration so a default advertise (port 0 configs)
     // carries the real bound port.
     let kafka_tls = config.tls.clone().map(Tls::load).transpose()?;
     let http_tls = kafka_tls.as_ref().map(|tls| tls.alpn(picomq_http::ALPN));
-    let bind = |addr, tls: &Option<Tls>| {
-        Listener::bind(addr, config.backlog, tls.clone())
+    let bind = |kind, addr, tls: &Option<Tls>| {
+        Listener::bind(kind, addr, config.backlog, tls.clone())
             .map_err(|source| RuntimeError::Bind { addr, source })
     };
-    let http_listener = bind(config.addr, &http_tls)?;
+    let http_listener = bind(Kind::Stream, config.addr, &http_tls)?;
     let http_bound = http_listener.local_addr();
     let admin_listener = config
         .admin_addr
-        .map(|addr| bind(addr, &http_tls))
+        .map(|addr| bind(Kind::Admin, addr, &http_tls))
         .transpose()?;
-    let kafka_listener = bind(config.kafka.listen, &kafka_tls)?;
+    let kafka_listener = bind(Kind::Kafka, config.kafka.listen, &kafka_tls)?;
     let kafka_addr = kafka_listener.local_addr();
     let kafka_advertise = config
         .kafka
         .advertise
         .clone()
         .unwrap_or_else(|| kafka_addr.to_string());
-    let protocol_addresses = std::collections::BTreeMap::from([(
+    let mut protocol_addresses = std::collections::BTreeMap::from([(
         picomq_kafka::PROTOCOL_NAME.to_owned(),
         kafka_advertise,
     )]);
+    if let Some(admin) = &admin_listener {
+        protocol_addresses.insert(
+            picomq_http::admin::PROTOCOL_NAME.to_owned(),
+            config.admin_url(admin.local_addr()),
+        );
+    }
     let node_config = NodeConfig {
         node_id: config.node_id,
         node_epoch: config.node_epoch,
@@ -234,6 +251,8 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             max_request_size: config.max_request_size,
             shutdown_drain: config.shutdown_drain,
             shutdown_timeout: config.shutdown_timeout,
+            forward: Some(forward),
+            metrics: Some(metrics),
             leadership: Some(lease.leadership()),
             authorizer,
         },
@@ -372,4 +391,17 @@ impl PicoServer {
         self.lease.shutdown().await;
         drop(self.sink);
     }
+}
+
+fn forward(ca_certificate: Option<&Path>) -> Result<Forward, RuntimeError> {
+    let Some(path) = ca_certificate else {
+        return Ok(Forward::new(None)?);
+    };
+    let refused = |reason: String| RuntimeError::CaCertificate {
+        path: path.to_owned(),
+        reason,
+    };
+
+    let pem = std::fs::read(path).map_err(|error| refused(error.to_string()))?;
+    Forward::new(Some(&pem)).map_err(|error| refused(error.to_string()))
 }

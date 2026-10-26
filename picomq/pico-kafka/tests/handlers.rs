@@ -597,7 +597,13 @@ async fn serve_with(
     config: ListenerConfig,
     tls: Option<Tls>,
 ) -> (SocketAddr, JoinHandle<()>) {
-    let listener = Listener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024, tls).unwrap();
+    let listener = Listener::bind(
+        picomq_metrics::Listener::Kafka,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        1024,
+        tls,
+    )
+    .unwrap();
     let addr = listener.local_addr();
     let server = tokio::spawn(KafkaListener::new(config, broker).serve(listener));
     (addr, server)

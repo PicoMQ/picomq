@@ -436,6 +436,7 @@ impl DsFrontend {
             return Ok(response);
         }
 
+        let _reader = picomq_metrics::live_reader();
         if self
             .topics
             .wait_appended(name, partition, offset, self.long_poll_timeout)
@@ -492,7 +493,9 @@ impl DsFrontend {
         let name = name.to_owned();
         let max_chunk_size = self.max_chunk_size;
         let deadline = tokio::time::Instant::now() + self.sse_max_duration;
+        let reader = picomq_metrics::live_reader();
         tokio::spawn(async move {
+            let _reader = reader;
             let mut offset = start;
             let mut announced_caught_up = false;
             while tokio::time::Instant::now() < deadline {

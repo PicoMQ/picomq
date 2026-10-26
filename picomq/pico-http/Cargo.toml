@@ -23,11 +23,15 @@ futures = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
 humantime = { workspace = true }
+picomq-metrics = { workspace = true }
+reqwest = { workspace = true, features = ["rustls", "stream"] }
 rust-embed = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net"] }
+picomq-listener = { workspace = true, features = ["testing"] }
 async-trait = { workspace = true }
 reqwest = { workspace = true, features = ["http2", "stream"] }
 durable-streams = { workspace = true }

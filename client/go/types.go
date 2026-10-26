@@ -170,7 +170,7 @@ type ReadPage struct {
 
 type StreamListing struct {
 	Streams []StreamInfo
-	HasMore bool
+	Next    string
 }
 
 type RecordsOptions struct {

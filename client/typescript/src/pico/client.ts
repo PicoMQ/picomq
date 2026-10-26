@@ -200,9 +200,14 @@ export class PicoClient implements StreamApi {
     })
   }
 
-  async list(prefix: string, limit = 0, options?: CallOptions): Promise<StreamListing> {
+  async list(
+    prefix: string,
+    limit = 0,
+    cursor?: string,
+    options?: CallOptions,
+  ): Promise<StreamListing> {
     return this.retry.run(
-      () => this.listOnce(prefix, limit, options?.signal),
+      () => this.listOnce(prefix, limit, cursor, options?.signal),
       retryableError,
       options?.signal,
     )
@@ -583,46 +588,47 @@ export class PicoClient implements StreamApi {
   private async listOnce(
     prefix: string,
     limit: number,
+    cursor: string | undefined,
     signal?: AbortSignal,
   ): Promise<StreamListing> {
     let query = `?prefix=${urlencode(prefix)}`
     if (limit > 0) {
       query += `&limit=${limit}`
     }
+    if (cursor !== undefined) {
+      query += `&cursor=${urlencode(cursor)}`
+    }
     const response = await expectPico(
       await this.http.send({ method: 'GET', url: this.url('/', query), signal }),
       [200],
     )
     const body = (await response.json()) as {
-      streams?: Array<{
+      items?: Array<{
         name?: string
         content_type?: string
         partitions?: number
-        start_seq?: number
-        next_seq?: number
         closed?: boolean
         ttl?: number
         expires_at?: string
       }>
-      has_more?: boolean
+      next?: string | null
     }
 
-    return {
-      streams: (body.streams ?? []).map((node) => {
+    const listing: StreamListing = {
+      streams: (body.items ?? []).map((node) => {
         const info: StreamInfo = {
           name: node.name ?? '',
           partitions: node.partitions ?? 1,
           closed: node.closed ?? false,
         }
-        if (node.start_seq !== undefined) info.start = String(node.start_seq)
-        if (node.next_seq !== undefined) info.next = String(node.next_seq)
         if (node.content_type !== undefined) info.contentType = node.content_type
         if (node.ttl !== undefined) info.ttlSeconds = node.ttl
         if (node.expires_at !== undefined) info.expiresAt = node.expires_at
         return info
       }),
-      hasMore: body.has_more ?? false,
     }
+    if (typeof body.next === 'string') listing.next = body.next
+    return listing
   }
 
   private async fetchOffsetsOnce(

@@ -13,4 +13,4 @@ mod sse;
 mod wire;
 
 pub use error::{CodecError, ErrorKind, WireError};
-pub use wire::{Producer, WireRequest, bearer, check_path, stream_path};
+pub use wire::{Producer, WireRequest, bearer, check_path, stream_path, stream_segment};

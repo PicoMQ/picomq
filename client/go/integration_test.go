@@ -591,7 +591,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		Expect(record4.Records[0].Headers["via"]).To(Equal([]byte("follower")))
 
 		for _, client := range clients {
-			listing, err := client.List(ctx, "/go-client-tests/cluster-", 100)
+			listing, err := client.List(ctx, "/go-client-tests/cluster-", 100, "")
 			Expect(err).NotTo(HaveOccurred())
 			var names []string
 			for _, entry := range listing.Streams {

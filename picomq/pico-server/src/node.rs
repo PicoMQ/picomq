@@ -247,12 +247,12 @@ impl PicoNode {
             return Err(ServiceError::kind(crate::ErrorKind::NotFound));
         };
         let view = self.views.load();
-        let Some(row) = view.state.streams.get(&stream_id).copied() else {
+        let Some(row) = view.state.streams().get(&stream_id).copied() else {
             return Err(ServiceError::kind(crate::ErrorKind::NotFound));
         };
         if !view
             .state
-            .nodes
+            .nodes()
             .get(&to_node)
             .is_some_and(|node| !node.fenced)
         {
@@ -291,6 +291,16 @@ impl PicoNode {
         self.fenced.subscribe()
     }
 
+    pub fn logs_owned(&self) -> u64 {
+        self.views
+            .load()
+            .state
+            .streams_by_node()
+            .get(&self.config.node_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn views(&self) -> Arc<ViewPublisher> {
         self.views.clone()
     }
@@ -311,7 +321,7 @@ impl PicoNode {
             .views
             .load()
             .state
-            .nodes
+            .nodes()
             .get(&node.node_id)
             .filter(|_| !*self.fenced.borrow())
             .map(|row| row.heartbeats)

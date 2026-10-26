@@ -1,0 +1,12 @@
+[package]
+name = "picomq-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Names, records and exports every PicoMQ metric"
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

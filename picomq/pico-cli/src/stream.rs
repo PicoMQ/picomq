@@ -13,6 +13,8 @@ use picomq_client::{
 use crate::io::{note, print_record, stdin_records};
 use crate::schema::SchemaCommand;
 
+const LS_PAGE: u64 = 1_000;
+
 #[derive(Debug, Args)]
 pub struct Endpoint {
     /// Server base URL. Defaults to the profile's, else http://127.0.0.1:4437.
@@ -411,19 +413,26 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
             }
         }
         StreamCommand::Ls { prefix, limit } => {
-            let listing = client.list(&prefix, limit).await?;
-            for stream in &listing.streams {
-                println!(
-                    "{} partitions={} start={} next={} closed={}",
-                    stream.name,
-                    stream.partitions,
-                    stream.start.as_deref().unwrap_or("-"),
-                    stream.next.as_deref().unwrap_or("-"),
-                    stream.closed
-                );
-            }
-            if listing.has_more {
-                note("more streams available, raise --limit");
+            let mut cursor: Option<String> = None;
+            let mut listed = 0;
+
+            'pages: loop {
+                let page = client.list(&prefix, LS_PAGE, cursor.as_deref()).await?;
+                for stream in &page.streams {
+                    if limit > 0 && listed == limit {
+                        break 'pages;
+                    }
+                    println!(
+                        "{} partitions={} closed={}",
+                        stream.name, stream.partitions, stream.closed
+                    );
+                    listed += 1;
+                }
+
+                match page.next {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
             }
         }
         StreamCommand::Close { stream } => {

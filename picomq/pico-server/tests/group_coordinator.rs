@@ -907,7 +907,7 @@ async fn a_group_on_a_fenced_node_waits_for_its_log_to_be_recovered() {
         .await;
     assert!(created.result.is_ok());
 
-    let heartbeats = views.load().state.nodes[&2].heartbeats;
+    let heartbeats = views.load().state.nodes()[&2].heartbeats;
     node1
         .metadata()
         .fence_node(2, node2.metadata().node_epoch(), heartbeats)

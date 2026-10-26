@@ -9,6 +9,7 @@ mod leadership;
 pub mod log;
 pub mod node;
 pub mod ownership;
+pub mod page;
 pub mod partition;
 pub mod producers;
 pub mod record;
@@ -33,6 +34,7 @@ pub use group::{
 pub use log::Log;
 pub use node::{NodeConfig, PicoNode};
 pub use ownership::{MetadataOwnershipService, OwnershipService};
+pub use page::Page;
 pub use partition::Partition;
 pub use picomq_schema::{
     Batch as SchemaBatch, Record as SchemaRecord, Registry as SchemaRegistry, SchemaFormat,
@@ -49,7 +51,7 @@ pub use transfer::TransferWatcher;
 pub use types::{
     AppendBatchResult, AppendCommand, AppendResult, BatchReadResult, CloseResult, CreateCommand,
     CreateResult, LogOffsets, LogRead, MAX_NEW_PARTITIONS, NodeMeta, NumericProducer, OffsetToken,
-    Owner, ReadResult, StreamBatch, StreamWatermarks, SubmittedBatchAppend, TopicList, TopicMeta,
+    Owner, ReadResult, StreamBatch, StreamWatermarks, SubmittedBatchAppend, TopicMeta,
     UpdateTopicCommand,
 };
 pub use waiter::StreamWaiterRegistry;

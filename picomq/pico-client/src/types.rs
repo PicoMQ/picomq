@@ -88,7 +88,7 @@ pub struct ReadPage {
 #[derive(Debug, Clone)]
 pub struct StreamListing {
     pub streams: Vec<StreamInfo>,
-    pub has_more: bool,
+    pub next: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -142,7 +142,7 @@ pub trait StreamApi: Send + Sync {
         limits: ReadLimits,
     ) -> Result<ReadPage>;
 
-    async fn list(&self, prefix: &str, limit: u64) -> Result<StreamListing>;
+    async fn list(&self, prefix: &str, limit: u64, cursor: Option<&str>) -> Result<StreamListing>;
 
     async fn close(&self, name: &str) -> Result<String>;
 

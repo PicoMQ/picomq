@@ -257,7 +257,7 @@ impl Streams {
 
     fn open_error(&self, stream_id: u64, error: s3stream::Error) -> ServiceError {
         let view = self.views.load();
-        match view.state.streams.get(&stream_id) {
+        match view.state.streams().get(&stream_id) {
             Some(row) if row.state == StreamState::Opened && row.node_id != self.node.node_id() => {
                 ServiceError::with_message(
                     ErrorKind::Transferring,
@@ -275,7 +275,7 @@ impl Streams {
 
         loop {
             let view = self.views.load();
-            let Some(pending) = view.state.pending_transfers.get(&stream_id).copied() else {
+            let Some(pending) = view.state.pending_transfers().get(&stream_id).copied() else {
                 return Ok(());
             };
 

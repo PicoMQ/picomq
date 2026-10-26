@@ -7,6 +7,7 @@ members = [
     "picomq/pico-metadata",
     "picomq/pico-sql",
     "picomq/pico-server",
+    "picomq/pico-metrics",
     "picomq/pico-listener",
     "picomq/pico-kafka",
     "picomq/pico-http",
@@ -23,6 +24,7 @@ default-members = [
     "picomq/pico-metadata",
     "picomq/pico-sql",
     "picomq/pico-server",
+    "picomq/pico-metrics",
     "picomq/pico-listener",
     "picomq/pico-kafka",
     "picomq/pico-http",
@@ -50,6 +52,7 @@ picomq-metadata = { path = "picomq/pico-metadata" }
 picomq-sql = { path = "picomq/pico-sql" }
 picomq-server = { path = "picomq/pico-server" }
 picomq-listener = { path = "picomq/pico-listener" }
+picomq-metrics = { path = "picomq/pico-metrics" }
 picomq-kafka = { path = "picomq/pico-kafka" }
 picomq-http = { path = "picomq/pico-http" }
 picomq-runtime = { path = "picomq/pico-runtime" }

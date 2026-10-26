@@ -278,23 +278,29 @@ async fn listing_is_pico_only() {
     let server = start(Protocol::Pico, dir.path()).await;
     let client = connect(Protocol::Pico, &server.endpoint).unwrap();
 
-    client
-        .create("/streams/a", &CreateOptions::new("text/plain"))
+    for name in ["/streams/a", "/streams/b", "/streams/c"] {
+        client
+            .create(name, &CreateOptions::new("text/plain"))
+            .await
+            .unwrap();
+    }
+    let names = |listing: &picomq_client::StreamListing| -> Vec<String> {
+        listing.streams.iter().map(|s| s.name.clone()).collect()
+    };
+
+    let first = client.list("/streams/", 2, None).await.unwrap();
+    assert_eq!(names(&first), ["/streams/a", "/streams/b"]);
+    let rest = client
+        .list("/streams/", 2, first.next.as_deref())
         .await
         .unwrap();
-    client
-        .create("/streams/b", &CreateOptions::new("text/plain"))
-        .await
-        .unwrap();
-    let listing = client.list("/streams/", 0).await.unwrap();
-    let names: Vec<&str> = listing.streams.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, vec!["/streams/a", "/streams/b"]);
-    assert!(!listing.has_more);
+    assert_eq!(names(&rest), ["/streams/c"]);
+    assert_eq!(rest.next, None);
 
     server.server.shutdown().await;
 
     let ds = connect(Protocol::Ds, "http://127.0.0.1:1").unwrap();
-    let error = ds.list("/", 0).await.unwrap_err();
+    let error = ds.list("/", 0, None).await.unwrap_err();
     assert_eq!(error.code, "unsupported", "{error}");
 }
 

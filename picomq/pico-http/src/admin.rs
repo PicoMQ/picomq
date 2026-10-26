@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
@@ -23,13 +24,19 @@ use picomq_auth::{
     check_issue, scope_from_json, scope_to_json,
 };
 use picomq_metadata::{MetadataState, NodeRow, Proposer};
-use picomq_server::{Log, OwnershipService, PicoNode, ServiceError, Topic, partition_log};
-use s3stream::StreamState;
+use picomq_metrics::Metrics;
+use picomq_server::{Log, Page, PicoNode, ServiceError, Topic, partition_log};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::common::{auth_error, authenticate, gate, service_error};
+use crate::common::{auth_error, authenticate, error_response, gate, json_body, service_error};
+use crate::forward::{Forward, served_by};
+use crate::paging::Paging;
 use crate::partition;
+
+pub const PROTOCOL_NAME: &str = "admin";
+
+const NODE_METRICS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What `/ready` reports on.
 ///
@@ -38,12 +45,14 @@ use crate::partition;
 /// not node state: an embedded node with no HTTP has no use for it.
 #[derive(Clone)]
 pub struct AdminState {
-    node: Arc<PicoNode>,
+    pub(crate) node: Arc<PicoNode>,
     serving: Arc<AtomicBool>,
     /// Maintenance-lease holdership, when the host runs a lease keeper.
     leadership: Option<watch::Receiver<bool>>,
     /// Bearer enforcement on `/admin` routes. `None` leaves them open.
-    authorizer: Option<Arc<Authorizer>>,
+    pub(crate) authorizer: Option<Arc<Authorizer>>,
+    pub(crate) forward: Option<Forward>,
+    metrics: Option<Metrics>,
 }
 
 impl AdminState {
@@ -53,7 +62,19 @@ impl AdminState {
             serving: Arc::new(AtomicBool::new(true)),
             leadership: None,
             authorizer: None,
+            forward: None,
+            metrics: None,
         }
+    }
+
+    pub fn with_metrics(mut self, metrics: Option<Metrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    pub fn with_forward(mut self, forward: Option<Forward>) -> Self {
+        self.forward = forward;
+        self
     }
 
     pub fn with_leadership(mut self, leadership: Option<watch::Receiver<bool>>) -> Self {
@@ -92,13 +113,16 @@ pub fn router(state: AdminState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/metrics", get(metrics))
         .route("/admin/cluster", get(cluster))
         .route("/admin/nodes", get(nodes))
         .route("/admin/nodes/{id}", post(update_node))
-        .route("/admin/streams/{*name}", get(stream))
+        .route("/admin/nodes/{id}/metrics", get(node_metrics))
+        .route("/admin/nodes/{id}/offsets", post(crate::offsets::answer))
         .route("/admin/transfer", post(transfer))
         .route("/admin/tokens", get(list_tokens).post(issue_token))
         .route("/admin/tokens/{*id}", delete(revoke_token))
+        .merge(crate::topics::routes())
         .route("/", get(|| async { asset("index.html") }))
         .fallback(get(|uri: Uri| async move {
             asset(uri.path().trim_start_matches('/'))
@@ -220,19 +244,19 @@ async fn cluster(State(state): State<AdminState>, headers: HeaderMap) -> Respons
         "registered": row.is_some(),
         "fenced": row.is_some_and(|row| row.fenced),
         "appliedIndex": view.applied_index,
-        "streamCount": view.state.streams.len(),
-        "objectCount": view.state.stream_set_objects.len() + view.state.stream_objects.len(),
-        "streamSetObjectCount": view.state.stream_set_objects.len(),
-        "streamObjectCount": view.state.stream_objects.len(),
-        "preparedObjectCount": view.state.prepared.len(),
+        "streamCount": view.state.streams().len(),
+        "objectCount": view.state.stream_set_objects().len() + view.state.stream_objects().len(),
+        "streamSetObjectCount": view.state.stream_set_objects().len(),
+        "streamObjectCount": view.state.stream_objects().len(),
+        "preparedObjectCount": view.state.prepared().len(),
         // A head that does not advance while depth grows means a stuck cleaner.
         "gc": {
-            "backlog": view.state.mark_destroyed.len(),
-            "oldestSeq": view.state.mark_destroyed.keys().next().copied(),
-            "nextSeq": view.state.next_destroyed_seq,
+            "backlog": view.state.mark_destroyed().len(),
+            "oldestSeq": view.state.mark_destroyed().keys().next().copied(),
+            "nextSeq": view.state.next_destroyed_seq(),
         },
-        "kvEntryCount": view.state.kv.len(),
-        "kvBytes": view.state.kv_bytes,
+        "kvEntryCount": view.state.kv().len(),
+        "kvBytes": view.state.kv_bytes(),
         "pendingTransfers": pending_transfers_json(&view.state),
         "leaseHolder": state.lease_holder(),
         "snapshot": {
@@ -262,96 +286,69 @@ async fn nodes(State(state): State<AdminState>, headers: HeaderMap) -> Response 
     let view = state.node.views().load();
     let nodes: Vec<Value> = view
         .state
-        .nodes
+        .nodes()
         .values()
         .map(|node| node_json(&view.state, node, local_id))
         .collect();
     (StatusCode::OK, Json(json!({ "nodes": nodes }))).into_response()
 }
 
-/// Stream detail by name, read entirely from the published view so an admin
-/// GET never opens (and thereby claims) the stream.
-async fn stream(
-    State(state): State<AdminState>,
-    Path(name): Path<String>,
-    uri: Uri,
-    headers: HeaderMap,
-) -> Response {
+async fn metrics(State(state): State<AdminState>, headers: HeaderMap) -> Response {
     if let Err(response) = gate(
         state.authorizer.as_deref(),
         &headers,
-        Operation::StreamInspect,
+        Operation::NodeRead,
         None,
     )
     .await
     {
         return *response;
     }
-    let name = format!("/{name}");
-    let requested = match partition::requested(&uri) {
-        Ok(requested) => requested,
-        Err(e) => return service_error(e),
-    };
-    let topic = match state.node.topics().get(&name).await {
-        Ok(Some(topic)) => topic,
-        Ok(None) => return not_found(&name),
-        Err(e) => return service_error(e),
-    };
-    let (index, log) = match partition_of(&topic, requested) {
-        Ok(chosen) => chosen,
-        Err(e) => return service_error(e),
-    };
-    let stream_id = match state.node.service().stream_id(&log) {
-        Ok(Some(stream_id)) => stream_id,
-        Ok(None) => return not_found(&name),
-        Err(e) => return service_error(e),
-    };
-    let view = state.node.views().load();
-    let row = view.state.streams.get(&stream_id).copied();
-    let owner = match state.node.ownership().owner_of(&log).await {
-        Ok(owner) => owner,
-        Err(e) => return service_error(e),
-    };
-    let config = state.node.config();
-    let (owner_node_id, owner_address) = if owner.local {
-        (config.node_id, config.http_address.clone())
-    } else {
-        (
-            owner.owner_node_id.unwrap_or(-1),
-            owner.owner_advertised_address.clone().unwrap_or_default(),
-        )
-    };
-    let pending = view
-        .state
-        .pending_transfers
-        .get(&stream_id)
-        .map(|p| json!({ "fromNode": p.from_node, "toNode": p.to_node }));
 
-    let body = json!({
-        "name": topic.name.spelling(),
-        "topicId": topic.id.hex(),
-        "partitions": topic.partitions,
-        "partition": index,
-        "streamId": stream_id,
-        "ownerNodeId": owner_node_id,
-        "ownerAdvertisedAddress": owner_address,
-        "ownerLocal": owner.local,
-        "contentType": topic.content_type,
-        "kafkaTopic": topic.name.kafka(),
-        "ttlSeconds": topic.ttl_seconds,
-        "expiresAtMs": topic.expires_at_ms,
-        "closed": topic.closed,
-        "state": row.map(|r| match r.state {
-            StreamState::Opened => "opened",
-            StreamState::Closed => "closed",
-        }),
-        "epoch": row.map(|r| r.epoch),
-        "nodeId": row.map(|r| r.node_id),
-        "startOffset": row.map(|r| r.start_offset),
-        "endOffset": row.map(|r| r.end_offset),
-        "pendingTransfer": pending,
-    });
-    (StatusCode::OK, Json(body)).into_response()
+    rendered(&state)
+}
+
+async fn node_metrics(
+    State(state): State<AdminState>,
+    Path(id): Path<i32>,
+    request: Request,
+) -> Response {
+    if let Err(response) = gate(
+        state.authorizer.as_deref(),
+        request.headers(),
+        Operation::NodeRead,
+        None,
+    )
+    .await
+    {
+        return *response;
+    }
+
+    if id == state.node.config().node_id {
+        return rendered(&state);
+    }
+    let Some(forward) = &state.forward else {
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "this node does not forward requests",
+        );
+    };
+    forward
+        .to(&state.node, id, request, NODE_METRICS_TIMEOUT)
+        .await
+}
+
+fn rendered(state: &AdminState) -> Response {
+    let Some(metrics) = &state.metrics else {
+        return error_response(StatusCode::NOT_FOUND, "this node does not collect metrics");
+    };
+
+    let response = (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        metrics.render(state.node.logs_owned()),
+    )
+        .into_response();
+    served_by(&state.node, response)
 }
 
 /// Requests a live ownership move. Returns 202: the move completes
@@ -434,7 +431,7 @@ async fn update_node(
     let Some(slots) = body.get("slots").and_then(Value::as_u64) else {
         return error_response(StatusCode::BAD_REQUEST, "missing \"slots\"");
     };
-    if !state.node.views().load().state.nodes.contains_key(&id) {
+    if !state.node.views().load().state.nodes().contains_key(&id) {
         return error_response(
             StatusCode::NOT_FOUND,
             format!("node {id} is not registered"),
@@ -445,7 +442,7 @@ async fn update_node(
     }
     let view = state.node.views().load();
     let local_id = state.node.config().node_id;
-    match view.state.nodes.get(&id) {
+    match view.state.nodes().get(&id) {
         Some(node) => {
             (StatusCode::OK, Json(node_json(&view.state, node, local_id))).into_response()
         }
@@ -456,9 +453,7 @@ async fn update_node(
     }
 }
 
-/// Listing is filtered to ids the caller's token matcher allows. `count` is
-/// the number of visible records, informational only, never an enforced cap.
-async fn list_tokens(State(state): State<AdminState>, headers: HeaderMap) -> Response {
+async fn list_tokens(State(state): State<AdminState>, uri: Uri, headers: HeaderMap) -> Response {
     let principal = match authenticate(state.authorizer.as_deref(), &headers).await {
         Ok(principal) => principal,
         Err(response) => return *response,
@@ -468,20 +463,38 @@ async fn list_tokens(State(state): State<AdminState>, headers: HeaderMap) -> Res
     {
         return auth_error(&AuthError::Denied);
     }
-    let records = match state.node.tokens().store().list_prefix("").await {
+    let paging = match Paging::from_query(&uri, &["prefix"]) {
+        Ok(paging) => paging,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+    };
+
+    let records = match state
+        .node
+        .tokens()
+        .store()
+        .list_page(
+            paging.filter("prefix").unwrap_or(""),
+            paging.after.as_deref(),
+            paging.fetch(),
+        )
+        .await
+    {
         Ok(records) => records,
         Err(err) => return auth_error(&err),
     };
-    let tokens: Vec<Value> = records
-        .iter()
-        .filter(|record| match &principal {
-            Some(principal) => principal.scope.tokens.matches(&record.id),
-            None => true,
-        })
-        .map(token_json)
-        .collect();
-    let body = json!({ "count": tokens.len(), "tokens": tokens });
-    (StatusCode::OK, Json(body)).into_response()
+    let page = Page::scan(
+        records
+            .into_iter()
+            .map(|record| (record.id.clone(), record)),
+        paging.limit,
+        |id, _| {
+            principal
+                .as_ref()
+                .is_none_or(|principal| principal.scope.tokens.matches(id))
+        },
+    );
+
+    paging.reply(page, |_, record| token_json(record))
 }
 
 /// Issues a token narrowed from the caller's scope. With auth off the issuer
@@ -600,7 +613,7 @@ fn token_json(record: &TokenRecord) -> Value {
 
 fn node_json(state: &MetadataState, node: &NodeRow, local_id: i32) -> Value {
     let opening = state
-        .opening_by_node
+        .opening_by_node()
         .range((node.node_id, 0)..=(node.node_id, u64::MAX))
         .count();
     json!({
@@ -620,25 +633,16 @@ fn node_json(state: &MetadataState, node: &NodeRow, local_id: i32) -> Value {
 }
 
 /// Request bodies are parsed only once the caller is authorized.
-fn json_body(body: &Bytes) -> Result<Value, Box<Response>> {
-    serde_json::from_slice(body).map_err(|_| {
-        Box::new(error_response(
-            StatusCode::BAD_REQUEST,
-            "expected a JSON body",
-        ))
-    })
-}
-
 fn registration(state: &MetadataState, node: Proposer) -> Option<&NodeRow> {
     state
-        .nodes
+        .nodes()
         .get(&node.node_id)
         .filter(|row| row.epoch == node.node_epoch)
 }
 
 fn pending_transfers_json(state: &MetadataState) -> Vec<Value> {
     state
-        .pending_transfers
+        .pending_transfers()
         .iter()
         .map(|(stream_id, p)| {
             json!({
@@ -652,10 +656,6 @@ fn pending_transfers_json(state: &MetadataState) -> Vec<Value> {
 
 fn not_found(name: &str) -> Response {
     error_response(StatusCode::NOT_FOUND, format!("stream {name} not found"))
-}
-
-fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
-    (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
 fn partition_of(topic: &Topic, requested: Option<u32>) -> Result<(u32, Log), ServiceError> {

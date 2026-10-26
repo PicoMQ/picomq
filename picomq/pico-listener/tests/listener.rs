@@ -71,7 +71,8 @@ async fn served_certificate(
 
 #[tokio::test]
 async fn plain_connections_pass_through() {
-    let mut listener = Listener::bind(loopback(), 16, None).unwrap();
+    let mut listener =
+        Listener::bind(picomq_metrics::Listener::Stream, loopback(), 16, None).unwrap();
     let mut client = TcpStream::connect(listener.local_addr()).await.unwrap();
     client.write_all(b"ping").await.unwrap();
 
@@ -80,7 +81,7 @@ async fn plain_connections_pass_through() {
     client.read_exact(&mut pong).await.unwrap();
 
     assert_eq!(&pong, b"ping");
-    assert!(matches!(stream, Stream::Plain(_)));
+    assert!(!stream.is_tls());
 }
 
 #[tokio::test]
@@ -89,7 +90,8 @@ async fn tls_connections_are_decrypted() {
     let authority = Authority::new().unwrap();
     let issued = authority.issue(&["localhost"]).unwrap();
     let tls = Tls::load(write(dir.path(), &issued, &issued.key)).unwrap();
-    let mut listener = Listener::bind(loopback(), 16, Some(tls)).unwrap();
+    let mut listener =
+        Listener::bind(picomq_metrics::Listener::Stream, loopback(), 16, Some(tls)).unwrap();
 
     let addr = listener.local_addr();
     let client = tokio::spawn(async move {
@@ -102,7 +104,7 @@ async fn tls_connections_are_decrypted() {
 
     let stream = echo(&mut listener).await;
     assert_eq!(&client.await.unwrap(), b"ping");
-    assert!(matches!(stream, Stream::Tls(_)));
+    assert!(stream.is_tls());
 }
 
 #[tokio::test]
@@ -111,8 +113,15 @@ async fn only_listeners_that_state_protocols_offer_them() {
     let authority = Authority::new().unwrap();
     let issued = authority.issue(&["localhost"]).unwrap();
     let tls = Tls::load(write(dir.path(), &issued, &issued.key)).unwrap();
-    let mut http = Listener::bind(loopback(), 16, Some(tls.alpn(&[b"h2", b"http/1.1"]))).unwrap();
-    let mut kafka = Listener::bind(loopback(), 16, Some(tls)).unwrap();
+    let mut http = Listener::bind(
+        picomq_metrics::Listener::Stream,
+        loopback(),
+        16,
+        Some(tls.alpn(&[b"h2", b"http/1.1"])),
+    )
+    .unwrap();
+    let mut kafka =
+        Listener::bind(picomq_metrics::Listener::Kafka, loopback(), 16, Some(tls)).unwrap();
 
     let http = handshake(&authority, &mut http).await;
     let kafka = handshake(&authority, &mut kafka).await;
@@ -130,7 +139,13 @@ async fn a_stalled_handshake_times_out_without_holding_up_others() {
         handshake_timeout: Duration::from_secs(2),
         ..write(dir.path(), &issued, &issued.key)
     };
-    let mut listener = Listener::bind(loopback(), 16, Some(Tls::load(config).unwrap())).unwrap();
+    let mut listener = Listener::bind(
+        picomq_metrics::Listener::Stream,
+        loopback(),
+        16,
+        Some(Tls::load(config).unwrap()),
+    )
+    .unwrap();
 
     let mut silent = TcpStream::connect(listener.local_addr()).await.unwrap();
     let served = tokio::time::timeout(
@@ -157,7 +172,13 @@ async fn a_renewed_certificate_is_served_without_a_restart() {
         reload_interval: Duration::from_millis(100),
         ..write(dir.path(), &first, &first.key)
     };
-    let mut listener = Listener::bind(loopback(), 16, Some(Tls::load(config).unwrap())).unwrap();
+    let mut listener = Listener::bind(
+        picomq_metrics::Listener::Stream,
+        loopback(),
+        16,
+        Some(Tls::load(config).unwrap()),
+    )
+    .unwrap();
     assert_eq!(
         served_certificate(&authority, &mut listener).await,
         first.der
@@ -192,7 +213,13 @@ async fn unusable_files_never_replace_the_current_certificate() {
     assert!(matches!(garbage, Err(TlsError::Pem { .. })));
 
     let tls = Tls::load(write(dir.path(), &issued, &issued.key)).unwrap();
-    let mut listener = Listener::bind(loopback(), 16, Some(tls.clone())).unwrap();
+    let mut listener = Listener::bind(
+        picomq_metrics::Listener::Stream,
+        loopback(),
+        16,
+        Some(tls.clone()),
+    )
+    .unwrap();
 
     write(dir.path(), &stranger, &issued.key);
     assert!(matches!(tls.reload(), Err(TlsError::Key(_))));

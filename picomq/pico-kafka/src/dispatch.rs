@@ -1,10 +1,14 @@
+use std::time::Instant;
+
 use bytes::Bytes;
 use picomq_auth::{AuthPrincipal, Authorizer, Operation, Scope};
 
+use kafka_protocol::messages::ApiKey;
 use kafka_protocol::protocol::decode_request_header_from_buffer;
 
 use crate::broker::BrokerContext;
 use crate::handlers::{HandlerError, HandlerOutcome};
+use crate::versions::supported_apis;
 
 #[derive(Debug, Clone)]
 pub struct RequestContext {
@@ -70,5 +74,35 @@ pub async fn dispatch(
     frame: &[u8],
 ) -> Result<HandlerOutcome, HandlerError> {
     let (req, body) = request_context(frame, principal)?;
-    crate::handlers::dispatch(ctx, &req, &body).await
+    let api_key = req.api_key;
+    let started = Instant::now();
+
+    let outcome = crate::handlers::dispatch(ctx, &req, &body).await;
+    observed(outcome, api_key, started)
+}
+
+pub fn name_operations() {
+    for api in supported_apis() {
+        if let Ok(key) = ApiKey::try_from(api.api_key) {
+            picomq_metrics::name_kafka_operation(api.api_key, format!("{key:?}"));
+        }
+    }
+}
+
+fn observed(
+    outcome: Result<HandlerOutcome, HandlerError>,
+    api_key: i16,
+    started: Instant,
+) -> Result<HandlerOutcome, HandlerError> {
+    match outcome {
+        Ok(HandlerOutcome::Deferred(deferred)) => {
+            Ok(HandlerOutcome::Deferred(Box::pin(async move {
+                observed(deferred.await, api_key, started)
+            })))
+        }
+        outcome => {
+            picomq_metrics::kafka(api_key, outcome.is_ok(), started.elapsed());
+            outcome
+        }
+    }
 }

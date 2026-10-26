@@ -379,16 +379,16 @@ describe('PicoClient partitions', () => {
     })
   })
 
-  it('decodes partitions from list with absent offsets', async () => {
+  it('decodes list items and the next cursor', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
         json({
-          streams: [
-            { name: '/a', partitions: 1, start_seq: 0, next_seq: 4, closed: false },
+          items: [
+            { name: '/a', partitions: 1, closed: false },
             { name: '/b', partitions: 3, closed: false },
           ],
-          has_more: false,
+          next: 'opaque',
         }),
       ),
     )
@@ -396,10 +396,10 @@ describe('PicoClient partitions', () => {
 
     expect(await client.list('/')).toEqual({
       streams: [
-        { name: '/a', partitions: 1, start: '0', next: '4', closed: false },
+        { name: '/a', partitions: 1, closed: false },
         { name: '/b', partitions: 3, closed: false },
       ],
-      hasMore: false,
+      next: 'opaque',
     })
   })
 })

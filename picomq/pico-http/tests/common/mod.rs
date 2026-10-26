@@ -79,8 +79,8 @@ async fn start_with_node(protocol: HttpProtocol, node: Arc<PicoNode>) -> TestSer
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node.clone(),
-        Listener::bind(loopback, 1024, None).unwrap(),
-        Some(Listener::bind(loopback, 1024, None).unwrap()),
+        Listener::bind(picomq_metrics::Listener::Stream, loopback, 1024, None).unwrap(),
+        Some(Listener::bind(picomq_metrics::Listener::Admin, loopback, 1024, None).unwrap()),
         ServeOptions {
             protocol,
             routing_mode: RoutingMode::LocalAlways,

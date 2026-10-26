@@ -124,7 +124,7 @@ func (c *DurableStreamsClient) read(ctx context.Context, name string, partition 
 	return
 }
 
-func (c *DurableStreamsClient) List(context.Context, string, uint64) (StreamListing, error) {
+func (c *DurableStreamsClient) List(context.Context, string, uint64, string) (StreamListing, error) {
 	return StreamListing{}, unsupported("the Durable Streams protocol does not support stream listing; use the Pico protocol")
 }
 

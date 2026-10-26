@@ -2603,6 +2603,7 @@ dependencies = [
  "picomq-common",
  "picomq-listener",
  "picomq-metadata",
+ "picomq-metrics",
  "picomq-protocol",
  "picomq-schema",
  "picomq-server",
@@ -2611,6 +2612,7 @@ dependencies = [
  "s3stream",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -2630,6 +2632,7 @@ dependencies = [
  "picomq-common",
  "picomq-listener",
  "picomq-metadata",
+ "picomq-metrics",
  "picomq-schema",
  "picomq-server",
  "rustls",
@@ -2649,6 +2652,7 @@ version = "0.1.1"
 dependencies = [
  "arc-swap",
  "picomq-listener",
+ "picomq-metrics",
  "rcgen",
  "rustls",
  "socket2",
@@ -2676,6 +2680,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "picomq-metrics"
+version = "0.1.1"
+
+[[package]]
 name = "picomq-protocol"
 version = "0.1.1"
 dependencies = [
@@ -2699,6 +2707,7 @@ dependencies = [
  "picomq-kafka",
  "picomq-listener",
  "picomq-metadata",
+ "picomq-metrics",
  "picomq-protocol",
  "picomq-schema",
  "picomq-server",
@@ -2751,6 +2760,7 @@ dependencies = [
  "picomq-auth",
  "picomq-common",
  "picomq-metadata",
+ "picomq-metrics",
  "picomq-protocol",
  "picomq-schema",
  "picomq-sql",

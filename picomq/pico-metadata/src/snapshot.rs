@@ -139,6 +139,7 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
             end_offset,
             state: stream_state,
             node_id,
+            stored_bytes: 0,
         };
         state.put_stream(row);
     }
@@ -177,8 +178,7 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
     for _ in 0..get_u64(&mut buf)? {
         let id = get_u64(&mut buf)?;
         let deadline = get_i64(&mut buf)?;
-        state.prepared.insert(id, deadline);
-        state.prepared_by_deadline.insert((deadline, id), ());
+        state.put_prepared(id, deadline);
     }
 
     for _ in 0..get_u64(&mut buf)? {
@@ -190,41 +190,26 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
             .map(|_| get_u64(&mut buf))
             .collect::<Result<Vec<_>, _>>()?;
         let last_write_ms = get_i64(&mut buf)?;
-        for (range, size) in object.offset_ranges.iter().zip(&range_sizes) {
-            state.sso_ranges.insert(
-                (range.stream_id, range.start_offset, object.object_id),
-                (range.end_offset, *size),
-            );
-        }
-        state.sso_by_node.insert((node_id, object.object_id), ());
-        state.stream_set_objects.insert(
-            object.object_id,
-            StreamSetObjectRow {
-                node_id,
-                object,
-                range_sizes,
-                last_write_ms,
-            },
-        );
+        state.put_stream_set_object(StreamSetObjectRow {
+            node_id,
+            object,
+            range_sizes,
+            last_write_ms,
+        });
     }
 
     for _ in 0..get_u64(&mut buf)? {
         let object = get_object(&mut buf)?;
-        let [range] = object.offset_ranges.as_slice() else {
+        if object.offset_ranges.len() != 1 {
             return Err(SnapshotError::Corrupt(
                 "stream object must have exactly one range".into(),
             ));
-        };
-        let key = (range.stream_id, range.start_offset, object.object_id);
+        }
         let last_write_ms = get_i64(&mut buf)?;
-        state.stream_object_ids.insert(object.object_id, key);
-        state.stream_objects.insert(
-            key,
-            StreamObjectRow {
-                object,
-                last_write_ms,
-            },
-        );
+        state.put_stream_object(StreamObjectRow {
+            object,
+            last_write_ms,
+        });
     }
 
     for _ in 0..get_u64(&mut buf)? {
@@ -236,8 +221,7 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
             2 => CompactOperations::DeepDelete,
             other => return Err(SnapshotError::Corrupt(format!("compact operation {other}"))),
         };
-        state.mark_destroyed.insert(seq, (object_id, op));
-        state.destroyed_by_id.insert(object_id, seq);
+        state.put_destroyed(seq, object_id, op);
     }
     state.next_destroyed_seq = get_u64(&mut buf)?;
 
@@ -247,8 +231,7 @@ pub fn decode(bytes: &[u8]) -> Result<MetadataState, SnapshotError> {
         if buf.remaining() < len {
             return Err(SnapshotError::Corrupt("kv value truncated".into()));
         }
-        state.kv_bytes += (key.len() + len) as u64;
-        state.kv.insert(key, Bytes::copy_from_slice(&buf[..len]));
+        state.put_kv(&key, Bytes::copy_from_slice(&buf[..len]));
         buf.advance(len);
     }
 

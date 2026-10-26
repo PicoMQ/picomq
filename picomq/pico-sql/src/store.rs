@@ -30,8 +30,9 @@ pub enum StoreError {
 #[async_trait]
 pub trait MetaStore: Send + Sync {
     /// Append `payload` at exactly `idx`. `Ok(true)` if this call won the
-    /// slot.`Ok(false)` if the index was already taken (caller re-tails and
-    /// retries at a later index). Durable before returning.
+    /// slot.`Ok(false)` if the index was already taken or is covered by the
+    /// stored snapshot (caller re-tails and retries at a later index).
+    /// Durable before returning.
     async fn append(&self, idx: u64, payload: &[u8]) -> Result<bool, StoreError>;
 
     /// Highest index the store knows: `max(log tail, snapshot applied_idx)`.
@@ -87,9 +88,9 @@ fn to_u64(value: i64, what: &str) -> Result<u64, StoreError> {
 }
 
 /// `Ok(false)` for unique-key conflicts, error otherwise (append helper).
-fn insert_outcome(result: Result<(), sqlx::Error>) -> Result<bool, StoreError> {
+fn insert_outcome(result: Result<u64, sqlx::Error>) -> Result<bool, StoreError> {
     match result {
-        Ok(()) => Ok(true),
+        Ok(inserted) => Ok(inserted == 1),
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Ok(false),
         Err(e) => Err(e.into()),
     }
@@ -167,12 +168,16 @@ impl SqliteStore {
 impl MetaStore for SqliteStore {
     async fn append(&self, idx: u64, payload: &[u8]) -> Result<bool, StoreError> {
         let idx = to_i64(idx, "log idx")?;
-        let result = sqlx::query("INSERT INTO meta_log (idx, payload) VALUES (?, ?)")
-            .bind(idx)
-            .bind(payload)
-            .execute(&self.pool)
-            .await
-            .map(|_| ());
+        let result = sqlx::query(
+            "INSERT INTO meta_log (idx, payload) SELECT ?, ? \
+             WHERE ? > COALESCE((SELECT applied_idx FROM meta_snapshot WHERE id = 0), 0)",
+        )
+        .bind(idx)
+        .bind(payload)
+        .bind(idx)
+        .execute(&self.pool)
+        .await
+        .map(|done| done.rows_affected());
         insert_outcome(result)
     }
 
@@ -356,12 +361,15 @@ impl PgStore {
 impl MetaStore for PgStore {
     async fn append(&self, idx: u64, payload: &[u8]) -> Result<bool, StoreError> {
         let idx = to_i64(idx, "log idx")?;
-        let result = sqlx::query("INSERT INTO meta_log (idx, payload) VALUES ($1, $2)")
-            .bind(idx)
-            .bind(payload)
-            .execute(&self.pool)
-            .await
-            .map(|_| ());
+        let result = sqlx::query(
+            "INSERT INTO meta_log (idx, payload) SELECT $1::BIGINT, $2::BYTEA \
+             WHERE $1::BIGINT > COALESCE((SELECT applied_idx FROM meta_snapshot WHERE id = 0), 0)",
+        )
+        .bind(idx)
+        .bind(payload)
+        .execute(&self.pool)
+        .await
+        .map(|done| done.rows_affected());
         insert_outcome(result)
     }
 
@@ -544,6 +552,12 @@ pub async fn contract_suite(store: &dyn MetaStore) {
         3,
         "snapshot idx survives truncation"
     );
+    assert!(
+        !store.append(3, b"below the snapshot").await.unwrap(),
+        "a slot freed by truncation stays taken"
+    );
+    assert!(!store.append(1, b"far below the snapshot").await.unwrap());
+    assert_eq!(store.fetch_after(0, 100).await.unwrap(), vec![]);
     assert!(store.append(4, b"post-truncate").await.unwrap());
     assert_eq!(store.last_idx().await.unwrap(), 4);
 

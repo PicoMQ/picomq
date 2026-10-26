@@ -370,12 +370,6 @@ pub struct TopicMeta {
     pub partitions: Vec<LogOffsets>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TopicList {
-    pub topics: Vec<TopicMeta>,
-    pub has_more: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeMeta {
     pub node_id: i32,

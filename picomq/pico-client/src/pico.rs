@@ -255,11 +255,16 @@ impl PicoClient {
         })
     }
 
-    async fn list_once(&self, prefix: &str, limit: u64) -> Result<StreamListing> {
+    async fn list_once(
+        &self,
+        prefix: &str,
+        limit: u64,
+        cursor: Option<&str>,
+    ) -> Result<StreamListing> {
         let request = ListRequest {
             prefix,
             limit,
-            start_after: None,
+            cursor,
         };
         let response = self.call(request.encode()).await?;
         let body = response.bytes().await?;
@@ -273,8 +278,8 @@ impl PicoClient {
                     name: entry.name,
                     content_type: entry.content_type,
                     partitions: entry.partitions,
-                    start: entry.start_seq.map(|seq| seq.to_string()),
-                    next: entry.next_seq.map(|seq| seq.to_string()),
+                    start: None,
+                    next: None,
                     closed: entry.closed,
                     ttl_seconds: entry.ttl_seconds,
                     expires_at: entry.expires_at,
@@ -284,7 +289,7 @@ impl PicoClient {
                     kafka_topic: None,
                 })
                 .collect(),
-            has_more: listing.has_more,
+            next: listing.next,
         })
     }
 }
@@ -362,8 +367,10 @@ impl StreamApi for PicoClient {
             .await
     }
 
-    async fn list(&self, prefix: &str, limit: u64) -> Result<StreamListing> {
-        self.retry.run(|| self.list_once(prefix, limit)).await
+    async fn list(&self, prefix: &str, limit: u64, cursor: Option<&str>) -> Result<StreamListing> {
+        self.retry
+            .run(|| self.list_once(prefix, limit, cursor))
+            .await
     }
 
     async fn close(&self, name: &str) -> Result<String> {

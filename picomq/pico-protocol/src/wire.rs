@@ -59,6 +59,10 @@ pub struct Producer<'a> {
     pub seq: u64,
 }
 
+pub fn stream_segment(name: &str) -> String {
+    urlencode(name)
+}
+
 pub fn stream_path(name: &str) -> String {
     let name = name.strip_prefix('/').unwrap_or(name);
     let mut path = String::with_capacity(name.len() + 1);

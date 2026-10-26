@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
 use picomq_client::ClientConfig;
-use picomq_protocol::{check_path, stream_path};
+use picomq_protocol::{check_path, stream_segment};
 use serde_json::Value;
 
 use crate::io::note;
@@ -43,12 +43,12 @@ pub enum AdminCommand {
     Cluster,
     /// List registered nodes.
     Nodes,
-    /// Stream detail by name.
+    /// One partition of a stream: owner, state, offsets, size.
     Stream {
         stream: String,
-        /// The partition to inspect, required when the topic has more than one.
-        #[arg(long)]
-        partition: Option<u32>,
+        /// The partition to inspect.
+        #[arg(long, default_value_t = 0)]
+        partition: u32,
     },
     /// Move a stream to another node.
     Transfer {
@@ -140,27 +140,21 @@ pub async fn run(args: AdminArgs, flags: &Endpoint) -> Result<i32, String> {
             }
         }
         AdminCommand::Stream { stream, partition } => {
-            let body = api.get(&admin_stream_path(&stream, partition)).await?;
+            let body = api.get(&partition_path(&stream, partition)).await?;
             if args.json {
                 return print_json(&body);
             }
             println!(
-                "name={} partition={} id={} owner={} address={} local={}",
-                body["name"].as_str().unwrap_or("-"),
-                body["partition"],
+                "stream={stream} partition={} id={} owner={} state={} epoch={}",
+                body["index"],
                 body["streamId"],
                 body["ownerNodeId"],
-                body["ownerAdvertisedAddress"].as_str().unwrap_or("-"),
-                body["ownerLocal"],
-            );
-            println!(
-                "state={} epoch={} start={} end={} closed={} type={}",
                 body["state"].as_str().unwrap_or("-"),
                 body["epoch"],
-                body["startOffset"],
-                body["endOffset"],
-                body["closed"],
-                body["contentType"].as_str().unwrap_or("-"),
+            );
+            println!(
+                "start={} next={} current={} stored_bytes={}",
+                body["startOffset"], body["nextOffset"], body["current"], body["storedBytes"],
             );
             if body["pendingTransfer"].is_object() {
                 println!(
@@ -186,7 +180,11 @@ pub async fn run(args: AdminArgs, flags: &Endpoint) -> Result<i32, String> {
                 stream, body["partition"], body["streamId"], to_node
             ));
             if wait {
-                await_transfer(&api, &stream, partition, to_node).await?;
+                let moved = body["partition"]
+                    .as_u64()
+                    .and_then(|partition| u32::try_from(partition).ok())
+                    .ok_or("the transfer reply names no partition")?;
+                await_transfer(&api, &stream, moved, to_node).await?;
                 note("transfer complete");
             }
             if args.json {
@@ -265,12 +263,11 @@ async fn decode(response: reqwest::Response) -> Result<Value, String> {
     }
 }
 
-fn admin_stream_path(stream: &str, partition: Option<u32>) -> String {
-    let path = format!("/admin/streams{}", stream_path(stream));
-    match partition {
-        Some(partition) => format!("{path}?partition={partition}"),
-        None => path,
-    }
+fn partition_path(stream: &str, partition: u32) -> String {
+    format!(
+        "/admin/topics/{}/partitions/{partition}",
+        stream_segment(stream)
+    )
 }
 
 /// The move is done once no transfer is pending and the row points at the
@@ -278,13 +275,13 @@ fn admin_stream_path(stream: &str, partition: Option<u32>) -> String {
 async fn await_transfer(
     api: &Api,
     stream: &str,
-    partition: Option<u32>,
+    partition: u32,
     to_node: i32,
 ) -> Result<(), String> {
     let deadline = Instant::now() + TRANSFER_WAIT_TIMEOUT;
     loop {
-        let body = api.get(&admin_stream_path(stream, partition)).await?;
-        if body["pendingTransfer"].is_null() && body["nodeId"] == to_node {
+        let body = api.get(&partition_path(stream, partition)).await?;
+        if body["pendingTransfer"].is_null() && body["ownerNodeId"] == to_node {
             return Ok(());
         }
         if Instant::now() >= deadline {

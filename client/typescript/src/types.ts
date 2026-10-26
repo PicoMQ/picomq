@@ -127,7 +127,7 @@ export interface ReadPage {
 
 export interface StreamListing {
   streams: StreamInfo[]
-  hasMore: boolean
+  next?: string
 }
 
 export interface ReadLimits {
@@ -216,7 +216,12 @@ export interface StreamApi {
     options?: PartitionOptions,
   ): Promise<ReadPage>
   subscribe(name: string, from: string, options?: SubscribeOptions): AsyncIterable<SseEvent>
-  list(prefix: string, limit?: number, options?: CallOptions): Promise<StreamListing>
+  list(
+    prefix: string,
+    limit?: number,
+    cursor?: string,
+    options?: CallOptions,
+  ): Promise<StreamListing>
   close(name: string, options?: CallOptions): Promise<string>
   delete(name: string, options?: CallOptions): Promise<boolean>
   config(name: string, options?: CallOptions): Promise<TopicConfig | null>

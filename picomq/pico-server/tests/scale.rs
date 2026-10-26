@@ -93,13 +93,13 @@ async fn run_gate(total: u64) {
 
     {
         let view = node.views().load();
-        assert_eq!(view.state.kv.len() as u64, 4 * total);
-        assert!(view.state.kv_bytes > 0);
+        assert_eq!(view.state.kv().len() as u64, 4 * total);
+        assert!(view.state.kv_bytes() > 0);
         println!(
             "kv entries: {}, kv bytes: {} ({:.0} B/stream)",
-            view.state.kv.len(),
-            view.state.kv_bytes,
-            view.state.kv_bytes as f64 / total as f64
+            view.state.kv().len(),
+            view.state.kv_bytes(),
+            view.state.kv_bytes() as f64 / total as f64
         );
     }
 

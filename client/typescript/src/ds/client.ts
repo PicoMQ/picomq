@@ -167,7 +167,12 @@ export class DsClient implements StreamApi {
     })
   }
 
-  async list(_prefix: string, _limit = 0, _options?: CallOptions): Promise<StreamListing> {
+  async list(
+    _prefix: string,
+    _limit = 0,
+    _cursor?: string,
+    _options?: CallOptions,
+  ): Promise<StreamListing> {
     throw ClientError.unsupported(
       'the Durable Streams protocol has no stream listing; use protocol pico',
     )

@@ -180,7 +180,12 @@ impl StreamApi for DsClient {
             .await
     }
 
-    async fn list(&self, _prefix: &str, _limit: u64) -> Result<StreamListing> {
+    async fn list(
+        &self,
+        _prefix: &str,
+        _limit: u64,
+        _cursor: Option<&str>,
+    ) -> Result<StreamListing> {
         Err(ClientError::unsupported(
             "the Durable Streams protocol has no stream listing; use --protocol pico",
         ))

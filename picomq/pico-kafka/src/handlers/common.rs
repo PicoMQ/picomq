@@ -150,7 +150,7 @@ pub struct Broker {
 
 pub fn brokers(state: &MetadataState, include_fenced: bool) -> Vec<Broker> {
     state
-        .nodes
+        .nodes()
         .values()
         .filter(|node| include_fenced || !node.fenced)
         .filter_map(|node| {

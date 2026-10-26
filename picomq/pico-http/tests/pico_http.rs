@@ -265,16 +265,16 @@ async fn protocol_end_to_end() {
         .json()
         .await
         .unwrap();
-    let names: Vec<&str> = listing["streams"]
+    let names: Vec<&str> = listing["items"]
         .as_array()
         .unwrap()
         .iter()
         .map(|s| s["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["/native/orders", "/native/other"]);
-    assert_eq!(listing["has_more"], false);
+    assert_eq!(listing["next"], Value::Null);
     assert_eq!(
-        listing["streams"][1]["content_type"],
+        listing["items"][1]["content_type"],
         "application/octet-stream"
     );
 
@@ -286,8 +286,30 @@ async fn protocol_end_to_end() {
         .json()
         .await
         .unwrap();
-    assert_eq!(page["streams"].as_array().unwrap().len(), 1);
-    assert_eq!(page["has_more"], true);
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    let cursor = page["next"].as_str().unwrap();
+    let rest: Value = http
+        .get(format!(
+            "{}/?prefix=/native/&limit=1&cursor={cursor}",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rest["items"][0]["name"], "/native/other");
+    assert_eq!(rest["next"], Value::Null);
+    let elsewhere = http
+        .get(format!(
+            "{}/?prefix=/other/&limit=1&cursor={cursor}",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(elsewhere.status(), 400);
 
     // Trim commits asynchronously against the engine's start offset.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

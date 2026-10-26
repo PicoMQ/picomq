@@ -59,18 +59,18 @@ impl OwnershipService for MetadataOwnershipService {
         let view = self.views.load();
         let epoch = view
             .state
-            .streams
+            .streams()
             .get(&stream_id)
             .map(|row| row.epoch)
             .unwrap_or(-1);
 
         let pending = view
             .state
-            .pending_transfers
+            .pending_transfers()
             .get(&stream_id)
             .filter(|pending| {
                 view.state
-                    .nodes
+                    .nodes()
                     .get(&pending.to_node)
                     .is_some_and(|node| !node.fenced)
             });
@@ -86,12 +86,12 @@ impl OwnershipService for MetadataOwnershipService {
             });
         }
 
-        let Some(row) = view.state.streams.get(&stream_id).copied() else {
+        let Some(row) = view.state.streams().get(&stream_id).copied() else {
             return Ok(Owner::local(Some(stream_id), epoch));
         };
         let owner_live = view
             .state
-            .nodes
+            .nodes()
             .get(&row.node_id)
             .is_some_and(|node| !node.fenced);
         let routable = owner_live && (row.state == StreamState::Opened || row.node_id != -1);

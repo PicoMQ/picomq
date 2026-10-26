@@ -1,5 +1,5 @@
 mod schemas;
-mod streams;
+pub(crate) mod streams;
 
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation, Resource};
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{ErrorKind, ServiceError, Topics};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::RoutingMode;
 
@@ -117,6 +117,7 @@ pub(crate) fn auth_error(err: &AuthError) -> Response {
     if let AuthError::Store(detail) = err {
         tracing::warn!(%detail, "auth store failure");
     }
+    crate::observe::refused(Audience::Admin, err);
     let (status, _, message) = crate::auth::status_code(err);
     let mut response = (
         StatusCode::from_u16(status).expect("known status"),
@@ -129,6 +130,19 @@ pub(crate) fn auth_error(err: &AuthError) -> Response {
             .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
     }
     response
+}
+
+pub(crate) fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
+    (status, Json(json!({ "error": message.into() }))).into_response()
+}
+
+pub(crate) fn json_body(body: &[u8]) -> Result<Value, Box<Response>> {
+    serde_json::from_slice(body).map_err(|_| {
+        Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            "expected a JSON body",
+        ))
+    })
 }
 
 pub(crate) fn service_error(error: ServiceError) -> Response {

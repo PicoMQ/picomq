@@ -99,7 +99,7 @@ async fn postgres_sink_multi_writer_snapshot_and_lease() {
     let view_a = views_a.wait_applied(target).await;
     let view_b = views_b.wait_applied(target).await;
     assert_eq!(view_a.state, view_b.state);
-    assert_eq!(view_a.state.streams.len(), 60);
+    assert_eq!(view_a.state.streams().len(), 60);
 
     // The snapshot cycle ran against Postgres (62 rows >> snapshot_every=16).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -138,7 +138,7 @@ async fn postgres_sink_multi_writer_snapshot_and_lease() {
     drop(sink_b);
     let store: Arc<dyn MetaStore> = Arc::new(PgStore::connect(&url).await.unwrap());
     let (sink, views) = SqlSink::open(store, config()).await.unwrap();
-    assert_eq!(views.load().state.streams.len(), 60);
+    assert_eq!(views.load().state.streams().len(), 60);
     let next = sink
         .propose(MetadataCommand::CreateStream {
             proposer: Proposer::new(1, 10),

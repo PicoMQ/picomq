@@ -83,7 +83,7 @@ async fn run_gate(total: u64) {
     ids.sort_unstable();
     ids.dedup();
     assert_eq!(ids.len() as u64, total, "every create got a unique id");
-    assert_eq!(views.load().state.streams.len() as u64, total);
+    assert_eq!(views.load().state.streams().len() as u64, total);
 
     // Group commit did its job: far fewer durable rows than commands. The
     // tailer truncates as it snapshots, so measure rows-ever-written via the
@@ -120,7 +120,7 @@ async fn run_gate(total: u64) {
     let store: Arc<dyn MetaStore> = Arc::new(SqliteStore::open(&path).await.unwrap());
     let (sink, views) = SqlSink::open(store, config()).await.unwrap();
     println!("cold start with {total} streams: {:?}", started.elapsed());
-    assert_eq!(views.load().state.streams.len() as u64, total);
+    assert_eq!(views.load().state.streams().len() as u64, total);
     let next = sink
         .propose(MetadataCommand::CreateStream {
             proposer: Proposer::new(NODE, EPOCH),

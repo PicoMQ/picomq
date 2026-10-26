@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use picomq_metadata::{MetadataView, ViewPublisher};
+use picomq_metrics::Transfer;
 use s3stream::StreamState;
 
 use crate::service::S3StreamService;
@@ -46,7 +47,7 @@ async fn process(
     node_id: i32,
     incoming: &mut HashSet<u64>,
 ) {
-    for (stream_id, pending) in view.state.pending_transfers.iter() {
+    for (stream_id, pending) in view.state.pending_transfers().iter() {
         if pending.to_node == node_id {
             incoming.insert(*stream_id);
         }
@@ -58,13 +59,13 @@ async fn process(
     let completed: Vec<u64> = incoming
         .iter()
         .copied()
-        .filter(|id| !view.state.pending_transfers.contains_key(id))
+        .filter(|id| !view.state.pending_transfers().contains_key(id))
         .collect();
     for stream_id in completed {
         incoming.remove(&stream_id);
         let owned = view
             .state
-            .streams
+            .streams()
             .get(&stream_id)
             .is_some_and(|row| row.node_id == node_id && row.state == StreamState::Closed);
         if owned && let Err(error) = service.streams().ensure_open(stream_id).await {
@@ -76,7 +77,7 @@ async fn process(
 /// Source-side step: drain and close the stream, then propose the completion
 /// at the epoch it closed at.
 async fn release_and_complete(service: &S3StreamService, view: &MetadataView, stream_id: u64) {
-    let Some(row) = view.state.streams.get(&stream_id).copied() else {
+    let Some(row) = view.state.streams().get(&stream_id).copied() else {
         return;
     };
     let node = service.streams().node();
@@ -88,13 +89,18 @@ async fn release_and_complete(service: &S3StreamService, view: &MetadataView, st
                 Ok(None) => return,
                 Err(error) => {
                     tracing::warn!(%error, stream_id, "transfer release failed");
+                    picomq_metrics::transfer(Transfer::Failed);
                     return;
                 }
             }
         }
         _ => return,
     };
-    if let Err(error) = node.complete_transfer(stream_id, epoch).await {
-        tracing::warn!(%error, stream_id, "transfer completion failed");
+    match node.complete_transfer(stream_id, epoch).await {
+        Ok(_) => picomq_metrics::transfer(Transfer::Completed),
+        Err(error) => {
+            tracing::warn!(%error, stream_id, "transfer completion failed");
+            picomq_metrics::transfer(Transfer::Failed);
+        }
     }
 }

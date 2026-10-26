@@ -333,7 +333,13 @@ async fn gated(scope: Scope) -> (picomq_http::RunningServer, String) {
         .unwrap();
     let server = serve(
         node.clone(),
-        Listener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024, None).unwrap(),
+        Listener::bind(
+            picomq_metrics::Listener::Stream,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            1024,
+            None,
+        )
+        .unwrap(),
         None,
         ServeOptions {
             protocol: HttpProtocol::Pico,

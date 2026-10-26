@@ -15,6 +15,7 @@ futures = { workspace = true }
 kafka-protocol = { workspace = true }
 picomq-auth = { workspace = true }
 picomq-listener = { workspace = true }
+picomq-metrics = { workspace = true }
 picomq-common = { workspace = true }
 picomq-metadata = { workspace = true }
 picomq-server = { workspace = true }

@@ -12,6 +12,8 @@ use picomq_metadata::MetadataKvClient;
 /// Metadata KV prefix for token records. Must not start with `/`.
 pub const TOKEN_KEY_PREFIX: &str = "auth/token/";
 
+const EXPIRY_PAGE: usize = 1_000;
+
 /// [`TokenStore`] over the metadata KV.
 pub struct KvTokenStore {
     kv: MetadataKvClient,
@@ -79,14 +81,18 @@ impl TokenStore for KvTokenStore {
         Ok(removed.is_some())
     }
 
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<TokenRecord>, AuthError> {
-        let kv_prefix = format!("{TOKEN_KEY_PREFIX}{prefix}");
-        let entries = self.kv.list_kv(&kv_prefix);
-        let mut out = Vec::with_capacity(entries.len());
-        for (_, value) in entries {
-            out.push(TokenRecord::decode(&value)?);
-        }
-        Ok(out)
+    async fn list_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TokenRecord>, AuthError> {
+        let after = after.map(Self::key);
+        self.kv
+            .list_kv_page(&Self::key(prefix), after.as_deref(), limit)
+            .into_iter()
+            .map(|(_, value)| TokenRecord::decode(&value))
+            .collect()
     }
 
     async fn count(&self) -> Result<usize, AuthError> {
@@ -119,14 +125,26 @@ impl TokenService {
     /// rotated since the list.
     pub async fn remove_expired(&self, now_ms: i64) -> Result<usize, AuthError> {
         let mut removed = 0;
-        for record in self.store.list_prefix("").await? {
-            if record.scope.is_expired(now_ms)
-                && self.store.delete_if(&record.id, &record.verifier).await?
-            {
-                removed += 1;
+        let mut after = None;
+
+        loop {
+            let records = self
+                .store
+                .list_page("", after.as_deref(), EXPIRY_PAGE)
+                .await?;
+            for record in &records {
+                if record.scope.is_expired(now_ms)
+                    && self.store.delete_if(&record.id, &record.verifier).await?
+                {
+                    removed += 1;
+                }
             }
+
+            if records.len() < EXPIRY_PAGE {
+                return Ok(removed);
+            }
+            after = records.last().map(|record| record.id.clone());
         }
-        Ok(removed)
     }
 
     /// Background expiry loop, gated on the leadership watch. Exits when the
@@ -199,15 +217,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_prefix_ordered() {
+    async fn list_page_is_ordered_bounded_and_resumable() {
         let store = KvTokenStore::new(kv().await);
-        for id in ["t/b", "t/a", "u/x"] {
+        for id in ["t/b", "t/a", "u/x", "t/c"] {
             assert!(store.put_if_absent(record(id)).await.unwrap());
         }
-        let listed = store.list_prefix("t/").await.unwrap();
-        let ids: Vec<_> = listed.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, ["t/a", "t/b"]);
-        assert_eq!(store.count().await.unwrap(), 3);
+        let ids = |records: Vec<TokenRecord>| records.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+        assert_eq!(
+            ids(store.list_page("t/", None, 2).await.unwrap()),
+            ["t/a", "t/b"]
+        );
+        assert_eq!(
+            ids(store.list_page("t/", Some("t/b"), 2).await.unwrap()),
+            ["t/c"]
+        );
+        assert_eq!(
+            ids(store.list_page("", Some("t/c"), 5).await.unwrap()),
+            ["u/x"]
+        );
+        assert_eq!(store.count().await.unwrap(), 4);
     }
 
     #[test]
@@ -246,6 +275,26 @@ mod tests {
         assert!(store.get("dead").await.unwrap().is_none());
         assert!(store.get("live").await.unwrap().is_some());
         assert!(store.get("forever").await.unwrap().is_some());
+        assert_eq!(service.remove_expired(100).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn remove_expired_walks_every_page() {
+        let kv = kv().await;
+        let store = KvTokenStore::new(kv.clone());
+        let service = TokenService::new(kv);
+        let total = EXPIRY_PAGE * 2 + 500;
+        for n in 0..total {
+            let id = format!("svc/{n:05}");
+            let expires_at_ms = if n % 2 == 0 { 10 } else { 1_000 };
+            store
+                .put_if_absent(expiring_record(&id, expires_at_ms))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(service.remove_expired(100).await.unwrap(), total / 2);
+        assert_eq!(store.count().await.unwrap(), total / 2);
         assert_eq!(service.remove_expired(100).await.unwrap(), 0);
     }
 

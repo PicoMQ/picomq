@@ -551,6 +551,7 @@ fn fail_all(waiters: Vec<oneshot::Sender<Result<Proposed, MetadataError>>>, mess
 mod tests {
     use super::*;
     use crate::store::SqliteStore;
+    use bytes::Bytes;
     use picomq_metadata::{LocalSink, Proposer};
 
     fn fast_config() -> SqlSinkConfig {
@@ -566,16 +567,24 @@ mod tests {
         SqlSink::open(store, fast_config()).await.unwrap()
     }
 
-    /// Delegating store whose `store_snapshot` parks until released.
-    struct GatedSnapshotStore {
-        inner: SqliteStore,
-        release: tokio::sync::watch::Receiver<bool>,
+    struct TestStore {
+        inner: Arc<SqliteStore>,
+        snapshots: Option<tokio::sync::watch::Receiver<bool>>,
+        lagging: std::sync::atomic::AtomicBool,
+    }
+
+    impl TestStore {
+        fn lagging(&self) -> bool {
+            self.lagging.load(Ordering::SeqCst)
+        }
     }
 
     #[async_trait]
-    impl MetaStore for GatedSnapshotStore {
+    impl MetaStore for TestStore {
         async fn append(&self, idx: u64, payload: &[u8]) -> Result<bool, StoreError> {
-            self.inner.append(idx, payload).await
+            let appended = self.inner.append(idx, payload).await;
+            self.lagging.store(false, Ordering::SeqCst);
+            appended
         }
         async fn last_idx(&self) -> Result<u64, StoreError> {
             self.inner.last_idx().await
@@ -585,20 +594,28 @@ mod tests {
             after: u64,
             limit: u32,
         ) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
+            if self.lagging() {
+                return Ok(Vec::new());
+            }
             self.inner.fetch_after(after, limit).await
         }
         async fn load_snapshot(&self) -> Result<Option<(u64, Vec<u8>)>, StoreError> {
             self.inner.load_snapshot().await
         }
         async fn snapshot_idx(&self) -> Result<Option<u64>, StoreError> {
+            if self.lagging() {
+                return Ok(None);
+            }
             self.inner.snapshot_idx().await
         }
         async fn store_snapshot(&self, applied_idx: u64, payload: &[u8]) -> Result<(), StoreError> {
-            let mut release = self.release.clone();
-            release
-                .wait_for(|open| *open)
-                .await
-                .expect("release sender dropped");
+            if let Some(snapshots) = &self.snapshots {
+                let mut release = snapshots.clone();
+                release
+                    .wait_for(|open| *open)
+                    .await
+                    .expect("release sender dropped");
+            }
             self.inner.store_snapshot(applied_idx, payload).await
         }
         async fn truncate_log(&self, up_to: u64) -> Result<(), StoreError> {
@@ -620,13 +637,66 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_lagging_writer_never_appends_below_another_writers_snapshot() {
+        let inner = Arc::new(SqliteStore::memory().await.unwrap());
+        let config = SqlSinkConfig {
+            snapshot_every: 2,
+            ..fast_config()
+        };
+        let (writer, _) = SqlSink::open(inner.clone(), config).await.unwrap();
+        writer.propose(register(1, 10)).await.unwrap();
+        let lagging = Arc::new(TestStore {
+            inner: inner.clone(),
+            snapshots: None,
+            lagging: std::sync::atomic::AtomicBool::new(true),
+        });
+        let (behind, _) = SqlSink::open(lagging, fast_config()).await.unwrap();
+        let put = |key: &str| MetadataCommand::PutKv {
+            proposer: Proposer::new(1, 10),
+            key: key.to_owned(),
+            value: Bytes::from_static(b"v"),
+        };
+
+        for n in 0..6 {
+            writer.propose(put(&format!("k{n}"))).await.unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = inner.snapshot_idx().await.unwrap().unwrap_or(0);
+            let first = inner.fetch_after(0, 1).await.unwrap();
+            if snapshot >= 4 && first.first().is_none_or(|(idx, _)| *idx > snapshot) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the writer never snapshotted and truncated"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let proposed = behind.propose(put("late")).await.unwrap();
+        assert_eq!(
+            proposed.result,
+            MetadataResult::Value(Some(Bytes::from_static(b"v")))
+        );
+
+        let (_reader, views) = SqlSink::open(inner, fast_config()).await.unwrap();
+        assert_eq!(
+            views.load().state.get_kv("late"),
+            Some(Bytes::from_static(b"v")),
+            "the late write is in the log every reader replays"
+        );
+    }
+
     /// Proposals keep applying while a snapshot store hangs.
     #[tokio::test]
     async fn apply_never_waits_on_snapshot_store() {
         let (release, gate) = tokio::sync::watch::channel(false);
-        let store = Arc::new(GatedSnapshotStore {
-            inner: SqliteStore::memory().await.unwrap(),
-            release: gate,
+        let store = Arc::new(TestStore {
+            inner: Arc::new(SqliteStore::memory().await.unwrap()),
+            snapshots: Some(gate),
+            lagging: std::sync::atomic::AtomicBool::new(false),
         });
         let config = SqlSinkConfig {
             snapshot_every: 5,
@@ -862,7 +932,7 @@ mod tests {
         let view_a = views_a.wait_applied(target).await;
         let view_b = views_b.wait_applied(target).await;
         assert_eq!(view_a.state, view_b.state);
-        assert_eq!(view_a.state.streams.len(), 20);
+        assert_eq!(view_a.state.streams().len(), 20);
     }
 
     /// Group commit actually batches: many concurrent proposes land in fewer
@@ -1051,7 +1121,7 @@ mod tests {
             .await
             .expect("lagging reader never recovered");
         assert_eq!(view_b.state, views_a.load().state);
-        assert_eq!(view_b.state.streams.len(), 21);
+        assert_eq!(view_b.state.streams().len(), 21);
     }
 
     /// Failed commands surface their typed error and change nothing, batched
@@ -1078,6 +1148,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ok.result, MetadataResult::Id(0));
-        assert_eq!(views.load().state.streams.len(), 1);
+        assert_eq!(views.load().state.streams().len(), 1);
     }
 }

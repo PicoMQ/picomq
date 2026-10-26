@@ -51,11 +51,16 @@ pub struct Harness {
 
 impl Harness {
     pub fn new() -> Self {
+        let mut http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        if let Ok(path) = std::env::var("PICO_CA_CERTIFICATE") {
+            let pem = std::fs::read(path).unwrap();
+            for root in reqwest::Certificate::from_pem_bundle(&pem).unwrap() {
+                http = http.add_root_certificate(root);
+            }
+        }
+
         Self {
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap(),
+            http: http.build().unwrap(),
             base: endpoint().trim_end_matches('/').to_owned(),
             bootstrap: bootstrap(),
         }

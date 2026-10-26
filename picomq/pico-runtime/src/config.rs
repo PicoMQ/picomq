@@ -101,6 +101,7 @@ pub struct ServerConfig {
     pub addr: SocketAddr,
     pub admin_addr: Option<SocketAddr>,
     pub advertised_url: Option<String>,
+    pub admin_url: Option<String>,
     /// Which HTTP protocol the data listener speaks.
     pub http_protocol: HttpProtocol,
     pub kafka: KafkaConfig,
@@ -131,6 +132,7 @@ pub struct ServerConfig {
     /// stored token under the same id fails startup.
     pub bootstrap_token: Option<String>,
     pub tls: Option<TlsConfig>,
+    pub tls_ca_certificate: Option<PathBuf>,
     pub schema_registry: Option<String>,
     pub engine: s3stream::Config,
 }
@@ -146,6 +148,7 @@ impl Default for ServerConfig {
             addr: SocketAddr::from(([127, 0, 0, 1], 4437)),
             admin_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9090))),
             advertised_url: None,
+            admin_url: None,
             http_protocol: HttpProtocol::Pico,
             kafka: KafkaConfig::default(),
             meta_backend: MetaBackend::Sqlite(Some(PathBuf::from("./data/meta.db"))),
@@ -167,6 +170,7 @@ impl Default for ServerConfig {
             insecure_allow_remote: false,
             bootstrap_token: None,
             tls: None,
+            tls_ca_certificate: None,
             schema_registry: None,
             engine: s3stream::Config::default(),
         }
@@ -176,6 +180,12 @@ impl Default for ServerConfig {
 impl ServerConfig {
     pub fn advertised_url(&self, bound: SocketAddr) -> String {
         self.advertised_url
+            .clone()
+            .unwrap_or_else(|| format!("{}://{bound}", self.scheme()))
+    }
+
+    pub fn admin_url(&self, bound: SocketAddr) -> String {
+        self.admin_url
             .clone()
             .unwrap_or_else(|| format!("{}://{bound}", self.scheme()))
     }
@@ -255,5 +265,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(tls.advertised_url(bound), "https://127.0.0.1:50123");
+    }
+
+    #[test]
+    fn admin_url_defaults_to_the_bound_address() {
+        let bound = SocketAddr::from(([127, 0, 0, 1], 9_091));
+        assert_eq!(
+            ServerConfig::default().admin_url(bound),
+            "http://127.0.0.1:9091"
+        );
+
+        let configured = ServerConfig {
+            admin_url: Some("https://node2.internal:9090".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(configured.admin_url(bound), "https://node2.internal:9090");
+
+        let tls = ServerConfig {
+            tls: Some(TlsConfig::new("certificate.pem", "key.pem")),
+            ..Default::default()
+        };
+        assert_eq!(tls.admin_url(bound), "https://127.0.0.1:9091");
     }
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use picomq_metrics::Open;
 use tokio::sync::{Mutex, oneshot};
 
 use super::assign::assign;
@@ -139,6 +140,7 @@ pub(super) struct Group {
     pub(super) rebalance: Option<Rebalance>,
     pub(super) sync_waiters: BTreeMap<String, oneshot::Sender<Result<SyncOutcome, GroupError>>>,
     pub(super) last_activity: Instant,
+    _coordinated: Open,
 }
 
 impl Group {
@@ -156,6 +158,7 @@ impl Group {
             rebalance: None,
             sync_waiters: BTreeMap::new(),
             last_activity: Instant::now(),
+            _coordinated: picomq_metrics::coordinated_group(),
         }
     }
 
@@ -303,6 +306,7 @@ fn complete_rebalance(state: &mut Group) -> Vec<(oneshot::Sender<JoinOutcome>, J
 
     let now = Instant::now();
     state.generation = state.generation.wrapping_add(1).max(1);
+    picomq_metrics::rebalance();
     answer_syncs(state, GroupError::RebalanceInProgress);
     match state.mode.clone() {
         Some(Mode::Subscribed) => complete_subscribed(state, rebalance, now),

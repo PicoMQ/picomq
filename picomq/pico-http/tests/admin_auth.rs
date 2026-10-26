@@ -6,7 +6,7 @@ mod common;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore};
+use picomq_auth::{AccessToken, Audience, Operation, ResourceSet, Scope, TokenRecord, TokenStore};
 use picomq_http::{HttpProtocol, RoutingMode, RunningServer, ServeOptions, serve};
 use picomq_listener::Listener;
 use picomq_server::PicoNode;
@@ -29,8 +29,8 @@ async fn admin_server() -> (RunningServer, String, Arc<PicoNode>) {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node.clone(),
-        Listener::bind(loopback, 1024, None).unwrap(),
-        Some(Listener::bind(loopback, 1024, None).unwrap()),
+        Listener::bind(picomq_metrics::Listener::Stream, loopback, 1024, None).unwrap(),
+        Some(Listener::bind(picomq_metrics::Listener::Admin, loopback, 1024, None).unwrap()),
         ServeOptions {
             protocol: HttpProtocol::Pico,
             routing_mode: RoutingMode::LocalAlways,
@@ -176,17 +176,16 @@ async fn token_lifecycle_issue_list_revoke() {
         .json()
         .await
         .unwrap();
-    assert_eq!(listing["count"], 2);
-    let ids: Vec<&str> = listing["tokens"]
+    let ids: Vec<&str> = listing["items"]
         .as_array()
         .unwrap()
         .iter()
         .map(|t| t["id"].as_str().unwrap())
         .collect();
     assert_eq!(ids, ["ops/root", "svc/reader"]);
+    assert_eq!(listing["next"], Value::Null);
     assert!(
-        listing["tokens"][1].get("token").is_none()
-            && listing["tokens"][1].get("verifier").is_none(),
+        listing["items"][1].get("token").is_none() && listing["items"][1].get("verifier").is_none(),
         "secrets never listed"
     );
 
@@ -214,7 +213,7 @@ async fn token_lifecycle_issue_list_revoke() {
         .json()
         .await
         .unwrap();
-    assert_eq!(listing["count"], 1);
+    assert_eq!(listing["items"].as_array().unwrap().len(), 1);
 
     server.shutdown().await;
 }
@@ -358,6 +357,240 @@ async fn issuance_rejects_widening_and_dead_scopes() {
         .await
         .unwrap();
     assert_eq!(dead.status(), 400, "no ops means a dead credential");
+
+    server.shutdown().await;
+}
+
+async fn seed(node: &PicoNode, id: &str, scope: Scope) -> String {
+    let (token, verifier) = AccessToken::issue(id).unwrap();
+    node.tokens()
+        .store()
+        .put_if_absent(TokenRecord {
+            id: token.id.clone(),
+            verifier,
+            scope,
+            created_at_ms: 1,
+            issued_by: String::new(),
+        })
+        .await
+        .unwrap();
+    token.render()
+}
+
+async fn every_id(client: &reqwest::Client, url: &str, wire: &str) -> (Vec<String>, usize) {
+    let mut ids = Vec::new();
+    let mut pages = 0;
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let page_url = match &cursor {
+            Some(cursor) => format!("{url}{separator}cursor={cursor}"),
+            None => url.to_owned(),
+        };
+        let page: Value = client
+            .get(page_url)
+            .bearer_auth(wire)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        pages += 1;
+        ids.extend(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["id"].as_str().unwrap().to_owned()),
+        );
+
+        match page["next"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => return (ids, pages),
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_token_list_pages_through_every_token_once() {
+    let (server, wire, node) = admin_server().await;
+    let admin = format!("http://{}", server.admin_addr().unwrap());
+    let client = reqwest::Client::new();
+    let mut expected = vec!["ops/root".to_owned()];
+    for n in 0..250 {
+        let id = format!("svc/{n:03}");
+        seed(&node, &id, Scope::default()).await;
+        expected.push(id);
+    }
+
+    let (ids, pages) = every_id(&client, &format!("{admin}/admin/tokens?limit=100"), &wire).await;
+    assert_eq!(ids, expected);
+    assert_eq!(pages, 3);
+
+    let (prefixed, _) = every_id(
+        &client,
+        &format!("{admin}/admin/tokens?prefix=svc/1&limit=7"),
+        &wire,
+    )
+    .await;
+    assert_eq!(
+        prefixed,
+        (100..200)
+            .map(|n| format!("svc/{n:03}"))
+            .collect::<Vec<_>>()
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_narrow_token_gets_short_pages_that_still_finish() {
+    let (server, _, node) = admin_server().await;
+    let admin = format!("http://{}", server.admin_addr().unwrap());
+    let client = reqwest::Client::new();
+    for n in 0..500 {
+        seed(&node, &format!("svc/{n:03}"), Scope::default()).await;
+    }
+    let narrow = seed(
+        &node,
+        "z/lister",
+        Scope {
+            tokens: ResourceSet::prefix("z/"),
+            ops: [Operation::ListTokens].into(),
+            audiences: [Audience::Admin].into(),
+            ..Scope::default()
+        },
+    )
+    .await;
+
+    let first: Value = client
+        .get(format!("{admin}/admin/tokens?limit=5"))
+        .bearer_auth(&narrow)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        first["items"],
+        json!([]),
+        "the budget ends the scan before z/"
+    );
+    assert!(first["next"].is_string());
+
+    let (ids, pages) = every_id(&client, &format!("{admin}/admin/tokens?limit=5"), &narrow).await;
+    assert_eq!(ids, ["z/lister"]);
+    assert!(pages > 1);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_cursor_only_resumes_its_own_query() {
+    let (server, wire, node) = admin_server().await;
+    let admin = format!("http://{}", server.admin_addr().unwrap());
+    let client = reqwest::Client::new();
+    for n in 0..5 {
+        seed(&node, &format!("svc/{n}"), Scope::default()).await;
+    }
+
+    let first: Value = client
+        .get(format!("{admin}/admin/tokens?prefix=svc/&limit=2"))
+        .bearer_auth(&wire)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let cursor = first["next"].as_str().unwrap();
+
+    let elsewhere = client
+        .get(format!(
+            "{admin}/admin/tokens?prefix=ops/&limit=2&cursor={cursor}"
+        ))
+        .bearer_auth(&wire)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(elsewhere.status(), 400);
+    let tampered = client
+        .get(format!("{admin}/admin/tokens?cursor=garbage"))
+        .bearer_auth(&wire)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tampered.status(), 400);
+    let unbounded = client
+        .get(format!("{admin}/admin/tokens?limit=5000"))
+        .bearer_auth(&wire)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unbounded.status(), 400);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn token_pages_stay_bounded_at_the_scale_target() {
+    let (server, wire, node) = admin_server().await;
+    let admin = format!("http://{}", server.admin_addr().unwrap());
+    let client = reqwest::Client::new();
+    for n in 0..100_000 {
+        seed(&node, &format!("svc/{n:06}"), Scope::default()).await;
+    }
+    let narrow = seed(
+        &node,
+        "z/lister",
+        Scope {
+            tokens: ResourceSet::prefix("z/"),
+            ops: [Operation::ListTokens].into(),
+            audiences: [Audience::Admin].into(),
+            ..Scope::default()
+        },
+    )
+    .await;
+
+    for (wire, limit, expected) in [(&wire, 1_000, 100_002), (&narrow, 100, 1)] {
+        let mut cursor: Option<String> = None;
+        let mut seen = 0;
+        let mut slowest = std::time::Duration::ZERO;
+
+        loop {
+            let url = match &cursor {
+                Some(cursor) => format!("{admin}/admin/tokens?limit={limit}&cursor={cursor}"),
+                None => format!("{admin}/admin/tokens?limit={limit}"),
+            };
+            let started = std::time::Instant::now();
+            let page: Value = client
+                .get(url)
+                .bearer_auth(wire)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            slowest = slowest.max(started.elapsed());
+
+            let items = page["items"].as_array().unwrap().len();
+            assert!(items <= limit);
+            seen += items;
+            match page["next"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => break,
+            }
+        }
+
+        println!("limit {limit}: {seen} tokens, slowest page {slowest:?}");
+        assert_eq!(seen, expected);
+        assert!(slowest < std::time::Duration::from_millis(250));
+    }
 
     server.shutdown().await;
 }

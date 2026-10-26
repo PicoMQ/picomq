@@ -46,6 +46,12 @@ pub struct ServeArgs {
     #[arg(long, env = "PICO_HTTP_ADDRESS")]
     http_address: Option<String>,
 
+    /// Public URL of this node's admin listener, registered so other nodes
+    /// can forward console requests to it. Defaults to `http://{admin-listen}`,
+    /// or `https://{admin-listen}` with TLS.
+    #[arg(long, env = "PICO_ADMIN_ADDRESS")]
+    admin_address: Option<String>,
+
     /// Metadata log: `sqlite::memory:`, `sqlite:<path>` or `postgres://…`
     #[arg(long, env = "PICO_META_URL", default_value = "sqlite:./data/meta.db")]
     meta_url: String,
@@ -158,6 +164,12 @@ pub struct ServeArgs {
     #[arg(long, env = "PICO_TLS_KEY", requires = "tls_certificate")]
     tls_key: Option<PathBuf>,
 
+    /// PEM file of CA certificates this node trusts, on top of the system's,
+    /// when it calls another node's admin listener. Needed when node
+    /// certificates come from a private CA.
+    #[arg(long, env = "PICO_TLS_CA_CERTIFICATE")]
+    tls_ca_certificate: Option<PathBuf>,
+
     /// Seconds a client has to finish its TLS handshake.
     #[arg(long, env = "PICO_TLS_HANDSHAKE_TIMEOUT_SEC", default_value_t = 10)]
     tls_handshake_timeout_sec: u64,
@@ -228,6 +240,7 @@ impl ServeArgs {
             addr: self.listen,
             admin_addr: (!self.no_admin).then_some(self.admin_listen),
             advertised_url: self.http_address,
+            admin_url: self.admin_address,
             http_protocol,
             kafka: KafkaConfig {
                 listen: self.kafka_listen,
@@ -264,6 +277,7 @@ impl ServeArgs {
                     handshake_timeout: Duration::from_secs(self.tls_handshake_timeout_sec),
                     ..TlsConfig::new(certificate, key)
                 }),
+            tls_ca_certificate: self.tls_ca_certificate,
             schema_registry: self.schema_registry,
             engine,
         })

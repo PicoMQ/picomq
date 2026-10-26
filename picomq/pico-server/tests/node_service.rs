@@ -240,24 +240,24 @@ async fn list_and_match_seq_via_topics() {
         topics.create(create(name, "text/plain")).await.unwrap();
     }
 
-    let names = |list: &picomq_server::TopicList| -> Vec<String> {
-        list.topics
+    let names = |page: &picomq_server::Page<String, picomq_server::Topic>| -> Vec<String> {
+        page.items
             .iter()
-            .map(|m| m.topic.name.spelling().to_owned())
+            .map(|(_, topic)| topic.name.spelling().to_owned())
             .collect()
     };
 
-    let all = topics.list("/list/", None, 0).unwrap();
+    let all = topics.list("/list/", None, 100, |_| true);
     assert_eq!(names(&all), ["/list/a", "/list/b", "/list/c"]);
-    assert!(!all.has_more);
+    assert_eq!(all.next, None);
 
-    let page = topics.list("/list/", None, 2).unwrap();
+    let page = topics.list("/list/", None, 2, |_| true);
     assert_eq!(names(&page), ["/list/a", "/list/b"]);
-    assert!(page.has_more);
+    assert_eq!(page.next.as_deref(), Some("list.b"));
 
-    let rest = topics.list("/list/", Some("/list/b"), 0).unwrap();
+    let rest = topics.list("/list/", page.next.as_deref(), 100, |_| true);
     assert_eq!(names(&rest), ["/list/c"]);
-    assert!(!rest.has_more);
+    assert_eq!(rest.next, None);
 
     let at = |payload: &'static [u8], match_seq: u64| AppendCommand {
         match_seq: Some(match_seq),
@@ -631,17 +631,17 @@ async fn transfer_moves_partition_to_target_node() {
     let raced = racer.await.unwrap();
 
     wait_for_view(&views, "transfer completion", |view| {
-        !view.state.pending_transfers.contains_key(&stream_id)
+        !view.state.pending_transfers().contains_key(&stream_id)
             && view
                 .state
-                .streams
+                .streams()
                 .get(&stream_id)
                 .is_some_and(|row| row.node_id == 2)
     })
     .await;
     wait_for_view(&views, "target pre-warm open", |view| {
         view.state
-            .streams
+            .streams()
             .get(&stream_id)
             .is_some_and(|row| row.state == s3stream::StreamState::Opened && row.node_id == 2)
     })
@@ -711,7 +711,7 @@ async fn stale_transfer_completes_when_source_restarts() {
     })
     .await
     .unwrap();
-    let stream_id = views.load().state.next_stream_id - 1;
+    let stream_id = views.load().state.next_stream_id() - 1;
     sink.propose(MetadataCommand::OpenStream {
         proposer: Proposer::new(1, 1),
 
@@ -732,16 +732,16 @@ async fn stale_transfer_completes_when_source_restarts() {
         views
             .load()
             .state
-            .pending_transfers
+            .pending_transfers()
             .contains_key(&stream_id)
     );
 
     let node1 = start_shared_node(1, 2, sink, views.clone(), object_storage, wal_storage).await;
     wait_for_view(&views, "stale transfer completion", |view| {
-        !view.state.pending_transfers.contains_key(&stream_id)
+        !view.state.pending_transfers().contains_key(&stream_id)
             && view
                 .state
-                .streams
+                .streams()
                 .get(&stream_id)
                 .is_some_and(|row| row.node_id == 2)
     })
@@ -1290,36 +1290,33 @@ async fn ttl_sweep_expires_untouched_topics() {
 }
 
 #[tokio::test]
-async fn list_paginates_with_start_after() {
+async fn a_filtered_list_spends_its_budget_and_resumes() {
     let node = local_node().await;
     let topics = node.topics();
-    for i in 0..5 {
+    for i in 0..30 {
         topics
-            .create(create(&format!("/page/{i}"), "text/plain"))
+            .create(create(&format!("/page/{i:02}"), "text/plain"))
             .await
             .unwrap();
     }
+    let wanted =
+        |topic: &picomq_server::Topic| ["/page/15", "/page/25"].contains(&topic.name.spelling());
 
-    let names = |list: picomq_server::TopicList| -> (Vec<String>, bool) {
-        let names = list
-            .topics
-            .iter()
-            .map(|m| m.topic.name.spelling().to_owned())
-            .collect();
-        (names, list.has_more)
-    };
+    let first = topics.list("/page/", None, 1, wanted);
+    assert!(first.items.is_empty());
+    assert_eq!(first.next.as_deref(), Some("page.09"));
 
-    let (first, more) = names(topics.list("/page/", None, 2).unwrap());
-    assert_eq!(first, ["/page/0", "/page/1"]);
-    assert!(more);
-
-    let (second, more) = names(topics.list("/page/", Some("/page/1"), 2).unwrap());
-    assert_eq!(second, ["/page/2", "/page/3"]);
-    assert!(more);
-
-    let (last, more) = names(topics.list("/page/", Some("/page/3"), 2).unwrap());
-    assert_eq!(last, ["/page/4"]);
-    assert!(!more);
+    let mut after = None;
+    let mut found = Vec::new();
+    loop {
+        let page = topics.list("/page/", after.as_deref(), 1, wanted);
+        found.extend(page.items.into_iter().map(|(name, _)| name));
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(found, ["page.15", "page.25"]);
 
     node.close().await;
 }
@@ -1550,7 +1547,7 @@ fn placements(node: &PicoNode, topic: &Topic) -> Vec<(i32, StreamState)> {
     stream_ids(node, topic)
         .iter()
         .map(|stream_id| {
-            let row = view.state.streams[stream_id];
+            let row = view.state.streams()[stream_id];
             (row.node_id, row.state)
         })
         .collect()
@@ -1645,7 +1642,7 @@ async fn deleted_topics_release_streams_held_by_other_nodes() {
         .topic;
     let mut held = Vec::new();
     for (index, stream_id) in stream_ids(&node1, &topic).into_iter().enumerate() {
-        if views.load().state.streams[&stream_id].node_id != 2 {
+        if views.load().state.streams()[&stream_id].node_id != 2 {
             continue;
         }
 
@@ -1659,12 +1656,12 @@ async fn deleted_topics_release_streams_held_by_other_nodes() {
     assert!(!held.is_empty());
     assert!(
         held.iter()
-            .all(|id| views.load().state.streams[id].state == StreamState::Opened)
+            .all(|id| views.load().state.streams()[id].state == StreamState::Opened)
     );
 
     assert!(node1.topics().delete("/doomed").await.unwrap());
     wait_for_view(&views, "held streams deleted", |view| {
-        held.iter().all(|id| !view.state.streams.contains_key(id))
+        held.iter().all(|id| !view.state.streams().contains_key(id))
     })
     .await;
 
@@ -1703,7 +1700,7 @@ async fn a_clean_shutdown_hands_streams_to_the_survivors() {
     wait_for_view(&views, "streams of node 2 placed on node 1", |view| {
         streams
             .iter()
-            .all(|stream_id| view.state.streams[stream_id].node_id == 1)
+            .all(|stream_id| view.state.streams()[stream_id].node_id == 1)
     })
     .await;
 
@@ -1719,7 +1716,7 @@ async fn a_fenced_node_notices() {
     let node2 = start_node(2, sink.clone(), views.clone()).await;
     let mut fenced = node2.fenced();
 
-    let heartbeats = views.load().state.nodes[&2].heartbeats;
+    let heartbeats = views.load().state.nodes()[&2].heartbeats;
     node1
         .metadata()
         .fence_node(2, node2.metadata().node_epoch(), heartbeats)
@@ -1917,13 +1914,13 @@ async fn deleted_topics_destroy_streams_that_were_never_opened() {
         .unwrap();
     let log = log_of(&topics, "/never-opened").await;
     let stream_id = node.service().stream_id(&log).unwrap().unwrap();
-    let row = views.load().state.streams[&stream_id];
+    let row = views.load().state.streams()[&stream_id];
     assert_eq!(row.state, StreamState::Closed);
     assert_eq!(row.node_id, 1);
 
     assert!(topics.delete("/never-opened").await.unwrap());
     wait_for_view(&views, "the placed stream to be destroyed", |view| {
-        !view.state.streams.contains_key(&stream_id)
+        !view.state.streams().contains_key(&stream_id)
     })
     .await;
 
@@ -1953,7 +1950,7 @@ async fn partitions_go_to_the_requested_owners() {
             .map(|index| {
                 let log = partition_log(topic, index).unwrap();
                 let stream_id = node1.service().stream_id(&log).unwrap().unwrap();
-                state.streams[&stream_id].node_id
+                state.streams()[&stream_id].node_id
             })
             .collect()
     };
@@ -2064,7 +2061,8 @@ async fn new_logs_are_published_with_their_owner() {
         for (key, stream_id) in &streams {
             if state.get_kv(key).is_some() {
                 assert_ne!(
-                    state.streams[stream_id].node_id, -1,
+                    state.streams()[stream_id].node_id,
+                    -1,
                     "{key} was published before it had an owner"
                 );
             }
@@ -2085,7 +2083,7 @@ async fn a_lost_claim_destroys_its_stream() {
 
     let winner = node1.service().stream_id(&log).unwrap().unwrap();
     assert_eq!(node2.service().stream_id(&log).unwrap(), Some(winner));
-    assert!(views2.load().state.streams.keys().eq([&winner]));
+    assert!(views2.load().state.streams().keys().eq([&winner]));
 
     node1.close().await;
     node2.close().await;
@@ -2101,7 +2099,7 @@ async fn a_claim_that_cannot_own_its_stream_destroys_it() {
     assert!(placed.is_err());
     assert_eq!(node.service().stream_id(&log).unwrap(), None);
     let state = &views.load().state;
-    assert!(state.streams.is_empty());
+    assert!(state.streams().is_empty());
     assert!(state.get_kv(&log.key()).is_none());
 
     node.close().await;
@@ -2136,7 +2134,7 @@ async fn a_failed_append_reopens_the_stream_at_a_new_epoch() {
         .await
         .unwrap();
     assert_eq!(appended.next_offset.record_offset(), 2);
-    let row = views.load().state.streams[&stream_id];
+    let row = views.load().state.streams()[&stream_id];
     assert_eq!((row.state, row.epoch), (StreamState::Opened, 2));
 
     node.close().await;
@@ -2513,7 +2511,7 @@ async fn retention_trims_a_closed_partition_without_reopening_it() {
         .await
         .unwrap();
 
-    let row = node.views().load().state.streams[&stream_id];
+    let row = node.views().load().state.streams()[&stream_id];
     assert_eq!(row.state, StreamState::Closed);
     assert_eq!(row.start_offset, row.end_offset);
     assert!(node.service().streams().held(stream_id).is_none());
@@ -2560,7 +2558,7 @@ async fn retention_does_not_reopen_a_partition_released_while_it_waited() {
     release.await.unwrap().unwrap();
     trim.await.unwrap().unwrap();
 
-    let row = node.views().load().state.streams[&stream_id];
+    let row = node.views().load().state.streams()[&stream_id];
     assert_eq!(row.state, StreamState::Closed);
     assert_eq!(row.start_offset, row.end_offset);
     assert!(service.streams().held(stream_id).is_none());
@@ -2620,7 +2618,7 @@ async fn retention_bytes_keeps_the_newest_object_of_an_open_partition() {
         .await
         .unwrap();
 
-    let row = node.views().load().state.streams[&stream_id];
+    let row = node.views().load().state.streams()[&stream_id];
     assert_eq!(row.state, StreamState::Opened);
     assert_eq!(row.start_offset, spans[0].end_offset);
 
@@ -2646,10 +2644,10 @@ async fn grow(
 async fn move_log(from: &PicoNode, views: &ViewPublisher, log: &Log, to: i32) {
     let stream_id = from.transfer(log, to).await.unwrap();
     wait_for_view(views, "transfer completion", |view| {
-        !view.state.pending_transfers.contains_key(&stream_id)
+        !view.state.pending_transfers().contains_key(&stream_id)
             && view
                 .state
-                .streams
+                .streams()
                 .get(&stream_id)
                 .is_some_and(|row| row.node_id == to)
     })

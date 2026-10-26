@@ -10,6 +10,36 @@ use picomq_http::{HttpProtocol, ServeOptions, serve};
 use picomq_listener::Listener;
 
 #[tokio::test]
+async fn metrics_are_served_only_by_a_node_that_collects_them() {
+    let server = common::picomq_server().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{}/metrics", server.admin_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_node_that_does_not_forward_refuses_other_nodes() {
+    let server = common::picomq_server().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{}/admin/nodes/99/metrics", server.admin_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 502);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn health_and_ready() {
     let server = common::picomq_server().await;
     let client = reqwest::Client::new();
@@ -43,7 +73,7 @@ async fn health_and_ready() {
 async fn a_fenced_node_is_not_ready() {
     let server = common::picomq_server().await;
     let node = server.node.metadata().proposer();
-    let heartbeats = server.node.views().load().state.nodes[&node.node_id].heartbeats;
+    let heartbeats = server.node.views().load().state.nodes()[&node.node_id].heartbeats;
     server
         .node
         .metadata()
@@ -79,8 +109,8 @@ async fn ready_fails_while_draining() {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node,
-        Listener::bind(loopback, 1024, None).unwrap(),
-        Some(Listener::bind(loopback, 1024, None).unwrap()),
+        Listener::bind(picomq_metrics::Listener::Stream, loopback, 1024, None).unwrap(),
+        Some(Listener::bind(picomq_metrics::Listener::Admin, loopback, 1024, None).unwrap()),
         ServeOptions {
             protocol: HttpProtocol::Pico,
             shutdown_drain: Duration::from_secs(2),
@@ -131,7 +161,7 @@ async fn a_silent_http2_client_cannot_hold_up_shutdown() {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node,
-        Listener::bind(loopback, 1024, None).unwrap(),
+        Listener::bind(picomq_metrics::Listener::Stream, loopback, 1024, None).unwrap(),
         None,
         ServeOptions {
             protocol: HttpProtocol::Pico,
@@ -212,26 +242,30 @@ async fn cluster_nodes_and_stream_detail() {
     assert_eq!(list[0]["openingCount"], 1, "stream opened by the append");
     assert!(list[0]["slots"].as_u64().unwrap() > 0);
 
-    let stream = client
-        .get(format!("{}/admin/streams/orders/live", server.admin_url))
+    let partition = client
+        .get(format!(
+            "{}/admin/topics/%2Forders%2Flive/partitions/0",
+            server.admin_url
+        ))
         .send()
         .await
         .unwrap();
-    assert_eq!(stream.status(), 200);
-    let body: serde_json::Value = stream.json().await.unwrap();
-    assert_eq!(body["name"], "/orders/live");
+    assert_eq!(partition.status(), 200);
+    let body: serde_json::Value = partition.json().await.unwrap();
+    assert_eq!(body["index"], 0);
     assert_eq!(body["ownerNodeId"], 1);
-    assert_eq!(body["ownerLocal"], true);
     assert_eq!(body["state"], "opened");
-    assert_eq!(body["contentType"], "text/plain");
+    assert_eq!(body["current"], true);
     assert_eq!(body["pendingTransfer"], serde_json::Value::Null);
 
-    let missing = client
-        .get(format!("{}/admin/streams/absent", server.admin_url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), 404);
+    for missing in ["absent/partitions/0", "%2Forders%2Flive/partitions/1"] {
+        let response = client
+            .get(format!("{}/admin/topics/{missing}", server.admin_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404, "{missing}");
+    }
 }
 
 #[tokio::test]
@@ -365,7 +399,13 @@ async fn admin_listener_can_be_disabled() {
     let node = common::start_node().await;
     let server = serve(
         node,
-        Listener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024, None).unwrap(),
+        Listener::bind(
+            picomq_metrics::Listener::Stream,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            1024,
+            None,
+        )
+        .unwrap(),
         None,
         ServeOptions {
             ..Default::default()

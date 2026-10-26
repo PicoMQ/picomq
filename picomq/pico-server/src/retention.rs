@@ -13,6 +13,10 @@ impl Retention {
         self.ms.is_none() && self.bytes.is_none()
     }
 
+    pub fn keeps_all(&self, stored_bytes: u64) -> bool {
+        self.ms.is_none() && self.bytes.is_some_and(|limit| stored_bytes < limit)
+    }
+
     pub fn validate(&self) -> Result<(), ServiceError> {
         if self.ms == Some(0) || self.bytes == Some(0) {
             return Err(ServiceError::with_message(
@@ -110,6 +114,27 @@ mod tests {
         assert_eq!(retention(150).start_offset(&spans(), 0), Some(10));
         assert_eq!(retention(100).start_offset(&spans(), 0), Some(20));
         assert_eq!(retention(300).start_offset(&spans(), 0), None);
+    }
+
+    #[test]
+    fn stored_bytes_under_a_bytes_only_limit_keep_everything() {
+        let bytes_only = Retention {
+            ms: None,
+            bytes: Some(301),
+        };
+        let stored = spans().iter().map(|span| span.bytes).sum();
+
+        assert!(bytes_only.keeps_all(stored));
+        assert_eq!(bytes_only.start_offset(&spans(), 0), None);
+        assert!(!bytes_only.keeps_all(301));
+        assert!(
+            !Retention {
+                ms: Some(1),
+                ..bytes_only
+            }
+            .keeps_all(0)
+        );
+        assert!(!Retention::default().keeps_all(0));
     }
 
     #[test]

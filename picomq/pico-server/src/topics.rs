@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 
 use crate::error::{ErrorKind, ServiceError};
 use crate::log::Log;
+use crate::page::{self, Page};
 use crate::partition::Partition;
 use crate::producers::ProducerDecision;
 use crate::record::{self, LogRecord, StreamRecord};
@@ -21,11 +22,9 @@ use crate::topic::{ClosedBy, Topic, TopicId, TopicName, deadline_of};
 use crate::types::{
     AppendBatchResult, AppendCommand, AppendResult, BatchReadResult, CloseResult, CreateCommand,
     CreateResult, LogOffsets, MAX_NEW_PARTITIONS, OffsetToken, ReadResult, StreamWatermarks,
-    SubmittedBatchAppend, TopicList, TopicMeta, UpdateTopicCommand,
+    SubmittedBatchAppend, TopicMeta, UpdateTopicCommand,
 };
 
-const DEFAULT_LIST_LIMIT: usize = 1000;
-const MAX_LIST_LIMIT: usize = 10_000;
 const MAX_WRITE_ATTEMPTS: usize = 16;
 const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 const TOPIC_PREFIX: &str = "topic/";
@@ -199,6 +198,15 @@ impl Topics {
         self.service.live_offsets(&log).await
     }
 
+    pub fn current_offsets(
+        &self,
+        topic: &Topic,
+        partition: u32,
+    ) -> Result<LogOffsets, ServiceError> {
+        let log = partition_log(topic, partition)?;
+        self.service.offsets(&log)
+    }
+
     pub async fn watermarks(
         &self,
         topic: &Topic,
@@ -244,56 +252,38 @@ impl Topics {
     pub fn list(
         &self,
         prefix: &str,
-        start_after: Option<&str>,
+        after: Option<&str>,
         limit: usize,
-    ) -> Result<TopicList, ServiceError> {
-        let max = if limit > 0 {
-            limit.min(MAX_LIST_LIMIT)
-        } else {
-            DEFAULT_LIST_LIMIT
-        };
-        let prefix = format!("{TOPIC_PREFIX}{}", canonical(prefix));
+        mut keep: impl FnMut(&Topic) -> bool,
+    ) -> Page<String, Topic> {
         let now = now_ms();
+        let prefix = topic_key(&canonical(prefix));
+        let after = after.map(topic_key);
 
-        let view = self.views.load();
-        let mut cursor = start_after
-            .filter(|after| !after.is_empty())
-            .map(|after| format!("{TOPIC_PREFIX}{}", canonical(after)));
-        let mut selected: Vec<Topic> = Vec::new();
-
-        'pages: loop {
-            let wanted = max + 1 - selected.len();
-            let page = view.state.list_kv_page(&prefix, cursor.as_deref(), wanted);
-            let exhausted = page.len() < wanted;
-
-            for (key, value) in page {
-                cursor = Some(key);
-                let Ok(topic) = Topic::decode(&value) else {
-                    continue;
-                };
-                if topic.expired(now) {
-                    continue;
-                }
-
-                selected.push(topic);
-                if selected.len() > max {
-                    break 'pages;
-                }
-            }
-
-            if exhausted {
-                break;
-            }
-        }
-
-        let has_more = selected.len() > max;
-        let topics = selected
+        let entries = self
+            .views
+            .load()
+            .state
+            .list_kv_page(&prefix, after.as_deref(), page::fetch(limit))
             .into_iter()
-            .take(max)
-            .map(|topic| self.meta(topic))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|(key, value)| {
+                let name = key[TOPIC_PREFIX.len()..].to_owned();
+                (name, Topic::decode(&value).ok())
+            });
+        let page = Page::scan(entries, limit, |_, topic| {
+            topic
+                .as_ref()
+                .is_some_and(|topic| !topic.expired(now) && keep(topic))
+        });
 
-        Ok(TopicList { topics, has_more })
+        Page {
+            items: page
+                .items
+                .into_iter()
+                .filter_map(|(name, topic)| Some((name, topic?)))
+                .collect(),
+            next: page.next,
+        }
     }
 
     pub async fn update(&self, command: UpdateTopicCommand) -> Result<Topic, ServiceError> {
@@ -436,6 +426,10 @@ impl Topics {
         }
 
         let closer = closed_by(&command);
+        let written = (
+            command.records.len(),
+            command.records.iter().map(LogRecord::size_hint).sum(),
+        );
         let committed = append
             .commit(
                 command.records,
@@ -445,6 +439,9 @@ impl Topics {
             )
             .await?;
 
+        if !close_only {
+            picomq_metrics::written(written.0, written.1);
+        }
         if command.close_after {
             self.seal(&topic, closer).await?;
         }
@@ -490,7 +487,20 @@ impl Topics {
         &self,
         submitted: SubmittedBatchAppend,
     ) -> Result<AppendBatchResult, ServiceError> {
-        self.service.finish_batch_append(submitted).await
+        let written = (!submitted.duplicate).then(|| {
+            submitted
+                .batches
+                .iter()
+                .fold((0, 0), |(records, bytes), batch| {
+                    (records + batch.count as usize, bytes + batch.payload.len())
+                })
+        });
+
+        let result = self.service.finish_batch_append(submitted).await?;
+        if let Some((records, bytes)) = written {
+            picomq_metrics::written(records, bytes);
+        }
+        Ok(result)
     }
 
     pub async fn read(
@@ -509,6 +519,13 @@ impl Topics {
             .service
             .read(&log, from, max_bytes, max_records)
             .await?;
+        picomq_metrics::read(
+            read.records.len(),
+            read.records
+                .iter()
+                .map(|stored| stored.record.size_hint())
+                .sum(),
+        );
 
         Ok(ReadResult {
             records: read.records,
@@ -529,7 +546,12 @@ impl Topics {
         let log = partition_log(topic, partition)?;
         self.touch(topic).await?;
 
-        self.service.read_batches(&log, from, max_bytes).await
+        let read = self.service.read_batches(&log, from, max_bytes).await?;
+        picomq_metrics::read(
+            read.batches.iter().map(|batch| batch.count as usize).sum(),
+            read.batches.iter().map(|batch| batch.payload.len()).sum(),
+        );
+        Ok(read)
     }
 
     pub async fn wait_appended(
