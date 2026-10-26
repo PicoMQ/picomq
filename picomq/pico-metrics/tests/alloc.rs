@@ -2,7 +2,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::time::Duration;
 
-use picomq_metrics::{Listener, Method, Metrics, Protocol, Reason, Transfer};
+use picomq_auth::Audience;
+use picomq_metrics::{ListenerKind, Method, Metrics, Reason, TransferOutcome};
 
 struct Counting;
 
@@ -39,14 +40,14 @@ fn recording_never_allocates() {
     let before = allocations();
     for event in 0..EVENTS {
         let elapsed = Duration::from_micros(event % 20_000_000);
-        picomq_metrics::http(Protocol::Pico, Method::Post, 200, elapsed);
+        picomq_metrics::http(Audience::Pico, Method::Post, 200, elapsed);
         picomq_metrics::kafka(0, event % 2 == 0, elapsed);
         picomq_metrics::written(1, 16);
         picomq_metrics::read(1, 16);
         picomq_metrics::rebalance();
-        picomq_metrics::transfer(Transfer::Completed);
-        picomq_metrics::auth_failure(Protocol::Kafka, Reason::Credential);
-        drop(picomq_metrics::connection(Listener::Stream));
+        picomq_metrics::transfer(TransferOutcome::Completed);
+        picomq_metrics::auth_failure(Audience::Kafka, Reason::Credential);
+        drop(picomq_metrics::connection(ListenerKind::Stream));
         drop(picomq_metrics::live_reader());
         drop(picomq_metrics::coordinated_group());
     }

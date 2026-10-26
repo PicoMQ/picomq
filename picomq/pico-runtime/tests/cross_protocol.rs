@@ -507,22 +507,48 @@ async fn one_group_serves_kafka_and_pico_consumers() {
         .unwrap();
     assert_eq!(offsets["offsets"]["/jobs"]["position"], 3);
 
-    let commit = node
-        .http
-        .put(node.url("/_groups/shared/offsets"))
-        .json(&serde_json::json!({ "offsets": { "/jobs": { "position": 1 } } }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(commit.status(), 204);
+    let commit = || {
+        node.http
+            .put(node.url("/_groups/shared/offsets"))
+            .json(&serde_json::json!({ "offsets": { "/jobs": { "position": 1 } } }))
+            .send()
+    };
+    assert_eq!(
+        commit().await.unwrap().status(),
+        404,
+        "an unfenced commit waits for the group to empty, as on a Kafka broker"
+    );
     let mut partitions = rdkafka::TopicPartitionList::new();
     partitions.add_partition("jobs", 0);
     let committed = subscriber
         .committed_offsets(partitions, Duration::from_secs(5))
         .unwrap();
-    assert_eq!(committed.elements()[0].offset(), rdkafka::Offset::Offset(1));
+    assert_eq!(committed.elements()[0].offset(), rdkafka::Offset::Offset(3));
 
     drop(subscriber);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = commit().await.unwrap().status();
+        if status == 204 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the group never emptied after the consumer left, last {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let offsets: Value = node
+        .http
+        .get(node.url("/_groups/shared/offsets"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(offsets["offsets"]["/jobs"]["position"], 1);
+
     node.shutdown().await;
 }
 

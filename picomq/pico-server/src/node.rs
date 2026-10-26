@@ -54,6 +54,7 @@ pub struct NodeConfig {
     /// How long a node may go without a heartbeat before the cluster fences
     /// it.
     pub node_timeout: Duration,
+    pub max_groups: usize,
     pub engine: Config,
 }
 
@@ -68,6 +69,7 @@ impl Default for NodeConfig {
             cluster_id: "picomq".to_owned(),
             heartbeat_interval: Duration::from_secs(5),
             node_timeout: Duration::from_secs(30),
+            max_groups: crate::group::DEFAULT_MAX_GROUPS,
             engine: Config::default(),
         }
     }
@@ -152,6 +154,7 @@ impl PicoNode {
         ));
         let groups = GroupCoordinator::new(
             config.node_id,
+            config.max_groups,
             service.clone(),
             topics.clone(),
             ownership.clone(),

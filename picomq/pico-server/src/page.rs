@@ -1,6 +1,6 @@
 const BUDGET: usize = 10;
 
-pub fn fetch(limit: usize) -> usize {
+pub fn fetch_count(limit: usize) -> usize {
     limit.saturating_mul(BUDGET).saturating_add(1)
 }
 
@@ -102,8 +102,8 @@ mod tests {
     }
 
     #[test]
-    fn fetch_covers_the_budget_and_one_to_spare() {
-        assert_eq!(fetch(100), 1_001);
+    fn the_fetch_count_covers_the_budget_and_one_to_spare() {
+        assert_eq!(fetch_count(100), 1_001);
     }
 
     #[test]

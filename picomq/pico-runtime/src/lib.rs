@@ -11,7 +11,7 @@ use picomq_http::forward::{Forward, ForwardError};
 use picomq_http::{RunningServer, ServeOptions};
 use picomq_listener::{Listener, Tls};
 use picomq_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
-use picomq_metrics::{Listener as Kind, Metrics};
+use picomq_metrics::{ListenerKind, Metrics};
 use picomq_server::wal::ObjectWal;
 use picomq_server::{KvTokenStore, NodeConfig, PicoNode};
 use picomq_sql::{
@@ -154,13 +154,13 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         Listener::bind(kind, addr, config.backlog, tls.clone())
             .map_err(|source| RuntimeError::Bind { addr, source })
     };
-    let http_listener = bind(Kind::Stream, config.addr, &http_tls)?;
+    let http_listener = bind(ListenerKind::Stream, config.addr, &http_tls)?;
     let http_bound = http_listener.local_addr();
     let admin_listener = config
         .admin_addr
-        .map(|addr| bind(Kind::Admin, addr, &http_tls))
+        .map(|addr| bind(ListenerKind::Admin, addr, &http_tls))
         .transpose()?;
-    let kafka_listener = bind(Kind::Kafka, config.kafka.listen, &kafka_tls)?;
+    let kafka_listener = bind(ListenerKind::Kafka, config.kafka.listen, &kafka_tls)?;
     let kafka_addr = kafka_listener.local_addr();
     let kafka_advertise = config
         .kafka
@@ -186,6 +186,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         cluster_id: config.cluster_id.clone(),
         heartbeat_interval: config.heartbeat_interval,
         node_timeout: config.node_timeout,
+        max_groups: config.max_groups,
         engine,
     };
     let wal_uri = config.wal_uri();

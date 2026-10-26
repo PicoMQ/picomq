@@ -13,7 +13,7 @@ use picomq_listener::{Listener, Tls};
 use picomq_metadata::{CommandSink, LocalSink, ViewPublisher};
 use picomq_metrics::Metrics;
 use picomq_server::wal::ObjectWal;
-use picomq_server::{CreateCommand, NodeConfig, PicoNode};
+use picomq_server::{CreateCommand, JoinInput, Membership, NodeConfig, PicoNode};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
 fn loopback() -> SocketAddr {
@@ -65,9 +65,9 @@ async fn start(id: i32, shared: &Shared, options: Options) -> Node {
         "http"
     };
     let listener =
-        Listener::bind(picomq_metrics::Listener::Stream, loopback(), 1024, None).unwrap();
+        Listener::bind(picomq_metrics::ListenerKind::Stream, loopback(), 1024, None).unwrap();
     let admin = Listener::bind(
-        picomq_metrics::Listener::Admin,
+        picomq_metrics::ListenerKind::Admin,
         loopback(),
         1024,
         options.tls.clone(),
@@ -151,7 +151,7 @@ async fn issue(node: &PicoNode, id: &str, scope: Scope) -> String {
     token.render()
 }
 
-fn answered_by(response: &reqwest::Response) -> Option<String> {
+fn node_id_of(response: &reqwest::Response) -> Option<String> {
     response
         .headers()
         .get(picomq_http::forward::NODE_ID)
@@ -189,7 +189,7 @@ async fn node_metrics_are_answered_by_the_node_asked() {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
-        assert_eq!(answered_by(&response).as_deref(), Some(id));
+        assert_eq!(node_id_of(&response).as_deref(), Some(id));
         assert!(response.text().await.unwrap().contains("pico_logs_owned"));
     }
 
@@ -291,7 +291,7 @@ async fn the_node_asked_checks_the_callers_scope() {
         .await
         .unwrap();
     assert_eq!(forwarded.status(), 200);
-    assert_eq!(answered_by(&forwarded).as_deref(), Some("2"));
+    assert_eq!(node_id_of(&forwarded).as_deref(), Some("2"));
 
     let narrow = client
         .get(format!("{}/admin/nodes/2/metrics", first.admin()))
@@ -377,7 +377,7 @@ async fn forwarding_over_tls_trusts_the_configured_ca() {
 
     let trusted = ask(&trusting).await;
     assert_eq!(trusted.status(), 200);
-    assert_eq!(answered_by(&trusted).as_deref(), Some("2"));
+    assert_eq!(node_id_of(&trusted).as_deref(), Some("2"));
     assert_eq!(ask(&untrusting).await.status(), 502);
     assert!(Forward::new(Some(b"not a certificate")).is_err());
 
@@ -548,6 +548,78 @@ async fn partition_offsets_come_live_from_the_owner() {
     assert_eq!(unasked["current"], false);
 
     unreachable.server.shutdown().await;
+    second.server.shutdown().await;
+    first.server.shutdown().await;
+}
+
+#[tokio::test]
+async fn groups_are_described_by_their_coordinator() {
+    let shared = Shared::new();
+    let first = start(
+        1,
+        &shared,
+        Options {
+            advertise_admin: true,
+            ..Options::default()
+        },
+    )
+    .await;
+    let second = start(
+        2,
+        &shared,
+        Options {
+            advertise_admin: true,
+            ..Options::default()
+        },
+    )
+    .await;
+    first
+        .node
+        .topics()
+        .create(CreateCommand::new("/orders", "text/plain"))
+        .await
+        .unwrap();
+    let joined = second
+        .node
+        .groups()
+        .join(
+            None,
+            JoinInput {
+                group_id: "g".to_owned(),
+                member_id: String::new(),
+                instance_id: None,
+                client_id: "worker".to_owned(),
+                client_host: "10.0.0.2".to_owned(),
+                membership: Membership::Subscribed(vec!["/orders".to_owned()]),
+                session_timeout_ms: 30_000,
+                rebalance_timeout_ms: 2_000,
+                require_known_member_id: false,
+            },
+        )
+        .await;
+    let client = reqwest::Client::new();
+    let get = |path: &str| {
+        let request = client.get(format!("{}{path}", first.admin()));
+        async move {
+            let response = request.send().await.unwrap();
+            let status = response.status().as_u16();
+            (status, response.json::<serde_json::Value>().await.unwrap())
+        }
+    };
+
+    let (_, listed) = get("/admin/groups").await;
+    let group = &listed["items"][0];
+    assert_eq!(group["groupId"], "g");
+    assert_eq!(group["coordinatorNodeId"], 2);
+    assert_eq!(group["state"], "Stable");
+    assert_eq!(group["members"], 1);
+    assert_eq!(group["current"], true);
+
+    let (status, members) = get("/admin/groups/g/members").await;
+    assert_eq!(status, 200);
+    assert_eq!(members["items"][0]["memberId"], joined.member_id);
+    assert_eq!(members["items"][0]["clientHost"], "10.0.0.2");
+
     second.server.shutdown().await;
     first.server.shutdown().await;
 }

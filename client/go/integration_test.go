@@ -403,9 +403,9 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		Expect(described.Members[0].ClientID).To(Equal("go-test"))
 		Expect(described.Members[0].Assignment).To(Equal(joined.Assignment))
 
-		groups, err := client.ListGroups(ctx)
+		groups, err := client.ListGroups(ctx, "", 0, "")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(groups).To(ContainElement(group))
+		Expect(groups.Groups).To(ContainElement(group))
 		Expect(errorCode(client.DeleteGroup(ctx, group))).To(Equal("conflict"))
 
 		Expect(client.LeaveGroup(ctx, group, joined.MemberID, "")).To(Succeed())
@@ -674,9 +674,9 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		Expect(described.State).To(Equal("Stable"))
 
 		for _, client := range clients {
-			groups, err := client.ListGroups(ctx)
+			groups, err := client.ListGroups(ctx, "", 0, "")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(groups).To(ContainElement(group), "every node lists every group")
+			Expect(groups.Groups).To(ContainElement(group), "every node lists every group")
 		}
 
 		Expect(clients[1].LeaveGroup(ctx, group, joined.MemberID, "")).To(Succeed())

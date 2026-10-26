@@ -33,6 +33,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
+fn host() -> std::sync::Arc<str> {
+    std::sync::Arc::from("127.0.0.1")
+}
+
 fn tn(name: &str) -> TopicName {
     TopicName(StrBytes::from(name.to_owned()))
 }
@@ -214,7 +218,7 @@ async fn api_versions_handler_lists_supported_apis() {
             .with_client_software_name(StrBytes::from_static_str("picomq"))
             .with_client_software_version(StrBytes::from_static_str("0.1")),
     );
-    let outcome = dispatch(&broker, None, &req).await.unwrap();
+    let outcome = dispatch(&broker, None, &host(), &req).await.unwrap();
     let mut buf = match resolve(outcome).await {
         HandlerOutcome::Response(frame) => frame.0,
         _ => panic!("expected response"),
@@ -248,7 +252,7 @@ async fn advertised_produce_versions_below_three_are_still_refused() {
         .with_correlation_id(1);
     encode_request_header_into_buffer(&mut req, &header).unwrap();
 
-    assert!(dispatch(&broker, None, &req).await.is_err());
+    assert!(dispatch(&broker, None, &host(), &req).await.is_err());
 }
 
 #[tokio::test]
@@ -281,7 +285,7 @@ async fn resolve(outcome: HandlerOutcome) -> HandlerOutcome {
 }
 
 async fn response_body(broker: &BrokerContext, req: &[u8]) -> Bytes {
-    match resolve(dispatch(broker, None, req).await.unwrap()).await {
+    match resolve(dispatch(broker, None, &host(), req).await.unwrap()).await {
         HandlerOutcome::Response(frame) => frame.0,
         _ => panic!("expected response"),
     }
@@ -304,7 +308,7 @@ async fn call_as<Request: Encodable, Response: Decodable + HeaderVersion>(
     request: &Request,
 ) -> Response {
     let frame = encode_request(api_key, version, 1, request);
-    let outcome = resolve(dispatch(broker, principal, &frame).await.unwrap()).await;
+    let outcome = resolve(dispatch(broker, principal, &host(), &frame).await.unwrap()).await;
     let HandlerOutcome::Response(frame) = outcome else {
         panic!("expected response");
     };
@@ -598,7 +602,7 @@ async fn serve_with(
     tls: Option<Tls>,
 ) -> (SocketAddr, JoinHandle<()>) {
     let listener = Listener::bind(
-        picomq_metrics::Listener::Kafka,
+        picomq_metrics::ListenerKind::Kafka,
         SocketAddr::from(([127, 0, 0, 1], 0)),
         1024,
         tls,
@@ -1852,7 +1856,9 @@ async fn listener_pipeline_survives_acks_zero() {
             ]))
             .with_allow_auto_topic_creation(true),
     );
-    dispatch(&broker, None, &metadata_req).await.unwrap();
+    dispatch(&broker, None, &host(), &metadata_req)
+        .await
+        .unwrap();
     let (addr, server) = serve(Arc::new(broker)).await;
 
     let produce_req = encode_request(
@@ -2240,12 +2246,16 @@ async fn a_superseded_sync_gets_no_response() {
     let mut first = {
         let broker = Arc::clone(&broker);
         let req = sync_request("pair", newcomer.clone(), 2, vec![], 12);
-        tokio::spawn(async move { resolve(dispatch(&broker, None, &req).await.unwrap()).await })
+        tokio::spawn(
+            async move { resolve(dispatch(&broker, None, &host(), &req).await.unwrap()).await },
+        )
     };
     let mut second = {
         let broker = Arc::clone(&broker);
         let req = sync_request("pair", newcomer.clone(), 2, vec![], 13);
-        tokio::spawn(async move { resolve(dispatch(&broker, None, &req).await.unwrap()).await })
+        tokio::spawn(
+            async move { resolve(dispatch(&broker, None, &host(), &req).await.unwrap()).await },
+        )
     };
     let first_to_resolve = async {
         tokio::select! {
@@ -2456,6 +2466,7 @@ async fn connect_shaped_group_passes_foreign_protocols_through() {
     assert_eq!(group.protocol_data.as_str(), "sessioned");
     assert_eq!(group.members[0].member_metadata, worker_state);
     assert_eq!(group.members[0].member_assignment, task_assignment);
+    assert_eq!(group.members[0].client_host.as_str(), "/127.0.0.1");
 }
 
 #[tokio::test]
@@ -3463,6 +3474,7 @@ async fn offset_delete_and_delete_groups_respect_members() {
                 member_id: String::new(),
                 instance_id: None,
                 client_id: "test".to_owned(),
+                client_host: String::new(),
                 membership: Membership::Client {
                     protocol_type: "consumer".to_owned(),
                     protocols: vec![JoinProtocol {

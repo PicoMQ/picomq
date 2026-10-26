@@ -1,4 +1,4 @@
-//! Transfer choreography: every node watches the published view and acts on
+//! TransferOutcome choreography: every node watches the published view and acts on
 //! pending transfers that involve it.
 //!
 //! The source drains and closes the stream, then proposes the completion.
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use picomq_metadata::{MetadataView, ViewPublisher};
-use picomq_metrics::Transfer;
+use picomq_metrics::TransferOutcome;
 use s3stream::StreamState;
 
 use crate::service::S3StreamService;
@@ -89,7 +89,7 @@ async fn release_and_complete(service: &S3StreamService, view: &MetadataView, st
                 Ok(None) => return,
                 Err(error) => {
                     tracing::warn!(%error, stream_id, "transfer release failed");
-                    picomq_metrics::transfer(Transfer::Failed);
+                    picomq_metrics::transfer(TransferOutcome::Failed);
                     return;
                 }
             }
@@ -97,10 +97,10 @@ async fn release_and_complete(service: &S3StreamService, view: &MetadataView, st
         _ => return,
     };
     match node.complete_transfer(stream_id, epoch).await {
-        Ok(_) => picomq_metrics::transfer(Transfer::Completed),
+        Ok(_) => picomq_metrics::transfer(TransferOutcome::Completed),
         Err(error) => {
             tracing::warn!(%error, stream_id, "transfer completion failed");
-            picomq_metrics::transfer(Transfer::Failed);
+            picomq_metrics::transfer(TransferOutcome::Failed);
         }
     }
 }

@@ -48,8 +48,8 @@ impl Paging {
         })
     }
 
-    pub(crate) fn fetch(&self) -> usize {
-        picomq_server::page::fetch(self.limit)
+    pub(crate) fn fetch_count(&self) -> usize {
+        picomq_server::page::fetch_count(self.limit)
     }
 
     pub(crate) fn filter(&self, name: &str) -> Option<&str> {

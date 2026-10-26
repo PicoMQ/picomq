@@ -29,6 +29,7 @@ export type {
   StreamApi,
   StreamInfo,
   StreamListing,
+  GroupListing,
   StreamRecord,
   SubscribeOptions,
   TopicConfig,

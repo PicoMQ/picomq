@@ -34,6 +34,15 @@ async fn start_node(
         .unwrap()
 }
 
+fn listed(groups: &GroupCoordinator, scope: Option<&Scope>) -> Vec<String> {
+    groups
+        .list(scope, "", None, 1_000)
+        .items
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
 fn partition(byte: u8) -> Partition {
     Partition::new(TopicId([byte; 16]), 0)
 }
@@ -55,6 +64,7 @@ fn join(group_id: &str, member_id: &str, membership: Membership) -> JoinInput {
         member_id: member_id.to_owned(),
         instance_id: None,
         client_id: "test".to_owned(),
+        client_host: String::new(),
         membership,
         session_timeout_ms: 10_000,
         rebalance_timeout_ms: 2_000,
@@ -245,17 +255,17 @@ async fn every_group_call_needs_its_right_on_the_group() {
         ]
     );
 
-    for (scope, listed) in [(&consumer, true), (&deleter, true), (&stranger, false)] {
+    for (scope, expected) in [(&consumer, true), (&deleter, true), (&stranger, false)] {
         assert_eq!(
-            groups.list(Some(scope)).contains(&"billing-eu".to_owned()),
-            listed
+            listed(&groups, Some(scope)).contains(&"billing-eu".to_owned()),
+            expected
         );
         let coordinated = groups.coordinated(Some(scope)).await;
         assert_eq!(
             coordinated
                 .iter()
                 .any(|group| group.group_id == "billing-eu"),
-            listed
+            expected
         );
     }
 }
@@ -303,9 +313,7 @@ async fn every_node_lists_every_group() {
         .unwrap();
 
     for node in [&node1, &node2] {
-        let mut listed = node.groups().list(None);
-        listed.sort();
-        assert_eq!(listed, ["a/b", "orders"]);
+        assert_eq!(listed(&node.groups(), None), ["a/b", "orders"]);
     }
 
     node1.close().await;
@@ -324,6 +332,7 @@ async fn offsets_replay_into_a_fresh_coordinator() {
 
     let restarted = GroupCoordinator::new(
         node.config().node_id,
+        node.config().max_groups,
         node.service(),
         node.topics(),
         node.ownership(),
@@ -683,6 +692,7 @@ async fn offset_deletes_survive_replay_and_snapshots() {
     let replayed = || {
         GroupCoordinator::new(
             node.config().node_id,
+            node.config().max_groups,
             node.service(),
             node.topics(),
             node.ownership(),
@@ -725,7 +735,12 @@ async fn groups_delete_only_when_empty() {
 
     let member = groups.join(None, join("g", "", subscribed(&["/a"]))).await;
     groups
-        .commit_offsets(None, "g", None, &[commit(partition(1), 5)])
+        .commit_offsets(
+            None,
+            "g",
+            Some(fence(member.generation, &member.member_id)),
+            &[commit(partition(1), 5)],
+        )
         .await
         .unwrap();
     assert_eq!(groups.delete(None, "g").await, Err(GroupError::NonEmpty));
@@ -734,10 +749,10 @@ async fn groups_delete_only_when_empty() {
         .leave(None, "g", &[(member.member_id.clone(), None)])
         .await
         .unwrap();
-    assert_eq!(groups.list(None), ["g"]);
+    assert_eq!(listed(&groups, None), ["g"]);
     groups.delete(None, "g").await.unwrap();
 
-    assert!(groups.list(None).is_empty());
+    assert!(listed(&groups, None).is_empty());
     assert_eq!(
         groups.delete(None, "g").await,
         Err(GroupError::GroupNotFound)
@@ -748,6 +763,70 @@ async fn groups_delete_only_when_empty() {
             .await
             .unwrap()
             .is_empty()
+    );
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn a_node_holds_at_most_its_configured_groups() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = GroupCoordinator::new(
+        node.config().node_id,
+        2,
+        node.service(),
+        node.topics(),
+        node.ownership(),
+        node.views(),
+    );
+
+    for group in ["a", "b"] {
+        let joined = groups
+            .join(None, join(group, "", subscribed(&["/a"])))
+            .await;
+        assert!(joined.result.is_ok(), "{group}");
+    }
+    let third = groups.join(None, join("c", "", subscribed(&["/a"]))).await;
+    assert_eq!(third.result.err(), Some(GroupError::CapacityExceeded));
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn unfenced_commits_wait_for_an_empty_group() {
+    let (sink, views) = LocalSink::new();
+    let node = start_node(1, Arc::new(sink), views).await;
+    let groups = node.groups();
+    let member = groups.join(None, join("g", "", subscribed(&["/a"]))).await;
+
+    assert_eq!(
+        groups
+            .commit_offsets(None, "g", None, &[commit(partition(1), 5)])
+            .await,
+        Err(GroupError::UnknownMember)
+    );
+    groups
+        .commit_offsets(
+            None,
+            "g",
+            Some(fence(member.generation, &member.member_id)),
+            &[commit(partition(1), 5)],
+        )
+        .await
+        .unwrap();
+
+    groups
+        .leave(None, "g", &[(member.member_id.clone(), None)])
+        .await
+        .unwrap();
+    groups
+        .commit_offsets(None, "g", None, &[commit(partition(1), 9)])
+        .await
+        .unwrap();
+    assert_eq!(
+        groups.fetch_offsets(None, "g", None).await.unwrap()[&partition(1)].position,
+        9
     );
 
     node.close().await;

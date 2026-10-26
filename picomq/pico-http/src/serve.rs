@@ -211,7 +211,8 @@ fn spawn_listener(
     let bound = listener.local_addr();
     let mut stop = stop.subscribe();
     let task = tokio::spawn(async move {
-        let result = axum::serve(HttpListener(listener), router)
+        let service = router.into_make_service_with_connect_info::<Peer>();
+        let result = axum::serve(HttpListener(listener), service)
             .with_graceful_shutdown(async move {
                 // Only the shutdown path sends, and the sender outlives these
                 // tasks, so a receive error cannot mean "stop" was missed.
@@ -226,6 +227,17 @@ fn spawn_listener(
 }
 
 struct HttpListener(Listener);
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Peer(pub(crate) SocketAddr);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, HttpListener>>
+    for Peer
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, HttpListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
+}
 
 impl axum::serve::Listener for HttpListener {
     type Io = Stream;

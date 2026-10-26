@@ -109,8 +109,8 @@ async fn ready_fails_while_draining() {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node,
-        Listener::bind(picomq_metrics::Listener::Stream, loopback, 1024, None).unwrap(),
-        Some(Listener::bind(picomq_metrics::Listener::Admin, loopback, 1024, None).unwrap()),
+        Listener::bind(picomq_metrics::ListenerKind::Stream, loopback, 1024, None).unwrap(),
+        Some(Listener::bind(picomq_metrics::ListenerKind::Admin, loopback, 1024, None).unwrap()),
         ServeOptions {
             protocol: HttpProtocol::Pico,
             shutdown_drain: Duration::from_secs(2),
@@ -161,7 +161,7 @@ async fn a_silent_http2_client_cannot_hold_up_shutdown() {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node,
-        Listener::bind(picomq_metrics::Listener::Stream, loopback, 1024, None).unwrap(),
+        Listener::bind(picomq_metrics::ListenerKind::Stream, loopback, 1024, None).unwrap(),
         None,
         ServeOptions {
             protocol: HttpProtocol::Pico,
@@ -400,7 +400,7 @@ async fn admin_listener_can_be_disabled() {
     let server = serve(
         node,
         Listener::bind(
-            picomq_metrics::Listener::Stream,
+            picomq_metrics::ListenerKind::Stream,
             SocketAddr::from(([127, 0, 0, 1], 0)),
             1024,
             None,

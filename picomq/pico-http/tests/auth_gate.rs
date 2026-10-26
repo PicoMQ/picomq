@@ -48,7 +48,7 @@ async fn gated_server(
     let server = serve(
         node.clone(),
         Listener::bind(
-            picomq_metrics::Listener::Stream,
+            picomq_metrics::ListenerKind::Stream,
             SocketAddr::from(([127, 0, 0, 1], 0)),
             1024,
             None,

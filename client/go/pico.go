@@ -440,21 +440,32 @@ func (c *PicoClient) DeleteGroup(ctx context.Context, group string) error {
 	return err
 }
 
-func (c *PicoClient) ListGroups(ctx context.Context) (groups []string, err error) {
+func (c *PicoClient) ListGroups(ctx context.Context, prefix string, limit uint64, cursor string) (listing GroupListing, err error) {
+	query := url.Values{"prefix": {prefix}}
+	if limit > 0 {
+		query.Set("limit", strconv.FormatUint(limit, 10))
+	}
+	if cursor != "" {
+		query.Set("cursor", cursor)
+	}
 	err = c.core.run(ctx, func() error {
-		data, callErr := c.groupCall(ctx, http.MethodGet, c.core.groupURL(nil), nil, http.StatusOK)
+		data, callErr := c.groupCall(ctx, http.MethodGet, c.core.groupURL(query), nil, http.StatusOK)
 		if callErr != nil {
 			return callErr
 		}
 
 		var raw struct {
-			Groups []string `json:"groups"`
+			Items []string `json:"items"`
+			Next  *string  `json:"next"`
 		}
 		if callErr = json.Unmarshal(data, &raw); callErr != nil {
 			return invalidResponse(callErr)
 		}
 
-		groups = raw.Groups
+		listing = GroupListing{Groups: raw.Items}
+		if raw.Next != nil {
+			listing.Next = *raw.Next
+		}
 		return nil
 	})
 	return

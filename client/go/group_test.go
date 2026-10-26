@@ -128,7 +128,8 @@ var _ = ginkgo.Describe("Pico groups", func() {
 			case 8:
 				Expect(r.URL.EscapedPath()).To(Equal("/_groups"))
 				writeJSON(w, http.StatusOK, map[string]any{
-					"groups": []string{"orders/eu"},
+					"items": []string{"orders/eu"},
+					"next":  "opaque",
 				})
 			case 9:
 				Expect(r.Method).To(Equal(http.MethodDelete))
@@ -191,9 +192,9 @@ var _ = ginkgo.Describe("Pico groups", func() {
 			}},
 		}))
 
-		groups, err := client.ListGroups(ctx)
+		groups, err := client.ListGroups(ctx, "", 0, "")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(groups).To(Equal([]string{"orders/eu"}))
+		Expect(groups).To(Equal(GroupListing{Groups: []string{"orders/eu"}, Next: "opaque"}))
 
 		Expect(client.LeaveGroup(ctx, "orders/eu", "m/1", "i-1")).To(Succeed())
 		Expect(client.DeleteGroup(ctx, "orders/eu")).To(Succeed())
@@ -236,7 +237,7 @@ var _ = ginkgo.Describe("Pico groups", func() {
 		Expect(calls.Load()-before).To(Equal(int32(2)), "joins and heartbeats are not retried")
 
 		before = calls.Load()
-		_, err = client.ListGroups(ctx)
+		_, err = client.ListGroups(ctx, "", 0, "")
 		Expect(err).To(HaveOccurred())
 		Expect(calls.Load()-before).To(Equal(int32(3)), "list retries with the client policy")
 	})

@@ -27,9 +27,10 @@ pub mod wal;
 pub use auth::{KvTokenStore, TOKEN_KEY_PREFIX, TokenService};
 pub use error::{ErrorKind, ServiceError};
 pub use group::{
-    CommittedOffset, GroupCoordinator, GroupDescription, GroupError, GroupState, JoinInput,
-    JoinMember, JoinOutcome, JoinProtocol, Joined, ListedGroup, MemberDescription, MemberFence,
-    MemberRole, Membership, OffsetCommit, StreamName, SyncInput, SyncOutcome,
+    CommittedOffset, DEFAULT_MAX_GROUPS, GroupCoordinator, GroupDescription, GroupError,
+    GroupState, JoinInput, JoinMember, JoinOutcome, JoinProtocol, Joined, ListedGroup,
+    MemberDescription, MemberFence, MemberRole, Membership, OffsetCommit, StreamName, SyncInput,
+    SyncOutcome,
 };
 pub use log::Log;
 pub use node::{NodeConfig, PicoNode};

@@ -1,13 +1,14 @@
 use std::time::Duration;
 
-use picomq_metrics::{Method, Metrics, Protocol};
+use picomq_auth::Audience;
+use picomq_metrics::{Method, Metrics};
 
 #[test]
 fn inputs_outside_every_range_land_in_the_edge_slots() {
     let metrics = Metrics::install();
 
-    picomq_metrics::http(Protocol::Admin, Method::Other, 0, Duration::MAX);
-    picomq_metrics::http(Protocol::Admin, Method::Other, 999, Duration::ZERO);
+    picomq_metrics::http(Audience::Admin, Method::Other, 0, Duration::MAX);
+    picomq_metrics::http(Audience::Admin, Method::Other, 999, Duration::ZERO);
     picomq_metrics::kafka(i16::MIN, false, Duration::MAX);
     picomq_metrics::kafka(i16::MAX, true, Duration::ZERO);
     picomq_metrics::name_kafka_operation(i16::MAX, "Unknown");

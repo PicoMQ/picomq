@@ -1,24 +1,27 @@
 use std::fmt::Write;
 use std::sync::atomic::Ordering;
 
+use picomq_auth::json::audience_name;
+
 use crate::histogram::Histogram;
 use crate::instruments::{
-    Instruments, Listener, Method, OUTCOMES, Protocol, Reason, STATUS_CLASSES, Transfer,
+    AUDIENCES, Instruments, ListenerKind, Method, OUTCOMES, Reason, STATUS_CLASSES,
+    TransferOutcome, audience_slot,
 };
 
 pub(crate) fn render(instruments: &Instruments, logs_owned: u64) -> String {
     let mut out = String::new();
 
     family(&mut out, "pico_requests_total", "counter");
-    for protocol in Protocol::ALL {
+    for audience in AUDIENCES {
         for method in Method::ALL {
             for (class, label) in STATUS_CLASSES.iter().enumerate() {
-                let value = instruments.http[protocol as usize][method as usize][class]
+                let value = instruments.http[audience_slot(audience)][method as usize][class]
                     .load(Ordering::Relaxed);
                 if value > 0 {
                     let labels = format!(
                         r#"protocol="{}",operation="{}",status="{label}""#,
-                        protocol.label(),
+                        audience_name(audience),
                         method.label()
                     );
                     sample(&mut out, "pico_requests_total", &labels, value);
@@ -40,17 +43,17 @@ pub(crate) fn render(instruments: &Instruments, logs_owned: u64) -> String {
     }
 
     family(&mut out, "pico_request_duration_seconds", "histogram");
-    for protocol in Protocol::ALL {
+    for audience in AUDIENCES {
         for method in Method::ALL {
             let labels = format!(
                 r#"protocol="{}",operation="{}""#,
-                protocol.label(),
+                audience_name(audience),
                 method.label()
             );
             histogram(
                 &mut out,
                 &labels,
-                &instruments.http_latency[protocol as usize][method as usize],
+                &instruments.http_latency[audience_slot(audience)][method as usize],
             );
         }
     }
@@ -74,21 +77,21 @@ pub(crate) fn render(instruments: &Instruments, logs_owned: u64) -> String {
     }
 
     family(&mut out, "pico_transfers_total", "counter");
-    for outcome in Transfer::ALL {
+    for outcome in TransferOutcome::ALL {
         let labels = format!(r#"status="{}""#, outcome.label());
         let value = instruments.transfers[outcome as usize].load(Ordering::Relaxed);
         sample(&mut out, "pico_transfers_total", &labels, value);
     }
 
     family(&mut out, "pico_auth_failures_total", "counter");
-    for protocol in Protocol::ALL {
+    for audience in AUDIENCES {
         for reason in Reason::ALL {
-            let value = instruments.auth_failures[protocol as usize][reason as usize]
+            let value = instruments.auth_failures[audience_slot(audience)][reason as usize]
                 .load(Ordering::Relaxed);
             if value > 0 {
                 let labels = format!(
                     r#"protocol="{}",reason="{}""#,
-                    protocol.label(),
+                    audience_name(audience),
                     reason.label()
                 );
                 sample(&mut out, "pico_auth_failures_total", &labels, value);
@@ -97,7 +100,7 @@ pub(crate) fn render(instruments: &Instruments, logs_owned: u64) -> String {
     }
 
     family(&mut out, "pico_connections", "gauge");
-    for listener in Listener::ALL {
+    for listener in ListenerKind::ALL {
         let labels = format!(r#"listener="{}""#, listener.label());
         let value = instruments.connections[listener as usize].load(Ordering::Relaxed);
         sample(&mut out, "pico_connections", &labels, value);

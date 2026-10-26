@@ -1,19 +1,22 @@
 use std::time::Duration;
 
-use axum::Json;
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use picomq_server::PicoNode;
-use serde_json::json;
+use serde_json::Value;
 
 use crate::admin::PROTOCOL_NAME;
+use crate::common::error_response;
 
 pub const FORWARDED_BY: &str = "pico-forwarded-by";
 pub const NODE_ID: &str = "pico-node-id";
 
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(10);
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_RESPONSE: usize = 4 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ForwardError {
@@ -50,15 +53,9 @@ impl Forward {
         Ok(Self { client })
     }
 
-    pub(crate) async fn to(
-        &self,
-        node: &PicoNode,
-        target: i32,
-        request: Request,
-        timeout: Duration,
-    ) -> Response {
+    pub(crate) async fn to(&self, node: &PicoNode, target: i32, request: Request) -> Response {
         if request.headers().contains_key(FORWARDED_BY) {
-            return refused(
+            return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("node {target} is not reachable through this node, retry"),
             );
@@ -67,7 +64,7 @@ impl Forward {
         let address = {
             let view = node.views().load();
             let Some(row) = view.state.nodes().get(&target) else {
-                return refused(
+                return error_response(
                     StatusCode::NOT_FOUND,
                     format!("node {target} is not registered"),
                 );
@@ -75,7 +72,7 @@ impl Forward {
             match row.protocol_addresses.get(PROTOCOL_NAME) {
                 Some(address) => address.clone(),
                 None => {
-                    return refused(
+                    return error_response(
                         StatusCode::BAD_GATEWAY,
                         format!("node {target} has no admin address"),
                     );
@@ -92,7 +89,7 @@ impl Forward {
                 parts.method,
                 format!("{}{path}", address.trim_end_matches('/')),
             )
-            .timeout(timeout)
+            .timeout(TIMEOUT)
             .header(FORWARDED_BY, node.config().node_id.to_string())
             .body(reqwest::Body::wrap_stream(body.into_data_stream()));
         for name in [header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT] {
@@ -102,16 +99,43 @@ impl Forward {
         }
 
         match outbound.send().await {
-            Ok(response) => relay(response),
-            Err(error) if error.is_timeout() => refused(
+            Ok(response) => response_of(response),
+            Err(error) if error.is_timeout() => error_response(
                 StatusCode::GATEWAY_TIMEOUT,
                 format!("node {target} did not answer in time"),
             ),
-            Err(_) => refused(
+            Err(_) => error_response(
                 StatusCode::BAD_GATEWAY,
                 format!("node {target} could not be reached at {address}"),
             ),
         }
+    }
+
+    pub(crate) async fn post_json(
+        &self,
+        node: &PicoNode,
+        target: i32,
+        path: &str,
+        headers: &HeaderMap,
+        body: &Value,
+    ) -> Option<Value> {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(credential) = headers.get(header::AUTHORIZATION) {
+            request = request.header(header::AUTHORIZATION, credential);
+        }
+        let request = request.body(Body::from(body.to_string())).ok()?;
+
+        let response = self.to(node, target, request).await;
+        if response.status() != StatusCode::OK {
+            return None;
+        }
+        let body = axum::body::to_bytes(response.into_body(), MAX_RESPONSE)
+            .await
+            .ok()?;
+        serde_json::from_slice(&body).ok()
     }
 }
 
@@ -122,7 +146,7 @@ pub(crate) fn served_by(node: &PicoNode, mut response: Response) -> Response {
     response
 }
 
-fn relay(response: reqwest::Response) -> Response {
+fn response_of(response: reqwest::Response) -> Response {
     let status = response.status();
     let headers = end_to_end(response.headers());
 
@@ -145,8 +169,4 @@ fn end_to_end(headers: &HeaderMap) -> HeaderMap {
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
-}
-
-fn refused(status: StatusCode, message: impl Into<String>) -> Response {
-    (status, Json(json!({ "error": message.into() }))).into_response()
 }

@@ -8,7 +8,7 @@ use kafka_protocol::messages::{
 use kafka_protocol::protocol::{Decodable, StrBytes};
 use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer};
 use picomq_common::now_ms;
-use picomq_metrics::{Protocol, Reason};
+use picomq_metrics::Reason;
 
 use crate::dispatch::RequestContext;
 use crate::handlers::HandlerError;
@@ -179,20 +179,23 @@ fn supported(req: &RequestContext) -> Result<(), HandlerError> {
 
 async fn verify(authorizer: &Authorizer, token: &[u8]) -> Result<AuthPrincipal, &'static str> {
     let (username, password) =
-        plain(token).ok_or_else(|| refused(Reason::Malformed, "malformed PLAIN token"))?;
+        plain(token).ok_or_else(|| auth_failure(Reason::Malformed, "malformed PLAIN token"))?;
 
     let principal = authorizer
         .authenticate(password, Audience::Kafka, now_ms())
         .await
         .map_err(|err| match err {
             AuthError::Store(_) => "invalid username or password",
-            _ => refused(Reason::Credential, "invalid username or password"),
+            _ => auth_failure(Reason::Credential, "invalid username or password"),
         })?;
     if principal.id != username {
-        return Err(refused(Reason::Credential, "invalid username or password"));
+        return Err(auth_failure(
+            Reason::Credential,
+            "invalid username or password",
+        ));
     }
     if principal.scope.auto_prefix {
-        return Err(refused(
+        return Err(auth_failure(
             Reason::AutoPrefix,
             "auto prefix scopes are not supported over Kafka",
         ));
@@ -201,8 +204,8 @@ async fn verify(authorizer: &Authorizer, token: &[u8]) -> Result<AuthPrincipal, 
     Ok(principal)
 }
 
-fn refused(reason: Reason, message: &'static str) -> &'static str {
-    picomq_metrics::auth_failure(Protocol::Kafka, reason);
+fn auth_failure(reason: Reason, message: &'static str) -> &'static str {
+    picomq_metrics::auth_failure(Audience::Kafka, reason);
     message
 }
 

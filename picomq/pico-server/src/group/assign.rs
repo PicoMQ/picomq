@@ -43,6 +43,7 @@ mod tests {
         Member {
             instance_id: None,
             client_id: String::new(),
+            client_host: String::new(),
             role: Role::Subscribed {
                 subscription: subscription
                     .iter()

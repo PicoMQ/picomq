@@ -8,9 +8,12 @@
 //! term) are intentionally never added: the metadata plane is a SQL-backed
 //! log, and maintenance leadership is a lease, reported as `leaseHolder`.
 
+mod groups;
+mod offsets;
+mod topics;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
@@ -20,8 +23,8 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use picomq_auth::{
-    AccessToken, Audience, AuthError, Authorizer, Operation, TokenRecord, TokenStore as _,
-    check_issue, scope_from_json, scope_to_json,
+    AccessToken, Audience, AuthError, AuthPrincipal, Authorizer, Operation, TokenRecord,
+    TokenStore as _, check_issue, scope_from_json, scope_to_json,
 };
 use picomq_metadata::{MetadataState, NodeRow, Proposer};
 use picomq_metrics::Metrics;
@@ -35,8 +38,6 @@ use crate::paging::Paging;
 use crate::partition;
 
 pub const PROTOCOL_NAME: &str = "admin";
-
-const NODE_METRICS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What `/ready` reports on.
 ///
@@ -94,6 +95,37 @@ impl AdminState {
     fn lease_holder(&self) -> Option<bool> {
         self.leadership.as_ref().map(|rx| *rx.borrow())
     }
+
+    async fn forward_to(&self, target: i32, request: Request) -> Response {
+        let Some(forward) = &self.forward else {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "this node does not forward requests",
+            );
+        };
+        forward.to(&self.node, target, request).await
+    }
+
+    async fn post_json(
+        &self,
+        target: i32,
+        path: &str,
+        headers: &HeaderMap,
+        body: &Value,
+    ) -> Option<Value> {
+        self.forward
+            .as_ref()?
+            .post_json(&self.node, target, path, headers, body)
+            .await
+    }
+}
+
+fn allowed(principal: Option<&AuthPrincipal>, op: Operation, topic: &Topic) -> bool {
+    principal.is_none_or(|principal| principal.scope.allows(op, Some(topic.name.spelling())))
+}
+
+fn missing_topic(name: &str) -> Response {
+    error_response(StatusCode::NOT_FOUND, format!("topic {name} not found"))
 }
 
 #[derive(rust_embed::RustEmbed)]
@@ -118,11 +150,12 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/nodes", get(nodes))
         .route("/admin/nodes/{id}", post(update_node))
         .route("/admin/nodes/{id}/metrics", get(node_metrics))
-        .route("/admin/nodes/{id}/offsets", post(crate::offsets::answer))
+        .route("/admin/nodes/{id}/offsets", post(offsets::owned_offsets))
         .route("/admin/transfer", post(transfer))
         .route("/admin/tokens", get(list_tokens).post(issue_token))
         .route("/admin/tokens/{*id}", delete(revoke_token))
-        .merge(crate::topics::routes())
+        .merge(topics::routes())
+        .merge(groups::routes())
         .route("/", get(|| async { asset("index.html") }))
         .fallback(get(|uri: Uri| async move {
             asset(uri.path().trim_start_matches('/'))
@@ -327,15 +360,7 @@ async fn node_metrics(
     if id == state.node.config().node_id {
         return rendered(&state);
     }
-    let Some(forward) = &state.forward else {
-        return error_response(
-            StatusCode::BAD_GATEWAY,
-            "this node does not forward requests",
-        );
-    };
-    forward
-        .to(&state.node, id, request, NODE_METRICS_TIMEOUT)
-        .await
+    state.forward_to(id, request).await
 }
 
 fn rendered(state: &AdminState) -> Response {
@@ -475,7 +500,7 @@ async fn list_tokens(State(state): State<AdminState>, uri: Uri, headers: HeaderM
         .list_page(
             paging.filter("prefix").unwrap_or(""),
             paging.after.as_deref(),
-            paging.fetch(),
+            paging.fetch_count(),
         )
         .await
     {

@@ -8,13 +8,11 @@ pub mod forward;
 pub mod groups;
 mod http;
 mod observe;
-mod offsets;
 mod paging;
 mod partition;
 pub mod pico;
 pub mod route;
 pub mod serve;
-mod topics;
 
 pub use admin::AdminState;
 pub use auth::{Permit, gate};

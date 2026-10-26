@@ -4,7 +4,7 @@ use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use picomq_auth::{Audience, AuthError};
-use picomq_metrics::{Method, Protocol, Reason};
+use picomq_metrics::{Method, Reason};
 
 pub(crate) async fn observe(
     State(audience): State<Audience>,
@@ -16,7 +16,7 @@ pub(crate) async fn observe(
 
     let response = next.run(request).await;
     picomq_metrics::http(
-        protocol(audience),
+        audience,
         method,
         response.status().as_u16(),
         started.elapsed(),
@@ -24,18 +24,9 @@ pub(crate) async fn observe(
     response
 }
 
-pub(crate) fn refused(audience: Audience, err: &AuthError) {
+pub(crate) fn auth_failure(audience: Audience, err: &AuthError) {
     if let Some(reason) = reason(err) {
-        picomq_metrics::auth_failure(protocol(audience), reason);
-    }
-}
-
-fn protocol(audience: Audience) -> Protocol {
-    match audience {
-        Audience::Pico => Protocol::Pico,
-        Audience::DurableStreams => Protocol::DurableStreams,
-        Audience::Admin => Protocol::Admin,
-        Audience::Kafka => Protocol::Kafka,
+        picomq_metrics::auth_failure(audience, reason);
     }
 }
 

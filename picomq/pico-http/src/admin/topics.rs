@@ -8,27 +8,30 @@ use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use picomq_auth::{AuthError, AuthPrincipal, Operation};
+use picomq_auth::{AuthError, Operation};
 use picomq_metadata::{MetadataState, StreamRow};
 use picomq_protocol::config::ConfigUpdate;
-use picomq_server::{CreateCommand, Page, Retention, Topic, partition_log};
+use picomq_server::{CreateCommand, Page, Partition, Retention, Topic};
 use s3stream::StreamState;
 use serde_json::{Value, json};
 
-use crate::admin::AdminState;
+use super::offsets::{self, Offsets};
+use super::{AdminState, allowed, missing_topic};
 use crate::common::streams::update_command;
-use crate::common::{auth_error, authenticate, error_response, json_body, service_error};
-use crate::offsets::{self, Offsets};
+use crate::common::{
+    auth_error, authenticate, error_response, json_body, read_json, service_error,
+};
 use crate::paging::Paging;
 
 const TRIM_TIMEOUT: Duration = Duration::from_secs(10);
+const TRIM_BODY: usize = 4096;
 
 pub(crate) fn routes() -> Router<AdminState> {
     Router::new()
         .route("/admin/topics", get(list).post(create))
         .route(
             "/admin/topics/{name}",
-            get(detail).patch(update).delete(remove),
+            get(detail).patch(update).delete(delete_topic),
         )
         .route("/admin/topics/{name}/partitions", get(partitions))
         .route("/admin/topics/{name}/partitions/{index}", get(partition))
@@ -36,7 +39,7 @@ pub(crate) fn routes() -> Router<AdminState> {
 }
 
 async fn list(State(state): State<AdminState>, uri: Uri, headers: HeaderMap) -> Response {
-    let principal = match caller(&state, &headers).await {
+    let principal = match authenticate(state.authorizer.as_deref(), &headers).await {
         Ok(principal) => principal,
         Err(response) => return *response,
     };
@@ -60,7 +63,7 @@ async fn detail(
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let topic = match visible(&state, &headers, Operation::Head, &name).await {
+    let topic = match authorized_topic(&state, &headers, Operation::Head, &name).await {
         Ok(topic) => topic,
         Err(response) => return *response,
     };
@@ -69,7 +72,7 @@ async fn detail(
     let mut stored_bytes = 0;
     let mut owners: BTreeMap<i32, u32> = BTreeMap::new();
     for index in 0..topic.partitions {
-        let Some(row) = row_of(&state, &view.state, &topic, index) else {
+        let Some(row) = offsets::row_of(&state, &view.state, &topic, index) else {
             continue;
         };
         stored_bytes += row.stored_bytes;
@@ -91,7 +94,7 @@ async fn partitions(
     uri: Uri,
     headers: HeaderMap,
 ) -> Response {
-    let topic = match visible(&state, &headers, Operation::Head, &name).await {
+    let topic = match authorized_topic(&state, &headers, Operation::Head, &name).await {
         Ok(topic) => topic,
         Err(response) => return *response,
     };
@@ -108,16 +111,24 @@ async fn partitions(
 
     let view = state.node.views().load();
     let start = after.map_or(0, |after| after.saturating_add(1));
-    let entries =
-        (start..topic.partitions).map(|index| (index, row_of(&state, &view.state, &topic, index)));
+    let entries = (start..topic.partitions)
+        .map(|index| (index, offsets::row_of(&state, &view.state, &topic, index)));
     let page = Page::scan(entries, paging.limit, |_, row| {
         node.is_none_or(|node| row.is_some_and(|row| row.node_id == node))
     });
 
-    let known = offsets_of(&state, &headers, &view.state, &topic, &page.items).await;
+    let rows: Vec<_> = page
+        .items
+        .iter()
+        .map(|(index, row)| (&topic, *index, *row))
+        .collect();
+    let known = offsets::current(&state, &headers, &view.state, &rows, None).await;
 
     paging.reply(page, |index, row| {
-        let (offsets, current) = known.get(index).copied().unwrap_or((None, false));
+        let (offsets, current) = known
+            .get(&Partition::new(topic.id, *index))
+            .copied()
+            .unwrap_or((None, false));
         partition_json(*index, row.as_ref(), &view.state, offsets, current)
     })
 }
@@ -127,7 +138,7 @@ async fn partition(
     Path((name, index)): Path<(String, u32)>,
     headers: HeaderMap,
 ) -> Response {
-    let topic = match visible(&state, &headers, Operation::Head, &name).await {
+    let topic = match authorized_topic(&state, &headers, Operation::Head, &name).await {
         Ok(topic) => topic,
         Err(response) => return *response,
     };
@@ -139,16 +150,20 @@ async fn partition(
     }
 
     let view = state.node.views().load();
-    let row = row_of(&state, &view.state, &topic, index);
-    let known = offsets_of(&state, &headers, &view.state, &topic, &[(index, row)]).await;
+    let row = offsets::row_of(&state, &view.state, &topic, index);
+    let known =
+        offsets::current(&state, &headers, &view.state, &[(&topic, index, row)], None).await;
 
-    let (offsets, current) = known.get(&index).copied().unwrap_or((None, false));
+    let (offsets, current) = known
+        .get(&Partition::new(topic.id, index))
+        .copied()
+        .unwrap_or((None, false));
     let body = partition_json(index, row.as_ref(), &view.state, offsets, current);
     (StatusCode::OK, Json(body)).into_response()
 }
 
 async fn create(State(state): State<AdminState>, headers: HeaderMap, body: Bytes) -> Response {
-    let principal = match caller(&state, &headers).await {
+    let principal = match authenticate(state.authorizer.as_deref(), &headers).await {
         Ok(principal) => principal,
         Err(response) => return *response,
     };
@@ -187,7 +202,7 @@ async fn update(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let topic = match visible(&state, &headers, Operation::Create, &name).await {
+    let topic = match authorized_topic(&state, &headers, Operation::Create, &name).await {
         Ok(topic) => topic,
         Err(response) => return *response,
     };
@@ -203,19 +218,19 @@ async fn update(
     }
 }
 
-async fn remove(
+async fn delete_topic(
     State(state): State<AdminState>,
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let topic = match visible(&state, &headers, Operation::Delete, &name).await {
+    let topic = match authorized_topic(&state, &headers, Operation::Delete, &name).await {
         Ok(topic) => topic,
         Err(response) => return *response,
     };
 
     match state.node.topics().delete(topic.name.spelling()).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => missing(&name),
+        Ok(false) => missing_topic(&name),
         Err(error) => service_error(error),
     }
 }
@@ -225,12 +240,12 @@ async fn trim(
     Path((name, index)): Path<(String, u32)>,
     request: Request,
 ) -> Response {
-    let topic = match visible(&state, request.headers(), Operation::Trim, &name).await {
+    let topic = match authorized_topic(&state, request.headers(), Operation::Trim, &name).await {
         Ok(topic) => topic,
         Err(response) => return *response,
     };
     let view = state.node.views().load();
-    let Some(row) = row_of(&state, &view.state, &topic, index) else {
+    let Some(row) = offsets::row_of(&state, &view.state, &topic, index) else {
         return error_response(
             StatusCode::NOT_FOUND,
             format!("partition {index} not found"),
@@ -239,25 +254,14 @@ async fn trim(
 
     let local = state.node.config().node_id;
     if row.node_id != -1 && row.node_id != local {
-        let Some(forward) = &state.forward else {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                "this node does not forward requests",
-            );
-        };
-        return forward
-            .to(&state.node, row.node_id, request, TRIM_TIMEOUT)
-            .await;
+        return state.forward_to(row.node_id, request).await;
     }
 
-    let body = match axum::body::to_bytes(request.into_body(), 4096).await {
+    let body = match read_json(request, TRIM_BODY).await {
         Ok(body) => body,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "expected {\"before\": offset}"),
+        Err(response) => return *response,
     };
-    let Some(before) = json_body(&body)
-        .ok()
-        .and_then(|body| body["before"].as_u64())
-    else {
+    let Some(before) = body["before"].as_u64() else {
         return error_response(StatusCode::BAD_REQUEST, "expected {\"before\": offset}");
     };
 
@@ -272,106 +276,22 @@ async fn trim(
     }
 }
 
-async fn caller(
-    state: &AdminState,
-    headers: &HeaderMap,
-) -> Result<Option<AuthPrincipal>, Box<Response>> {
-    let principal = authenticate(state.authorizer.as_deref(), headers).await?;
-    if principal
-        .as_ref()
-        .is_some_and(|principal| principal.scope.auto_prefix)
-    {
-        return Err(Box::new(auth_error(&AuthError::Denied)));
-    }
-    Ok(principal)
-}
-
-async fn visible(
+async fn authorized_topic(
     state: &AdminState,
     headers: &HeaderMap,
     op: Operation,
     name: &str,
 ) -> Result<Topic, Box<Response>> {
-    let principal = caller(state, headers).await?;
+    let principal = authenticate(state.authorizer.as_deref(), headers).await?;
     let topic = match state.node.topics().get(name).await {
         Ok(Some(topic)) => topic,
-        Ok(None) => return Err(Box::new(missing(name))),
+        Ok(None) => return Err(Box::new(missing_topic(name))),
         Err(error) => return Err(Box::new(service_error(error))),
     };
     if !allowed(principal.as_ref(), op, &topic) {
         return Err(Box::new(auth_error(&AuthError::Denied)));
     }
     Ok(topic)
-}
-
-fn allowed(principal: Option<&AuthPrincipal>, op: Operation, topic: &Topic) -> bool {
-    principal.is_none_or(|principal| principal.scope.allows(op, Some(topic.name.spelling())))
-}
-
-fn row_of(
-    state: &AdminState,
-    view: &MetadataState,
-    topic: &Topic,
-    index: u32,
-) -> Option<StreamRow> {
-    let log = partition_log(topic, index).ok()?;
-    let stream_id = state.node.service().stream_id(&log).ok()??;
-    view.streams().get(&stream_id).copied()
-}
-
-async fn offsets_of(
-    state: &AdminState,
-    headers: &HeaderMap,
-    view: &MetadataState,
-    topic: &Topic,
-    partitions: &[(u32, Option<StreamRow>)],
-) -> BTreeMap<u32, (Option<Offsets>, bool)> {
-    let local = state.node.config().node_id;
-    let spelling = topic.name.spelling().to_owned();
-
-    let mut remote: BTreeMap<i32, Vec<(String, u32)>> = BTreeMap::new();
-    for (index, row) in partitions {
-        let owner = row
-            .and_then(|row| open_elsewhere(&row, local))
-            .filter(|owner| answers(view, *owner));
-        if let Some(owner) = owner {
-            remote
-                .entry(owner)
-                .or_default()
-                .push((spelling.clone(), *index));
-        }
-    }
-    let answered = offsets::from_owners(state, headers, remote).await;
-
-    partitions
-        .iter()
-        .map(|(index, row)| {
-            let known = match answered.get(&(spelling.clone(), *index)) {
-                Some(offsets) => (Some(*offsets), true),
-                None => {
-                    let elsewhere = row.and_then(|row| open_elsewhere(&row, local));
-                    (local_offsets(state, topic, *index), elsewhere.is_none())
-                }
-            };
-            (*index, known)
-        })
-        .collect()
-}
-
-fn open_elsewhere(row: &StreamRow, local: i32) -> Option<i32> {
-    (row.state == StreamState::Opened && row.node_id != local).then_some(row.node_id)
-}
-
-fn answers(view: &MetadataState, node: i32) -> bool {
-    view.nodes().get(&node).is_some_and(|row| !row.fenced)
-}
-
-fn local_offsets(state: &AdminState, topic: &Topic, index: u32) -> Option<Offsets> {
-    let offsets = state.node.topics().current_offsets(topic, index).ok()?;
-    Some(Offsets {
-        start: offsets.start_offset.record_offset(),
-        next: offsets.next_offset.record_offset(),
-    })
 }
 
 fn owner_id(node: i32) -> Option<i32> {
@@ -471,8 +391,4 @@ fn optional_u64(body: &Value, field: &str) -> Result<Option<u64>, String> {
             .map(Some)
             .ok_or_else(|| format!("{field} must be a number")),
     }
-}
-
-fn missing(name: &str) -> Response {
-    error_response(StatusCode::NOT_FOUND, format!("topic {name} not found"))
 }

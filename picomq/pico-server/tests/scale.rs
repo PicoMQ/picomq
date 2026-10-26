@@ -13,7 +13,10 @@ use std::time::Instant;
 use bytes::Bytes;
 use picomq_metadata::{CommandSink, LocalSink};
 use picomq_server::wal::ObjectWal;
-use picomq_server::{AppendCommand, CreateCommand, LogRecord, NodeConfig, OffsetToken, PicoNode};
+use picomq_server::{
+    AppendCommand, CommittedOffset, CreateCommand, JoinInput, LogRecord, MemberFence, Membership,
+    NodeConfig, OffsetCommit, OffsetToken, Partition, PicoNode, TopicId,
+};
 use s3stream::{MemoryObjectStorage, ObjectStorageTrait};
 
 /// Append durability waits are dominated by the WAL group-commit window
@@ -50,7 +53,7 @@ where
     }
 }
 
-async fn run_gate(total: u64) {
+async fn start_node() -> PicoNode {
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(0));
@@ -61,9 +64,13 @@ async fn run_gate(total: u64) {
         ..Default::default()
     };
     let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
-    let node = PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
         .await
-        .unwrap();
+        .unwrap()
+}
+
+async fn run_gate(total: u64) {
+    let node = start_node().await;
     let service = node.topics();
     let base_rss = rss_mib();
 
@@ -191,4 +198,66 @@ async fn fifty_k_streams_with_appends_gate() {
 #[ignore = "run explicitly: cargo test --release -p picomq-server --test scale -- --ignored --nocapture"]
 async fn million_streams_with_appends_gate() {
     run_gate(1_000_000).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run explicitly: cargo test --release -p picomq-server --test scale -- --ignored --nocapture"]
+async fn loaded_group_memory() {
+    const GROUPS: usize = 1_000;
+    const PARTITIONS: u8 = 100;
+    let node = start_node().await;
+    node.topics()
+        .create(CreateCommand::new(
+            "/scale/topic",
+            "application/octet-stream",
+        ))
+        .await
+        .unwrap();
+    let groups = node.groups();
+    let commits: Vec<OffsetCommit> = (0..PARTITIONS)
+        .map(|index| OffsetCommit {
+            partition: Partition::new(TopicId([index; 16]), u32::from(index)),
+            value: CommittedOffset {
+                position: 1,
+                leader_epoch: None,
+                metadata: None,
+            },
+        })
+        .collect();
+    let base_rss = rss_mib();
+
+    for group in 0..GROUPS {
+        let group_id = format!("group-{group}");
+        let joined = groups
+            .join(
+                None,
+                JoinInput {
+                    group_id: group_id.clone(),
+                    member_id: String::new(),
+                    instance_id: None,
+                    client_id: "scale".to_owned(),
+                    client_host: String::new(),
+                    membership: Membership::Subscribed(vec!["/scale/topic".to_owned()]),
+                    session_timeout_ms: 300_000,
+                    rebalance_timeout_ms: 2_000,
+                    require_known_member_id: false,
+                },
+            )
+            .await;
+        let fence = MemberFence {
+            generation: joined.generation,
+            member_id: &joined.member_id,
+            instance_id: None,
+        };
+        groups
+            .commit_offsets(None, &group_id, Some(fence), &commits)
+            .await
+            .unwrap();
+    }
+
+    let per_group = (rss_mib() - base_rss) * 1024.0 / GROUPS as f64;
+    println!(
+        "{GROUPS} loaded groups, one member and {PARTITIONS} offsets each: {per_group:.1} KiB/group"
+    );
+    node.close().await;
 }

@@ -85,6 +85,11 @@ impl TopicId {
     pub fn hex(&self) -> String {
         hex::encode(self.0)
     }
+
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        let bytes: [u8; 16] = hex::decode(hex).ok()?.try_into().ok()?;
+        Some(Self(bytes))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

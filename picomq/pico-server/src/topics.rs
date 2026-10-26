@@ -193,16 +193,16 @@ impl Topics {
             .collect()
     }
 
-    pub async fn offsets(&self, topic: &Topic, partition: u32) -> Result<LogOffsets, ServiceError> {
-        let log = partition_log(topic, partition)?;
-        self.service.live_offsets(&log).await
-    }
-
-    pub fn current_offsets(
+    pub async fn live_offsets(
         &self,
         topic: &Topic,
         partition: u32,
     ) -> Result<LogOffsets, ServiceError> {
+        let log = partition_log(topic, partition)?;
+        self.service.live_offsets(&log).await
+    }
+
+    pub fn offsets(&self, topic: &Topic, partition: u32) -> Result<LogOffsets, ServiceError> {
         let log = partition_log(topic, partition)?;
         self.service.offsets(&log)
     }
@@ -264,7 +264,7 @@ impl Topics {
             .views
             .load()
             .state
-            .list_kv_page(&prefix, after.as_deref(), page::fetch(limit))
+            .list_kv_page(&prefix, after.as_deref(), page::fetch_count(limit))
             .into_iter()
             .map(|(key, value)| {
                 let name = key[TOPIC_PREFIX.len()..].to_owned();

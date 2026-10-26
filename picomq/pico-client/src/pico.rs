@@ -174,14 +174,19 @@ impl PicoClient {
         self.call(request.encode()).await.map(drop)
     }
 
-    pub async fn list_groups(&self) -> Result<Vec<String>> {
-        let response = self
-            .retry
-            .run(|| self.call(ListGroupsRequest.encode()))
-            .await?;
-        GroupListing::decode(&response.bytes().await?)
-            .map(|listing| listing.groups)
-            .map_err(invalid_response)
+    pub async fn list_groups(
+        &self,
+        prefix: &str,
+        limit: u64,
+        cursor: Option<&str>,
+    ) -> Result<GroupListing> {
+        let request = ListGroupsRequest {
+            prefix,
+            limit,
+            cursor,
+        };
+        let response = self.retry.run(|| self.call(request.encode())).await?;
+        GroupListing::decode(&response.bytes().await?).map_err(invalid_response)
     }
 
     async fn call(&self, wire: WireRequest) -> Result<Response> {

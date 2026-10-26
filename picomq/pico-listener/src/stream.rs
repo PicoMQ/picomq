@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use picomq_metrics::Open;
+use picomq_metrics::GaugeGuard;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -11,7 +11,7 @@ use tokio_rustls::server::TlsStream;
 
 pub struct Stream {
     io: Io,
-    open: Open,
+    open: GaugeGuard,
 }
 
 enum Io {
@@ -21,7 +21,7 @@ enum Io {
 
 pub struct Reader {
     io: ReadIo,
-    _open: Arc<Open>,
+    _open: Arc<GaugeGuard>,
 }
 
 enum ReadIo {
@@ -31,7 +31,7 @@ enum ReadIo {
 
 pub struct Writer {
     io: WriteIo,
-    _open: Arc<Open>,
+    _open: Arc<GaugeGuard>,
 }
 
 enum WriteIo {
@@ -40,14 +40,14 @@ enum WriteIo {
 }
 
 impl Stream {
-    pub(crate) fn plain(socket: TcpStream, open: Open) -> Self {
+    pub(crate) fn plain(socket: TcpStream, open: GaugeGuard) -> Self {
         Self {
             io: Io::Plain(socket),
             open,
         }
     }
 
-    pub(crate) fn tls(stream: TlsStream<TcpStream>, open: Open) -> Self {
+    pub(crate) fn tls(stream: TlsStream<TcpStream>, open: GaugeGuard) -> Self {
         Self {
             io: Io::Tls(Box::new(stream)),
             open,

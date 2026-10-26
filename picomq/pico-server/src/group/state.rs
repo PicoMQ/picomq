@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use picomq_metrics::Open;
+use picomq_metrics::GaugeGuard;
 use tokio::sync::{Mutex, oneshot};
 
 use super::assign::assign;
@@ -13,7 +13,6 @@ use super::{
     SyncOutcome,
 };
 
-pub(super) const MAX_GROUPS: usize = 1_000;
 pub(super) const MAX_MEMBERS_PER_GROUP: usize = 10_000;
 pub(super) const MAX_STREAMS_PER_GROUP: usize = 10_000;
 pub(super) const MAX_PARTITIONS_PER_GROUP: usize = 10_000;
@@ -88,6 +87,7 @@ pub(super) enum Role {
 pub(super) struct Member {
     pub(super) instance_id: Option<String>,
     pub(super) client_id: String,
+    pub(super) client_host: String,
     pub(super) role: Role,
     pub(super) session_timeout: Duration,
     pub(super) rebalance_timeout: Duration,
@@ -140,7 +140,7 @@ pub(super) struct Group {
     pub(super) rebalance: Option<Rebalance>,
     pub(super) sync_waiters: BTreeMap<String, oneshot::Sender<Result<SyncOutcome, GroupError>>>,
     pub(super) last_activity: Instant,
-    _coordinated: Open,
+    _coordinated: GaugeGuard,
 }
 
 impl Group {
@@ -273,7 +273,11 @@ fn answer_syncs(state: &mut Group, answer: GroupError) {
     }
 }
 
-pub(super) fn evict_idle_groups(groups: &mut HashMap<String, Arc<Mutex<Group>>>, now: Instant) {
+pub(super) fn evict_idle_groups(
+    groups: &mut HashMap<String, Arc<Mutex<Group>>>,
+    now: Instant,
+    limit: usize,
+) {
     groups.retain(|_, group| match group.try_lock() {
         Ok(mut state) => {
             state.expire_members(now);
@@ -283,7 +287,7 @@ pub(super) fn evict_idle_groups(groups: &mut HashMap<String, Arc<Mutex<Group>>>,
         }
         Err(_) => true,
     });
-    if groups.len() < MAX_GROUPS {
+    if groups.len() < limit {
         return;
     }
     let idlest = groups
@@ -466,6 +470,7 @@ pub(super) fn member_from_input(input: &JoinInput, names: &mut Names, now: Insta
     Member {
         instance_id: input.instance_id.clone(),
         client_id: input.client_id.clone(),
+        client_host: input.client_host.clone(),
         role: match &input.membership {
             Membership::Subscribed(subscription) => Role::Subscribed {
                 subscription: subscription.iter().map(|s| names.intern(s)).collect(),

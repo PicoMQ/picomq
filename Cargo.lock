@@ -2598,6 +2598,7 @@ dependencies = [
  "durable-streams",
  "futures",
  "humantime",
+ "kafka-protocol",
  "object_store",
  "picomq-auth",
  "picomq-common",
@@ -2682,6 +2683,9 @@ dependencies = [
 [[package]]
 name = "picomq-metrics"
 version = "0.1.1"
+dependencies = [
+ "picomq-auth",
+]
 
 [[package]]
 name = "picomq-protocol"

@@ -173,6 +173,11 @@ type StreamListing struct {
 	Next    string
 }
 
+type GroupListing struct {
+	Groups []string
+	Next   string
+}
+
 type RecordsOptions struct {
 	From   string
 	Live   bool

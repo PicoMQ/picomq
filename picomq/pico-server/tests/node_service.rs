@@ -157,7 +157,7 @@ async fn create_append_read_close_via_topics() {
     let effective = topics.trim("/streams/batch", 0, 2).await.unwrap();
     assert!(effective <= 2, "effective trim {effective}");
     let topic = topics.get("/streams/batch").await.unwrap().unwrap();
-    let offsets = topics.offsets(&topic, 0).await.unwrap();
+    let offsets = topics.live_offsets(&topic, 0).await.unwrap();
     assert_eq!(offsets.start_offset.record_offset(), effective);
 
     let trimmed = topics
@@ -780,7 +780,7 @@ async fn topics_survive_restart() {
     let node = start_shared_node(1, 2, sink, views, object_storage, wal_storage).await;
 
     let topic = node.topics().get("/durable/a").await.unwrap().unwrap();
-    let offsets = node.topics().offsets(&topic, 0).await.unwrap();
+    let offsets = node.topics().live_offsets(&topic, 0).await.unwrap();
     assert_eq!(offsets.next_offset.record_offset(), 1);
     let read = node
         .topics()
@@ -1759,7 +1759,7 @@ async fn delete_records_waits_for_the_upload() {
     assert!(start >= 2, "start {start}");
     assert_eq!(
         topics
-            .offsets(&topic, 0)
+            .live_offsets(&topic, 0)
             .await
             .unwrap()
             .start_offset
@@ -1989,6 +1989,7 @@ async fn a_restarted_coordinator_keeps_the_members_that_join_it() {
         member_id: String::new(),
         instance_id: None,
         client_id: "test".to_owned(),
+        client_host: String::new(),
         membership: Membership::Subscribed(vec!["/a".to_owned()]),
         session_timeout_ms: 10_000,
         rebalance_timeout_ms: 2_000,

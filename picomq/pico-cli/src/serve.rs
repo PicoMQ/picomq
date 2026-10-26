@@ -95,6 +95,11 @@ pub struct ServeArgs {
     #[arg(long, env = "PICO_NODE_TIMEOUT_SEC", default_value_t = 30)]
     node_timeout_sec: u64,
 
+    /// Consumer groups this node holds in memory at once. Groups without
+    /// members are unloaded first.
+    #[arg(long, env = "PICO_MAX_GROUPS", default_value_t = 10_000)]
+    max_groups: usize,
+
     #[arg(long, env = "PICO_MAX_CHUNK_SIZE", default_value_t = 64 * 1024)]
     max_chunk_size: usize,
 
@@ -259,6 +264,7 @@ impl ServeArgs {
             sse_max_duration: Duration::from_secs(self.sse_max_duration_sec),
             heartbeat_interval: Duration::from_secs(self.heartbeat_interval_sec),
             node_timeout: Duration::from_secs(self.node_timeout_sec),
+            max_groups: self.max_groups,
             max_chunk_size: self.max_chunk_size,
             max_request_size: self.max_request_size,
             shutdown_drain: Duration::from_secs(self.shutdown_drain_sec),

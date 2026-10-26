@@ -5,7 +5,7 @@ mod text;
 use instruments::{INSTRUMENTS, Instruments};
 
 pub use instruments::{
-    Listener, Method, Open, Protocol, Reason, Transfer, auth_failure, connection,
+    GaugeGuard, ListenerKind, Method, Reason, TransferOutcome, auth_failure, connection,
     coordinated_group, http, kafka, live_reader, name_kafka_operation, read, rebalance, transfer,
     written,
 };

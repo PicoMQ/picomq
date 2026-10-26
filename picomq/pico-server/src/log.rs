@@ -28,13 +28,22 @@ impl Log {
         }
     }
 
-    /// Every group log in `state`, which names every group in the cluster.
-    pub fn groups(state: &MetadataState) -> Vec<String> {
+    pub fn groups(
+        state: &MetadataState,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Vec<String> {
+        let prefix = format!("{GROUP_PREFIX}{}", hex::encode(prefix));
+        let after = after.map(|after| format!("{GROUP_PREFIX}{}", hex::encode(after)));
+
         state
-            .list_kv(GROUP_PREFIX)
+            .list_kv_page(&prefix, after.as_deref(), limit)
             .into_iter()
-            .filter_map(|(key, _)| hex::decode(&key[GROUP_PREFIX.len()..]).ok())
-            .filter_map(|group_id| String::from_utf8(group_id).ok())
+            .map(|(key, _)| {
+                let id = hex::decode(&key[GROUP_PREFIX.len()..]).unwrap_or_default();
+                String::from_utf8_lossy(&id).into_owned()
+            })
             .collect()
     }
 }

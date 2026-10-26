@@ -3,6 +3,7 @@ pub(crate) mod streams;
 
 use std::sync::Arc;
 
+use axum::extract::Request;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
@@ -106,18 +107,33 @@ pub(crate) async fn authenticate(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| Box::new(auth_error(&AuthError::Unauthenticated)))?;
-    authorizer
+    let principal = authorizer
         .authenticate(credential, Audience::Admin, picomq_common::now_ms())
         .await
-        .map(Some)
-        .map_err(|err| Box::new(auth_error(&err)))
+        .map_err(|err| Box::new(auth_error(&err)))?;
+    if principal.scope.auto_prefix {
+        return Err(Box::new(auth_error(&AuthError::Denied)));
+    }
+    Ok(Some(principal))
+}
+
+pub(crate) async fn read_json(request: Request, limit: usize) -> Result<Value, Box<Response>> {
+    let body = axum::body::to_bytes(request.into_body(), limit)
+        .await
+        .map_err(|_| {
+            Box::new(error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "the body is too large",
+            ))
+        })?;
+    json_body(&body)
 }
 
 pub(crate) fn auth_error(err: &AuthError) -> Response {
     if let AuthError::Store(detail) = err {
         tracing::warn!(%detail, "auth store failure");
     }
-    crate::observe::refused(Audience::Admin, err);
+    crate::observe::auth_failure(Audience::Admin, err);
     let (status, _, message) = crate::auth::status_code(err);
     let mut response = (
         StatusCode::from_u16(status).expect("known status"),

@@ -130,6 +130,11 @@ export interface StreamListing {
   next?: string
 }
 
+export interface GroupListing {
+  groups: string[]
+  next?: string
+}
+
 export interface ReadLimits {
   count?: number
   bytes?: number

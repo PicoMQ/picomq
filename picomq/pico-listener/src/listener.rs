@@ -2,7 +2,7 @@ use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use picomq_metrics::Listener as Kind;
+use picomq_metrics::ListenerKind;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -20,7 +20,7 @@ pub struct Listener {
 
 impl Listener {
     pub fn bind(
-        kind: Kind,
+        kind: ListenerKind,
         addr: SocketAddr,
         backlog: i32,
         tls: Option<Tls>,
@@ -63,7 +63,7 @@ impl Drop for Listener {
 }
 
 async fn accept(
-    kind: Kind,
+    kind: ListenerKind,
     tcp: TcpListener,
     tls: Option<Tls>,
     accepted: mpsc::Sender<(Stream, SocketAddr)>,

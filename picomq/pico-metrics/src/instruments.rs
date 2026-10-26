@@ -2,6 +2,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
+use picomq_auth::Audience;
+
 use crate::histogram::Histogram;
 
 pub(crate) const KAFKA_SLOTS: usize = 128;
@@ -9,29 +11,19 @@ const KAFKA_OTHER: usize = KAFKA_SLOTS - 1;
 
 pub(crate) static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Protocol {
-    Pico,
-    DurableStreams,
-    Admin,
-    Kafka,
-}
+pub(crate) const AUDIENCES: [Audience; 4] = [
+    Audience::Pico,
+    Audience::DurableStreams,
+    Audience::Admin,
+    Audience::Kafka,
+];
 
-impl Protocol {
-    pub(crate) const ALL: [Protocol; 4] = [
-        Protocol::Pico,
-        Protocol::DurableStreams,
-        Protocol::Admin,
-        Protocol::Kafka,
-    ];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Pico => "pico",
-            Self::DurableStreams => "durable_streams",
-            Self::Admin => "admin",
-            Self::Kafka => "kafka",
-        }
+pub(crate) fn audience_slot(audience: Audience) -> usize {
+    match audience {
+        Audience::Pico => 0,
+        Audience::DurableStreams => 1,
+        Audience::Admin => 2,
+        Audience::Kafka => 3,
     }
 }
 
@@ -112,14 +104,18 @@ impl Reason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Listener {
+pub enum ListenerKind {
     Stream,
     Admin,
     Kafka,
 }
 
-impl Listener {
-    pub(crate) const ALL: [Listener; 3] = [Listener::Stream, Listener::Admin, Listener::Kafka];
+impl ListenerKind {
+    pub(crate) const ALL: [ListenerKind; 3] = [
+        ListenerKind::Stream,
+        ListenerKind::Admin,
+        ListenerKind::Kafka,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -131,13 +127,14 @@ impl Listener {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Transfer {
+pub enum TransferOutcome {
     Completed,
     Failed,
 }
 
-impl Transfer {
-    pub(crate) const ALL: [Transfer; 2] = [Transfer::Completed, Transfer::Failed];
+impl TransferOutcome {
+    pub(crate) const ALL: [TransferOutcome; 2] =
+        [TransferOutcome::Completed, TransferOutcome::Failed];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -201,11 +198,12 @@ pub(crate) fn kafka_slot(api_key: i16) -> usize {
         .unwrap_or(KAFKA_OTHER)
 }
 
-pub fn http(protocol: Protocol, method: Method, status: u16, elapsed: Duration) {
+pub fn http(audience: Audience, method: Method, status: u16, elapsed: Duration) {
     if let Some(instruments) = installed() {
         let class = usize::from(status / 100).clamp(1, 5) - 1;
-        instruments.http[protocol as usize][method as usize][class].fetch_add(1, Ordering::Relaxed);
-        instruments.http_latency[protocol as usize][method as usize].observe(elapsed);
+        instruments.http[audience_slot(audience)][method as usize][class]
+            .fetch_add(1, Ordering::Relaxed);
+        instruments.http_latency[audience_slot(audience)][method as usize].observe(elapsed);
     }
 }
 
@@ -251,37 +249,37 @@ pub fn rebalance() {
     }
 }
 
-pub fn transfer(outcome: Transfer) {
+pub fn transfer(outcome: TransferOutcome) {
     if let Some(instruments) = installed() {
         instruments.transfers[outcome as usize].fetch_add(1, Ordering::Relaxed);
     }
 }
 
-pub fn auth_failure(protocol: Protocol, reason: Reason) {
+pub fn auth_failure(audience: Audience, reason: Reason) {
     if let Some(instruments) = installed() {
-        instruments.auth_failures[protocol as usize][reason as usize]
+        instruments.auth_failures[audience_slot(audience)][reason as usize]
             .fetch_add(1, Ordering::Relaxed);
     }
 }
 
-pub fn connection(listener: Listener) -> Open {
-    Open::new(installed().map(|instruments| &instruments.connections[listener as usize]))
+pub fn connection(listener: ListenerKind) -> GaugeGuard {
+    GaugeGuard::new(installed().map(|instruments| &instruments.connections[listener as usize]))
 }
 
-pub fn live_reader() -> Open {
-    Open::new(installed().map(|instruments| &instruments.live_readers))
+pub fn live_reader() -> GaugeGuard {
+    GaugeGuard::new(installed().map(|instruments| &instruments.live_readers))
 }
 
-pub fn coordinated_group() -> Open {
-    Open::new(installed().map(|instruments| &instruments.groups_coordinated))
+pub fn coordinated_group() -> GaugeGuard {
+    GaugeGuard::new(installed().map(|instruments| &instruments.groups_coordinated))
 }
 
 #[derive(Debug)]
-pub struct Open {
+pub struct GaugeGuard {
     gauge: Option<&'static AtomicI64>,
 }
 
-impl Open {
+impl GaugeGuard {
     fn new(gauge: Option<&'static AtomicI64>) -> Self {
         if let Some(gauge) = gauge {
             gauge.fetch_add(1, Ordering::Relaxed);
@@ -290,7 +288,7 @@ impl Open {
     }
 }
 
-impl Drop for Open {
+impl Drop for GaugeGuard {
     fn drop(&mut self) {
         if let Some(gauge) = self.gauge {
             gauge.fetch_sub(1, Ordering::Relaxed);

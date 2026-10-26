@@ -324,7 +324,7 @@ describe.runIf(up)('live pico server', () => {
     expect(described.members).toHaveLength(1)
     expect(described.members[0]!.clientId).toBe('test')
     expect(described.members[0]!.assignment).toEqual(joined.assignment)
-    expect(await pico.listGroups()).toContain(group)
+    expect((await pico.listGroups()).groups).toContain(group)
     await expect(pico.deleteGroup(group)).rejects.toMatchObject({ code: 'conflict' })
 
     await pico.leaveGroup(group, joined.memberId)

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -16,6 +17,7 @@ pub struct RequestContext {
     pub api_version: i16,
     pub correlation_id: i32,
     pub client_id: Option<String>,
+    pub client_host: Arc<str>,
     pub principal: Option<AuthPrincipal>,
 }
 
@@ -53,6 +55,7 @@ impl RequestContext {
 pub fn request_context(
     frame: &[u8],
     principal: Option<AuthPrincipal>,
+    client_host: &Arc<str>,
 ) -> Result<(RequestContext, Bytes), HandlerError> {
     let mut body = Bytes::copy_from_slice(frame);
     let header = decode_request_header_from_buffer(&mut body)
@@ -63,6 +66,7 @@ pub fn request_context(
         api_version: header.request_api_version,
         correlation_id: header.correlation_id,
         client_id: header.client_id.map(|id| id.to_string()),
+        client_host: Arc::clone(client_host),
         principal,
     };
     Ok((req, body))
@@ -71,9 +75,10 @@ pub fn request_context(
 pub async fn dispatch(
     ctx: &BrokerContext,
     principal: Option<AuthPrincipal>,
+    client_host: &Arc<str>,
     frame: &[u8],
 ) -> Result<HandlerOutcome, HandlerError> {
-    let (req, body) = request_context(frame, principal)?;
+    let (req, body) = request_context(frame, principal, client_host)?;
     let api_key = req.api_key;
     let started = Instant::now();
 

@@ -8,5 +8,8 @@ description = "Names, records and exports every PicoMQ metric"
 repository.workspace = true
 publish = false
 
+[dependencies]
+picomq-auth = { workspace = true }
+
 [lints]
 workspace = true

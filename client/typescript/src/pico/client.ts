@@ -61,6 +61,7 @@ import type {
   StreamApi,
   StreamInfo,
   StreamListing,
+  GroupListing,
   StreamRecord,
   SubscribeOptions,
   TopicConfig,
@@ -407,9 +408,14 @@ export class PicoClient implements StreamApi {
     await this.call('DELETE', groupPath(group), '', undefined, [204], options?.signal)
   }
 
-  async listGroups(options?: CallOptions): Promise<string[]> {
+  async listGroups(
+    prefix = '',
+    limit = 0,
+    cursor?: string,
+    options?: CallOptions,
+  ): Promise<GroupListing> {
     return this.retry.run(
-      () => this.listGroupsOnce(options?.signal),
+      () => this.listGroupsOnce(prefix, limit, cursor, options?.signal),
       retryableError,
       options?.signal,
     )
@@ -697,11 +703,25 @@ export class PicoClient implements StreamApi {
     return described
   }
 
-  private async listGroupsOnce(signal?: AbortSignal): Promise<string[]> {
-    const response = await this.call('GET', GROUPS_PATH, '', undefined, [200], signal)
+  private async listGroupsOnce(
+    prefix: string,
+    limit: number,
+    cursor: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<GroupListing> {
+    let query = `?prefix=${urlencode(prefix)}`
+    if (limit > 0) {
+      query += `&limit=${limit}`
+    }
+    if (cursor !== undefined) {
+      query += `&cursor=${urlencode(cursor)}`
+    }
+    const response = await this.call('GET', GROUPS_PATH, query, undefined, [200], signal)
 
-    const body = (await response.json()) as { groups?: string[] }
-    return body.groups ?? []
+    const body = (await response.json()) as { items?: string[]; next?: string | null }
+    const listing: GroupListing = { groups: body.items ?? [] }
+    if (typeof body.next === 'string') listing.next = body.next
+    return listing
   }
 
   private async call(
