@@ -150,7 +150,7 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		Expect(bodies).To(ConsistOf([]byte("hello"), []byte("produced")))
 	})
 
-	ginkgo.It("sets, reads, and changes topic settings and schemas on a running Pico server", func() {
+	ginkgo.It("sets, reads, and changes topic settings on a running Pico server", func() {
 		if os.Getenv("PICO_INTEGRATION") == "" {
 			ginkgo.Skip("set PICO_INTEGRATION=1 to run live tests")
 		}
@@ -159,10 +159,8 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		suffix := time.Now().UnixNano()
 		name := fmt.Sprintf("/go-client-tests/settings-%d", suffix)
-		schemaName := fmt.Sprintf("go-settings-%d.json", suffix)
 		ginkgo.DeferCleanup(func() {
 			_, _ = client.Delete(ctx, name)
-			_, _ = client.DeleteSchema(ctx, schemaName)
 		})
 
 		created, err := client.Create(ctx, name, CreateOptions{ContentType: "application/json", Partitions: 2, Retention: time.Minute})
@@ -173,28 +171,16 @@ var _ = ginkgo.Describe("live PicoMQ", ginkgo.Label("integration"), func() {
 		Expect(info.Partitions).To(Equal(uint32(2)))
 		Expect(info.Retention).To(Equal(time.Minute))
 
-		Expect(client.PutSchema(ctx, schemaName, "", []byte(`{"type": "object"}`))).To(Succeed())
-		schema, err := client.GetSchema(ctx, schemaName)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(schema.ContentType).To(Equal("application/schema+json"))
-
 		none, limit := time.Duration(0), uint64(4096)
-		config, err := client.UpdateConfig(ctx, name, ConfigUpdate{Schema: &schemaName, Retention: &none, RetentionBytes: &limit, Partitions: 3})
+		config, err := client.UpdateConfig(ctx, name, ConfigUpdate{Retention: &none, RetentionBytes: &limit, Partitions: 3})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(config).To(Equal(TopicConfig{Schema: schemaName, KafkaTopic: config.KafkaTopic, Partitions: 3, RetentionBytes: 4096}))
+		Expect(config).To(Equal(TopicConfig{KafkaTopic: config.KafkaTopic, Partitions: 3, RetentionBytes: 4096}))
 		read, err := client.Config(ctx, name)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(*read).To(Equal(config))
 
 		_, err = client.UpdateConfig(ctx, name, ConfigUpdate{Partitions: 1})
 		Expect(IsKind(err, ErrorBadRequest)).To(BeTrue())
-
-		unbind := ""
-		_, err = client.UpdateConfig(ctx, name, ConfigUpdate{Schema: &unbind})
-		Expect(err).NotTo(HaveOccurred())
-		deleted, err := client.DeleteSchema(ctx, schemaName)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(deleted).To(BeTrue())
 	})
 
 	ginkgo.It("covers paging, now, trim, close, and producer resume on a running Pico server", func() {

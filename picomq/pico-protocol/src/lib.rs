@@ -8,7 +8,6 @@ mod json;
 pub mod mime;
 pub mod pico;
 pub mod record;
-pub mod schemas;
 mod sse;
 mod wire;
 

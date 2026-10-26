@@ -104,7 +104,6 @@ async fn start(id: i32, shared: &Shared, options: Options) -> Node {
             shared.views.clone(),
             shared.storage.clone(),
             Arc::new(wal),
-            None,
         )
         .await
         .unwrap(),

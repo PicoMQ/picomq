@@ -21,7 +21,7 @@ var _ = ginkgo.Describe("topic settings", func() {
 			w.WriteHeader(http.StatusCreated)
 		}))
 		defer server.Close()
-		options := CreateOptions{Partitions: 3, Retention: time.Minute, RetentionBytes: 4096, Schema: "order.json", SchemaValidate: true}
+		options := CreateOptions{Partitions: 3, Retention: time.Minute, RetentionBytes: 4096}
 
 		pico, err := NewPico(server.URL)
 		Expect(err).NotTo(HaveOccurred())
@@ -33,8 +33,6 @@ var _ = ginkgo.Describe("topic settings", func() {
 		Expect(headers.Get("Pico-Partitions")).To(Equal("3"))
 		Expect(headers.Get("Pico-Retention-Ms")).To(Equal("60000"))
 		Expect(headers.Get("Pico-Retention-Bytes")).To(Equal("4096"))
-		Expect(headers.Get("Pico-Schema")).To(Equal("order.json"))
-		Expect(headers.Get("Pico-Schema-Validate")).To(Equal("true"))
 		Expect(headers.Get("Pico-TTL")).To(BeEmpty())
 
 		ds, err := NewDurableStreams(server.URL)
@@ -53,7 +51,7 @@ var _ = ginkgo.Describe("topic settings", func() {
 			Expect(r.URL.Path).To(Equal("/_streams/orders"))
 			data, _ := io.ReadAll(r.Body)
 			Expect(json.Unmarshal(data, &body)).To(Succeed())
-			_, _ = w.Write([]byte(`{"schema":null,"schemaValidate":false,"kafkaTopic":"orders","partitions":4,"retentionMs":null,"retentionBytes":4096}`))
+			_, _ = w.Write([]byte(`{"kafkaTopic":"orders","partitions":4,"retentionMs":null,"retentionBytes":4096}`))
 		}))
 		defer server.Close()
 		client, err := NewPico(server.URL)
@@ -127,30 +125,28 @@ var _ = ginkgo.Describe("topic settings", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		for _, name := range []string{"..", "../orders", "a/./b", "a/.."} {
-			_, err := client.DeleteSchema(context.Background(), name)
-			Expect(IsKind(err, ErrorBadRequest)).To(BeTrue(), name)
-			_, err = client.Delete(context.Background(), name)
+			_, err := client.Delete(context.Background(), name)
 			Expect(IsKind(err, ErrorBadRequest)).To(BeTrue(), name)
 		}
 		Expect(calls.Load()).To(BeZero())
 	})
 
-	ginkgo.It("escapes schema names in the path", func() {
+	ginkgo.It("escapes topic names in control paths", func() {
 		paths := make(chan string, 1)
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			paths <- r.URL.EscapedPath()
-			w.WriteHeader(http.StatusNoContent)
+			w.WriteHeader(http.StatusNotFound)
 		}))
 		defer server.Close()
 		client, err := NewPico(server.URL)
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = client.DeleteSchema(context.Background(), "team/orders#v2 final.json")
+		_, err = client.Config(context.Background(), "team/orders#v2 final")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(<-paths).To(Equal("/_schemas/team/orders%23v2%20final.json"))
+		Expect(<-paths).To(Equal("/_streams/team/orders%23v2%20final"))
 	})
 
-	ginkgo.It("decodes control route errors and missing topics and schemas", func() {
+	ginkgo.It("decodes control route errors and missing topics", func() {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodPatch:
@@ -170,11 +166,5 @@ var _ = ginkgo.Describe("topic settings", func() {
 		config, err := client.Config(context.Background(), "/orders")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(config).To(BeNil())
-		schema, err := client.GetSchema(context.Background(), "order.json")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(schema).To(BeNil())
-		deleted, err := client.DeleteSchema(context.Background(), "order.json")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(deleted).To(BeFalse())
 	})
 })

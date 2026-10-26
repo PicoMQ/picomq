@@ -1,9 +1,9 @@
 import { ClientError, type ErrorKind } from './error'
 import { RetryPolicy } from './retry'
 import { decodeConfig } from './settings'
-import { header, namePath, type Http } from './transport/http'
+import { namePath, type Http } from './transport/http'
 import { retryableError } from './util'
-import type { CallOptions, ConfigUpdate, PutSchemaOptions, Schema, TopicConfig } from './types'
+import type { CallOptions, ConfigUpdate, TopicConfig } from './types'
 
 export class Control {
   constructor(
@@ -41,53 +41,6 @@ export class Control {
       signal: options?.signal,
     })
     return decodeConfig(await (await expectControl(response, [200])).json())
-  }
-
-  async putSchema(
-    name: string,
-    body: Uint8Array | string,
-    options?: PutSchemaOptions,
-  ): Promise<void> {
-    const headers: { [key: string]: string } = {}
-    if (options?.contentType !== undefined) headers['Content-Type'] = options.contentType
-    const response = await this.http.send({
-      method: 'PUT',
-      url: this.url('/_schemas', name),
-      headers,
-      body: body as BodyInit,
-      signal: options?.signal,
-    })
-    await expectControl(response, [204])
-  }
-
-  getSchema(name: string, options?: CallOptions): Promise<Schema | null> {
-    return this.retry.run(
-      async () => {
-        const response = await this.http.send({
-          method: 'GET',
-          url: this.url('/_schemas', name),
-          signal: options?.signal,
-        })
-        if (response.status === 404) return null
-        await expectControl(response, [200])
-        const schema: Schema = { body: new Uint8Array(await response.arrayBuffer()) }
-        const contentType = header(response, 'content-type')
-        if (contentType !== undefined) schema.contentType = contentType
-        return schema
-      },
-      retryableError,
-      options?.signal,
-    )
-  }
-
-  async deleteSchema(name: string, options?: CallOptions): Promise<boolean> {
-    const response = await this.http.send({
-      method: 'DELETE',
-      url: this.url('/_schemas', name),
-      signal: options?.signal,
-    })
-    await expectControl(response, [204, 404])
-    return response.status === 204
   }
 
   private url(root: string, name: string): string {

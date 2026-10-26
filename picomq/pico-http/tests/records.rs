@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use common::{Console, create, issue};
 use picomq_auth::{Audience, Operation, ResourceSet, Scope};
-use picomq_schema::{MessageKind, Registry, SchemaFormat};
 use picomq_server::{AppendCommand, CreateCommand, LogRecord};
 use serde_json::{Value, json};
 
@@ -356,56 +355,6 @@ async fn records_need_read_on_the_topic() {
         assert_eq!(console.get(path, &head).await.0, 403, "{path}");
         assert_eq!(console.get(path, &read).await.0, 200, "{path}");
     }
-
-    console.server.shutdown().await;
-}
-
-#[tokio::test]
-async fn schema_bound_records_are_decoded_and_filtered() {
-    let registry = Registry::new(object_store::memory::InMemory::new());
-    let proto = br#"
-syntax = "proto3";
-message Value { string name = 1; }
-"#;
-    registry
-        .put("people", SchemaFormat::Protobuf, Bytes::from_static(proto))
-        .await
-        .unwrap();
-    let console = Console::on(common::start_node_with_schema(registry).await).await;
-    console
-        .node
-        .topics()
-        .create(CreateCommand::new("/people", "application/x-protobuf").with_schema_name("people"))
-        .await
-        .unwrap();
-    let schema = picomq_schema::proto::Schema::try_from(Bytes::from_static(proto)).unwrap();
-    let encoded = |name: &str| {
-        schema
-            .encode_from_value(MessageKind::Value, &json!({ "name": name }))
-            .unwrap()
-    };
-    write(
-        &console,
-        "/people",
-        vec![
-            LogRecord::value(encoded("alice")),
-            LogRecord::value(encoded("bob")),
-        ],
-    )
-    .await;
-
-    let (status, page) = console
-        .get(
-            "/admin/topics/%2Fpeople/partitions/0/records?value=bob",
-            &console.root,
-        )
-        .await;
-    assert_eq!(status, 200, "{page}");
-    assert_eq!(page["items"].as_array().unwrap().len(), 1);
-    let value = &page["items"][0]["value"];
-    assert_eq!(value["encoding"], "protobuf");
-    assert_eq!(value["data"], r#"{"name":"bob"}"#);
-    assert_eq!(value["size"], encoded("bob").len());
 
     console.server.shutdown().await;
 }

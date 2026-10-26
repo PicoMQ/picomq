@@ -9,7 +9,6 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use picomq_auth::Operation;
-use picomq_schema::{MessageKind, Schema, SchemaFormat};
 use picomq_server::{Log, OffsetToken, Page, ServiceError, StreamRecord, Topic, partition_log};
 use serde_json::{Value, json};
 
@@ -45,7 +44,6 @@ struct Filter {
 enum Encoding {
     Utf8,
     Base64,
-    Decoded(SchemaFormat),
 }
 
 struct Field {
@@ -86,26 +84,14 @@ async fn list(
         Err(error) => return service_error(error),
     };
 
-    let schema = schema_of(&state, &topic).await;
     let start = match start_of(&state, &topic, index, &paging, request.uri()).await {
         Ok(start) => start,
         Err(response) => return *response,
     };
-    let scanned = scan(
-        &state,
-        &log,
-        start,
-        paging.limit,
-        &filter,
-        schema.as_ref(),
-        wait,
-    )
-    .await;
+    let scanned = scan(&state, &log, start, paging.limit, &filter, wait).await;
 
     match scanned {
-        Ok(page) => paging.reply(page, |_, record| {
-            record_json(record, schema.as_ref(), PREVIEW_BYTES)
-        }),
+        Ok(page) => paging.reply(page, |_, record| record_json(record, PREVIEW_BYTES)),
         Err(error) => service_error(error),
     }
 }
@@ -129,10 +115,9 @@ async fn record(
         Err(error) => return service_error(error),
     };
 
-    let schema = schema_of(&state, &topic).await;
     match read_one(&state, &log, offset).await {
         Ok(Some(record)) => {
-            let body = record_json(&record, schema.as_ref(), RECORD_BYTES);
+            let body = record_json(&record, RECORD_BYTES);
             (StatusCode::OK, Json(body)).into_response()
         }
         Ok(None) => error_response(
@@ -193,7 +178,6 @@ async fn scan(
     start: u64,
     limit: usize,
     filter: &Filter,
-    schema: Option<&Schema>,
     wait: Duration,
 ) -> Result<Page<u64, StreamRecord>, ServiceError> {
     let service = state.node.service();
@@ -226,7 +210,7 @@ async fn scan(
             bytes += record.record.size_hint();
             last = Some(offset);
 
-            if filter.matches(&record, schema) {
+            if filter.matches(&record) {
                 items.push((offset, record));
             }
             full = items.len() == limit || scanned == budget || bytes >= SCAN_BYTES;
@@ -263,12 +247,6 @@ async fn read_one(
         .find(|record| record.offset.record_offset() == offset))
 }
 
-async fn schema_of(state: &AdminState, topic: &Topic) -> Option<Schema> {
-    let name = topic.schema_name.as_deref()?;
-    let registry = state.node.topics().schema_registry()?.clone();
-    registry.schema(name).await.ok().flatten()
-}
-
 fn wait_of(uri: &Uri) -> Result<Duration, String> {
     match query_param(uri, "wait").map_err(|error| error.to_string())? {
         None => Ok(Duration::ZERO),
@@ -297,28 +275,26 @@ impl Filter {
         Ok(filter)
     }
 
-    fn matches(&self, record: &StreamRecord, schema: Option<&Schema>) -> bool {
+    fn matches(&self, record: &StreamRecord) -> bool {
         let record = &record.record;
 
-        self.key.as_deref().is_none_or(|needle| {
-            record.key.as_ref().is_some_and(|key| {
-                contains(&schema_field(key, schema, MessageKind::Key).data, needle)
+        self.key
+            .as_deref()
+            .is_none_or(|needle| record.key.as_ref().is_some_and(|key| contains(key, needle)))
+            && self.header.as_deref().is_none_or(|name| {
+                record.headers.iter().any(|(header, value)| {
+                    header == name
+                        && self.header_value.as_deref().is_none_or(|needle| {
+                            value.as_ref().is_some_and(|value| contains(value, needle))
+                        })
+                })
             })
-        }) && self.header.as_deref().is_none_or(|name| {
-            record.headers.iter().any(|(header, value)| {
-                header == name
-                    && self.header_value.as_deref().is_none_or(|needle| {
-                        value.as_ref().is_some_and(|value| contains(value, needle))
-                    })
+            && self.value.as_deref().is_none_or(|needle| {
+                record
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| contains(value, needle))
             })
-        }) && self.value.as_deref().is_none_or(|needle| {
-            record.value.as_ref().is_some_and(|value| {
-                contains(
-                    &schema_field(value, schema, MessageKind::Value).data,
-                    needle,
-                )
-            })
-        })
     }
 }
 
@@ -327,9 +303,6 @@ impl Encoding {
         match self {
             Self::Utf8 => "utf8",
             Self::Base64 => "base64",
-            Self::Decoded(SchemaFormat::Avro) => "avro",
-            Self::Decoded(SchemaFormat::Json) => "json",
-            Self::Decoded(SchemaFormat::Protobuf) => "protobuf",
         }
     }
 }
@@ -341,21 +314,7 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
             .any(|window| window == needle.as_bytes())
 }
 
-fn schema_field(bytes: &Bytes, schema: Option<&Schema>, kind: MessageKind) -> Field {
-    let Some((schema, json)) =
-        schema.and_then(|schema| Some((schema, schema.decode(kind, bytes).ok()??)))
-    else {
-        return raw_field(bytes);
-    };
-
-    Field {
-        data: Bytes::from(json.to_string()),
-        encoding: Encoding::Decoded(schema.format()),
-        size: bytes.len(),
-    }
-}
-
-fn raw_field(bytes: &Bytes) -> Field {
+fn field(bytes: &Bytes) -> Field {
     let encoding = match std::str::from_utf8(bytes) {
         Ok(_) => Encoding::Utf8,
         Err(_) => Encoding::Base64,
@@ -368,23 +327,21 @@ fn raw_field(bytes: &Bytes) -> Field {
     }
 }
 
-fn record_json(record: &StreamRecord, schema: Option<&Schema>, limit: usize) -> Value {
+fn record_json(record: &StreamRecord, limit: usize) -> Value {
     let stored = &record.record;
     let key = stored
         .key
         .as_ref()
-        .map(|key| field_json(&schema_field(key, schema, MessageKind::Key), limit));
+        .map(|key| field_json(&field(key), limit));
     let value = stored
         .value
         .as_ref()
-        .map(|value| field_json(&schema_field(value, schema, MessageKind::Value), limit));
+        .map(|value| field_json(&field(value), limit));
     let headers: Vec<Value> = stored
         .headers
         .iter()
         .map(|(name, value)| {
-            let value = value
-                .as_ref()
-                .map(|value| field_json(&raw_field(value), limit));
+            let value = value.as_ref().map(|value| field_json(&field(value), limit));
             json!({ "name": name, "value": value })
         })
         .collect();
@@ -402,7 +359,7 @@ fn field_json(field: &Field, limit: usize) -> Value {
     let shown = field.data.len().min(limit);
     let data = match field.encoding {
         Encoding::Base64 => STANDARD.encode(&field.data[..shown]),
-        Encoding::Utf8 | Encoding::Decoded(_) => {
+        Encoding::Utf8 => {
             let text = std::str::from_utf8(&field.data).unwrap_or_default();
             let mut end = shown;
             while !text.is_char_boundary(end) {

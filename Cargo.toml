@@ -14,7 +14,6 @@ members = [
     "picomq/pico-runtime",
     "picomq/pico-client",
     "picomq/pico-cli",
-    "picomq/pico-schema",
     "picomq/pico-conformance",
 ]
 default-members = [
@@ -31,7 +30,6 @@ default-members = [
     "picomq/pico-runtime",
     "picomq/pico-client",
     "picomq/pico-cli",
-    "picomq/pico-schema",
 ]
 
 [workspace.package]
@@ -57,17 +55,8 @@ picomq-kafka = { path = "picomq/pico-kafka" }
 picomq-http = { path = "picomq/pico-http" }
 picomq-runtime = { path = "picomq/pico-runtime" }
 picomq-client = { path = "picomq/pico-client", version = "0.1.1" }
-picomq-schema = { path = "picomq/pico-schema" }
 
-# Schema registry / validation (picomq-schema)
 anyhow = "1.0.104"
-apache-avro = "0.22.0"
-jsonschema = "0.53.0"
-pretty_assertions = "1.4.1"
-protobuf = { version = "3.7.2", features = ["with-bytes"] }
-protobuf-json-mapping = "3.7.2"
-protobuf-parse = "3.7.2"
-url = "2.5.8"
 uuid = { version = "1.26.0", features = ["serde", "v4", "v7"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -97,7 +86,6 @@ thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "io-util"] }
 async-trait = "0.1.92"
 futures = "0.3.34"
-object_store = { version = "0.14.1", features = ["aws"] }
 fastrand = "2.5.0"
 md-5 = "0.11.0"
 hex = "0.4.3"

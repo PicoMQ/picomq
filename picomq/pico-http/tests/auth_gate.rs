@@ -635,7 +635,7 @@ async fn a_stream_reader_reads_its_stream_config() {
     let patched = client
         .patch(format!("http://{}/_streams/cfg/a", server.local_addr()))
         .bearer_auth(&wire)
-        .json(&serde_json::json!({ "schemaValidate": true }))
+        .json(&serde_json::json!({ "retentionMs": 60000 }))
         .send()
         .await
         .unwrap();

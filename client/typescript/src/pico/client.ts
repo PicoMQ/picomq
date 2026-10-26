@@ -52,11 +52,9 @@ import type {
   PartitionOptions,
   ProducerAck,
   ProducerRef,
-  PutSchemaOptions,
   Protocol,
   ReadLimits,
   ReadPage,
-  Schema,
   SseEvent,
   StreamApi,
   StreamInfo,
@@ -235,18 +233,6 @@ export class PicoClient implements StreamApi {
 
   updateConfig(name: string, update: ConfigUpdate, options?: CallOptions): Promise<TopicConfig> {
     return this.control.updateConfig(name, update, options)
-  }
-
-  putSchema(name: string, body: Uint8Array | string, options?: PutSchemaOptions): Promise<void> {
-    return this.control.putSchema(name, body, options)
-  }
-
-  getSchema(name: string, options?: CallOptions): Promise<Schema | null> {
-    return this.control.getSchema(name, options)
-  }
-
-  deleteSchema(name: string, options?: CallOptions): Promise<boolean> {
-    return this.control.deleteSchema(name, options)
   }
 
 

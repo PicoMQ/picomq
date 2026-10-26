@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use picomq_protocol::config::{ConfigUpdate, TopicConfig};
-use picomq_protocol::schemas::Schema;
 
 use crate::error::Result;
 
@@ -33,7 +32,6 @@ pub struct StreamInfo {
     pub expires_at: Option<String>,
     pub retention_ms: Option<u64>,
     pub retention_bytes: Option<u64>,
-    pub schema: Option<String>,
     pub kafka_topic: Option<String>,
 }
 
@@ -45,8 +43,6 @@ pub struct CreateOptions {
     pub expires_at: Option<String>,
     pub retention_ms: Option<u64>,
     pub retention_bytes: Option<u64>,
-    pub schema: Option<String>,
-    pub schema_validate: bool,
     pub closed: bool,
 }
 
@@ -152,10 +148,4 @@ pub trait StreamApi: Send + Sync {
     async fn config(&self, name: &str) -> Result<Option<TopicConfig>>;
 
     async fn update_config(&self, update: &ConfigUpdate) -> Result<TopicConfig>;
-
-    async fn put_schema(&self, name: &str, content_type: Option<&str>, body: Bytes) -> Result<()>;
-
-    async fn get_schema(&self, name: &str) -> Result<Option<Schema>>;
-
-    async fn delete_schema(&self, name: &str) -> Result<bool>;
 }

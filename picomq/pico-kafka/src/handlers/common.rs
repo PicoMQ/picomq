@@ -46,7 +46,6 @@ pub const POLICY_VIOLATION: i16 = 44;
 pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 pub const INVALID_PRODUCER_EPOCH: i16 = 47;
 pub const KAFKA_STORAGE_ERROR: i16 = 56;
-pub const INVALID_RECORD: i16 = 87;
 pub const NON_EMPTY_GROUP: i16 = 68;
 pub const GROUP_ID_NOT_FOUND: i16 = 69;
 pub const MEMBER_ID_REQUIRED: i16 = 79;
@@ -125,7 +124,6 @@ pub fn service_error_code(error: &ServiceError) -> i16 {
         ErrorKind::BadRequest => INVALID_REQUEST,
         ErrorKind::InvalidName => INVALID_TOPIC_EXCEPTION,
         ErrorKind::CorruptBatch => CORRUPT_MESSAGE,
-        ErrorKind::SchemaViolation => INVALID_RECORD,
         ErrorKind::Fenced => INVALID_PRODUCER_EPOCH,
         ErrorKind::SequenceGap => OUT_OF_ORDER_SEQUENCE_NUMBER,
         ErrorKind::Closed => POLICY_VIOLATION,

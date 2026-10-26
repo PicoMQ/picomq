@@ -43,7 +43,7 @@ async fn start_engine(
         ..Default::default()
     };
     let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
-    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal))
         .await
         .unwrap()
 }
@@ -562,7 +562,7 @@ async fn start_shared_node(
         ..Default::default()
     };
     let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
-    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal))
         .await
         .unwrap()
 }
@@ -1340,117 +1340,6 @@ async fn a_filtered_list_spends_its_budget_and_resumes() {
         }
     }
     assert_eq!(found, ["page.15", "page.25"]);
-
-    node.close().await;
-}
-
-#[tokio::test]
-async fn append_rejects_schema_invalid_records() {
-    use object_store::memory::InMemory;
-    use picomq_schema::{Registry, SchemaFormat};
-
-    let schema = Bytes::from_static(
-        br#"{
-        "title": "Person",
-        "type": "object",
-        "properties": {
-            "value": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" }
-                },
-                "required": ["name"]
-            }
-        }
-    }"#,
-    );
-
-    let (sink, views) = LocalSink::new();
-    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
-    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
-    let config = NodeConfig {
-        node_id: 1,
-        node_epoch: 1,
-        http_address: "http://127.0.0.1:4010".into(),
-        ..Default::default()
-    };
-    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
-    let node = PicoNode::start(
-        config,
-        Arc::new(sink),
-        views,
-        object_storage,
-        Arc::new(wal),
-        Some(Arc::new(Registry::new(InMemory::new()))),
-    )
-    .await
-    .unwrap();
-    let topics = node.topics();
-
-    let registry = topics.schema_registry().unwrap();
-    registry
-        .put("person", SchemaFormat::Json, schema)
-        .await
-        .unwrap();
-    assert_eq!(
-        registry.get("person").await.unwrap().unwrap().0,
-        SchemaFormat::Json
-    );
-
-    let mut cmd = create("/streams/orders", "application/json");
-    cmd.schema_name = Some("person".into());
-    cmd.schema_validate = true;
-    topics.create(cmd).await.unwrap();
-
-    let ok = topics
-        .append(
-            "/streams/orders",
-            0,
-            append(&[br#"{"name":"alice"}"#], "application/json"),
-        )
-        .await
-        .unwrap();
-    assert!(ok.applied);
-
-    let err = topics
-        .append(
-            "/streams/orders",
-            0,
-            append(&[br#"{"name":1}"#], "application/json"),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(err.kind, ErrorKind::SchemaViolation);
-
-    topics
-        .create(create("/streams/raw", "application/json"))
-        .await
-        .unwrap();
-    topics
-        .append(
-            "/streams/raw",
-            0,
-            append(&[br#"{"name":1}"#], "application/json"),
-        )
-        .await
-        .unwrap();
-
-    topics
-        .update(picomq_server::UpdateTopicCommand {
-            name: "/streams/orders".into(),
-            schema_validate: Some(false),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    topics
-        .append(
-            "/streams/orders",
-            0,
-            append(&[br#"{"name":1}"#], "application/json"),
-        )
-        .await
-        .unwrap();
 
     node.close().await;
 }
@@ -2284,7 +2173,6 @@ async fn faulty_node() -> (PicoNode, Arc<AtomicBool>) {
         views,
         Arc::new(MemoryObjectStorage::new(0)),
         Arc::new(wal),
-        None,
     )
     .await
     .unwrap();

@@ -11,7 +11,6 @@ use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore};
 use picomq_http::{HttpProtocol, RoutingMode, RunningServer, ServeOptions, serve};
 use picomq_listener::Listener;
 use picomq_metadata::LocalSink;
-use picomq_schema::{Registry, SchemaStore};
 use picomq_server::CreateCommand;
 use picomq_server::wal::ObjectWal;
 use picomq_server::{NodeConfig, PicoNode};
@@ -37,14 +36,6 @@ impl TestServer {
 }
 
 pub async fn start_node() -> Arc<PicoNode> {
-    start_node_inner(None).await
-}
-
-pub async fn start_node_with_schema(registry: Registry) -> Arc<PicoNode> {
-    start_node_inner(Some(Arc::new(registry))).await
-}
-
-async fn start_node_inner(schema_registry: Option<Arc<dyn SchemaStore>>) -> Arc<PicoNode> {
     let (sink, views) = LocalSink::new();
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
     let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(3));
@@ -61,16 +52,9 @@ async fn start_node_inner(schema_registry: Option<Arc<dyn SchemaStore>>) -> Arc<
     };
     let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
     Arc::new(
-        PicoNode::start(
-            config,
-            Arc::new(sink),
-            views,
-            object_storage,
-            Arc::new(wal),
-            schema_registry,
-        )
-        .await
-        .unwrap(),
+        PicoNode::start(config, Arc::new(sink), views, object_storage, Arc::new(wal))
+            .await
+            .unwrap(),
     )
 }
 
@@ -109,11 +93,6 @@ pub async fn picomq_server() -> TestServer {
 }
 
 #[allow(dead_code)]
-pub async fn picomq_server_with_schema(registry: Registry) -> TestServer {
-    start_with_node(HttpProtocol::Pico, start_node_with_schema(registry).await).await
-}
-
-#[allow(dead_code)]
 pub async fn ds_server() -> TestServer {
     start(HttpProtocol::Ds).await
 }
@@ -129,10 +108,7 @@ pub struct Console {
 #[allow(dead_code)]
 impl Console {
     pub async fn start() -> Self {
-        Self::on(start_node().await).await
-    }
-
-    pub async fn on(node: Arc<PicoNode>) -> Self {
+        let node = start_node().await;
         let root = issue(&node, "ops/root", Scope::root()).await;
         let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
         let server = serve(

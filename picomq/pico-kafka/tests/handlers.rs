@@ -42,15 +42,11 @@ fn tn(name: &str) -> TopicName {
 }
 
 async fn test_broker() -> BrokerContext {
-    broker_with(None).await
-}
-
-async fn broker_with(registry: Option<Arc<dyn picomq_schema::SchemaStore>>) -> BrokerContext {
-    BrokerContext::new(&start_node(registry).await, None)
+    BrokerContext::new(&start_node().await, None)
 }
 
 async fn secured_broker() -> (BrokerContext, AccessToken, PicoNode) {
-    let node = start_node(None).await;
+    let node = start_node().await;
     let token = seed(&node, "ci/kafka", Scope::root()).await;
     (
         BrokerContext::new(&node, Some(node.authorizer())),
@@ -136,7 +132,7 @@ async fn seed(node: &PicoNode, id: &str, scope: Scope) -> AccessToken {
     token
 }
 
-async fn start_node(registry: Option<Arc<dyn picomq_schema::SchemaStore>>) -> PicoNode {
+async fn start_node() -> PicoNode {
     let (sink, views) = LocalSink::new();
     let sink: Arc<dyn CommandSink> = Arc::new(sink);
     let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
@@ -152,7 +148,7 @@ async fn start_node(registry: Option<Arc<dyn picomq_schema::SchemaStore>>) -> Pi
         ..Default::default()
     };
     let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
-    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), registry)
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal))
         .await
         .unwrap()
 }
@@ -1254,7 +1250,7 @@ async fn group_membership_needs_the_group() {
 async fn an_auto_prefix_token_is_refused_over_kafka() {
     use picomq_auth::{Access, Audience, ReadWrite, ResourceSet};
 
-    let node = start_node(None).await;
+    let node = start_node().await;
     let scope = Scope {
         streams: ResourceSet::prefix("/acct/"),
         access: Access {
@@ -2618,111 +2614,6 @@ async fn classic_group_lifecycle_and_offset_replay() {
 }
 
 #[tokio::test]
-async fn create_topics_binds_picomq_schema_and_validates_produce() {
-    use kafka_protocol::messages::create_topics_request::{CreatableTopic, CreatableTopicConfig};
-    use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse, ProduceResponse};
-    use picomq_schema::SchemaFormat;
-
-    let registry = picomq_schema::Registry::new(object_store::memory::InMemory::new());
-    let schema = bytes::Bytes::from_static(
-        br#"{
-        "title": "Person",
-        "type": "object",
-        "properties": {
-            "value": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" }
-                },
-                "required": ["name"]
-            }
-        }
-    }"#,
-    );
-    registry
-        .put("person", SchemaFormat::Json, schema)
-        .await
-        .unwrap();
-
-    let broker = broker_with(Some(Arc::new(registry))).await;
-
-    let create_req = encode_request(
-        ApiKey::CreateTopics,
-        5,
-        1,
-        &CreateTopicsRequest::default()
-            .with_timeout_ms(5_000)
-            .with_topics(vec![
-                CreatableTopic::default()
-                    .with_name(tn("orders"))
-                    .with_num_partitions(1)
-                    .with_replication_factor(1)
-                    .with_configs(vec![
-                        CreatableTopicConfig::default()
-                            .with_name(StrBytes::from_static_str("pico.schema"))
-                            .with_value(Some(StrBytes::from_static_str("person"))),
-                        CreatableTopicConfig::default()
-                            .with_name(StrBytes::from_static_str("pico.schema.validate"))
-                            .with_value(Some(StrBytes::from_static_str("true"))),
-                    ]),
-            ]),
-    );
-    let mut buf = response_body(&broker, &create_req).await;
-    ResponseHeader::decode(&mut buf, 1).unwrap();
-    let created = CreateTopicsResponse::decode(&mut buf, 5).unwrap();
-    assert_eq!(created.topics[0].error_code, 0);
-    assert_eq!(
-        broker
-            .topics
-            .get("/orders")
-            .await
-            .unwrap()
-            .unwrap()
-            .schema_name
-            .as_deref(),
-        Some("person")
-    );
-
-    let bad = encode_request(
-        ApiKey::Produce,
-        10,
-        2,
-        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
-            TopicProduceData::default()
-                .with_name(tn("orders"))
-                .with_partition_data(vec![
-                    PartitionProduceData::default()
-                        .with_index(0)
-                        .with_records(Some(kafka_batch(br#"{"name":1}"#))),
-                ]),
-        ]),
-    );
-    let mut buf = response_body(&broker, &bad).await;
-    ResponseHeader::decode(&mut buf, 1).unwrap();
-    let produced = ProduceResponse::decode(&mut buf, 10).unwrap();
-    assert_eq!(produced.responses[0].partition_responses[0].error_code, 87);
-
-    let ok = encode_request(
-        ApiKey::Produce,
-        10,
-        3,
-        &ProduceRequest::default().with_acks(1).with_topic_data(vec![
-            TopicProduceData::default()
-                .with_name(tn("orders"))
-                .with_partition_data(vec![
-                    PartitionProduceData::default()
-                        .with_index(0)
-                        .with_records(Some(kafka_batch(br#"{"name":"alice"}"#))),
-                ]),
-        ]),
-    );
-    let mut buf = response_body(&broker, &ok).await;
-    ResponseHeader::decode(&mut buf, 1).unwrap();
-    let produced = ProduceResponse::decode(&mut buf, 10).unwrap();
-    assert_eq!(produced.responses[0].partition_responses[0].error_code, 0);
-}
-
-#[tokio::test]
 async fn partitioned_topics_create_produce_fetch_and_grow() {
     use kafka_protocol::messages::create_partitions_request::CreatePartitionsTopic;
     use kafka_protocol::messages::create_topics_request::CreatableTopic;
@@ -3262,17 +3153,8 @@ async fn alter_config(
 }
 
 #[tokio::test]
-async fn topic_configs_describe_and_change_the_schema_binding() {
-    let registry = picomq_schema::Registry::new(object_store::memory::InMemory::new());
-    registry
-        .put(
-            "person",
-            picomq_schema::SchemaFormat::Json,
-            Bytes::from_static(br#"{"type": "object"}"#),
-        )
-        .await
-        .unwrap();
-    let broker = broker_with(Some(Arc::new(registry))).await;
+async fn topic_configs_describe_and_change_settings() {
+    let broker = test_broker().await;
     broker
         .topics
         .create(picomq_server::CreateCommand::new(
@@ -3281,14 +3163,15 @@ async fn topic_configs_describe_and_change_the_schema_binding() {
         ))
         .await
         .unwrap();
-    let schema_of = || async {
+    let retention_of = || async {
         broker
             .topics
             .get("/orders")
             .await
             .unwrap()
             .unwrap()
-            .schema_name
+            .retention
+            .ms
     };
 
     let described = describe_configs(&broker, 2, "orders", None).await;
@@ -3299,50 +3182,38 @@ async fn topic_configs_describe_and_change_the_schema_binding() {
     assert_eq!(read_only, [true, false, false]);
 
     assert_eq!(
-        alter_config(&broker, "orders", "pico.schema", 0, Some("person"), true).await,
+        alter_config(&broker, "orders", "retention.ms", 0, Some("60000"), true).await,
         0
     );
-    assert_eq!(schema_of().await, None);
+    assert_eq!(retention_of().await, None);
 
     assert_eq!(
-        alter_config(&broker, "orders", "pico.schema", 0, Some("person"), false).await,
+        alter_config(&broker, "orders", "retention.ms", 0, Some("60000"), false).await,
         0
     );
-    assert_eq!(schema_of().await.as_deref(), Some("person"));
+    assert_eq!(retention_of().await, Some(60_000));
 
-    let described = describe_configs(&broker, 2, "orders", Some(&["pico.schema"])).await;
+    let described = describe_configs(&broker, 2, "orders", Some(&["retention.ms"])).await;
     assert_eq!(described.configs.len(), 1);
-    let schema = &described.configs[0];
-    assert_eq!(schema.value.as_deref(), Some("person"));
-    assert_eq!(schema.config_source, 1);
-    assert!(!schema.read_only);
+    let retention = &described.configs[0];
+    assert_eq!(retention.value.as_deref(), Some("60000"));
+    assert_eq!(retention.config_source, 1);
+    assert!(!retention.read_only);
 
     assert_eq!(
         alter_config(&broker, "orders", "segment.bytes", 0, Some("1000"), false).await,
         40
     );
     assert_eq!(
-        alter_config(
-            &broker,
-            "orders",
-            "pico.schema.validate",
-            0,
-            Some("maybe"),
-            false
-        )
-        .await,
-        40
-    );
-    assert_eq!(
-        alter_config(&broker, "missing", "pico.schema", 0, Some("person"), false).await,
+        alter_config(&broker, "missing", "retention.ms", 0, Some("60000"), false).await,
         3
     );
 
     assert_eq!(
-        alter_config(&broker, "orders", "pico.schema", 1, None, false).await,
+        alter_config(&broker, "orders", "retention.ms", 1, None, false).await,
         0
     );
-    assert_eq!(schema_of().await, None);
+    assert_eq!(retention_of().await, None);
 
     assert_eq!(
         describe_configs(&broker, 2, "missing", None)
@@ -3734,7 +3605,7 @@ async fn create_topics_refuses_compaction() {
     use kafka_protocol::messages::create_topics_request::{CreatableTopic, CreatableTopicConfig};
     use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse};
 
-    let broker = broker_with(None).await;
+    let broker = test_broker().await;
     let create = |name: &'static str, policy: &'static str| {
         encode_request(
             ApiKey::CreateTopics,

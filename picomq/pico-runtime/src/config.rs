@@ -134,7 +134,6 @@ pub struct ServerConfig {
     pub bootstrap_token: Option<String>,
     pub tls: Option<TlsConfig>,
     pub tls_ca_certificate: Option<PathBuf>,
-    pub schema_registry: Option<String>,
     pub engine: s3stream::Config,
 }
 
@@ -173,7 +172,6 @@ impl Default for ServerConfig {
             bootstrap_token: None,
             tls: None,
             tls_ca_certificate: None,
-            schema_registry: None,
             engine: s3stream::Config::default(),
         }
     }

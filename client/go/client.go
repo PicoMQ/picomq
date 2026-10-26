@@ -53,9 +53,6 @@ type Client interface {
 	Delete(context.Context, string) (bool, error)
 	Config(context.Context, string) (*TopicConfig, error)
 	UpdateConfig(context.Context, string, ConfigUpdate) (TopicConfig, error)
-	PutSchema(context.Context, string, string, []byte) error
-	GetSchema(context.Context, string) (*Schema, error)
-	DeleteSchema(context.Context, string) (bool, error)
 }
 
 var (

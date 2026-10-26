@@ -8,7 +8,7 @@
 #
 # Scenarios:
 #   single    one node, Pico HTTP + Kafka, auth off
-#             protocol cross tests (pico <-> kafka, groups, ttl, trim, schema, producers)
+#             protocol cross tests (pico <-> kafka, groups, ttl, trim, producers)
 #             Rust, TypeScript and Go client suites, Go restart test
 #   cluster   two nodes, Pico HTTP + Kafka, auth required
 #             ownership redirects, groups across nodes, Rust, TypeScript and Go cluster suites

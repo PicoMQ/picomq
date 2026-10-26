@@ -43,7 +43,6 @@ fn config(dir: &Path, protocol: HttpProtocol, node_epoch: i64) -> ServerConfig {
             .unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
         wal_uri: Some(wal(dir, "wal")),
-        schema_registry: Some(format!("3@file://{}", dir.join("schemas").display())),
         engine: s3stream::Config {
             wal_upload_interval_ms: 200,
             ..Default::default()
@@ -725,82 +724,6 @@ async fn slashes_and_dots_name_one_topic() {
     assert_eq!(not_kafka.status(), 201);
     assert!(not_kafka.headers().get("Pico-Kafka-Topic").is_none());
     assert!(!node.topics().await.iter().any(|t| t.contains("tenant")));
-
-    node.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn schema_binding_applies_to_every_writer() {
-    let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
-    let schema = r#"{
-        "type": "object",
-        "properties": {
-            "value": {
-                "type": "object",
-                "properties": { "name": { "type": "string" } },
-                "required": ["name"]
-            }
-        }
-    }"#;
-    assert_eq!(
-        node.http
-            .put(node.url("/_schemas/person"))
-            .header("Content-Type", "application/schema+json")
-            .body(schema)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        204
-    );
-    assert_eq!(
-        node.http
-            .put(node.url("/people"))
-            .header("Content-Type", "application/json")
-            .header("Pico-Schema", "person")
-            .header("Pico-Schema-Validate", "true")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        201
-    );
-
-    let producer = node.producer();
-    assert_eq!(
-        produce(&producer, "people", None, r#"{"name":"alice"}"#).await,
-        0
-    );
-    let rejected = producer
-        .send(
-            FutureRecord::to("people")
-                .payload(r#"{"name":1}"#)
-                .key("bad"),
-            Duration::from_secs(15),
-        )
-        .await
-        .unwrap_err()
-        .0;
-    assert_eq!(
-        rejected.rdkafka_error_code(),
-        Some(RDKafkaErrorCode::InvalidRecord)
-    );
-
-    let rejected = node
-        .http
-        .post(node.url("/people"))
-        .header("Content-Type", "application/json")
-        .body(r#"{"name":2}"#)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), 400);
-    let body: Value = rejected.json().await.unwrap();
-    assert_eq!(body["error"], "schema_violation");
-
-    let records = pico_read_json(&node, "/people").await;
-    assert_eq!(records.len(), 1);
 
     node.shutdown().await;
 }

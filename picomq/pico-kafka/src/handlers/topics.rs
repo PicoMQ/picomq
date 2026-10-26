@@ -19,17 +19,14 @@ use crate::broker::BrokerContext;
 use crate::dispatch::RequestContext;
 use crate::handlers::common::{
     EXCESSIVE_PARTITIONS, Failure, INVALID_CONFIG, INVALID_PARTITIONS, INVALID_REPLICA_ASSIGNMENT,
-    INVALID_REPLICATION_FACTOR, INVALID_REQUEST, INVALID_TOPIC_EXCEPTION, NO_ERROR,
-    POLICY_VIOLATION, TOPIC_ALREADY_EXISTS, TOPIC_AUTHORIZATION_FAILED, UNKNOWN_TOPIC_OR_PARTITION,
-    assigned_broker, encode_response, resolve_topic, service_error_code, service_failure,
-    topic_name, topic_uuid,
+    INVALID_REPLICATION_FACTOR, INVALID_TOPIC_EXCEPTION, NO_ERROR, POLICY_VIOLATION,
+    TOPIC_ALREADY_EXISTS, TOPIC_AUTHORIZATION_FAILED, UNKNOWN_TOPIC_OR_PARTITION, assigned_broker,
+    encode_response, resolve_topic, service_error_code, service_failure, topic_name, topic_uuid,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
 
 pub(crate) const KAFKA_CREATED_CT: &str = "application/octet-stream";
 
-pub const SCHEMA_CONFIG: &str = "pico.schema";
-pub const SCHEMA_VALIDATE_CONFIG: &str = "pico.schema.validate";
 pub const RETENTION_MS_CONFIG: &str = "retention.ms";
 pub const RETENTION_BYTES_CONFIG: &str = "retention.bytes";
 
@@ -88,21 +85,15 @@ async fn create_topic(
     }
 
     let (partitions, owners) = partitions(ctx, topic)?;
-    let (schema_name, schema_validate) = schema_configs(&topic.configs)?;
     cleanup_policy(&topic.configs)?;
     let retention = parse_retention(&topic.configs)?;
 
-    let mut command = CreateCommand {
+    let command = CreateCommand {
         partitions,
         owners,
         retention,
         ..CreateCommand::new(&name, KAFKA_CREATED_CT)
     };
-    if let Some(schema_name) = schema_name {
-        command = command
-            .with_schema_name(schema_name)
-            .with_schema_validate(schema_validate);
-    }
 
     if validate_only {
         command.validate().map_err(service_failure)?;
@@ -272,41 +263,6 @@ pub async fn delete(
     )))
 }
 
-fn schema_configs(configs: &[CreatableTopicConfig]) -> Result<(Option<String>, bool), Failure> {
-    let mut schema_name = None;
-    let mut schema_validate = false;
-    for config in configs {
-        let Some(value) = config
-            .value
-            .as_ref()
-            .map(|value| value.as_str())
-            .filter(|value| !value.is_empty())
-        else {
-            if config.name.as_str() == SCHEMA_CONFIG
-                || config.name.as_str() == SCHEMA_VALIDATE_CONFIG
-            {
-                return Err(invalid_config(config.name.as_str()));
-            }
-            continue;
-        };
-        match config.name.as_str() {
-            SCHEMA_CONFIG => {
-                if schema_name.is_some() {
-                    return Err(invalid_config(SCHEMA_CONFIG));
-                }
-                schema_name = Some(value.to_owned());
-            }
-            SCHEMA_VALIDATE_CONFIG => match value {
-                "true" => schema_validate = true,
-                "false" => schema_validate = false,
-                _ => return Err(invalid_config(SCHEMA_VALIDATE_CONFIG)),
-            },
-            _ => {}
-        }
-    }
-    Ok((schema_name, schema_validate))
-}
-
 fn parse_retention(configs: &[CreatableTopicConfig]) -> Result<Retention, Failure> {
     let mut retention = Retention::default();
     for config in configs {
@@ -352,8 +308,4 @@ fn cleanup_policy(configs: &[CreatableTopicConfig]) -> Result<(), Failure> {
     }
 
     Ok(())
-}
-
-fn invalid_config(name: &str) -> Failure {
-    (INVALID_REQUEST, Some(format!("invalid value for {name}")))
 }

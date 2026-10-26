@@ -20,7 +20,6 @@ pub use picomq_protocol::groups::{
     CommittedOffset, GroupDescription, JoinRequest, JoinResponse, MemberDescription, MemberFence,
     Offsets,
 };
-pub use picomq_protocol::schemas::Schema;
 pub use retry::RetryPolicy;
 pub use types::{
     AppendAck, CreateOptions, Live, Protocol, ReadLimits, ReadPage, Record, StreamApi, StreamInfo,

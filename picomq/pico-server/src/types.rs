@@ -153,8 +153,6 @@ pub struct CreateCommand {
     pub expires_at_ms: Option<i64>,
     pub closed: bool,
     pub initial_records: Vec<LogRecord>,
-    pub schema_name: Option<String>,
-    pub schema_validate: bool,
     pub retention: Retention,
 }
 
@@ -169,20 +167,8 @@ impl CreateCommand {
             expires_at_ms: None,
             closed: false,
             initial_records: Vec::new(),
-            schema_name: None,
-            schema_validate: false,
             retention: Retention::default(),
         }
-    }
-
-    pub fn with_schema_name(mut self, schema_name: impl Into<String>) -> Self {
-        self.schema_name = Some(schema_name.into());
-        self
-    }
-
-    pub fn with_schema_validate(mut self, validate: bool) -> Self {
-        self.schema_validate = validate;
-        self
     }
 
     pub fn validate(&self) -> Result<(), ServiceError> {
@@ -227,8 +213,6 @@ impl CreateCommand {
 #[derive(Debug, Clone, Default)]
 pub struct UpdateTopicCommand {
     pub name: String,
-    pub schema_name: Option<Option<String>>,
-    pub schema_validate: Option<bool>,
     pub retention_ms: Option<Option<u64>>,
     pub retention_bytes: Option<Option<u64>>,
     pub partitions: Option<u32>,
@@ -237,11 +221,7 @@ pub struct UpdateTopicCommand {
 
 impl UpdateTopicCommand {
     pub fn is_empty(&self) -> bool {
-        self.schema_name.is_none()
-            && self.schema_validate.is_none()
-            && self.retention_ms.is_none()
-            && self.retention_bytes.is_none()
-            && self.partitions.is_none()
+        self.retention_ms.is_none() && self.retention_bytes.is_none() && self.partitions.is_none()
     }
 
     pub fn validate(&self) -> Result<(), ServiceError> {
@@ -262,16 +242,6 @@ impl UpdateTopicCommand {
     }
 
     pub fn apply(&self, mut topic: Topic) -> Topic {
-        match &self.schema_name {
-            Some(Some(schema_name)) => topic.schema_name = Some(schema_name.clone()),
-            Some(None) => topic.schema_name = None,
-            None => {}
-        }
-        if let Some(validate) = self.schema_validate {
-            topic.schema_validate = validate;
-        }
-        topic.schema_validate &= topic.schema_name.is_some();
-
         if let Some(ms) = self.retention_ms {
             topic.retention.ms = ms;
         }

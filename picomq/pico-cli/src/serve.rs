@@ -178,9 +178,6 @@ pub struct ServeArgs {
     /// Seconds a client has to finish its TLS handshake.
     #[arg(long, env = "PICO_TLS_HANDSHAKE_TIMEOUT_SEC", default_value_t = 10)]
     tls_handshake_timeout_sec: u64,
-
-    #[arg(long, env = "PICO_SCHEMA_REGISTRY")]
-    schema_registry: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -284,7 +281,6 @@ impl ServeArgs {
                     ..TlsConfig::new(certificate, key)
                 }),
             tls_ca_certificate: self.tls_ca_certificate,
-            schema_registry: self.schema_registry,
             engine,
         })
     }

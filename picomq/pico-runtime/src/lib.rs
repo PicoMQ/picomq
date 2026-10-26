@@ -25,8 +25,6 @@ pub use picomq_listener::TlsConfig;
 /// (`MetadataLifecycle`).
 const LIFECYCLE_TICK: Duration = Duration::from_secs(1);
 
-const SCHEMA_CACHE_EXPIRY: Duration = Duration::from_secs(30);
-
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("metadata store: {0}")]
@@ -86,7 +84,6 @@ pub struct PicoServer {
     /// Kept alive for the process lifetime: dropping it aborts the log's
     /// flusher/tailer tasks, so it must outlive the node.
     sink: Arc<SqlSink>,
-    schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
 }
 
 /// Open the metadata log, start the node, and serve the configured listeners,
@@ -118,17 +115,6 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             }
         }
     }
-
-    let schema_registry = match &config.schema_registry {
-        None => None,
-        Some(uri) => {
-            let registry = picomq_schema::Builder::from(open_adapter(uri)?.object_store())
-                .with_cache_expiry_after(Some(SCHEMA_CACHE_EXPIRY))
-                .build();
-            tracing::info!(%uri, "schema registry enabled");
-            Some(Arc::new(registry) as Arc<dyn picomq_schema::SchemaStore>)
-        }
-    };
 
     let store = open_store(&config.meta_backend).await?;
     let (sink, views) = SqlSink::open(store.clone(), SqlSinkConfig::default()).await?;
@@ -197,7 +183,6 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         views,
         object_storage.clone(),
         Arc::new(wal),
-        schema_registry.clone(),
     )
     .await?;
     let node = Arc::new(node);
@@ -272,7 +257,6 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         failover,
         compaction_check,
         sink,
-        schema_registry,
     })
 }
 
@@ -374,10 +358,6 @@ impl PicoServer {
 
     pub fn fenced(&self) -> tokio::sync::watch::Receiver<bool> {
         self.server.node().fenced()
-    }
-
-    pub fn schema_registry(&self) -> Option<&Arc<dyn picomq_schema::SchemaStore>> {
-        self.schema_registry.as_ref()
     }
 
     pub async fn shutdown(self) {

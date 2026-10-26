@@ -23,14 +23,13 @@ use picomq_auth::{Audience, Authorizer, Resource};
 use picomq_protocol::mime::mime_of;
 use picomq_protocol::pico::{
     CT_BATCH_BINARY, CT_BATCH_JSON, CT_EVENT_STREAM, CT_JSON, DEFAULT_CT, E_BAD_REQUEST, E_CLOSED,
-    E_CONFLICT, E_DURABILITY, E_FENCED, E_INTERNAL, E_MATCH_FAILED, E_NOT_FOUND,
-    E_SCHEMA_VIOLATION, E_SEQUENCE_GAP, E_TIMEOUT, E_UNAVAILABLE, ErrorBody, FORMAT_BINARY,
-    FORMAT_JSON, FORMAT_RAW, H_CLOSED, H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT, H_KAFKA_TOPIC,
-    H_KEY, H_MATCH_SEQ, H_NEXT_SEQ, H_PARTITIONS, H_PRODUCER_EPOCH, H_PRODUCER_ID, H_PRODUCER_SEQ,
-    H_RECEIVED_SEQ, H_RETENTION_BYTES, H_RETENTION_MS, H_SCHEMA, H_SCHEMA_VALIDATE, H_START_SEQ,
-    H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, Q_BYTES, Q_COUNT,
-    Q_CURSOR, Q_FORMAT, Q_LIVE, Q_PREFIX, Q_SEQ, SEQ_NOW, StreamEntry, sse_control_event,
-    sse_data_event,
+    E_CONFLICT, E_DURABILITY, E_FENCED, E_INTERNAL, E_MATCH_FAILED, E_NOT_FOUND, E_SEQUENCE_GAP,
+    E_TIMEOUT, E_UNAVAILABLE, ErrorBody, FORMAT_BINARY, FORMAT_JSON, FORMAT_RAW, H_CLOSED,
+    H_CURSOR, H_EXPECTED_SEQ, H_EXPIRES_AT, H_KAFKA_TOPIC, H_KEY, H_MATCH_SEQ, H_NEXT_SEQ,
+    H_PARTITIONS, H_PRODUCER_EPOCH, H_PRODUCER_ID, H_PRODUCER_SEQ, H_RECEIVED_SEQ,
+    H_RETENTION_BYTES, H_RETENTION_MS, H_START_SEQ, H_TIMESTAMP, H_TRIM_SEQ, H_TTL, H_UP_TO_DATE,
+    LIVE_LONG_POLL, LIVE_SSE, Q_BYTES, Q_COUNT, Q_CURSOR, Q_FORMAT, Q_LIVE, Q_PREFIX, Q_SEQ,
+    SEQ_NOW, StreamEntry, sse_control_event, sse_data_event,
 };
 use picomq_protocol::record::{
     PicoRecord, SequencedRecord, decode_batch_append, decode_json_append, encode_batch_read,
@@ -256,10 +255,6 @@ impl PicoFrontend {
                 ttl_seconds,
                 expires_at_ms,
                 closed: truthy(headers, H_CLOSED),
-                schema_name: header_str(headers, H_SCHEMA)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned),
-                schema_validate: truthy(headers, H_SCHEMA_VALIDATE),
                 partitions,
                 retention,
                 ..CreateCommand::new(name, content_type.clone())
@@ -704,8 +699,7 @@ fn options() -> Response {
         "Access-Control-Allow-Headers",
         "content-type, authorization, If-None-Match, Pico-Key, Pico-Match-Seq, Pico-Trim-Seq, \
          Pico-TTL, Pico-Expires-At, Pico-Partitions, Pico-Retention-Ms, Pico-Retention-Bytes, \
-         Pico-Schema, Pico-Schema-Validate, Pico-Closed, Pico-Producer-Id, Pico-Producer-Epoch, \
-         Pico-Producer-Seq",
+         Pico-Closed, Pico-Producer-Id, Pico-Producer-Epoch, Pico-Producer-Seq",
     );
     set_header(
         &mut response,
@@ -724,7 +718,6 @@ pub(crate) fn service_error_response(e: ServiceError) -> Response {
         ErrorKind::BadRequest | ErrorKind::InvalidName | ErrorKind::CorruptBatch => {
             error(400, E_BAD_REQUEST, &e.message, None)
         }
-        ErrorKind::SchemaViolation => error(400, E_SCHEMA_VIOLATION, &e.message, None),
         ErrorKind::Fenced => {
             let mut response = error(403, E_FENCED, &e.message, None);
             if let Some(epoch) = e.producer_epoch {
@@ -822,9 +815,6 @@ fn write_meta(response: &mut Response, topic: &Topic, offsets: Option<&LogOffset
     }
     if let Some(expires_at_ms) = topic.expires_at_ms {
         set_header(response, H_EXPIRES_AT, &format_instant(expires_at_ms));
-    }
-    if let Some(schema_name) = &topic.schema_name {
-        set_header(response, H_SCHEMA, schema_name);
     }
     if let Some(ms) = topic.retention.ms {
         set_header(response, H_RETENTION_MS, &ms.to_string());

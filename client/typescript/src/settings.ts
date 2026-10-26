@@ -18,8 +18,6 @@ export function createHeaders(prefix: 'Pico' | 'Stream', options?: CreateOptions
   set('Expires-At', options?.expiresAt)
   set('Retention-Ms', options?.retentionMs)
   set('Retention-Bytes', options?.retentionBytes)
-  set('Schema', options?.schema)
-  if (options?.schemaValidate) set('Schema-Validate', 'true')
   if (options?.closed) set('Closed', 'true')
   return headers
 }
@@ -33,17 +31,13 @@ export function readSettings(
   if (retentionMs !== undefined) info.retentionMs = retentionMs
   const retentionBytes = parseOptionalUint(header(response, `${prefix}-Retention-Bytes`))
   if (retentionBytes !== undefined) info.retentionBytes = retentionBytes
-  const schema = header(response, `${prefix}-Schema`)
-  if (schema !== undefined) info.schema = schema
 }
 
 export function decodeConfig(body: unknown): TopicConfig {
   const node = (body ?? {}) as { [key: string]: unknown }
   const config: TopicConfig = {
-    schemaValidate: node.schemaValidate === true,
     partitions: typeof node.partitions === 'number' ? node.partitions : 1,
   }
-  if (typeof node.schema === 'string') config.schema = node.schema
   if (typeof node.kafkaTopic === 'string') config.kafkaTopic = node.kafkaTopic
   if (typeof node.retentionMs === 'number') config.retentionMs = node.retentionMs
   if (typeof node.retentionBytes === 'number') config.retentionBytes = node.retentionBytes

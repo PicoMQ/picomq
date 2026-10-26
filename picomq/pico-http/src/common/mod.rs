@@ -1,4 +1,3 @@
-mod schemas;
 pub(crate) mod streams;
 
 use std::sync::Arc;
@@ -14,8 +13,8 @@ use serde_json::{Value, json};
 
 use crate::RoutingMode;
 
-/// The stream config and schema routes beside a protocol listener. They
-/// authenticate like that listener's stream routes.
+/// The stream config routes beside a protocol listener. They authenticate
+/// like that listener's stream routes.
 #[derive(Clone)]
 pub struct CommonState {
     pub topics: Arc<Topics>,
@@ -40,8 +39,7 @@ pub fn router(
         authorizer,
         audience,
     };
-    schemas::router()
-        .merge(streams::router())
+    streams::router()
         .layer(axum::extract::DefaultBodyLimit::max(max_request_size))
         .with_state(state)
 }
@@ -62,20 +60,6 @@ impl CommonState {
         let name = caller.resolve(Resource::Stream, name)?;
         caller.authorize(op, Some(&name))?;
         Ok(name)
-    }
-
-    /// Authorizes `op` on a schema, matched like a stream name.
-    pub(crate) async fn admit_schema(
-        &self,
-        headers: &HeaderMap,
-        op: Operation,
-        name: &str,
-    ) -> Result<(), Box<Response>> {
-        let Some(authorizer) = self.authorizer.as_deref() else {
-            return Ok(());
-        };
-        let caller = crate::auth::authenticate(authorizer, self.audience, headers).await?;
-        caller.authorize(op, Some(name))
     }
 }
 
@@ -171,7 +155,6 @@ pub(crate) fn service_error(error: ServiceError) -> Response {
         ErrorKind::BadRequest
         | ErrorKind::InvalidName
         | ErrorKind::CorruptBatch
-        | ErrorKind::SchemaViolation
         | ErrorKind::Fenced
         | ErrorKind::SequenceGap
         | ErrorKind::MatchFailed => StatusCode::BAD_REQUEST,

@@ -18,7 +18,6 @@ picomq-http = { workspace = true }
 picomq-kafka = { workspace = true }
 picomq-listener = { workspace = true }
 picomq-metrics = { workspace = true }
-picomq-schema = { workspace = true }
 
 thiserror = { workspace = true }
 tokio = { workspace = true }

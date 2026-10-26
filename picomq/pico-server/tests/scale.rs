@@ -64,7 +64,7 @@ async fn start_node() -> PicoNode {
         ..Default::default()
     };
     let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
-    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal))
         .await
         .unwrap()
 }

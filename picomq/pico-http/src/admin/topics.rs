@@ -282,8 +282,6 @@ fn topic_json(topic: &Topic) -> Value {
         "ttlSeconds": topic.ttl_seconds,
         "expiresAtMs": topic.expires_at_ms,
         "closed": topic.closed,
-        "schema": topic.schema_name,
-        "schemaValidate": topic.schema_validate,
     })
 }
 
@@ -337,20 +335,6 @@ fn create_command(body: &Value) -> Result<CreateCommand, String> {
     command.retention = Retention {
         ms: optional_u64(body, "retentionMs")?,
         bytes: optional_u64(body, "retentionBytes")?,
-    };
-    command.schema_name = match &body["schema"] {
-        Value::Null => None,
-        value => Some(
-            value
-                .as_str()
-                .filter(|schema| !schema.is_empty())
-                .ok_or("schema must be a schema name")?
-                .to_owned(),
-        ),
-    };
-    command.schema_validate = match &body["schemaValidate"] {
-        Value::Null => false,
-        value => value.as_bool().ok_or("schemaValidate must be a boolean")?,
     };
     Ok(command)
 }

@@ -37,10 +37,6 @@ pub use node::{NodeConfig, PicoNode};
 pub use ownership::{MetadataOwnershipService, OwnershipService};
 pub use page::Page;
 pub use partition::Partition;
-pub use picomq_schema::{
-    Batch as SchemaBatch, Record as SchemaRecord, Registry as SchemaRegistry, SchemaFormat,
-    SchemaStore,
-};
 pub use producers::ProducerDecision;
 pub use record::{LogRecord, StreamRecord};
 pub use retention::Retention;

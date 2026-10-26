@@ -23,8 +23,6 @@ pub const H_EXPIRES_AT: &str = "Pico-Expires-At";
 pub const H_RETENTION_MS: &str = "Pico-Retention-Ms";
 pub const H_RETENTION_BYTES: &str = "Pico-Retention-Bytes";
 pub const H_CLOSED: &str = "Pico-Closed";
-pub const H_SCHEMA: &str = "Pico-Schema";
-pub const H_SCHEMA_VALIDATE: &str = "Pico-Schema-Validate";
 pub const H_PARTITIONS: &str = "Pico-Partitions";
 pub const H_UP_TO_DATE: &str = "Pico-Up-To-Date";
 pub const H_CURSOR: &str = "Pico-Cursor";
@@ -59,7 +57,6 @@ pub const SEQ_NOW: &str = "now";
 pub const SEQ_BEGINNING: &str = "0";
 pub const E_NOT_FOUND: &str = "not_found";
 pub const E_BAD_REQUEST: &str = "bad_request";
-pub const E_SCHEMA_VIOLATION: &str = "schema_violation";
 pub const E_FENCED: &str = "fenced";
 pub const E_SEQUENCE_GAP: &str = "sequence_gap";
 pub const E_MATCH_FAILED: &str = "match_failed";
@@ -224,8 +221,6 @@ pub struct CreateRequest<'a> {
     pub ttl_seconds: Option<u64>,
     pub expires_at: Option<&'a str>,
     pub closed: bool,
-    pub schema: Option<&'a str>,
-    pub schema_validate: bool,
     pub partitions: Option<u32>,
     pub retention_ms: Option<u64>,
     pub retention_bytes: Option<u64>,
@@ -239,8 +234,6 @@ impl<'a> CreateRequest<'a> {
             ttl_seconds: None,
             expires_at: None,
             closed: false,
-            schema: None,
-            schema_validate: false,
             partitions: None,
             retention_ms: None,
             retention_bytes: None,
@@ -253,8 +246,6 @@ impl<'a> CreateRequest<'a> {
             .header_opt(H_TTL, self.ttl_seconds)
             .header_opt(H_EXPIRES_AT, self.expires_at)
             .flag(H_CLOSED, self.closed)
-            .header_opt(H_SCHEMA, self.schema)
-            .flag(H_SCHEMA_VALIDATE, self.schema_validate)
             .header_opt(H_PARTITIONS, self.partitions)
             .header_opt(H_RETENTION_MS, self.retention_ms)
             .header_opt(H_RETENTION_BYTES, self.retention_bytes)
@@ -396,7 +387,6 @@ pub struct HeadResponse {
     pub expires_at: Option<String>,
     pub retention_ms: Option<u64>,
     pub retention_bytes: Option<u64>,
-    pub schema: Option<String>,
     pub kafka_topic: Option<String>,
 }
 
@@ -415,7 +405,6 @@ impl HeadResponse {
             expires_at: header_string(headers, H_EXPIRES_AT),
             retention_ms: header_u64(headers, H_RETENTION_MS),
             retention_bytes: header_u64(headers, H_RETENTION_BYTES),
-            schema: header_string(headers, H_SCHEMA),
             kafka_topic: header_string(headers, H_KAFKA_TOPIC),
         })
     }

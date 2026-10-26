@@ -63,7 +63,6 @@ export interface StreamInfo {
   expiresAt?: string
   retentionMs?: number
   retentionBytes?: number
-  schema?: string
   kafkaTopic?: string
 }
 
@@ -74,14 +73,10 @@ export interface CreateOptions extends CallOptions {
   expiresAt?: string
   retentionMs?: number
   retentionBytes?: number
-  schema?: string
-  schemaValidate?: boolean
   closed?: boolean
 }
 
 export interface TopicConfig {
-  schema?: string
-  schemaValidate: boolean
   kafkaTopic?: string
   partitions: number
   retentionMs?: number
@@ -93,20 +88,9 @@ export interface TopicConfig {
  * removes the setting. `partitions` grows the topic and never shrinks it.
  */
 export interface ConfigUpdate {
-  schema?: string | null
-  schemaValidate?: boolean
   retentionMs?: number | null
   retentionBytes?: number | null
   partitions?: number
-}
-
-export interface PutSchemaOptions extends CallOptions {
-  contentType?: string
-}
-
-export interface Schema {
-  contentType?: string
-  body: Uint8Array
 }
 
 export interface AppendAck {
@@ -236,8 +220,5 @@ export interface StreamApi {
   delete(name: string, options?: CallOptions): Promise<boolean>
   config(name: string, options?: CallOptions): Promise<TopicConfig | null>
   updateConfig(name: string, update: ConfigUpdate, options?: CallOptions): Promise<TopicConfig>
-  putSchema(name: string, body: Uint8Array | string, options?: PutSchemaOptions): Promise<void>
-  getSchema(name: string, options?: CallOptions): Promise<Schema | null>
-  deleteSchema(name: string, options?: CallOptions): Promise<boolean>
   closeTransport(): Promise<void>
 }

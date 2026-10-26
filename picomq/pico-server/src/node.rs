@@ -101,7 +101,6 @@ impl PicoNode {
         views: Arc<ViewPublisher>,
         object_storage: Arc<dyn ObjectStorageTrait>,
         wal: Arc<dyn Wal>,
-        schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
     ) -> Result<Self, ServiceError> {
         let handle = MetadataNodeHandle::register(
             sink,
@@ -140,11 +139,11 @@ impl PicoNode {
             Arc::new(StreamWaiterRegistry::new()),
         ));
 
-        let mut topics = Topics::new(service.clone(), kv_client.clone(), views.clone());
-        if let Some(registry) = schema_registry {
-            topics = topics.with_schema_registry(registry);
-        }
-        let topics = Arc::new(topics);
+        let topics = Arc::new(Topics::new(
+            service.clone(),
+            kv_client.clone(),
+            views.clone(),
+        ));
 
         let ownership = Arc::new(MetadataOwnershipService::new(
             views.clone(),

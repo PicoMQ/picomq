@@ -23,31 +23,24 @@ describe.runIf(live)('live pico server', () => {
   const base = `/it-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
   const CT = 'application/octet-stream'
 
-  it('sets, reads, and changes topic settings and schemas', async () => {
+  it('sets, reads, and changes topic settings', async () => {
     const name = `${base}/settings`
-    const schema = `${base.slice(1)}-settings.json`
     const options = { contentType: 'application/json', partitions: 2, retentionMs: 60000 }
     expect(await pico.create(name, options)).toBe(true)
     expect(await pico.head(name)).toMatchObject({ partitions: 2, retentionMs: 60000 })
 
-    await pico.putSchema(schema, '{"type": "object"}')
-    expect(await pico.getSchema(schema)).toMatchObject({ contentType: 'application/schema+json' })
-
     const config = await pico.updateConfig(name, {
-      schema,
       retentionMs: null,
       retentionBytes: 4096,
       partitions: 3,
     })
-    expect(config).toMatchObject({ schema, partitions: 3, retentionBytes: 4096 })
+    expect(config).toMatchObject({ partitions: 3, retentionBytes: 4096 })
     expect(config.retentionMs).toBeUndefined()
     expect(await pico.config(name)).toEqual(config)
     await expect(pico.updateConfig(name, { partitions: 1 })).rejects.toMatchObject({
       kind: 'bad_request',
     })
 
-    await pico.updateConfig(name, { schema: null })
-    expect(await pico.deleteSchema(schema)).toBe(true)
     await pico.delete(name)
   })
 

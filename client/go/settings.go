@@ -8,8 +8,6 @@ import (
 )
 
 type configBody struct {
-	Schema         *string `json:"schema"`
-	SchemaValidate bool    `json:"schemaValidate"`
 	KafkaTopic     *string `json:"kafkaTopic"`
 	Partitions     uint32  `json:"partitions"`
 	RetentionMs    *uint64 `json:"retentionMs"`
@@ -34,12 +32,6 @@ func (o CreateOptions) headers(prefix string) http.Header {
 	if o.RetentionBytes > 0 {
 		headers.Set(prefix+"-Retention-Bytes", strconv.FormatUint(o.RetentionBytes, 10))
 	}
-	if o.Schema != "" {
-		headers.Set(prefix+"-Schema", o.Schema)
-	}
-	if o.SchemaValidate {
-		headers.Set(prefix+"-Schema-Validate", "true")
-	}
 	if o.Closed {
 		headers.Set(prefix+"-Closed", "true")
 	}
@@ -49,17 +41,10 @@ func (o CreateOptions) headers(prefix string) http.Header {
 func readSettings(header http.Header, prefix string, info *StreamInfo) {
 	info.Retention = time.Duration(headerUint(header, prefix+"-Retention-Ms")) * time.Millisecond
 	info.RetentionBytes = headerUint(header, prefix+"-Retention-Bytes")
-	info.Schema = header.Get(prefix + "-Schema")
 }
 
 func (u ConfigUpdate) body() map[string]any {
 	body := map[string]any{}
-	if u.Schema != nil {
-		body["schema"] = nullIfZero(*u.Schema, "")
-	}
-	if u.SchemaValidate != nil {
-		body["schemaValidate"] = *u.SchemaValidate
-	}
 	if u.Retention != nil {
 		var millis any
 		if *u.Retention > 0 {
@@ -88,10 +73,7 @@ func decodeConfig(data []byte) (TopicConfig, error) {
 	if err := json.Unmarshal(data, &body); err != nil {
 		return TopicConfig{}, invalidResponse(err)
 	}
-	config := TopicConfig{SchemaValidate: body.SchemaValidate, Partitions: partitionCount(uint64(body.Partitions))}
-	if body.Schema != nil {
-		config.Schema = *body.Schema
-	}
+	config := TopicConfig{Partitions: partitionCount(uint64(body.Partitions))}
 	if body.KafkaTopic != nil {
 		config.KafkaTopic = *body.KafkaTopic
 	}

@@ -92,8 +92,6 @@ async fn patch_config(
 pub(crate) fn update_command(name: String, update: ConfigUpdate) -> UpdateTopicCommand {
     UpdateTopicCommand {
         name,
-        schema_name: update.schema,
-        schema_validate: update.schema_validate,
         retention_ms: update.retention_ms,
         retention_bytes: update.retention_bytes,
         partitions: update.partitions,
@@ -103,8 +101,6 @@ pub(crate) fn update_command(name: String, update: ConfigUpdate) -> UpdateTopicC
 
 fn config(topic: &Topic) -> Response {
     let config = TopicConfig {
-        schema: topic.schema_name.clone(),
-        schema_validate: topic.schema_validate,
         kafka_topic: topic.name.kafka().map(str::to_owned),
         partitions: topic.partitions,
         retention_ms: topic.retention.ms,
