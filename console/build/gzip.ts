@@ -1,3 +1,5 @@
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import type { Plugin, Rollup } from 'vite'
 
@@ -16,13 +18,13 @@ export function gzip(): Plugin {
     name: 'gzip',
     apply: 'build',
     enforce: 'post',
-    generateBundle(_, bundle) {
+    writeBundle({ dir = '.' }, bundle) {
       const outputs = Object.values(bundle).filter((output) => COMPRESSIBLE.test(output.fileName))
 
       for (const output of outputs) {
         const compressed = compress(source(output))
         if (compressed.length < Buffer.byteLength(source(output))) {
-          this.emitFile({ type: 'asset', fileName: `${output.fileName}.gz`, source: compressed })
+          writeFileSync(join(dir, `${output.fileName}.gz`), compressed)
         }
       }
     },

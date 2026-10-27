@@ -41,6 +41,7 @@ description = "A durable stream engine on object storage."
 repository = "https://github.com/PicoMQ/picomq"
 
 [workspace.dependencies]
+flate2 = "1.1.10"
 s3stream = { git = "https://github.com/PicoMQ/s3stream", tag = "v0.1.2" }
 s3stream-wal = { git = "https://github.com/PicoMQ/s3stream", tag = "v0.1.2" }
 picomq-common = { path = "picomq/pico-common" }

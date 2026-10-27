@@ -3,6 +3,7 @@
 
 mod common;
 
+use std::io::Read;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -417,7 +418,13 @@ async fn console_is_served_at_root_and_every_page_path() {
         let compressed = get(path, "br, gzip").await.unwrap();
         assert_eq!(compressed.headers()["Content-Encoding"], "gzip");
         assert_eq!(compressed.headers()["Content-Type"], "text/javascript");
-        assert!(compressed.bytes().await.unwrap().len() < plain.len());
+        let compressed = compressed.bytes().await.unwrap();
+        assert!(compressed.len() < plain.len());
+        let mut unpacked = Vec::new();
+        flate2::read::GzDecoder::new(&compressed[..])
+            .read_to_end(&mut unpacked)
+            .unwrap();
+        assert_eq!(unpacked, plain, "the gzip copy is the same file");
 
         let refused = get(path, "gzip;q=0").await.unwrap();
         assert!(refused.headers().get("Content-Encoding").is_none());

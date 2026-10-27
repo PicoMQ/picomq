@@ -23,7 +23,7 @@ export function budget(): Plugin {
     name: 'budget',
     apply: 'build',
     enforce: 'post',
-    generateBundle(_, bundle) {
+    writeBundle(_, bundle) {
       const chunks = Object.values(bundle).filter(
         (output): output is Rollup.OutputChunk => output.type === 'chunk',
       )
