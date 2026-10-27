@@ -2192,7 +2192,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "picomq-auth"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2210,7 +2210,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "clap",
@@ -2236,7 +2236,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-client"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -2256,11 +2256,11 @@ dependencies = [
 
 [[package]]
 name = "picomq-common"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "picomq-conformance"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2280,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-http"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -2311,7 +2311,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-kafka"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2337,7 +2337,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-listener"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arc-swap",
  "picomq-listener",
@@ -2354,7 +2354,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-metadata"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2370,14 +2370,14 @@ dependencies = [
 
 [[package]]
 name = "picomq-metrics"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "picomq-auth",
 ]
 
 [[package]]
 name = "picomq-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-runtime"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "humantime",
@@ -2417,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2443,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "picomq-sql"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "bytes",
