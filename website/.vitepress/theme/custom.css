@@ -562,6 +562,11 @@ html {
   background: var(--vp-code-block-bg) !important;
 }
 
+.vp-doc img {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: var(--pico-radius);
+}
+
 .vp-doc div[class*="language-"] pre,
 .vp-doc div[class*="language-"] code,
 .vp-doc div[class*="language-"] .shiki {
