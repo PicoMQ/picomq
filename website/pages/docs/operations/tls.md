@@ -21,7 +21,7 @@ A listener speaks either TLS or plaintext, never both. A plaintext client gets a
 
 - **Format.** A PEM certificate chain, leaf first, and its PEM private key.
 - **Names.** The certificate must cover every name clients dial: the hosts in `--http-address`, `--admin-address`, and `--kafka-advertise`, and any load balancer name that passes TLS through to the node. Redirects and Kafka metadata send clients to those names directly.
-- **Clusters.** Nodes forward admin requests to each other over HTTPS at their `--admin-address`, and check the certificate like any client. A cluster can share one certificate whose names cover every node, or a wildcard, or give each node its own.
+- **Clusters.** Nodes forward admin requests to each other at their `--admin-address`, which defaults to `https://` with TLS, and check the certificate like any client. A cluster can share one certificate whose names cover every node, or a wildcard, or give each node its own.
 - **Key usage.** The certificate must list `serverAuth` in its extended key usage. Clients that verify through macOS reject a certificate without it. Public CAs include it, and the openssl recipe below asks for it.
 
 ## Rotation

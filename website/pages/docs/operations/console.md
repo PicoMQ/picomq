@@ -16,7 +16,7 @@ With auth off the console opens directly. With `--auth required` it asks for a t
 
 | Page | Shows | Actions |
 | --- | --- | --- |
-| Overview | Cluster counts, the nodes, and the ten largest and ten busiest topics. Write rates appear a minute after a node starts, see [`/admin/overview`](/docs/operations/admin#cluster-and-nodes) | |
+| Overview | Cluster counts, the nodes, and the ten largest and ten busiest topics. Write rates appear about a minute after the overview is first opened on a node, see [`/admin/overview`](/docs/operations/admin#cluster-and-nodes) | |
 | Topics | Topics by name, with a prefix search | Create topic |
 | Topic | Messages, Partitions, and Configuration tabs | Produce, trim a partition, grow partitions, change retention, delete |
 | Groups | Groups with state, member count, and coordinator | |
@@ -45,13 +45,13 @@ The Offsets tab lists each committed partition with its committed offset, the pa
 
 ## Nodes
 
-![A node page with records in and out over the last minute](/images/console/node.webp)
+![A node page charting records in and out](/images/console/node.webp)
 
 A node's page charts records, bytes, requests by status, and connections by listener. It samples the node's [metrics](/docs/operations/admin#metrics) every `2` seconds while the page is open and keeps the last `10` minutes, so longer history belongs in Prometheus.
 
 ## Large clusters
 
-The console follows the API's [paging](/docs/api#lists), so it stays responsive with 100,000 topics, a million partitions, or 100,000 groups.
+The console follows the API's [paging](/docs/api#lists), so every page costs the same however many topics, partitions, or groups the cluster holds.
 
 - **Paging.** Tables load a page at a time as you scroll, and searches run on the server.
 - **Order.** Tables keep the API's order and never sort a partial list.

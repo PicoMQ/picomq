@@ -93,7 +93,7 @@ Each record is `{offset, timestamp, key, value, headers}`.
   "offset": 1042,
   "timestamp": 1793001600000,
   "key": { "data": "customer-1042", "encoding": "utf8", "size": 13, "truncated": false },
-  "value": { "data": "{\"order\":\"o-77\",\"total\":42.5}", "encoding": "utf8", "size": 30, "truncated": false },
+  "value": { "data": "{\"order\":\"o-77\",\"total\":42.5}", "encoding": "utf8", "size": 29, "truncated": false },
   "headers": [
     { "name": "trace-id", "value": { "data": "4bf92f35", "encoding": "utf8", "size": 8, "truncated": false } },
     { "name": "source", "value": { "data": "checkout", "encoding": "utf8", "size": 8, "truncated": false } }
