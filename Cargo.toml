@@ -122,3 +122,6 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 todo = "allow" # scaffold phase: bodies are todo!() until ported
+
+[patch.crates-io]
+kafka-protocol = { git = "https://github.com/PicoMQ/kafka-protocol-rs", rev = "4513d667f9e131d15f93377915138493add7115d" }

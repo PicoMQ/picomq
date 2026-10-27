@@ -1,3 +1,5 @@
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
@@ -32,6 +34,27 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
+
+struct Largest;
+
+thread_local! {
+    static LARGEST: Cell<usize> = const { Cell::new(0) };
+}
+
+#[allow(unsafe_code)]
+unsafe impl GlobalAlloc for Largest {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _ = LARGEST.try_with(|largest| largest.set(largest.get().max(layout.size())));
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Largest = Largest;
 
 fn host() -> std::sync::Arc<str> {
     std::sync::Arc::from("127.0.0.1")
@@ -3790,4 +3813,23 @@ async fn create_topics_takes_retention() {
         CreateTopicsResponse::decode(&mut buf, 5).unwrap().topics[0].error_code,
         40
     );
+}
+
+#[tokio::test]
+async fn a_request_claiming_more_entries_than_it_carries_fails_without_reserving_them() {
+    let broker = test_broker().await;
+    let mut frame = encode_request(
+        ApiKey::Metadata,
+        1,
+        7,
+        &MetadataRequest::default().with_topics(Some(Vec::new())),
+    );
+    let count = frame.len() - 4;
+    frame[count..].copy_from_slice(&i32::MAX.to_be_bytes());
+    LARGEST.with(|largest| largest.set(0));
+
+    assert!(dispatch(&broker, None, &host(), &frame).await.is_err());
+
+    let largest = LARGEST.with(Cell::get);
+    assert!(largest < 1 << 20, "reserved {largest} bytes for a lie");
 }
