@@ -33,7 +33,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -45,7 +45,7 @@ flate2 = "1.1.10"
 s3stream = { git = "https://github.com/PicoMQ/s3stream", tag = "v0.1.2" }
 s3stream-wal = { git = "https://github.com/PicoMQ/s3stream", tag = "v0.1.2" }
 picomq-common = { path = "picomq/pico-common" }
-picomq-protocol = { path = "picomq/pico-protocol", version = "0.1.1" }
+picomq-protocol = { path = "picomq/pico-protocol", version = "0.1.2" }
 picomq-auth = { path = "picomq/pico-auth" }
 picomq-metadata = { path = "picomq/pico-metadata" }
 picomq-sql = { path = "picomq/pico-sql" }
@@ -55,7 +55,7 @@ picomq-metrics = { path = "picomq/pico-metrics" }
 picomq-kafka = { path = "picomq/pico-kafka" }
 picomq-http = { path = "picomq/pico-http" }
 picomq-runtime = { path = "picomq/pico-runtime" }
-picomq-client = { path = "picomq/pico-client", version = "0.1.1" }
+picomq-client = { path = "picomq/pico-client", version = "0.1.2" }
 
 anyhow = "1.0.104"
 uuid = { version = "1.26.0", features = ["serde", "v4", "v7"] }
