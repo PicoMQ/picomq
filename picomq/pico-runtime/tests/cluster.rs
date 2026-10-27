@@ -44,7 +44,11 @@ async fn settled_owner(h: &Harness, name: &str) -> i64 {
     loop {
         let described: serde_json::Value = h
             .http
-            .get(format!("{}/admin/streams{name}", first_admin()))
+            .get(format!(
+                "{}/admin/topics/{}/partitions/0",
+                first_admin(),
+                picomq_protocol::stream_segment(name)
+            ))
             .bearer_auth(token())
             .send()
             .await
@@ -76,7 +80,7 @@ async fn bodies(client: &PicoClient, name: &str) -> Vec<String> {
         .unwrap();
     page.records
         .into_iter()
-        .map(|record| String::from_utf8(record.body.to_vec()).unwrap())
+        .map(|record| String::from_utf8(record.body.unwrap().to_vec()).unwrap())
         .collect()
 }
 
@@ -127,23 +131,23 @@ async fn tokens_on_every_node(h: &Harness, ids: &[&str]) {
     loop {
         let mut everywhere = true;
         for admin in [first_admin(), second_admin()] {
-            let listed: serde_json::Value = h
-                .http
-                .get(format!("{admin}/admin/tokens"))
-                .bearer_auth(token())
-                .send()
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            let known: Vec<&str> = listed["tokens"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|entry| entry["id"].as_str())
-                .collect();
-            everywhere &= ids.iter().all(|id| known.contains(id));
+            for id in ids {
+                let listed: serde_json::Value = h
+                    .http
+                    .get(format!("{admin}/admin/tokens?prefix={id}"))
+                    .bearer_auth(token())
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                everywhere &= listed["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["id"].as_str() == Some(id));
+            }
         }
         if everywhere {
             return;
@@ -286,6 +290,37 @@ async fn http_reads_of_a_partition_reach_its_owner() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
+async fn each_node_answers_for_the_other() {
+    let h = cluster();
+
+    for (via, asked) in [(first_admin(), "2"), (second_admin(), "1")] {
+        let response = h
+            .http
+            .get(format!("{via}/admin/nodes/{asked}/metrics"))
+            .bearer_auth(token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response
+                .headers()
+                .get("pico-node-id")
+                .and_then(|value| value.to_str().ok()),
+            Some(asked)
+        );
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("pico_requests_total")
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
 async fn admin_apis_reach_partitions_on_both_nodes() {
     let h = cluster();
     let topic = unique("admin");
@@ -354,10 +389,10 @@ async fn admin_apis_reach_partitions_on_both_nodes() {
 #[ignore]
 async fn a_dead_node_fails_over_and_committed_offsets_survive() {
     let (Ok(kill), Ok(start)) = (
-        std::env::var("PICOMQ_KILL_CMD"),
-        std::env::var("PICOMQ_START_CMD"),
+        std::env::var("PICO_KILL_CMD"),
+        std::env::var("PICO_START_CMD"),
     ) else {
-        eprintln!("set PICOMQ_KILL_CMD and PICOMQ_START_CMD to run the failover test");
+        eprintln!("set PICO_KILL_CMD and PICO_START_CMD to run the failover test");
         return;
     };
 
@@ -521,9 +556,9 @@ async fn an_http_producer_retry_is_deduplicated_across_a_transfer() {
     let to = 3 - from;
     let accepted = h
         .http
-        .post(format!("{}/admin/transfer", first_admin()))
+        .post(format!("{}/admin/transfers", first_admin()))
         .bearer_auth(token())
-        .json(&serde_json::json!({ "stream": name, "toNode": to }))
+        .json(&serde_json::json!({ "topic": name, "toNode": to }))
         .send()
         .await
         .unwrap();
@@ -574,10 +609,10 @@ async fn an_http_producer_retry_is_deduplicated_across_a_transfer() {
 #[ignore]
 async fn an_http_producer_survives_a_killed_owner_exactly_once() {
     let (Ok(kill), Ok(start)) = (
-        std::env::var("PICOMQ_KILL_CMD"),
-        std::env::var("PICOMQ_START_CMD"),
+        std::env::var("PICO_KILL_CMD"),
+        std::env::var("PICO_START_CMD"),
     ) else {
-        eprintln!("set PICOMQ_KILL_CMD and PICOMQ_START_CMD to run the failover test");
+        eprintln!("set PICO_KILL_CMD and PICO_START_CMD to run the failover test");
         return;
     };
 
@@ -681,10 +716,10 @@ fn consume_continuously(
 #[ignore]
 async fn kafka_clients_survive_a_killed_coordinator_and_owner() {
     let (Ok(kill), Ok(start)) = (
-        std::env::var("PICOMQ_KILL_CMD"),
-        std::env::var("PICOMQ_START_CMD"),
+        std::env::var("PICO_KILL_CMD"),
+        std::env::var("PICO_START_CMD"),
     ) else {
-        eprintln!("set PICOMQ_KILL_CMD and PICOMQ_START_CMD to run the failover test");
+        eprintln!("set PICO_KILL_CMD and PICO_START_CMD to run the failover test");
         return;
     };
 
@@ -786,9 +821,9 @@ async fn a_kafka_producer_is_deduplicated_across_a_transfer() {
 
     let accepted = h
         .http
-        .post(format!("{}/admin/transfer", first_admin()))
+        .post(format!("{}/admin/transfers", first_admin()))
         .bearer_auth(token())
-        .json(&serde_json::json!({ "stream": format!("/{topic}"), "partition": 0, "toNode": to }))
+        .json(&serde_json::json!({ "topic": format!("/{topic}"), "partition": 0, "toNode": to }))
         .send()
         .await
         .unwrap();

@@ -43,7 +43,7 @@ import type {
   GroupAssignment,
   GroupDescription,
   GroupMembership,
-  HeaderValue,
+  Header,
   JoinOptions,
   Live,
   MemberDescription,
@@ -52,15 +52,14 @@ import type {
   PartitionOptions,
   ProducerAck,
   ProducerRef,
-  PutSchemaOptions,
   Protocol,
   ReadLimits,
   ReadPage,
-  Schema,
   SseEvent,
   StreamApi,
   StreamInfo,
   StreamListing,
+  GroupListing,
   StreamRecord,
   SubscribeOptions,
   TopicConfig,
@@ -200,9 +199,14 @@ export class PicoClient implements StreamApi {
     })
   }
 
-  async list(prefix: string, limit = 0, options?: CallOptions): Promise<StreamListing> {
+  async list(
+    prefix: string,
+    limit = 0,
+    cursor?: string,
+    options?: CallOptions,
+  ): Promise<StreamListing> {
     return this.retry.run(
-      () => this.listOnce(prefix, limit, options?.signal),
+      () => this.listOnce(prefix, limit, cursor, options?.signal),
       retryableError,
       options?.signal,
     )
@@ -229,18 +233,6 @@ export class PicoClient implements StreamApi {
 
   updateConfig(name: string, update: ConfigUpdate, options?: CallOptions): Promise<TopicConfig> {
     return this.control.updateConfig(name, update, options)
-  }
-
-  putSchema(name: string, body: Uint8Array | string, options?: PutSchemaOptions): Promise<void> {
-    return this.control.putSchema(name, body, options)
-  }
-
-  getSchema(name: string, options?: CallOptions): Promise<Schema | null> {
-    return this.control.getSchema(name, options)
-  }
-
-  deleteSchema(name: string, options?: CallOptions): Promise<boolean> {
-    return this.control.deleteSchema(name, options)
   }
 
 
@@ -402,9 +394,14 @@ export class PicoClient implements StreamApi {
     await this.call('DELETE', groupPath(group), '', undefined, [204], options?.signal)
   }
 
-  async listGroups(options?: CallOptions): Promise<string[]> {
+  async listGroups(
+    prefix = '',
+    limit = 0,
+    cursor?: string,
+    options?: CallOptions,
+  ): Promise<GroupListing> {
     return this.retry.run(
-      () => this.listGroupsOnce(options?.signal),
+      () => this.listGroupsOnce(prefix, limit, cursor, options?.signal),
       retryableError,
       options?.signal,
     )
@@ -583,46 +580,47 @@ export class PicoClient implements StreamApi {
   private async listOnce(
     prefix: string,
     limit: number,
+    cursor: string | undefined,
     signal?: AbortSignal,
   ): Promise<StreamListing> {
     let query = `?prefix=${urlencode(prefix)}`
     if (limit > 0) {
       query += `&limit=${limit}`
     }
+    if (cursor !== undefined) {
+      query += `&cursor=${urlencode(cursor)}`
+    }
     const response = await expectPico(
       await this.http.send({ method: 'GET', url: this.url('/', query), signal }),
       [200],
     )
     const body = (await response.json()) as {
-      streams?: Array<{
+      items?: Array<{
         name?: string
         content_type?: string
         partitions?: number
-        start_seq?: number
-        next_seq?: number
         closed?: boolean
         ttl?: number
         expires_at?: string
       }>
-      has_more?: boolean
+      next?: string | null
     }
 
-    return {
-      streams: (body.streams ?? []).map((node) => {
+    const listing: StreamListing = {
+      streams: (body.items ?? []).map((node) => {
         const info: StreamInfo = {
           name: node.name ?? '',
           partitions: node.partitions ?? 1,
           closed: node.closed ?? false,
         }
-        if (node.start_seq !== undefined) info.start = String(node.start_seq)
-        if (node.next_seq !== undefined) info.next = String(node.next_seq)
         if (node.content_type !== undefined) info.contentType = node.content_type
         if (node.ttl !== undefined) info.ttlSeconds = node.ttl
         if (node.expires_at !== undefined) info.expiresAt = node.expires_at
         return info
       }),
-      hasMore: body.has_more ?? false,
     }
+    if (typeof body.next === 'string') listing.next = body.next
+    return listing
   }
 
   private async fetchOffsetsOnce(
@@ -691,11 +689,25 @@ export class PicoClient implements StreamApi {
     return described
   }
 
-  private async listGroupsOnce(signal?: AbortSignal): Promise<string[]> {
-    const response = await this.call('GET', GROUPS_PATH, '', undefined, [200], signal)
+  private async listGroupsOnce(
+    prefix: string,
+    limit: number,
+    cursor: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<GroupListing> {
+    let query = `?prefix=${urlencode(prefix)}`
+    if (limit > 0) {
+      query += `&limit=${limit}`
+    }
+    if (cursor !== undefined) {
+      query += `&cursor=${urlencode(cursor)}`
+    }
+    const response = await this.call('GET', GROUPS_PATH, query, undefined, [200], signal)
 
-    const body = (await response.json()) as { groups?: string[] }
-    return body.groups ?? []
+    const body = (await response.json()) as { items?: string[]; next?: string | null }
+    const listing: GroupListing = { groups: body.items ?? [] }
+    if (typeof body.next === 'string') listing.next = body.next
+    return listing
   }
 
   private async call(
@@ -807,28 +819,24 @@ function parsePicoData(data: string): StreamRecord[] {
     const row = node as {
       seq?: number | string
       timestamp?: number
-      key?: string
-      key_b64?: string
-      headers?: { [key: string]: string }
-      headers_b64?: { [key: string]: string }
-      body?: string
-      body_b64?: string
+      key?: string | null
+      key_b64?: string | null
+      headers?: { name: string; value?: string | null; value_b64?: string }[]
+      body?: string | null
+      body_b64?: string | null
     }
-    const headers: { [key: string]: HeaderValue } = { ...(row.headers ?? {}) }
-    for (const [name, value] of Object.entries(row.headers_b64 ?? {})) {
-      headers[name] = base64Decode(value)
-    }
+    const headers: Header[] = (row.headers ?? []).map(({ name, value, value_b64 }) => ({
+      name,
+      value: value_b64 !== undefined ? base64Decode(value_b64) : (value ?? null),
+    }))
     const record: StreamRecord = {
       position: String(row.seq ?? ''),
       headers,
-      body:
-        row.body_b64 !== undefined
-          ? base64Decode(row.body_b64)
-          : new TextEncoder().encode(row.body ?? ''),
+      body: nullableBytes(row.body, row.body_b64),
     }
     if (row.timestamp !== undefined) record.timestamp = row.timestamp
-    if (row.key_b64 !== undefined) record.key = base64Decode(row.key_b64)
-    else if (row.key !== undefined) record.key = new TextEncoder().encode(row.key)
+    const key = nullableBytes(row.key, row.key_b64)
+    if (key !== null) record.key = key
     return record
   })
 }
@@ -845,4 +853,10 @@ function parsePicoControl(data: string): { next: string; upToDate: boolean; clos
     upToDate: parsed.up_to_date === true,
     closed: parsed.closed === true,
   }
+}
+
+function nullableBytes(text?: string | null, b64?: string | null): Uint8Array | null {
+  if (b64 !== undefined && b64 !== null) return base64Decode(b64)
+  if (text !== undefined && text !== null) return new TextEncoder().encode(text)
+  return null
 }

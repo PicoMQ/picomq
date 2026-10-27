@@ -19,10 +19,7 @@ use crate::handlers::common::{
     Failure, INVALID_CONFIG, INVALID_REQUEST, NO_ERROR, encode_response, resolve_topic,
     service_failure,
 };
-use crate::handlers::topics::{
-    RETENTION_BYTES_CONFIG, RETENTION_MS_CONFIG, SCHEMA_CONFIG, SCHEMA_VALIDATE_CONFIG,
-    retention_limit,
-};
+use crate::handlers::topics::{RETENTION_BYTES_CONFIG, RETENTION_MS_CONFIG, retention_limit};
 use crate::handlers::{HandlerError, HandlerOutcome};
 
 const TOPIC: i8 = 2;
@@ -31,8 +28,6 @@ const BROKER: i8 = 4;
 const DYNAMIC_TOPIC_CONFIG: i8 = 1;
 const DEFAULT_CONFIG: i8 = 5;
 
-const BOOLEAN: i8 = 1;
-const STRING: i8 = 2;
 const LONG: i8 = 5;
 const LIST: i8 = 7;
 
@@ -142,30 +137,11 @@ async fn configs(
 }
 
 fn topic_configs(topic: &Topic) -> Vec<DescribeConfigsResourceResult> {
-    let mut configs = vec![
+    vec![
         config("cleanup.policy", "delete", DEFAULT_CONFIG, LIST, true),
         retention_config(RETENTION_MS_CONFIG, topic.retention.ms),
         retention_config(RETENTION_BYTES_CONFIG, topic.retention.bytes),
-    ];
-
-    if let Some(schema) = &topic.schema_name {
-        configs.push(config(
-            SCHEMA_CONFIG,
-            schema,
-            DYNAMIC_TOPIC_CONFIG,
-            STRING,
-            false,
-        ));
-        configs.push(config(
-            SCHEMA_VALIDATE_CONFIG,
-            &topic.schema_validate.to_string(),
-            DYNAMIC_TOPIC_CONFIG,
-            BOOLEAN,
-            false,
-        ));
-    }
-
-    configs
+    ]
 }
 
 fn retention_config(name: &str, limit: Option<u64>) -> DescribeConfigsResourceResult {
@@ -215,19 +191,6 @@ async fn change(
     for config in &resource.configs {
         let value = config.value.as_ref().map(|value| value.as_str());
         match (config.name.as_str(), config.config_operation, value) {
-            (SCHEMA_CONFIG, SET, Some(schema)) => {
-                command.schema_name = Some(Some(schema.to_owned()))
-            }
-            (SCHEMA_CONFIG, DELETE, _) => command.schema_name = Some(None),
-            (SCHEMA_VALIDATE_CONFIG, SET, Some(flag)) => {
-                command.schema_validate = Some(flag.parse().map_err(|_| {
-                    (
-                        INVALID_CONFIG,
-                        Some(format!("{SCHEMA_VALIDATE_CONFIG} must be true or false")),
-                    )
-                })?);
-            }
-            (SCHEMA_VALIDATE_CONFIG, DELETE, _) => command.schema_validate = Some(false),
             (RETENTION_MS_CONFIG, SET, Some(value)) => {
                 command.retention_ms = Some(retention_limit(RETENTION_MS_CONFIG, value)?)
             }

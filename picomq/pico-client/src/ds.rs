@@ -7,7 +7,6 @@ use picomq_protocol::ds::{
     DeleteRequest, DeleteResponse, HeadRequest, HeadResponse, LIVE_LONG_POLL, OFFSET_BEGINNING,
     OFFSET_NOW, ReadRequest, ReadResponse, decode_error,
 };
-use picomq_protocol::schemas::Schema;
 use reqwest::Response;
 
 use crate::ClientConfig;
@@ -64,7 +63,6 @@ impl DsClient {
             expires_at: head.expires_at,
             retention_ms: head.retention_ms,
             retention_bytes: head.retention_bytes,
-            schema: head.schema,
             kafka_topic: None,
         }))
     }
@@ -94,7 +92,7 @@ impl DsClient {
                 timestamp: None,
                 key: None,
                 headers: Vec::new(),
-                body,
+                body: Some(body),
             }]
         };
         Ok(ReadPage {
@@ -126,8 +124,6 @@ impl StreamApi for DsClient {
             ttl_seconds: options.ttl_seconds,
             expires_at: options.expires_at.as_deref(),
             closed: options.closed,
-            schema: options.schema.as_deref(),
-            schema_validate: options.schema_validate,
             partitions: options.partitions,
             retention_ms: options.retention_ms,
             retention_bytes: options.retention_bytes,
@@ -180,7 +176,12 @@ impl StreamApi for DsClient {
             .await
     }
 
-    async fn list(&self, _prefix: &str, _limit: u64) -> Result<StreamListing> {
+    async fn list(
+        &self,
+        _prefix: &str,
+        _limit: u64,
+        _cursor: Option<&str>,
+    ) -> Result<StreamListing> {
         Err(ClientError::unsupported(
             "the Durable Streams protocol has no stream listing; use --protocol pico",
         ))
@@ -203,17 +204,5 @@ impl StreamApi for DsClient {
 
     async fn update_config(&self, update: &ConfigUpdate) -> Result<TopicConfig> {
         self.transport.update_config(update).await
-    }
-
-    async fn put_schema(&self, name: &str, content_type: Option<&str>, body: Bytes) -> Result<()> {
-        self.transport.put_schema(name, content_type, body).await
-    }
-
-    async fn get_schema(&self, name: &str) -> Result<Option<Schema>> {
-        self.retry.run(|| self.transport.get_schema(name)).await
-    }
-
-    async fn delete_schema(&self, name: &str) -> Result<bool> {
-        self.transport.delete_schema(name).await
     }
 }

@@ -6,17 +6,8 @@ const ENDPOINT = process.env.PICO_ENDPOINT ?? 'http://127.0.0.1:4437'
 const TOKEN =
   process.env.PICO_TOKEN ?? 'ZGV2L3Jvb3Q.BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY'
 
-async function serverUp(): Promise<boolean> {
-  try {
-    const response = await fetch(ENDPOINT, { signal: AbortSignal.timeout(1500) })
-    return response.status < 500
-  } catch {
-    return false
-  }
-}
-
-const up = await serverUp()
-const text = (record: StreamRecord) => new TextDecoder().decode(record.body)
+const live = Boolean(process.env.PICO_INTEGRATION)
+const text = (record: StreamRecord) => new TextDecoder().decode(record.body!)
 
 const groupConfig = { sessionTimeoutMs: 2000, heartbeatIntervalMs: 100 }
 
@@ -27,36 +18,29 @@ async function nextGeneration(member: GroupMember, after: number): Promise<Assig
   throw new Error(`no rebalance past generation ${after}; error=${member.error()?.code}`)
 }
 
-describe.runIf(up)('live pico server', () => {
+describe.runIf(live)('live pico server', () => {
   const pico = connect('pico', ENDPOINT, { retry: RetryPolicy.attempts(3), token: TOKEN })
   const base = `/it-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
   const CT = 'application/octet-stream'
 
-  it('sets, reads, and changes topic settings and schemas', async () => {
+  it('sets, reads, and changes topic settings', async () => {
     const name = `${base}/settings`
-    const schema = `${base.slice(1)}-settings.json`
     const options = { contentType: 'application/json', partitions: 2, retentionMs: 60000 }
     expect(await pico.create(name, options)).toBe(true)
     expect(await pico.head(name)).toMatchObject({ partitions: 2, retentionMs: 60000 })
 
-    await pico.putSchema(schema, '{"type": "object"}')
-    expect(await pico.getSchema(schema)).toMatchObject({ contentType: 'application/schema+json' })
-
     const config = await pico.updateConfig(name, {
-      schema,
       retentionMs: null,
       retentionBytes: 4096,
       partitions: 3,
     })
-    expect(config).toMatchObject({ schema, partitions: 3, retentionBytes: 4096 })
+    expect(config).toMatchObject({ partitions: 3, retentionBytes: 4096 })
     expect(config.retentionMs).toBeUndefined()
     expect(await pico.config(name)).toEqual(config)
     await expect(pico.updateConfig(name, { partitions: 1 })).rejects.toMatchObject({
       kind: 'bad_request',
     })
 
-    await pico.updateConfig(name, { schema: null })
-    expect(await pico.deleteSchema(schema)).toBe(true)
     await pico.delete(name)
   })
 
@@ -73,26 +57,40 @@ describe.runIf(up)('live pico server', () => {
     await stream.create({ contentType: CT })
     const ack = await stream.append([
       'one',
-      { body: 'two', headers: { kind: 'demo', n: '2' } },
+      {
+        body: 'two',
+        headers: [
+          { name: 'kind', value: 'demo' },
+          { name: 'kind', value: 'repeat' },
+          { name: 'flag', value: null },
+        ],
+      },
       new Uint8Array([1, 2, 3]),
-      { body: 'four', key: 'user-7', headers: { raw: new Uint8Array([0xff, 0x00]) } },
+      { body: 'four', key: 'user-7', headers: [{ name: 'raw', value: new Uint8Array([0xff, 0x00]) }] },
+      { body: null, key: 'gone' },
     ])
     expect(ack.start).toBe('0')
-    expect(ack.next).toBe('4')
+    expect(ack.next).toBe('5')
 
     const page = await stream.read('0', 'off')
-    expect(page.records).toHaveLength(4)
+    expect(page.records).toHaveLength(5)
     expect(page.upToDate).toBe(true)
     expect(text(page.records[0]!)).toBe('one')
     expect(page.records[0]!.position).toBe('0')
     expect(page.records[0]!.key).toBeUndefined()
     expect(page.records[0]!.timestamp).toBeGreaterThan(0)
     expect(text(page.records[1]!)).toBe('two')
-    expect(page.records[1]!.headers).toEqual({ kind: 'demo', n: '2' })
+    expect(page.records[1]!.headers).toEqual([
+      { name: 'kind', value: 'demo' },
+      { name: 'kind', value: 'repeat' },
+      { name: 'flag', value: null },
+    ])
     expect(page.records[2]!.body).toEqual(new Uint8Array([1, 2, 3]))
     expect(page.records[2]!.position).toBe('2')
     expect(page.records[3]!.key).toEqual(new TextEncoder().encode('user-7'))
-    expect(page.records[3]!.headers).toEqual({ raw: new Uint8Array([0xff, 0x00]) })
+    expect(page.records[3]!.headers).toEqual([{ name: 'raw', value: new Uint8Array([0xff, 0x00]) }])
+    expect(page.records[4]!.key).toEqual(new TextEncoder().encode('gone'))
+    expect(page.records[4]!.body).toBeNull()
   })
 
   it('paginates records() across many pages', async () => {
@@ -324,7 +322,7 @@ describe.runIf(up)('live pico server', () => {
     expect(described.members).toHaveLength(1)
     expect(described.members[0]!.clientId).toBe('test')
     expect(described.members[0]!.assignment).toEqual(joined.assignment)
-    expect(await pico.listGroups()).toContain(group)
+    expect((await pico.listGroups()).groups).toContain(group)
     await expect(pico.deleteGroup(group)).rejects.toMatchObject({ code: 'conflict' })
 
     await pico.leaveGroup(group, joined.memberId)
@@ -391,8 +389,8 @@ describe.runIf(up)('live pico server', () => {
   })
 })
 
-describe.runIf(!up)('live pico server (skipped)', () => {
-  it('skips because no server is reachable at ' + ENDPOINT, () => {
-    expect(up).toBe(false)
+describe.runIf(!live)('live pico server (skipped)', () => {
+  it(`skips unless PICO_INTEGRATION is set to run against ${ENDPOINT}`, () => {
+    expect(live).toBe(false)
   })
 })

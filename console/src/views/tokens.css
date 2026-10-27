@@ -1,0 +1,11 @@
+.tokens-row {
+  display: grid;
+  grid-template-columns: 6rem auto auto;
+  gap: var(--space-4);
+  justify-content: start;
+}
+
+.tokens-issued {
+  display: grid;
+  gap: var(--space-4);
+}

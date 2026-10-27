@@ -22,7 +22,7 @@
   ],
   "scripts": {
     "build": "tsup && tsc -p tsconfig.build.json",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest"
   },

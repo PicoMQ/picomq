@@ -1,20 +1,20 @@
-mod schemas;
-mod streams;
+pub(crate) mod streams;
 
 use std::sync::Arc;
 
+use axum::extract::Request;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use picomq_auth::{Audience, AuthError, AuthPrincipal, Authorizer, Operation, Resource};
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{ErrorKind, ServiceError, Topics};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::RoutingMode;
 
-/// The stream config and schema routes beside a protocol listener. They
-/// authenticate like that listener's stream routes.
+/// The stream config routes beside a protocol listener. They authenticate
+/// like that listener's stream routes.
 #[derive(Clone)]
 pub struct CommonState {
     pub topics: Arc<Topics>,
@@ -39,8 +39,7 @@ pub fn router(
         authorizer,
         audience,
     };
-    schemas::router()
-        .merge(streams::router())
+    streams::router()
         .layer(axum::extract::DefaultBodyLimit::max(max_request_size))
         .with_state(state)
 }
@@ -61,20 +60,6 @@ impl CommonState {
         let name = caller.resolve(Resource::Stream, name)?;
         caller.authorize(op, Some(&name))?;
         Ok(name)
-    }
-
-    /// Authorizes `op` on a schema, matched like a stream name.
-    pub(crate) async fn admit_schema(
-        &self,
-        headers: &HeaderMap,
-        op: Operation,
-        name: &str,
-    ) -> Result<(), Box<Response>> {
-        let Some(authorizer) = self.authorizer.as_deref() else {
-            return Ok(());
-        };
-        let caller = crate::auth::authenticate(authorizer, self.audience, headers).await?;
-        caller.authorize(op, Some(name))
     }
 }
 
@@ -106,17 +91,33 @@ pub(crate) async fn authenticate(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| Box::new(auth_error(&AuthError::Unauthenticated)))?;
-    authorizer
+    let principal = authorizer
         .authenticate(credential, Audience::Admin, picomq_common::now_ms())
         .await
-        .map(Some)
-        .map_err(|err| Box::new(auth_error(&err)))
+        .map_err(|err| Box::new(auth_error(&err)))?;
+    if principal.scope.auto_prefix {
+        return Err(Box::new(auth_error(&AuthError::Denied)));
+    }
+    Ok(Some(principal))
+}
+
+pub(crate) async fn read_json(request: Request, limit: usize) -> Result<Value, Box<Response>> {
+    let body = axum::body::to_bytes(request.into_body(), limit)
+        .await
+        .map_err(|_| {
+            Box::new(error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "the body is too large",
+            ))
+        })?;
+    json_body(&body)
 }
 
 pub(crate) fn auth_error(err: &AuthError) -> Response {
     if let AuthError::Store(detail) = err {
         tracing::warn!(%detail, "auth store failure");
     }
+    crate::observe::auth_failure(Audience::Admin, err);
     let (status, _, message) = crate::auth::status_code(err);
     let mut response = (
         StatusCode::from_u16(status).expect("known status"),
@@ -131,6 +132,19 @@ pub(crate) fn auth_error(err: &AuthError) -> Response {
     response
 }
 
+pub(crate) fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
+    (status, Json(json!({ "error": message.into() }))).into_response()
+}
+
+pub(crate) fn json_body(body: &[u8]) -> Result<Value, Box<Response>> {
+    serde_json::from_slice(body).map_err(|_| {
+        Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            "expected a JSON body",
+        ))
+    })
+}
+
 pub(crate) fn service_error(error: ServiceError) -> Response {
     let status = match error.kind {
         ErrorKind::NotFound => StatusCode::NOT_FOUND,
@@ -141,7 +155,6 @@ pub(crate) fn service_error(error: ServiceError) -> Response {
         ErrorKind::BadRequest
         | ErrorKind::InvalidName
         | ErrorKind::CorruptBatch
-        | ErrorKind::SchemaViolation
         | ErrorKind::Fenced
         | ErrorKind::SequenceGap
         | ErrorKind::MatchFailed => StatusCode::BAD_REQUEST,

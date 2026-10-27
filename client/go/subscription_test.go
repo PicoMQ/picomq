@@ -22,7 +22,7 @@ var _ = ginkgo.Describe("SSE subscriptions", func() {
 			w.Header().Set("Content-Type", "text/event-stream")
 			if connections.Add(1) == 1 {
 				Expect(r.URL.Query().Get("seq")).To(Equal("0"))
-				_, _ = io.WriteString(w, "id: event-1\nevent: data\ndata: [{\"seq\":0,\"timestamp\":7,\"headers\":{},\"body\":\"hello\"}]\n\n")
+				_, _ = io.WriteString(w, "id: event-1\nevent: data\ndata: [{\"seq\":0,\"timestamp\":7,\"headers\":[],\"body\":\"hello\"}]\n\n")
 				return
 			}
 			Expect(r.Header.Get("Last-Event-ID")).To(Equal("event-1"))
@@ -40,7 +40,7 @@ var _ = ginkgo.Describe("SSE subscriptions", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(event.Type).To(Equal(EventData))
 		Expect(event.ID).To(Equal("event-1"))
-		Expect(event.Records).To(ConsistOf(Record{Position: "0", Timestamp: 7, Headers: map[string][]byte{}, Body: []byte("hello")}))
+		Expect(event.Records).To(ConsistOf(Record{Position: "0", Timestamp: 7, Body: []byte("hello")}))
 
 		event, err = subscription.Next()
 		Expect(err).NotTo(HaveOccurred())
@@ -55,7 +55,7 @@ var _ = ginkgo.Describe("SSE subscriptions", func() {
 	ginkgo.It("decodes text and binary Pico keys", func() {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(w, "event: data\ndata: [{\"seq\":0,\"key\":\"text\",\"headers\":{\"text\":\"ok\"},\"headers_b64\":{\"binary\":\"/wA=\"},\"body\":\"a\"},{\"seq\":1,\"key_b64\":\"AP8=\",\"headers\":{},\"body\":\"b\"}]\n\n")
+			_, _ = io.WriteString(w, "event: data\ndata: [{\"seq\":0,\"key\":\"text\",\"headers\":[{\"name\":\"text\",\"value\":\"ok\"},{\"name\":\"binary\",\"value_b64\":\"/wA=\"},{\"name\":\"text\",\"value\":null}],\"body\":\"a\"},{\"seq\":1,\"key_b64\":\"AP8=\",\"headers\":[],\"body\":\"b\"},{\"seq\":2,\"key\":\"gone\",\"body\":null}]\n\n")
 		}))
 		defer server.Close()
 		client, err := NewPico(server.URL)
@@ -65,8 +65,9 @@ var _ = ginkgo.Describe("SSE subscriptions", func() {
 		event, err := subscription.Next()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(event.Records[0].Key).To(Equal([]byte("text")))
-		Expect(event.Records[0].Headers).To(Equal(map[string][]byte{"text": []byte("ok"), "binary": []byte{0xff, 0x00}}))
+		Expect(event.Records[0].Headers).To(Equal([]Header{{Name: "text", Value: []byte("ok")}, {Name: "binary", Value: []byte{0xff, 0x00}}, {Name: "text", Value: nil}}))
 		Expect(event.Records[1].Key).To(Equal([]byte{0, 255}))
+		Expect(event.Records[2].Body).To(BeNil())
 	})
 
 	ginkgo.It("allows SSE framing in addition to the data limit", func() {

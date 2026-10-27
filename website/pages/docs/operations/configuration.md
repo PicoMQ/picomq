@@ -25,9 +25,10 @@ The node id is the one value worth care. Each start registers the id at a higher
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--listen` | `127.0.0.1:4437` | The HTTP stream protocol listener. |
-| `--admin-listen` | `127.0.0.1:9090` | The admin API and dashboard. |
+| `--admin-listen` | `127.0.0.1:9090` | The [admin API](/docs/operations/admin), metrics, and [console](/docs/operations/console). |
 | `--no-admin` | off | Disables the admin listener entirely. |
 | `--http-address` | `http://{listen}`, `https://` with TLS | The public URL other nodes redirect clients to. |
+| `--admin-address` | `http://{admin-listen}`, `https://` with TLS | The admin URL other nodes forward admin requests to, see [Any node answers](/docs/operations/admin#any-node-answers). |
 | `--kafka-listen` | `127.0.0.1:9092` | The Kafka listener. |
 | `--kafka-advertise` | `{kafka-listen}` | The Kafka address registered in metadata and returned to clients. |
 | `--backlog` | `1024` | Listener accept queue depth. |
@@ -85,8 +86,6 @@ S3 credentials come from the standard `AWS_*` environment variables. Compatible 
 
 When a node dies, another node takes over its WAL, so every node keeps its WAL in object storage the other nodes can reach. A `file://` WAL can only be taken over on the same host, so it suits a single node. See [Write-ahead log](/docs/design/wal#takeover).
 
-`--schema-registry` points at a store of named schemas that streams bind and optionally validate against. Unset by default, covered in [Schemas](/docs/schemas).
-
 ### S3 Express One Zone for the WAL
 
 The WAL bucket can be an [S3 Express One Zone](https://aws.amazon.com/s3/storage-classes/express-one-zone/) directory bucket while the data bucket stays on standard S3. Express PUTs complete in single-digit milliseconds, so this cuts append acknowledgment latency without changing the data bucket's economics.
@@ -121,6 +120,7 @@ A different token under an already-stored bootstrap id fails startup rather than
 | --- | --- | --- |
 | `--tls-certificate` | none | PEM certificate chain for every listener. Turns on TLS. Needs `--tls-key`. |
 | `--tls-key` | none | PEM private key for the certificate. |
+| `--tls-ca-certificate` | none | PEM file of CA certificates this node trusts, on top of the system's, when it calls another node's admin listener. Needed when node certificates come from a private CA. |
 | `--tls-handshake-timeout-sec` | `10` | How long a client has to finish its TLS handshake. |
 
 Certificate names, rotation, and client trust are covered in [TLS](/docs/operations/tls).
@@ -134,6 +134,7 @@ Certificate names, rotation, and client trust are covered in [TLS](/docs/operati
 | `--sse-max-duration-sec` | `55` | Connection cap for SSE, after which the client reconnects. |
 | `--max-chunk-size` | `65536` | Response chunk size for streamed reads. |
 | `--max-request-size` | `33554432` | Cap on a single request body. Oversized bodies get `413`. |
+| `--max-groups` | `10000` | Consumer groups held in memory at once. Groups without members are unloaded first. |
 
 The two timeouts default below common proxy idle limits. Raise them only if every intermediary between clients and nodes is known to allow longer idle connections.
 

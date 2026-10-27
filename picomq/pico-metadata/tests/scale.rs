@@ -68,7 +68,7 @@ fn run_gate(total: u64) {
     let state = build(total, open_every);
     let build_elapsed = started.elapsed();
     println!("create {total} streams (+{opened} opens): {build_elapsed:?}");
-    assert_eq!(state.streams.len() as u64, total);
+    assert_eq!(state.streams().len() as u64, total);
 
     // Fork is O(1): this is what every snapshot and published view costs.
     let started = Instant::now();
@@ -112,7 +112,7 @@ fn run_gate(total: u64) {
         started.elapsed()
     );
     assert_eq!(
-        state.streams.len() as u64,
+        state.streams().len() as u64,
         total,
         "original untouched (persistent maps)"
     );

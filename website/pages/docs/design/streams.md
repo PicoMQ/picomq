@@ -36,7 +36,7 @@ Topic names are paths, such as `/logs/api`. Slashes and dots are the same separa
 
 The canonical form is also the topic's Kafka name, when it is a legal Kafka name: at most `249` characters from letters, digits, `.`, `_`, and `-`. A topic whose canonical form is not legal in Kafka exists only over HTTP.
 
-The first segment may not start with `_`. That namespace belongs to PicoMQ's own routes, `/_streams`, `/_schemas`, and `/_groups`, and a name in it is refused on every protocol: `400` over HTTP, `INVALID_TOPIC_EXCEPTION` over Kafka.
+The first segment may not start with `_`. That namespace belongs to PicoMQ's own routes, `/_streams` and `/_groups`, and a name in it is refused on every protocol: `400` over HTTP, `INVALID_TOPIC_EXCEPTION` over Kafka.
 
 ## What is stored
 
@@ -44,7 +44,7 @@ Everything about a topic lives in the metadata KV, part of the replicated state 
 
 | Key | Holds |
 | --- | --- |
-| `topic/{canonical name}` | The topic: id, partition count, content type, TTL or expiry, closed, bound [schema](/docs/schemas) |
+| `topic/{canonical name}` | The topic: id, partition count, content type, TTL or expiry, retention, closed |
 | `topic-id/{topic id}` | The name of a topic id |
 | `log/partition/{topic id}/{index}` | A partition's log entry: its internal stream |
 | `log/group/{group}` | A consumer group's log entry |

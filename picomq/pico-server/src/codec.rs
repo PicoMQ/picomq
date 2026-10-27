@@ -7,13 +7,6 @@ pub(crate) fn put_str(buf: &mut BytesMut, value: &str) {
     buf.put_slice(value.as_bytes());
 }
 
-pub(crate) fn put_opt_str(buf: &mut BytesMut, value: Option<&str>) {
-    buf.put_u8(value.is_some() as u8);
-    if let Some(value) = value {
-        put_str(buf, value);
-    }
-}
-
 pub(crate) fn put_opt_i64(buf: &mut BytesMut, value: Option<i64>) {
     buf.put_u8(value.is_some() as u8);
     buf.put_i64(value.unwrap_or(0));
@@ -74,13 +67,6 @@ pub(crate) fn get_str(buf: &mut &[u8]) -> Result<String, ServiceError> {
     buf.advance(len as usize);
 
     Ok(value)
-}
-
-pub(crate) fn get_opt_str(buf: &mut &[u8]) -> Result<Option<String>, ServiceError> {
-    match get_u8(buf)? {
-        0 => Ok(None),
-        _ => Ok(Some(get_str(buf)?)),
-    }
 }
 
 pub(crate) fn get_opt_i64(buf: &mut &[u8]) -> Result<Option<i64>, ServiceError> {

@@ -12,7 +12,7 @@ mod versions;
 pub const PROTOCOL_NAME: &str = "kafka";
 
 pub use broker::BrokerContext;
-pub use dispatch::{RequestContext, dispatch, request_context};
+pub use dispatch::{RequestContext, dispatch, name_operations, request_context};
 pub use error::KafkaError;
 pub use frame::{read_frame, write_frame};
 pub use handlers::{HandlerError, HandlerOutcome, ResponseFrame};

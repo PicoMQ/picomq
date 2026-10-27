@@ -22,7 +22,6 @@ pub enum Operation {
     DeleteGroup,
     ClusterRead,
     NodeRead,
-    StreamInspect,
     TransferStream,
     UpdateNodeSlots,
 }
@@ -35,7 +34,7 @@ pub enum Resource {
 }
 
 impl Operation {
-    pub const ALL: [Operation; 19] = [
+    pub const ALL: [Operation; 18] = [
         Operation::Read,
         Operation::Head,
         Operation::List,
@@ -52,7 +51,6 @@ impl Operation {
         Operation::DeleteGroup,
         Operation::ClusterRead,
         Operation::NodeRead,
-        Operation::StreamInspect,
         Operation::TransferStream,
         Operation::UpdateNodeSlots,
     ];
@@ -69,11 +67,9 @@ impl Operation {
             | Self::Delete => Some(Resource::Stream),
             Self::IssueToken | Self::RevokeToken | Self::ListTokens => Some(Resource::Token),
             Self::Consume | Self::DescribeGroup | Self::DeleteGroup => Some(Resource::Group),
-            Self::ClusterRead
-            | Self::NodeRead
-            | Self::StreamInspect
-            | Self::TransferStream
-            | Self::UpdateNodeSlots => None,
+            Self::ClusterRead | Self::NodeRead | Self::TransferStream | Self::UpdateNodeSlots => {
+                None
+            }
         }
     }
 

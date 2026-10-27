@@ -46,6 +46,12 @@ pub struct ServeArgs {
     #[arg(long, env = "PICO_HTTP_ADDRESS")]
     http_address: Option<String>,
 
+    /// Public URL of this node's admin listener, registered so other nodes
+    /// can forward console requests to it. Defaults to `http://{admin-listen}`,
+    /// or `https://{admin-listen}` with TLS.
+    #[arg(long, env = "PICO_ADMIN_ADDRESS")]
+    admin_address: Option<String>,
+
     /// Metadata log: `sqlite::memory:`, `sqlite:<path>` or `postgres://…`
     #[arg(long, env = "PICO_META_URL", default_value = "sqlite:./data/meta.db")]
     meta_url: String,
@@ -88,6 +94,11 @@ pub struct ServeArgs {
     /// Seconds a node may miss heartbeats before its partitions fail over.
     #[arg(long, env = "PICO_NODE_TIMEOUT_SEC", default_value_t = 30)]
     node_timeout_sec: u64,
+
+    /// Consumer groups this node holds in memory at once. Groups without
+    /// members are unloaded first.
+    #[arg(long, env = "PICO_MAX_GROUPS", default_value_t = 10_000)]
+    max_groups: usize,
 
     #[arg(long, env = "PICO_MAX_CHUNK_SIZE", default_value_t = 64 * 1024)]
     max_chunk_size: usize,
@@ -158,12 +169,15 @@ pub struct ServeArgs {
     #[arg(long, env = "PICO_TLS_KEY", requires = "tls_certificate")]
     tls_key: Option<PathBuf>,
 
+    /// PEM file of CA certificates this node trusts, on top of the system's,
+    /// when it calls another node's admin listener. Needed when node
+    /// certificates come from a private CA.
+    #[arg(long, env = "PICO_TLS_CA_CERTIFICATE")]
+    tls_ca_certificate: Option<PathBuf>,
+
     /// Seconds a client has to finish its TLS handshake.
     #[arg(long, env = "PICO_TLS_HANDSHAKE_TIMEOUT_SEC", default_value_t = 10)]
     tls_handshake_timeout_sec: u64,
-
-    #[arg(long, env = "PICO_SCHEMA_REGISTRY")]
-    schema_registry: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -228,6 +242,7 @@ impl ServeArgs {
             addr: self.listen,
             admin_addr: (!self.no_admin).then_some(self.admin_listen),
             advertised_url: self.http_address,
+            admin_url: self.admin_address,
             http_protocol,
             kafka: KafkaConfig {
                 listen: self.kafka_listen,
@@ -246,6 +261,7 @@ impl ServeArgs {
             sse_max_duration: Duration::from_secs(self.sse_max_duration_sec),
             heartbeat_interval: Duration::from_secs(self.heartbeat_interval_sec),
             node_timeout: Duration::from_secs(self.node_timeout_sec),
+            max_groups: self.max_groups,
             max_chunk_size: self.max_chunk_size,
             max_request_size: self.max_request_size,
             shutdown_drain: Duration::from_secs(self.shutdown_drain_sec),
@@ -264,7 +280,7 @@ impl ServeArgs {
                     handshake_timeout: Duration::from_secs(self.tls_handshake_timeout_sec),
                     ..TlsConfig::new(certificate, key)
                 }),
-            schema_registry: self.schema_registry,
+            tls_ca_certificate: self.tls_ca_certificate,
             engine,
         })
     }

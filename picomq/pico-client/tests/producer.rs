@@ -50,7 +50,7 @@ async fn read_all(client: &PicoClient, name: &str) -> Vec<Bytes> {
         if page.records.is_empty() {
             return bodies;
         }
-        bodies.extend(page.records.into_iter().map(|r| r.body));
+        bodies.extend(page.records.into_iter().map(|r| r.body.unwrap()));
         from = page.next;
     }
 }

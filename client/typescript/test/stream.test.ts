@@ -3,7 +3,7 @@ import { Stream } from '../src/stream'
 import type { ReadPage, StreamApi, StreamRecord } from '../src/types'
 
 function record(position: string, body: string): StreamRecord {
-  return { position, headers: {}, body: new TextEncoder().encode(body) }
+  return { position, headers: [], body: new TextEncoder().encode(body) }
 }
 
 function page(records: StreamRecord[], next: string, upToDate: boolean, closed = false): ReadPage {
@@ -49,7 +49,7 @@ describe('Stream.records', () => {
     const stream = new Stream(api, '/s')
     const bodies: string[] = []
     for await (const rec of stream.records()) {
-      bodies.push(new TextDecoder().decode(rec.body))
+      bodies.push(new TextDecoder().decode(rec.body!))
     }
     expect(bodies).toEqual(['a', 'b', 'c'])
   })
@@ -83,7 +83,7 @@ describe('Stream.records', () => {
     const stream = new Stream(api, '/s')
     const bodies: string[] = []
     for await (const rec of stream.records(undefined, { live: true })) {
-      bodies.push(new TextDecoder().decode(rec.body))
+      bodies.push(new TextDecoder().decode(rec.body!))
     }
     expect(bodies).toEqual(['a', 'b'])
   })

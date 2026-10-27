@@ -205,7 +205,7 @@ async fn members_join_heartbeat_commit_and_leave() {
         .json()
         .await
         .unwrap();
-    assert_eq!(listed["groups"], serde_json::json!(["workers"]));
+    assert_eq!(listed["items"], serde_json::json!(["workers"]));
 
     let left = client
         .delete(format!("{base}/_groups/workers/members/{member2}"))
@@ -333,7 +333,13 @@ async fn gated(scope: Scope) -> (picomq_http::RunningServer, String) {
         .unwrap();
     let server = serve(
         node.clone(),
-        Listener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024, None).unwrap(),
+        Listener::bind(
+            picomq_metrics::ListenerKind::Stream,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            1024,
+            None,
+        )
+        .unwrap(),
         None,
         ServeOptions {
             protocol: HttpProtocol::Pico,
@@ -390,11 +396,18 @@ async fn group_routes_require_the_group_and_read_on_the_streams() {
         .unwrap();
     assert_eq!(joined["assignment"], json!(["/acct/orders"]));
     let member = joined["memberId"].as_str().unwrap();
+    let fence = |offsets: Value| {
+        json!({
+            "offsets": offsets,
+            "memberId": member,
+            "generation": joined["generation"],
+        })
+    };
 
     let commit = client
         .put(format!("{base}/_groups/g/offsets"))
         .bearer_auth(&wire)
-        .json(&json!({ "offsets": { "/acct/orders": { "position": 3 } } }))
+        .json(&fence(json!({ "/acct/orders": { "position": 3 } })))
         .send()
         .await
         .unwrap();
@@ -481,7 +494,11 @@ async fn auto_prefix_scopes_see_relative_names() {
     let commit = client
         .put(format!("{base}/_groups/g/offsets"))
         .bearer_auth(&wire)
-        .json(&json!({ "offsets": { "orders": { "position": 11 } } }))
+        .json(&json!({
+            "offsets": { "orders": { "position": 11 } },
+            "memberId": joined["memberId"],
+            "generation": joined["generation"],
+        }))
         .send()
         .await
         .unwrap();
@@ -547,8 +564,14 @@ async fn auto_prefix_tenants_get_separate_groups() {
         assert_eq!(joined.status(), 200);
     }
 
-    let mut groups = server.node().groups().list(None);
-    groups.sort();
+    let groups: Vec<String> = server
+        .node()
+        .groups()
+        .list(None, "", None, 100)
+        .items
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
     assert_eq!(groups, ["acct/workers", "other/workers"]);
 
     let listed: Value = client
@@ -560,7 +583,8 @@ async fn auto_prefix_tenants_get_separate_groups() {
         .json()
         .await
         .unwrap();
-    assert_eq!(listed["groups"], json!(["workers"]));
+    assert_eq!(listed["items"], json!(["workers"]));
+    assert_eq!(listed["next"], Value::Null);
 }
 
 #[tokio::test]

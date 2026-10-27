@@ -1,0 +1,43 @@
+.messages-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.messages-remove {
+  margin-left: var(--space-1);
+  padding: 0;
+  border: 0;
+  background: none;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.messages-detail {
+  display: grid;
+  gap: var(--space-5);
+  white-space: normal;
+}
+
+.messages-section {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.messages-headers {
+  display: grid;
+  margin: 0;
+}
+
+.messages-header {
+  display: grid;
+  grid-template-columns: 14rem 1fr;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: var(--line);
+}
+
+.messages-header dd {
+  min-width: 0;
+  margin: 0;
+}

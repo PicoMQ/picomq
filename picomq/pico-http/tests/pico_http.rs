@@ -10,8 +10,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use picomq_protocol::record::{PicoRecord, decode_batch_read, encode_batch_append};
 use picomq_server::ownership::OwnershipService;
-use picomq_server::{CreateCommand, Log, NodeMeta, Owner, ServiceError};
-use serde_json::Value;
+use picomq_server::record::encode_batch;
+use picomq_server::{CreateCommand, Log, LogRecord, NodeMeta, Owner, ServiceError};
+use serde_json::{Value, json};
 
 use common::picomq_server;
 
@@ -137,7 +138,7 @@ async fn protocol_end_to_end() {
     let json = http
         .post(&url)
         .header("Content-Type", CT_BATCH_JSON)
-        .body(r#"{"records":[{"headers":{"k":"v"},"body":"three"},{"body_b64":"AAECgP8="}]}"#)
+        .body(r#"{"records":[{"headers":[{"name":"k","value":"v"},{"name":"k","value":null}],"body":"three"},{"body_b64":"AAECgP8="}]}"#)
         .send()
         .await
         .unwrap();
@@ -164,7 +165,14 @@ async fn protocol_end_to_end() {
     for (i, record) in records.iter().enumerate() {
         assert_eq!(record["seq"], i as u64);
     }
-    assert_eq!(records[1]["headers"]["key"], "a");
+    assert_eq!(
+        records[1]["headers"],
+        json!([{"name": "key", "value": "a"}])
+    );
+    assert_eq!(
+        records[3]["headers"],
+        json!([{"name": "k", "value": "v"}, {"name": "k", "value": null}])
+    );
     assert_eq!(records[1]["key"], "order-1");
     assert!(records[2].get("key").is_none());
     assert_eq!(records[3]["body"], "three");
@@ -183,8 +191,15 @@ async fn protocol_end_to_end() {
     assert_eq!(binary.headers()["Content-Type"], CT_BATCH_BINARY);
     let decoded = decode_batch_read(&binary.bytes().await.unwrap()).unwrap();
     assert_eq!(decoded.len(), 5);
-    assert_eq!(&decoded[0].record.body[..], b"hello-world");
+    assert_eq!(decoded[0].record.body.as_deref(), Some(&b"hello-world"[..]));
     assert_eq!(decoded[1].record.key.as_deref(), Some(&b"order-1"[..]));
+    assert_eq!(
+        decoded[3].record.headers,
+        [
+            ("k".to_owned(), Some(Bytes::from_static(b"v"))),
+            ("k".to_owned(), None)
+        ]
+    );
 
     let raw_read = http
         .get(format!("{url}?seq=0&format=raw"))
@@ -265,16 +280,16 @@ async fn protocol_end_to_end() {
         .json()
         .await
         .unwrap();
-    let names: Vec<&str> = listing["streams"]
+    let names: Vec<&str> = listing["items"]
         .as_array()
         .unwrap()
         .iter()
         .map(|s| s["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["/native/orders", "/native/other"]);
-    assert_eq!(listing["has_more"], false);
+    assert_eq!(listing["next"], Value::Null);
     assert_eq!(
-        listing["streams"][1]["content_type"],
+        listing["items"][1]["content_type"],
         "application/octet-stream"
     );
 
@@ -286,8 +301,30 @@ async fn protocol_end_to_end() {
         .json()
         .await
         .unwrap();
-    assert_eq!(page["streams"].as_array().unwrap().len(), 1);
-    assert_eq!(page["has_more"], true);
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    let cursor = page["next"].as_str().unwrap();
+    let rest: Value = http
+        .get(format!(
+            "{}/?prefix=/native/&limit=1&cursor={cursor}",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rest["items"][0]["name"], "/native/other");
+    assert_eq!(rest["next"], Value::Null);
+    let elsewhere = http
+        .get(format!(
+            "{}/?prefix=/other/&limit=1&cursor={cursor}",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(elsewhere.status(), 400);
 
     // Trim commits asynchronously against the engine's start offset.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -945,4 +982,77 @@ async fn partitions_are_set_on_create_and_grown_through_stream_config() {
         .await
         .unwrap();
     assert_eq!(zero.status(), 400);
+}
+
+#[tokio::test]
+async fn kafka_records_read_back_whole_over_pico() {
+    let server = picomq_server().await;
+    let topics = server.node.topics();
+    topics
+        .create(CreateCommand::new("/headed", "application/octet-stream"))
+        .await
+        .unwrap();
+    let record = LogRecord::value("v")
+        .with_header("trace", "a")
+        .with_header("trace", "b");
+    let record = LogRecord {
+        headers: [record.headers, vec![("flag".to_owned(), None)]].concat(),
+        ..record
+    };
+    let tombstone = LogRecord {
+        value: None,
+        ..LogRecord::default().with_key("gone")
+    };
+    let topic = topics.get("/headed").await.unwrap().unwrap();
+    let submitted = topics
+        .submit_batch(
+            &topic,
+            0,
+            encode_batch(0, -1, 1, None, &[record, tombstone]),
+        )
+        .await
+        .unwrap();
+    topics.finish_batch(submitted).await.unwrap();
+    let url = format!("{}/headed", server.base_url);
+    let http = client();
+
+    let read: Value = http
+        .get(format!("{url}?seq=0"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        read[0]["headers"],
+        json!([
+            {"name": "trace", "value": "a"},
+            {"name": "trace", "value": "b"},
+            {"name": "flag", "value": null},
+        ])
+    );
+    assert_eq!(read[1]["key"], "gone");
+    assert_eq!(read[1]["body"], Value::Null);
+
+    let binary = http
+        .get(format!("{url}?seq=0&format=binary"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let decoded = decode_batch_read(&binary).unwrap();
+    assert_eq!(
+        decoded[0].record.headers,
+        [
+            ("trace".to_owned(), Some(Bytes::from_static(b"a"))),
+            ("trace".to_owned(), Some(Bytes::from_static(b"b"))),
+            ("flag".to_owned(), None),
+        ]
+    );
+    assert_eq!(decoded[1].record.body, None);
+
+    server.shutdown().await;
 }

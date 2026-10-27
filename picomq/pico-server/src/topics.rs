@@ -6,26 +6,24 @@ use std::time::Duration;
 use bytes::Bytes;
 use picomq_common::name::canonical;
 use picomq_common::now_ms;
-use picomq_metadata::{MetadataKvClient, ViewPublisher};
+use picomq_metadata::{MetadataKvClient, MetadataState, ViewPublisher};
 use picomq_protocol::mime::mime_equals;
-use picomq_schema::Validator as _;
 use tokio::sync::RwLock;
 
 use crate::error::{ErrorKind, ServiceError};
 use crate::log::Log;
+use crate::page::{self, Page};
 use crate::partition::Partition;
 use crate::producers::ProducerDecision;
-use crate::record::{self, LogRecord, StreamRecord};
+use crate::record::{LogRecord, StreamRecord};
 use crate::service::S3StreamService;
 use crate::topic::{ClosedBy, Topic, TopicId, TopicName, deadline_of};
 use crate::types::{
     AppendBatchResult, AppendCommand, AppendResult, BatchReadResult, CloseResult, CreateCommand,
     CreateResult, LogOffsets, MAX_NEW_PARTITIONS, OffsetToken, ReadResult, StreamWatermarks,
-    SubmittedBatchAppend, TopicList, TopicMeta, UpdateTopicCommand,
+    SubmittedBatchAppend, TopicMeta, UpdateTopicCommand,
 };
 
-const DEFAULT_LIST_LIMIT: usize = 1000;
-const MAX_LIST_LIMIT: usize = 10_000;
 const MAX_WRITE_ATTEMPTS: usize = 16;
 const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 const TOPIC_PREFIX: &str = "topic/";
@@ -35,7 +33,6 @@ pub struct Topics {
     service: Arc<S3StreamService>,
     kv: MetadataKvClient,
     views: Arc<ViewPublisher>,
-    schemas: Option<Arc<dyn picomq_schema::SchemaStore>>,
     locks: Mutex<HashMap<String, Arc<RwLock<()>>>>,
 }
 
@@ -49,24 +46,11 @@ impl Topics {
             service,
             kv,
             views,
-            schemas: None,
             locks: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn with_schema_registry(mut self, registry: Arc<dyn picomq_schema::SchemaStore>) -> Self {
-        self.schemas = Some(registry);
-        self
-    }
-
-    pub fn schema_registry(&self) -> Option<&Arc<dyn picomq_schema::SchemaStore>> {
-        self.schemas.as_ref()
-    }
-
-    pub async fn create(&self, mut command: CreateCommand) -> Result<CreateResult, ServiceError> {
-        if command.schema_name.is_none() {
-            command.schema_validate = false;
-        }
+    pub async fn create(&self, command: CreateCommand) -> Result<CreateResult, ServiceError> {
         command.validate()?;
 
         let name = TopicName::parse(&command.name)?;
@@ -79,10 +63,6 @@ impl Topics {
             }
             self.remove(&existing, &stored).await;
         }
-        if let Some(schema_name) = command.schema_name.as_deref() {
-            self.require_schema(schema_name).await?;
-        }
-
         let id = TopicId::random();
         self.kv
             .put_kv(&id_key(&id), Bytes::from(name.canonical().to_owned()))
@@ -106,8 +86,6 @@ impl Topics {
             deadline_ms: deadline_of(command.ttl_seconds, command.expires_at_ms),
             closed: false,
             closed_by: None,
-            schema_name: command.schema_name.clone(),
-            schema_validate: command.schema_validate,
             retention: command.retention,
         };
 
@@ -185,18 +163,24 @@ impl Topics {
     }
 
     pub fn kafka_topics(&self) -> Vec<Topic> {
-        let now = now_ms();
-        self.kv
-            .list_kv(TOPIC_PREFIX)
-            .into_iter()
-            .filter_map(|(_, value)| Topic::decode(&value).ok())
-            .filter(|topic| !topic.expired(now) && topic.name.kafka().is_some())
+        let view = self.views.load();
+        live_topics(&view.state, now_ms())
+            .filter(|topic| topic.name.kafka().is_some())
             .collect()
     }
 
-    pub async fn offsets(&self, topic: &Topic, partition: u32) -> Result<LogOffsets, ServiceError> {
+    pub async fn live_offsets(
+        &self,
+        topic: &Topic,
+        partition: u32,
+    ) -> Result<LogOffsets, ServiceError> {
         let log = partition_log(topic, partition)?;
         self.service.live_offsets(&log).await
+    }
+
+    pub fn offsets(&self, topic: &Topic, partition: u32) -> Result<LogOffsets, ServiceError> {
+        let log = partition_log(topic, partition)?;
+        self.service.offsets(&log)
     }
 
     pub async fn watermarks(
@@ -244,64 +228,43 @@ impl Topics {
     pub fn list(
         &self,
         prefix: &str,
-        start_after: Option<&str>,
+        after: Option<&str>,
         limit: usize,
-    ) -> Result<TopicList, ServiceError> {
-        let max = if limit > 0 {
-            limit.min(MAX_LIST_LIMIT)
-        } else {
-            DEFAULT_LIST_LIMIT
-        };
-        let prefix = format!("{TOPIC_PREFIX}{}", canonical(prefix));
+        mut keep: impl FnMut(&Topic) -> bool,
+    ) -> Page<String, Topic> {
         let now = now_ms();
+        let prefix = topic_key(&canonical(prefix));
+        let after = after.map(topic_key);
 
-        let view = self.views.load();
-        let mut cursor = start_after
-            .filter(|after| !after.is_empty())
-            .map(|after| format!("{TOPIC_PREFIX}{}", canonical(after)));
-        let mut selected: Vec<Topic> = Vec::new();
-
-        'pages: loop {
-            let wanted = max + 1 - selected.len();
-            let page = view.state.list_kv_page(&prefix, cursor.as_deref(), wanted);
-            let exhausted = page.len() < wanted;
-
-            for (key, value) in page {
-                cursor = Some(key);
-                let Ok(topic) = Topic::decode(&value) else {
-                    continue;
-                };
-                if topic.expired(now) {
-                    continue;
-                }
-
-                selected.push(topic);
-                if selected.len() > max {
-                    break 'pages;
-                }
-            }
-
-            if exhausted {
-                break;
-            }
-        }
-
-        let has_more = selected.len() > max;
-        let topics = selected
+        let entries = self
+            .views
+            .load()
+            .state
+            .list_kv_page(&prefix, after.as_deref(), page::fetch_count(limit))
             .into_iter()
-            .take(max)
-            .map(|topic| self.meta(topic))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|(key, value)| {
+                let name = key[TOPIC_PREFIX.len()..].to_owned();
+                (name, Topic::decode(&value).ok())
+            });
+        let page = Page::scan(entries, limit, |_, topic| {
+            topic
+                .as_ref()
+                .is_some_and(|topic| !topic.expired(now) && keep(topic))
+        });
 
-        Ok(TopicList { topics, has_more })
+        Page {
+            items: page
+                .items
+                .into_iter()
+                .filter_map(|(name, topic)| Some((name, topic?)))
+                .collect(),
+            next: page.next,
+        }
     }
 
     pub async fn update(&self, command: UpdateTopicCommand) -> Result<Topic, ServiceError> {
         command.validate()?;
         let name = TopicName::parse(&command.name)?;
-        if let Some(Some(schema_name)) = &command.schema_name {
-            self.require_schema(schema_name).await?;
-        }
 
         let lock = self.lock(name.canonical());
         let _exclusive = lock.write().await;
@@ -428,14 +391,15 @@ impl Topics {
             }
         }
         append.check_stream_seq(command.stream_seq.as_deref(), decision)?;
-        if !close_only {
-            self.validate_records(&topic, &command.records).await?;
-        }
         if !command.close_after {
             self.touch(&topic).await?;
         }
 
         let closer = closed_by(&command);
+        let written = (
+            command.records.len(),
+            command.records.iter().map(LogRecord::size_hint).sum(),
+        );
         let committed = append
             .commit(
                 command.records,
@@ -445,6 +409,9 @@ impl Topics {
             )
             .await?;
 
+        if !close_only {
+            picomq_metrics::written(written.0, written.1);
+        }
         if command.close_after {
             self.seal(&topic, closer).await?;
         }
@@ -472,14 +439,6 @@ impl Topics {
         if topic.closed {
             return Err(ServiceError::kind(ErrorKind::Closed));
         }
-        if topic.validation_schema().is_some() {
-            let records: Vec<LogRecord> = record::decode_batches(&payload)?
-                .into_iter()
-                .map(|record| record.record)
-                .collect();
-            self.validate_records(&topic, &records).await?;
-        }
-
         let log = partition_log(&topic, partition)?;
         self.touch(&topic).await?;
 
@@ -490,7 +449,20 @@ impl Topics {
         &self,
         submitted: SubmittedBatchAppend,
     ) -> Result<AppendBatchResult, ServiceError> {
-        self.service.finish_batch_append(submitted).await
+        let written = (!submitted.duplicate).then(|| {
+            submitted
+                .batches
+                .iter()
+                .fold((0, 0), |(records, bytes), batch| {
+                    (records + batch.count as usize, bytes + batch.payload.len())
+                })
+        });
+
+        let result = self.service.finish_batch_append(submitted).await?;
+        if let Some((records, bytes)) = written {
+            picomq_metrics::written(records, bytes);
+        }
+        Ok(result)
     }
 
     pub async fn read(
@@ -509,6 +481,13 @@ impl Topics {
             .service
             .read(&log, from, max_bytes, max_records)
             .await?;
+        picomq_metrics::read(
+            read.records.len(),
+            read.records
+                .iter()
+                .map(|stored| stored.record.size_hint())
+                .sum(),
+        );
 
         Ok(ReadResult {
             records: read.records,
@@ -529,7 +508,12 @@ impl Topics {
         let log = partition_log(topic, partition)?;
         self.touch(topic).await?;
 
-        self.service.read_batches(&log, from, max_bytes).await
+        let read = self.service.read_batches(&log, from, max_bytes).await?;
+        picomq_metrics::read(
+            read.batches.iter().map(|batch| batch.count as usize).sum(),
+            read.batches.iter().map(|batch| batch.payload.len()).sum(),
+        );
+        Ok(read)
     }
 
     pub async fn wait_appended(
@@ -690,8 +674,6 @@ impl Topics {
         topic: &Topic,
         records: Vec<LogRecord>,
     ) -> Result<(), ServiceError> {
-        self.validate_records(topic, &records).await?;
-
         let log = partition_log(topic, 0)?;
         self.service.append_records(&log, records).await?;
 
@@ -912,55 +894,15 @@ impl Topics {
         locks.retain(|_, lock| Arc::strong_count(lock) > 1);
         locks.entry(canonical.to_owned()).or_default().clone()
     }
+}
 
-    async fn validate_records(
-        &self,
-        topic: &Topic,
-        records: &[LogRecord],
-    ) -> Result<(), ServiceError> {
-        let Some(schema_name) = topic.validation_schema() else {
-            return Ok(());
-        };
-
-        self.validate_schema(schema_name, &schema_batch(records))
-            .await
-    }
-
-    async fn validate_schema(
-        &self,
-        name: &str,
-        batch: &picomq_schema::Batch,
-    ) -> Result<(), ServiceError> {
-        let schema = self
-            .schema_registry_required()?
-            .schema(name)
-            .await
-            .map_err(|e| bad_request(e.to_string()))?
-            .ok_or_else(|| {
-                bad_request(format!("bound schema {name} is missing from the registry"))
-            })?;
-
-        schema.validate(batch).map_err(|e| {
-            ServiceError::with_message(ErrorKind::SchemaViolation, None, false, e.to_string())
-        })
-    }
-
-    async fn require_schema(&self, schema_name: &str) -> Result<(), ServiceError> {
-        self.schema_registry_required()?
-            .schema(schema_name)
-            .await
-            .map_err(|e| bad_request(e.to_string()))?
-            .map(|_| ())
-            .ok_or_else(|| bad_request(format!("unknown schema {schema_name}")))
-    }
-
-    fn schema_registry_required(
-        &self,
-    ) -> Result<&Arc<dyn picomq_schema::SchemaStore>, ServiceError> {
-        self.schemas
-            .as_ref()
-            .ok_or_else(|| bad_request("schema registry is not configured"))
-    }
+pub fn live_topics(state: &MetadataState, now_ms: i64) -> impl Iterator<Item = Topic> + '_ {
+    state
+        .kv()
+        .range(TOPIC_PREFIX.to_owned()..)
+        .take_while(|(key, _)| key.starts_with(TOPIC_PREFIX))
+        .filter_map(|(_, value)| Topic::decode(value).ok())
+        .filter(move |topic| !topic.expired(now_ms))
 }
 
 pub fn partition_log(topic: &Topic, index: u32) -> Result<Log, ServiceError> {
@@ -991,8 +933,6 @@ fn config_matches(topic: &Topic, command: &CreateCommand) -> bool {
         && topic.ttl_seconds == command.ttl_seconds
         && topic.expires_at_ms == command.expires_at_ms
         && topic.closed == command.closed
-        && topic.schema_name == command.schema_name
-        && topic.schema_validate == command.schema_validate
         && topic.retention == command.retention
 }
 
@@ -1084,21 +1024,6 @@ fn matches_closed_by(topic: &Topic, command: &AppendCommand) -> bool {
                 && closed_by.seq == producer.seq
         }
         _ => false,
-    }
-}
-
-fn schema_batch(records: &[LogRecord]) -> picomq_schema::Batch {
-    picomq_schema::Batch {
-        records: records
-            .iter()
-            .map(|record| {
-                let mut builder = picomq_schema::Record::builder().value(record.value.clone());
-                if let Some(key) = &record.key {
-                    builder = builder.key(key.clone());
-                }
-                builder.build()
-            })
-            .collect(),
     }
 }
 

@@ -1,8 +1,8 @@
 //! Postgres sink e2e. The SqlSink behaviors that matter in the clustered
-//! posture, against a real Postgres when `PICOMQ_PG_URL` is set:
+//! posture, against a real Postgres when `PICO_TEST_PG_URL` is set:
 //!
 //! ```text
-//! PICOMQ_PG_URL=postgres://user:pass@localhost:5432/picomq \
+//! PICO_TEST_PG_URL=postgres://user:pass@localhost:5432/picomq \
 //!     cargo test -p picomq-sql --test pg_e2e
 //! ```
 //!
@@ -40,8 +40,8 @@ fn register(node_id: i32, node_epoch: i64) -> MetadataCommand {
 
 #[tokio::test]
 async fn postgres_sink_multi_writer_snapshot_and_lease() {
-    let Ok(url) = std::env::var("PICOMQ_PG_URL") else {
-        eprintln!("PICOMQ_PG_URL not set; skipping postgres e2e");
+    let Ok(url) = std::env::var("PICO_TEST_PG_URL") else {
+        eprintln!("PICO_TEST_PG_URL not set; skipping postgres e2e");
         return;
     };
 
@@ -99,7 +99,7 @@ async fn postgres_sink_multi_writer_snapshot_and_lease() {
     let view_a = views_a.wait_applied(target).await;
     let view_b = views_b.wait_applied(target).await;
     assert_eq!(view_a.state, view_b.state);
-    assert_eq!(view_a.state.streams.len(), 60);
+    assert_eq!(view_a.state.streams().len(), 60);
 
     // The snapshot cycle ran against Postgres (62 rows >> snapshot_every=16).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -138,7 +138,7 @@ async fn postgres_sink_multi_writer_snapshot_and_lease() {
     drop(sink_b);
     let store: Arc<dyn MetaStore> = Arc::new(PgStore::connect(&url).await.unwrap());
     let (sink, views) = SqlSink::open(store, config()).await.unwrap();
-    assert_eq!(views.load().state.streams.len(), 60);
+    assert_eq!(views.load().state.streams().len(), 60);
     let next = sink
         .propose(MetadataCommand::CreateStream {
             proposer: Proposer::new(1, 10),

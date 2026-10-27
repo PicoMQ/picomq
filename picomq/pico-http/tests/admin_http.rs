@@ -3,11 +3,42 @@
 
 mod common;
 
+use std::io::Read;
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use picomq_http::{HttpProtocol, ServeOptions, serve};
 use picomq_listener::Listener;
+
+#[tokio::test]
+async fn metrics_are_served_only_by_a_node_that_collects_them() {
+    let server = common::picomq_server().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{}/metrics", server.admin_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_node_that_does_not_forward_refuses_other_nodes() {
+    let server = common::picomq_server().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{}/admin/nodes/99/metrics", server.admin_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 502);
+
+    server.shutdown().await;
+}
 
 #[tokio::test]
 async fn health_and_ready() {
@@ -43,7 +74,7 @@ async fn health_and_ready() {
 async fn a_fenced_node_is_not_ready() {
     let server = common::picomq_server().await;
     let node = server.node.metadata().proposer();
-    let heartbeats = server.node.views().load().state.nodes[&node.node_id].heartbeats;
+    let heartbeats = server.node.views().load().state.nodes()[&node.node_id].heartbeats;
     server
         .node
         .metadata()
@@ -70,7 +101,7 @@ async fn a_fenced_node_is_not_ready() {
         .json()
         .await
         .unwrap();
-    assert_eq!(nodes["nodes"][0]["fenced"], true);
+    assert_eq!(nodes["items"][0]["fenced"], true);
 }
 
 #[tokio::test]
@@ -79,8 +110,8 @@ async fn ready_fails_while_draining() {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node,
-        Listener::bind(loopback, 1024, None).unwrap(),
-        Some(Listener::bind(loopback, 1024, None).unwrap()),
+        Listener::bind(picomq_metrics::ListenerKind::Stream, loopback, 1024, None).unwrap(),
+        Some(Listener::bind(picomq_metrics::ListenerKind::Admin, loopback, 1024, None).unwrap()),
         ServeOptions {
             protocol: HttpProtocol::Pico,
             shutdown_drain: Duration::from_secs(2),
@@ -131,7 +162,7 @@ async fn a_silent_http2_client_cannot_hold_up_shutdown() {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let server = serve(
         node,
-        Listener::bind(loopback, 1024, None).unwrap(),
+        Listener::bind(picomq_metrics::ListenerKind::Stream, loopback, 1024, None).unwrap(),
         None,
         ServeOptions {
             protocol: HttpProtocol::Pico,
@@ -193,7 +224,7 @@ async fn cluster_nodes_and_stream_detail() {
     assert_eq!(cluster["nodeId"], 1);
     assert_eq!(cluster["registered"], true);
     assert_eq!(cluster["streamCount"], 1);
-    assert_eq!(cluster["pendingTransfers"], serde_json::json!([]));
+    assert_eq!(cluster["pendingTransferCount"], 0);
     assert_eq!(cluster["leaseHolder"], serde_json::Value::Null);
     assert!(cluster["appliedIndex"].as_u64().unwrap() > 0);
 
@@ -205,33 +236,52 @@ async fn cluster_nodes_and_stream_detail() {
         .json()
         .await
         .unwrap();
-    let list = nodes["nodes"].as_array().unwrap();
+    let list = nodes["items"].as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["nodeId"], 1);
     assert_eq!(list[0]["local"], true);
     assert_eq!(list[0]["openingCount"], 1, "stream opened by the append");
     assert!(list[0]["slots"].as_u64().unwrap() > 0);
 
-    let stream = client
-        .get(format!("{}/admin/streams/orders/live", server.admin_url))
+    let node = client
+        .get(format!("{}/admin/nodes/1", server.admin_url))
         .send()
         .await
         .unwrap();
-    assert_eq!(stream.status(), 200);
-    let body: serde_json::Value = stream.json().await.unwrap();
-    assert_eq!(body["name"], "/orders/live");
+    assert_eq!(node.status(), 200);
+    assert_eq!(node.json::<serde_json::Value>().await.unwrap(), list[0]);
+
+    let unknown = client
+        .get(format!("{}/admin/nodes/99", server.admin_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+
+    let partition = client
+        .get(format!(
+            "{}/admin/topics/%2Forders%2Flive/partitions/0",
+            server.admin_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(partition.status(), 200);
+    let body: serde_json::Value = partition.json().await.unwrap();
+    assert_eq!(body["index"], 0);
     assert_eq!(body["ownerNodeId"], 1);
-    assert_eq!(body["ownerLocal"], true);
     assert_eq!(body["state"], "opened");
-    assert_eq!(body["contentType"], "text/plain");
+    assert_eq!(body["current"], true);
     assert_eq!(body["pendingTransfer"], serde_json::Value::Null);
 
-    let missing = client
-        .get(format!("{}/admin/streams/absent", server.admin_url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), 404);
+    for missing in ["absent/partitions/0", "%2Forders%2Flive/partitions/1"] {
+        let response = client
+            .get(format!("{}/admin/topics/{missing}", server.admin_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404, "{missing}");
+    }
 }
 
 #[tokio::test]
@@ -277,8 +327,8 @@ async fn transfer_validation() {
     let client = reqwest::Client::new();
 
     let absent = client
-        .post(format!("{}/admin/transfer", server.admin_url))
-        .json(&serde_json::json!({ "stream": "/absent", "toNode": 2 }))
+        .post(format!("{}/admin/transfers", server.admin_url))
+        .json(&serde_json::json!({ "topic": "/absent", "toNode": 2 }))
         .send()
         .await
         .unwrap();
@@ -300,34 +350,34 @@ async fn transfer_validation() {
 
     // The target node is not registered, so the proposal is rejected.
     let bad_target = client
-        .post(format!("{}/admin/transfer", server.admin_url))
-        .json(&serde_json::json!({ "stream": "/xfer/a", "toNode": 2 }))
+        .post(format!("{}/admin/transfers", server.admin_url))
+        .json(&serde_json::json!({ "topic": "/xfer/a", "toNode": 2 }))
         .send()
         .await
         .unwrap();
     assert_eq!(bad_target.status(), 400);
 
     let malformed = client
-        .post(format!("{}/admin/transfer", server.admin_url))
-        .json(&serde_json::json!({ "stream": "/xfer/a" }))
+        .post(format!("{}/admin/transfers", server.admin_url))
+        .json(&serde_json::json!({ "topic": "/xfer/a" }))
         .send()
         .await
         .unwrap();
     assert_eq!(malformed.status(), 400);
 }
 
-/// Passes with or without a built dist: `/` serves the dashboard when the
-/// assets were embedded and a hint page otherwise.
 #[tokio::test]
-async fn dashboard_is_served_at_root() {
+async fn console_is_served_at_root_and_every_page_path() {
     let server = common::picomq_server().await;
     let client = reqwest::Client::new();
+    let get = |path: &str, encoding: &str| {
+        client
+            .get(format!("{}{path}", server.admin_url))
+            .header("Accept-Encoding", encoding)
+            .send()
+    };
 
-    let index = client
-        .get(format!("{}/", server.admin_url))
-        .send()
-        .await
-        .unwrap();
+    let index = get("/", "identity").await.unwrap();
     assert_eq!(index.status(), 200);
     assert!(
         index.headers()["Content-Type"]
@@ -338,26 +388,47 @@ async fn dashboard_is_served_at_root() {
     let body = index.text().await.unwrap();
     assert!(body.contains("PicoMQ"), "{body}");
 
-    if let Some(start) = body.find("assets/") {
+    let page = get("/topics/orders/partitions", "identity").await.unwrap();
+    assert_eq!(page.status(), 200);
+    assert_eq!(page.text().await.unwrap(), body);
+
+    assert_eq!(
+        get("/admin/absent", "identity").await.unwrap().status(),
+        404
+    );
+    assert_eq!(
+        get("/assets/absent.js", "identity").await.unwrap().status(),
+        404
+    );
+
+    if let Some(script) = body.find("src=\"/assets/") {
+        let start = script + "src=\"".len();
         let end = start + body[start..].find('"').unwrap();
-        let asset = client
-            .get(format!("{}/{}", server.admin_url, &body[start..end]))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(asset.status(), 200);
+        let path = &body[start..end];
+
+        let plain = get(path, "identity").await.unwrap();
+        assert_eq!(plain.status(), 200);
         assert_eq!(
-            asset.headers()["Cache-Control"],
+            plain.headers()["Cache-Control"],
             "public, max-age=31536000, immutable"
         );
-    }
+        assert!(plain.headers().get("Content-Encoding").is_none());
+        let plain = plain.bytes().await.unwrap();
 
-    let missing = client
-        .get(format!("{}/assets/absent.js", server.admin_url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), 404);
+        let compressed = get(path, "br, gzip").await.unwrap();
+        assert_eq!(compressed.headers()["Content-Encoding"], "gzip");
+        assert_eq!(compressed.headers()["Content-Type"], "text/javascript");
+        let compressed = compressed.bytes().await.unwrap();
+        assert!(compressed.len() < plain.len());
+        let mut unpacked = Vec::new();
+        flate2::read::GzDecoder::new(&compressed[..])
+            .read_to_end(&mut unpacked)
+            .unwrap();
+        assert_eq!(unpacked, plain, "the gzip copy is the same file");
+
+        let refused = get(path, "gzip;q=0").await.unwrap();
+        assert!(refused.headers().get("Content-Encoding").is_none());
+    }
 }
 
 #[tokio::test]
@@ -365,7 +436,13 @@ async fn admin_listener_can_be_disabled() {
     let node = common::start_node().await;
     let server = serve(
         node,
-        Listener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024, None).unwrap(),
+        Listener::bind(
+            picomq_metrics::ListenerKind::Stream,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            1024,
+            None,
+        )
+        .unwrap(),
         None,
         ServeOptions {
             ..Default::default()

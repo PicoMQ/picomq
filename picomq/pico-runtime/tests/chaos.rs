@@ -23,7 +23,7 @@ struct Cluster {
 
 impl Cluster {
     fn from_env() -> Option<Self> {
-        let compose = std::env::var("PICOMQ_COMPOSE").ok()?;
+        let compose = std::env::var("PICO_COMPOSE").ok()?;
         let admin2 =
             std::env::var("PICO_ADMIN_2").unwrap_or_else(|_| "http://127.0.0.1:9091".into());
         let bootstrap2 = std::env::var("PICO_KAFKA_2").unwrap_or_else(|_| "127.0.0.1:9093".into());
@@ -71,7 +71,7 @@ impl Cluster {
     /// Node `id`'s row as `asker` sees it: (epoch, fenced).
     async fn row(&self, asker: usize, id: i64) -> Option<(i64, bool)> {
         let nodes = self.get(asker, "/admin/nodes").await?;
-        nodes["nodes"].as_array()?.iter().find_map(|node| {
+        nodes["items"].as_array()?.iter().find_map(|node| {
             (node["nodeId"] == id).then(|| {
                 (
                     node["nodeEpoch"].as_i64().unwrap_or_default(),
@@ -127,7 +127,7 @@ where
 #[ignore]
 async fn a_paused_node_loses_no_acknowledged_write() {
     let Some(cluster) = Cluster::from_env() else {
-        eprintln!("set PICOMQ_COMPOSE to run the chaos tests");
+        eprintln!("set PICO_COMPOSE to run the chaos tests");
         return;
     };
     cluster.both_ready().await;
@@ -165,7 +165,7 @@ async fn a_paused_node_loses_no_acknowledged_write() {
 #[ignore]
 async fn a_paused_leader_does_not_fence_the_node_that_replaced_it() {
     let Some(cluster) = Cluster::from_env() else {
-        eprintln!("set PICOMQ_COMPOSE to run the chaos tests");
+        eprintln!("set PICO_COMPOSE to run the chaos tests");
         return;
     };
     cluster.both_ready().await;
@@ -201,7 +201,7 @@ async fn a_paused_leader_does_not_fence_the_node_that_replaced_it() {
 #[ignore]
 async fn a_metadata_outage_fences_nobody() {
     let Some(cluster) = Cluster::from_env() else {
-        eprintln!("set PICOMQ_COMPOSE to run the chaos tests");
+        eprintln!("set PICO_COMPOSE to run the chaos tests");
         return;
     };
     cluster.both_ready().await;
@@ -231,7 +231,7 @@ async fn a_metadata_outage_fences_nobody() {
 #[ignore]
 async fn a_stopped_node_hands_off_at_once() {
     let Some(cluster) = Cluster::from_env() else {
-        eprintln!("set PICOMQ_COMPOSE to run the chaos tests");
+        eprintln!("set PICO_COMPOSE to run the chaos tests");
         return;
     };
     cluster.both_ready().await;

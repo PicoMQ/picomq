@@ -15,6 +15,7 @@ futures = { workspace = true }
 kafka-protocol = { workspace = true }
 picomq-auth = { workspace = true }
 picomq-listener = { workspace = true }
+picomq-metrics = { workspace = true }
 picomq-common = { workspace = true }
 picomq-metadata = { workspace = true }
 picomq-server = { workspace = true }
@@ -28,12 +29,10 @@ picomq-listener = { workspace = true, features = ["testing"] }
 rustls = { workspace = true }
 tempfile = { workspace = true }
 tokio-rustls = { workspace = true }
-picomq-schema = { workspace = true }
 picomq-metadata = { workspace = true }
 picomq-server = { workspace = true }
 s3stream = { workspace = true }
 tokio-test = { workspace = true }
-object_store = { workspace = true }
 
 [lints]
 workspace = true

@@ -230,6 +230,7 @@ fn reject(audience: Audience, err: AuthError) -> Response {
     if let AuthError::Store(detail) = &err {
         tracing::warn!(%detail, "auth store failure");
     }
+    crate::observe::auth_failure(audience, &err);
     match audience {
         Audience::DurableStreams => ds_reject(err),
         Audience::Pico | Audience::Admin | Audience::Kafka => pico_reject(err),

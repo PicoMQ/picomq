@@ -27,7 +27,6 @@ type StreamInfo struct {
 	ExpiresAt      string
 	Retention      time.Duration
 	RetentionBytes uint64
-	Schema         string
 	KafkaTopic     string
 }
 
@@ -38,14 +37,10 @@ type CreateOptions struct {
 	ExpiresAt      string
 	Retention      time.Duration
 	RetentionBytes uint64
-	Schema         string
-	SchemaValidate bool
 	Closed         bool
 }
 
 type TopicConfig struct {
-	Schema         string
-	SchemaValidate bool
 	KafkaTopic     string
 	Partitions     uint32
 	Retention      time.Duration
@@ -56,22 +51,20 @@ type TopicConfig struct {
 // pointer to a zero or negative value removes the setting. Partitions grows
 // the topic when non-zero and can never shrink it.
 type ConfigUpdate struct {
-	Schema         *string
-	SchemaValidate *bool
 	Retention      *time.Duration
 	RetentionBytes *uint64
 	Partitions     uint32
 }
 
-type Schema struct {
-	ContentType string
-	Body        []byte
+type Header struct {
+	Name  string
+	Value []byte
 }
 
 type AppendRecord struct {
 	Body        []byte
 	Key         []byte
-	Headers     map[string][]byte
+	Headers     []Header
 	Timestamp   int64
 	ContentType string
 }
@@ -80,7 +73,7 @@ type Record struct {
 	Position  string
 	Timestamp int64
 	Key       []byte
-	Headers   map[string][]byte
+	Headers   []Header
 	Body      []byte
 }
 
@@ -170,7 +163,12 @@ type ReadPage struct {
 
 type StreamListing struct {
 	Streams []StreamInfo
-	HasMore bool
+	Next    string
+}
+
+type GroupListing struct {
+	Groups []string
+	Next   string
 }
 
 type RecordsOptions struct {

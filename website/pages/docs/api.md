@@ -1,6 +1,6 @@
 # HTTP API
 
-Reference for the Pico protocol on the stream listener. The Kafka listener is covered in [Kafka protocol](/docs/kafka), and the admin listener in [Admin API and dashboard](/docs/operations/admin).
+Reference for the Pico protocol on the stream listener. The Kafka listener is covered in [Kafka protocol](/docs/kafka), and the admin listener in [Admin API](/docs/operations/admin).
 
 OpenAPI spec: <a href="/openapi.yaml" download>openapi.yaml</a>
 
@@ -26,7 +26,7 @@ Errors on stream and group routes are JSON with a code:
 
 | Status | `error` | Meaning |
 | --- | --- | --- |
-| `400` | `bad_request`, `schema_violation` | Malformed request, or records the bound schema rejects |
+| `400` | `bad_request` | Malformed request |
 | `401` | `unauthenticated` | No valid credential, with a `WWW-Authenticate: Bearer` challenge |
 | `403` | `permission_denied` | Insufficient scope |
 | `403` | `fenced` | Stale producer epoch, with the current one in `Pico-Producer-Epoch` |
@@ -43,7 +43,25 @@ Errors on stream and group routes are JSON with a code:
 
 Retrying `503` and `504` is safe. How the same failures look over Durable Streams and Kafka is in [Protocols](/docs/design/protocols#errors).
 
-The config and schema routes, `/_streams` and `/_schemas`, are a control surface and answer errors as `{"error": "<message>"}`, like the admin API.
+The topic config route, `/_streams`, is a control surface and answers errors as `{"error": "<message>"}`, like the admin API.
+
+## Lists
+
+Every list on this listener and on the [admin API](/docs/operations/admin) pages the same way. Items come in their natural order, by name, id, or offset, never sorted another way, and the response is:
+
+```json
+{ "items": [ ... ], "next": "opaque" }
+```
+
+| Query parameter | Meaning |
+| --- | --- |
+| `limit` | Items per page, `100` by default and `1000` at most |
+| `cursor` | The `next` of the previous page, to continue after it |
+| Filters | Such as `prefix`, sent again with every page |
+
+- **Last page.** `next` is `null`.
+- **Short pages.** A page can hold fewer items than `limit` while `next` is set, when entries the token may not see were skipped or the page reached its size cap. Keep following `next` until it is `null`.
+- **Cursors.** A cursor only continues the list it came from, so sending it with different filters is a `400`.
 
 ## Topic settings
 
@@ -55,7 +73,6 @@ A topic's settings are given as headers on create. Some can change later through
 | Partitions | `Pico-Partitions`, default `1` | `partitions` | Grows, never shrinks, by at most `10000` at a time |
 | Expiry | `Pico-TTL`, seconds without appends or reads, or `Pico-Expires-At`, a fixed time. Not both | | Fixed |
 | [Retention](/docs/design/streams#retention) | `Pico-Retention-Ms`, `Pico-Retention-Bytes`, unlimited by default | `retentionMs`, `retentionBytes` | Set, or removed with `null` |
-| [Schema](/docs/schemas#bind) | `Pico-Schema` names a registered schema, `Pico-Schema-Validate: true` validates appends | `schema`, `schemaValidate` | Rebound, or unbound with `null` |
 | Sealed | `Pico-Closed: true` | | Sealed by an append with `Pico-Closed`, never reopened |
 | Kafka name | Follows from the topic name | `kafkaTopic` | Fixed |
 
@@ -75,7 +92,7 @@ Creates a topic with the [settings](#topic-settings) in its headers, with no bod
 POST /{topic}
 ```
 
-Appends records. The body is a single record in the topic's content type, a JSON batch (`application/vnd.picomq.batch+json`), or a binary batch (`application/vnd.picomq.batch`). Returns `200`.
+Appends records. The body is a single record in the topic's content type, a JSON batch (`application/vnd.picomq.batch+json`) of [records](#records), or a binary batch (`application/vnd.picomq.batch`). Returns `200`.
 
 | Request header | Meaning |
 | --- | --- |
@@ -107,7 +124,7 @@ Reads records from a sequence. Without `live` it returns what exists and stops. 
 | `format` | `json` (default), `binary` batch, or `raw` concatenated bodies |
 | `live` | `long-poll` waits for the next record, `sse` holds the response open as an event stream |
 
-A JSON record is `seq`, `timestamp`, `key`, `headers`, and `body`. Non-UTF-8 bytes use `key_b64`, `body_b64`, or `headers_b64`.
+Records come back in the [record](#records) shape, with `seq` and `timestamp` added.
 
 | Response header | Meaning |
 | --- | --- |
@@ -117,6 +134,26 @@ A JSON record is `seq`, `timestamp`, `key`, `headers`, and `body`. Non-UTF-8 byt
 | `Pico-Cursor` | Opaque resume token for paginated catch-up reads |
 
 Catch-up responses include an `ETag` and honor `If-None-Match` with `304`, so polling readers that are caught up transfer nothing. A long poll that times out with no data returns `204`. SSE delivers each record as an event with its sequence as the event id, and ends with a control event when the topic is sealed. A node that is shutting down ends live reads with `503`, and the client reconnects.
+
+## Records
+
+A JSON batch is `{"records": [...]}`, and each record has a `key`, ordered `headers`, and a `body`:
+
+```json
+{
+  "key": "customer-1042",
+  "headers": [
+    { "name": "trace-id", "value": "4f9c2a" },
+    { "name": "trace-id", "value": "7d1e08" },
+    { "name": "deleted-by", "value": null }
+  ],
+  "body": "{\"order\":\"o-981\",\"amount\":42.5}"
+}
+```
+
+- **Bytes.** UTF-8 text goes in `key`, `body`, and a header's `value`. Other bytes use `key_b64`, `body_b64`, or `value_b64` with base64 instead.
+- **Headers.** A list, kept in order, so a name can repeat.
+- **Null.** A `body` of `null` is a record with no value, the Kafka tombstone, and a header `value` of `null` has no value either. An absent `key` means no key. A binary batch carries the same fields, with a length of `-1` for null.
 
 ## Inspect
 
@@ -134,7 +171,6 @@ Returns the topic's metadata in headers with no body, or `404`.
 | `Pico-TTL`, `Pico-Expires-At` | Expiry settings, when set |
 | `Pico-Retention-Ms`, `Pico-Retention-Bytes` | Retention limits, when set |
 | `Pico-Closed` | `true` when sealed |
-| `Pico-Schema` | The bound schema, when set |
 | `Pico-Kafka-Topic` | The topic's Kafka name, when it has one |
 
 ## Delete
@@ -151,7 +187,7 @@ Removes the topic, all of its partitions, and their records. `204` on success, `
 GET /?prefix=/logs/&limit=100
 ```
 
-Lists topics as JSON. `prefix` filters by name prefix, `limit` caps the page, and `start_after` continues after a name from the previous page. Each entry has `name`, `content_type`, `partitions`, `closed`, and, for single-partition topics, `start_seq` and `next_seq`. With auth, only topics the token may read are listed.
+Lists topics in [pages](#lists), filtered by name prefix. Each item has `name`, `content_type`, `partitions`, and `closed`, plus `ttl` and `expires_at` when the topic expires. With auth, only topics the token's stream matchers cover are listed.
 
 ## Topic config
 
@@ -163,7 +199,7 @@ PATCH /_streams/{topic}
 Reads and changes a topic's settings as JSON, with the config fields from [Topic settings](#topic-settings). Both routes serve either HTTP protocol, and cover topics created over Kafka too. In a cluster they follow the ownership of partition `0`.
 
 ```json
-{ "schema": null, "schemaValidate": false, "kafkaTopic": "orders", "partitions": 3, "retentionMs": 604800000, "retentionBytes": null }
+{ "kafkaTopic": "orders", "partitions": 3, "retentionMs": 604800000, "retentionBytes": null }
 ```
 
 - **`GET`** returns every field, with `null` for an unset one. `404` when the topic does not exist.
@@ -176,7 +212,7 @@ How groups work is in [Consumer groups](/docs/design/groups). Group routes are s
 
 | Route | Does |
 | --- | --- |
-| `GET /_groups` | Lists the groups the token may describe, every group in the cluster with auth off: `{"groups": ["a", "b"]}` |
+| `GET /_groups?prefix=` | Lists group ids in [pages](#lists), only the groups the token may describe |
 | `GET /_groups/{group}` | Describes a group: `group`, `state`, `generation`, and `members` |
 | `DELETE /_groups/{group}` | Deletes a group without members and its offsets. `204` |
 | `POST /_groups/{group}/members` | Joins. Returns once the rebalance completes |
@@ -219,4 +255,4 @@ Group errors use the error format above:
 
 ## Durable Streams
 
-A listener started with `--protocol ds` speaks the Durable Streams open protocol on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers, raw record bodies, plain text errors, and one record per append. The [topic settings](#topic-settings) the protocol has no header for are extensions under the same prefix: `Stream-Partitions`, `Stream-Retention-Ms`, `Stream-Retention-Bytes`, `Stream-Schema`, and `Stream-Schema-Validate`. Topics created through either HTTP protocol or Kafka are readable through all three.
+A listener started with `--protocol ds` speaks the Durable Streams open protocol on its exact wire vocabulary, with `Stream-*` and `Producer-*` headers, raw record bodies, plain text errors, and one record per append. The [topic settings](#topic-settings) the protocol has no header for are extensions under the same prefix: `Stream-Partitions`, `Stream-Retention-Ms`, and `Stream-Retention-Bytes`. Topics created through either HTTP protocol or Kafka are readable through all three.

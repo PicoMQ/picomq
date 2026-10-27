@@ -35,7 +35,7 @@ pub(crate) async fn offsets(
         return Ok(None);
     };
 
-    let offsets = topics.offsets(&topic, partition).await?;
+    let offsets = topics.live_offsets(&topic, partition).await?;
 
     Ok(Some((topic, offsets)))
 }
@@ -53,7 +53,7 @@ pub(crate) async fn head(
         (None, partitions) if partitions > 1 => None,
         (requested, _) => {
             let index = choose(&topic, requested)?;
-            Some(topics.offsets(&topic, index).await?)
+            Some(topics.live_offsets(&topic, index).await?)
         }
     };
 

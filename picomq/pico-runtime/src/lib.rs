@@ -2,13 +2,16 @@
 
 pub mod config;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use picomq_auth::{AccessToken, Scope, TokenRecord, TokenStore, Verifier};
+use picomq_http::forward::{Forward, ForwardError};
 use picomq_http::{RunningServer, ServeOptions};
 use picomq_listener::{Listener, Tls};
 use picomq_metadata::{CommandSink, MetadataLifecycle, ObjectCleaner};
+use picomq_metrics::{ListenerKind, Metrics};
 use picomq_server::wal::ObjectWal;
 use picomq_server::{KvTokenStore, NodeConfig, PicoNode};
 use picomq_sql::{
@@ -21,8 +24,6 @@ pub use picomq_listener::TlsConfig;
 
 /// (`MetadataLifecycle`).
 const LIFECYCLE_TICK: Duration = Duration::from_secs(1);
-
-const SCHEMA_CACHE_EXPIRY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -61,6 +62,10 @@ pub enum RuntimeError {
     },
     #[error("tls: {0}")]
     Tls(#[from] picomq_listener::TlsError),
+    #[error("tls ca certificate {path}: {reason}")]
+    CaCertificate { path: PathBuf, reason: String },
+    #[error("forwarding: {0}")]
+    Forward(#[from] ForwardError),
 }
 
 /// A running PicoMQ process: metadata log, node, background maintenance and
@@ -79,13 +84,15 @@ pub struct PicoServer {
     /// Kept alive for the process lifetime: dropping it aborts the log's
     /// flusher/tailer tasks, so it must outlive the node.
     sink: Arc<SqlSink>,
-    schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
 }
 
 /// Open the metadata log, start the node, and serve the configured listeners,
 /// in that order: metadata first (a node must be registered before it can
 /// own streams), then storage and the engine, then listeners.
 pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
+    let metrics = Metrics::install();
+    picomq_kafka::name_operations();
+
     if config.heartbeat_interval.is_zero() || config.node_timeout <= config.heartbeat_interval {
         return Err(RuntimeError::Liveness {
             interval: config.heartbeat_interval,
@@ -109,17 +116,6 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         }
     }
 
-    let schema_registry = match &config.schema_registry {
-        None => None,
-        Some(uri) => {
-            let registry = picomq_schema::Builder::from(open_adapter(uri)?.object_store())
-                .with_cache_expiry_after(Some(SCHEMA_CACHE_EXPIRY))
-                .build();
-            tracing::info!(%uri, "schema registry enabled");
-            Some(Arc::new(registry) as Arc<dyn picomq_schema::SchemaStore>)
-        }
-    };
-
     let store = open_store(&config.meta_backend).await?;
     let (sink, views) = SqlSink::open(store.clone(), SqlSinkConfig::default()).await?;
     let sink = Arc::new(sink);
@@ -135,31 +131,38 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         wal_config: config.wal_uri(),
         ..config.engine.clone()
     };
+    let forward = forward(config.tls_ca_certificate.as_deref())?;
     // Bind before node registration so a default advertise (port 0 configs)
     // carries the real bound port.
     let kafka_tls = config.tls.clone().map(Tls::load).transpose()?;
     let http_tls = kafka_tls.as_ref().map(|tls| tls.alpn(picomq_http::ALPN));
-    let bind = |addr, tls: &Option<Tls>| {
-        Listener::bind(addr, config.backlog, tls.clone())
+    let bind = |kind, addr, tls: &Option<Tls>| {
+        Listener::bind(kind, addr, config.backlog, tls.clone())
             .map_err(|source| RuntimeError::Bind { addr, source })
     };
-    let http_listener = bind(config.addr, &http_tls)?;
+    let http_listener = bind(ListenerKind::Stream, config.addr, &http_tls)?;
     let http_bound = http_listener.local_addr();
     let admin_listener = config
         .admin_addr
-        .map(|addr| bind(addr, &http_tls))
+        .map(|addr| bind(ListenerKind::Admin, addr, &http_tls))
         .transpose()?;
-    let kafka_listener = bind(config.kafka.listen, &kafka_tls)?;
+    let kafka_listener = bind(ListenerKind::Kafka, config.kafka.listen, &kafka_tls)?;
     let kafka_addr = kafka_listener.local_addr();
     let kafka_advertise = config
         .kafka
         .advertise
         .clone()
         .unwrap_or_else(|| kafka_addr.to_string());
-    let protocol_addresses = std::collections::BTreeMap::from([(
+    let mut protocol_addresses = std::collections::BTreeMap::from([(
         picomq_kafka::PROTOCOL_NAME.to_owned(),
         kafka_advertise,
     )]);
+    if let Some(admin) = &admin_listener {
+        protocol_addresses.insert(
+            picomq_http::admin::PROTOCOL_NAME.to_owned(),
+            config.admin_url(admin.local_addr()),
+        );
+    }
     let node_config = NodeConfig {
         node_id: config.node_id,
         node_epoch: config.node_epoch,
@@ -169,6 +172,7 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         cluster_id: config.cluster_id.clone(),
         heartbeat_interval: config.heartbeat_interval,
         node_timeout: config.node_timeout,
+        max_groups: config.max_groups,
         engine,
     };
     let wal_uri = config.wal_uri();
@@ -179,7 +183,6 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         views,
         object_storage.clone(),
         Arc::new(wal),
-        schema_registry.clone(),
     )
     .await?;
     let node = Arc::new(node);
@@ -234,6 +237,8 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
             max_request_size: config.max_request_size,
             shutdown_drain: config.shutdown_drain,
             shutdown_timeout: config.shutdown_timeout,
+            forward: Some(forward),
+            metrics: Some(metrics),
             leadership: Some(lease.leadership()),
             authorizer,
         },
@@ -252,7 +257,6 @@ pub async fn start(config: ServerConfig) -> Result<PicoServer, RuntimeError> {
         failover,
         compaction_check,
         sink,
-        schema_registry,
     })
 }
 
@@ -356,10 +360,6 @@ impl PicoServer {
         self.server.node().fenced()
     }
 
-    pub fn schema_registry(&self) -> Option<&Arc<dyn picomq_schema::SchemaStore>> {
-        self.schema_registry.as_ref()
-    }
-
     pub async fn shutdown(self) {
         self.kafka.abort();
         self.lifecycle.abort();
@@ -372,4 +372,17 @@ impl PicoServer {
         self.lease.shutdown().await;
         drop(self.sink);
     }
+}
+
+fn forward(ca_certificate: Option<&Path>) -> Result<Forward, RuntimeError> {
+    let Some(path) = ca_certificate else {
+        return Ok(Forward::new(None)?);
+    };
+    let refused = |reason: String| RuntimeError::CaCertificate {
+        path: path.to_owned(),
+        reason,
+    };
+
+    let pem = std::fs::read(path).map_err(|error| refused(error.to_string()))?;
+    Forward::new(Some(&pem)).map_err(|error| refused(error.to_string()))
 }

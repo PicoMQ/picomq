@@ -1,0 +1,42 @@
+.view-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  min-height: 3.5rem;
+  padding: var(--space-2) var(--space-6);
+  border-bottom: var(--line);
+  background: var(--color-surface-1);
+}
+
+.view-trail {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.view-crumb {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-right: var(--space-2);
+  color: var(--color-text-2);
+  white-space: nowrap;
+}
+
+.view-crumb a:hover {
+  color: var(--color-text-1);
+}
+
+.view-crumb [aria-current="page"] {
+  color: var(--color-text-1);
+}
+
+.view-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-6);
+}

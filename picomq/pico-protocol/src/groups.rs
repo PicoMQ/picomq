@@ -9,7 +9,7 @@ use crate::json::{
     i32_of, json_body, json_request, object, put_str, put_u32, required_i32, required_string,
     string, strings, u32_of,
 };
-use crate::pico::GROUPS_PATH_PREFIX;
+use crate::pico::{GROUPS_PATH_PREFIX, Q_CURSOR, Q_LIMIT, Q_PREFIX};
 use crate::wire::{WireRequest, urlencode};
 
 pub const Q_GENERATION: &str = "generation";
@@ -383,27 +383,35 @@ impl GroupDescription {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ListGroupsRequest;
+pub struct ListGroupsRequest<'a> {
+    pub prefix: &'a str,
+    pub limit: u64,
+    pub cursor: Option<&'a str>,
+}
 
-impl ListGroupsRequest {
+impl ListGroupsRequest<'_> {
     pub fn encode(&self) -> WireRequest {
-        WireRequest::new(Method::GET, GROUPS_PATH_PREFIX.to_owned(), &[200])
+        let mut path = format!("{GROUPS_PATH_PREFIX}?{Q_PREFIX}={}", urlencode(self.prefix));
+        if self.limit > 0 {
+            path.push_str(&format!("&{Q_LIMIT}={}", self.limit));
+        }
+        if let Some(cursor) = self.cursor {
+            path.push_str(&format!("&{Q_CURSOR}={}", urlencode(cursor)));
+        }
+        WireRequest::new(Method::GET, path, &[200])
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GroupListing {
     pub groups: Vec<String>,
+    pub next: Option<String>,
 }
 
 impl GroupListing {
-    pub fn encode(&self) -> Bytes {
-        json_body(json!({ "groups": self.groups }))
-    }
-
     pub fn decode(body: &[u8]) -> Result<Self, CodecError> {
         let node = object(body)?;
-        let groups = match node.get("groups") {
+        let groups = match node.get("items") {
             Some(Value::Array(groups)) => groups
                 .iter()
                 .map(|group| {
@@ -413,9 +421,10 @@ impl GroupListing {
                         .ok_or_else(|| CodecError::new("groups must be strings"))
                 })
                 .collect::<Result<_, _>>()?,
-            _ => return Err(CodecError::new("groups must be an array")),
+            _ => return Err(CodecError::new("items must be an array")),
         };
-        Ok(Self { groups })
+        let next = node.get("next").and_then(Value::as_str).map(str::to_owned);
+        Ok(Self { groups, next })
     }
 }
 
@@ -602,10 +611,23 @@ mod tests {
             described
         );
 
-        let listing = GroupListing {
-            groups: vec!["g".to_owned()],
-        };
-        assert_eq!(GroupListing::decode(&listing.encode()).unwrap(), listing);
+        assert_eq!(
+            GroupListing::decode(br#"{"items":["g"],"next":"opaque"}"#).unwrap(),
+            GroupListing {
+                groups: vec!["g".to_owned()],
+                next: Some("opaque".to_owned()),
+            }
+        );
+        assert_eq!(
+            ListGroupsRequest {
+                prefix: "a/",
+                limit: 10,
+                cursor: Some("c"),
+            }
+            .encode()
+            .path_and_query,
+            "/_groups?prefix=a%2F&limit=10&cursor=c"
+        );
     }
 
     #[test]

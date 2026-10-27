@@ -59,6 +59,10 @@ pub struct Producer<'a> {
     pub seq: u64,
 }
 
+pub fn stream_segment(name: &str) -> String {
+    urlencode(name)
+}
+
 pub fn stream_path(name: &str) -> String {
     let name = name.strip_prefix('/').unwrap_or(name);
     let mut path = String::with_capacity(name.len() + 1);
@@ -137,7 +141,7 @@ mod tests {
 
     #[test]
     fn paths_with_dot_segments_are_refused() {
-        for path in ["/..", "/../orders", "/a/./b?x=1", "/_schemas/a/.."] {
+        for path in ["/..", "/../orders", "/a/./b?x=1", "/_groups/a/.."] {
             assert!(check_path(path).is_err(), "{path}");
         }
         for path in ["/a..b", "/.orders", "//orders", "/a?seq=..", "/"] {

@@ -4,9 +4,12 @@ use picomq_metadata::MetadataState;
 use crate::codec::{expect_end, expect_version, get_u64};
 use crate::error::ServiceError;
 use crate::partition::Partition;
+use crate::topic::TopicId;
 
 const VERSION: u8 = 1;
+const PARTITION_PREFIX: &str = "log/partition/";
 const GROUP_PREFIX: &str = "log/group/";
+const STREAM_PREFIX: &str = "idx/sid/";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Log {
@@ -19,7 +22,7 @@ impl Log {
         match self {
             Log::Partition(partition) => {
                 format!(
-                    "log/partition/{}/{}",
+                    "{PARTITION_PREFIX}{}/{}",
                     partition.topic.hex(),
                     partition.index
                 )
@@ -28,15 +31,51 @@ impl Log {
         }
     }
 
-    /// Every group log in `state`, which names every group in the cluster.
-    pub fn groups(state: &MetadataState) -> Vec<String> {
+    pub fn parse(key: &str) -> Option<Self> {
+        if let Some(partition) = key.strip_prefix(PARTITION_PREFIX) {
+            let (topic, index) = partition.split_once('/')?;
+            let partition = Partition::new(TopicId::from_hex(topic)?, index.parse().ok()?);
+            return Some(Log::Partition(partition));
+        }
+
+        let group = hex::decode(key.strip_prefix(GROUP_PREFIX)?).ok()?;
+        Some(Log::Group(String::from_utf8(group).ok()?))
+    }
+
+    pub fn of_stream(state: &MetadataState, stream_id: u64) -> Option<Self> {
+        let key = state.get_kv(&stream_id_key(stream_id))?;
+        Log::parse(std::str::from_utf8(&key).ok()?)
+    }
+
+    pub fn stream_id(&self, state: &MetadataState) -> Result<Option<u64>, ServiceError> {
         state
-            .list_kv(GROUP_PREFIX)
+            .get_kv(&self.key())
+            .map(|value| decode_stream_id(&value))
+            .transpose()
+    }
+
+    pub fn groups(
+        state: &MetadataState,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Vec<String> {
+        let prefix = format!("{GROUP_PREFIX}{}", hex::encode(prefix));
+        let after = after.map(|after| format!("{GROUP_PREFIX}{}", hex::encode(after)));
+
+        state
+            .list_kv_page(&prefix, after.as_deref(), limit)
             .into_iter()
-            .filter_map(|(key, _)| hex::decode(&key[GROUP_PREFIX.len()..]).ok())
-            .filter_map(|group_id| String::from_utf8(group_id).ok())
+            .map(|(key, _)| {
+                let id = hex::decode(&key[GROUP_PREFIX.len()..]).unwrap_or_default();
+                String::from_utf8_lossy(&id).into_owned()
+            })
             .collect()
     }
+}
+
+pub(crate) fn stream_id_key(stream_id: u64) -> String {
+    format!("{STREAM_PREFIX}{stream_id}")
 }
 
 pub fn encode_stream_id(stream_id: u64) -> Bytes {
@@ -58,7 +97,6 @@ pub fn decode_stream_id(value: &[u8]) -> Result<u64, ServiceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::topic::TopicId;
 
     #[test]
     fn keys_are_distinct_per_log() {
@@ -72,6 +110,23 @@ mod tests {
             Log::Group("a/b".into()).key(),
             Log::Group("a%2fb".into()).key()
         );
+    }
+
+    #[test]
+    fn keys_parse_back_to_their_log() {
+        let partition = Log::Partition(Partition::new(TopicId(*b"0123456789abcdef"), 7));
+        let group = Log::Group("a/b c".into());
+
+        assert_eq!(Log::parse(&partition.key()), Some(partition));
+        assert_eq!(Log::parse(&group.key()), Some(group));
+        for foreign in [
+            "topic/x",
+            "log/partition/zz/1",
+            "log/partition/00/x",
+            "log/group/zz",
+        ] {
+            assert_eq!(Log::parse(foreign), None, "{foreign}");
+        }
     }
 
     #[test]

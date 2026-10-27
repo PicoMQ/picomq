@@ -1,6 +1,6 @@
 import { asClientError, ClientError } from './error'
 import { parseSafeSeq, sleep } from './util'
-import { toEnvelope, type RecordEnvelope } from './record'
+import { recordBytes, toEnvelope, type RecordEnvelope } from './record'
 import { RetryPolicy } from './retry'
 import type { AppendInput, PartitionOptions, ProducerAck, ProducerRef } from './types'
 
@@ -50,6 +50,7 @@ function resolveConfig(config: ProducerConfig = {}): ResolvedConfig {
 
 interface Item {
   envelope: RecordEnvelope
+  size: number
   resolve: (seq: number) => void
   reject: (error: ClientError) => void
   release: () => void
@@ -82,15 +83,23 @@ export class Producer {
 
   async send(record: AppendInput): Promise<Pending> {
     const envelope = toEnvelope(record)
-    if (envelope.body.byteLength > this.config.maxBufferedBytes) {
+    const size = recordBytes(envelope)
+    if (size > this.config.maxBufferedBytes) {
       throw new ClientError(
         'bad_request',
-        `record of ${envelope.body.byteLength} bytes exceeds the session's ${this.config.maxBufferedBytes} byte budget`,
+        `record of ${size} bytes exceeds the session's ${this.config.maxBufferedBytes} byte budget`,
+        { code: 'record_too_large' },
+      )
+    }
+    if (size > this.config.maxBatchBytes) {
+      throw new ClientError(
+        'bad_request',
+        `record of ${size} bytes exceeds the ${this.config.maxBatchBytes} byte batch limit`,
         { code: 'record_too_large' },
       )
     }
     this.ensureOpen()
-    const release = await this.budget.acquire(Math.max(1, envelope.body.byteLength))
+    const release = await this.budget.acquire(size)
     let settle!: (seq: number) => void
     let fail!: (error: ClientError) => void
     const promise = new Promise<number>((resolve, reject) => {
@@ -99,6 +108,7 @@ export class Producer {
     })
     this.push({
       envelope,
+      size,
       resolve: settle,
       reject: fail,
       release,
@@ -201,13 +211,17 @@ export class Producer {
   }
 
   private async collect(first: Item): Promise<Item[]> {
-    let bytes = first.envelope.body.byteLength
+    let bytes = first.size
     const batch = [first]
     if (this.config.lingerMs === 0) {
       while (batch.length < this.config.maxBatchRecords && bytes < this.config.maxBatchBytes) {
         const item = this.tryRecv()
         if (!item) break
-        bytes += item.envelope.body.byteLength
+        if (bytes + item.size > this.config.maxBatchBytes) {
+          this.items.unshift(item)
+          break
+        }
+        bytes += item.size
         batch.push(item)
       }
       return batch
@@ -218,7 +232,11 @@ export class Producer {
       if (remaining <= 0) break
       const item = await this.recv(remaining)
       if (!item) break
-      bytes += item.envelope.body.byteLength
+      if (bytes + item.size > this.config.maxBatchBytes) {
+        this.items.unshift(item)
+        break
+      }
+      bytes += item.size
       batch.push(item)
     }
     return batch

@@ -20,8 +20,8 @@ const CT_BATCH_BINARY: &str = "application/vnd.picomq.batch";
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn kafka_clients_ride_through_a_node_restart() {
-    let Ok(restart) = std::env::var("PICOMQ_RESTART_CMD") else {
-        eprintln!("set PICOMQ_RESTART_CMD to run the restart test");
+    let Ok(restart) = std::env::var("PICO_RESTART_CMD") else {
+        eprintln!("set PICO_RESTART_CMD to run the restart test");
         return;
     };
 
@@ -221,21 +221,46 @@ async fn consumer_group_is_shared_by_kafka_and_pico_members() {
         .unwrap();
     assert_eq!(offsets["offsets"][format!("/{topic}")]["position"], 5);
 
-    let rewind = h
+    let rewind = || {
+        h.http
+            .put(h.url(&format!("/_groups/{group}/offsets")))
+            .json(&serde_json::json!({ "offsets": { format!("/{topic}"): { "position": 2 } } }))
+            .send()
+    };
+    assert_eq!(
+        rewind().await.unwrap().status(),
+        404,
+        "an active group keeps its offsets"
+    );
+    drop(subscriber);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let described: Value = h
+            .http
+            .get(h.url(&format!("/_groups/{group}")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if described["state"] == "Empty" {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{described}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(rewind().await.unwrap().status(), 204);
+    let rewound: Value = h
         .http
-        .put(h.url(&format!("/_groups/{group}/offsets")))
-        .json(&serde_json::json!({ "offsets": { format!("/{topic}"): { "position": 2 } } }))
+        .get(h.url(&format!("/_groups/{group}/offsets")))
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
-    assert_eq!(rewind.status(), 204);
-    let mut partitions = rdkafka::TopicPartitionList::new();
-    partitions.add_partition(&topic, 0);
-    let committed = subscriber
-        .committed_offsets(partitions, Duration::from_secs(10))
-        .unwrap();
-    assert_eq!(committed.elements()[0].offset(), rdkafka::Offset::Offset(2));
-    drop(subscriber);
+    assert_eq!(rewound["offsets"][format!("/{topic}")]["position"], 2);
 
     let pico_group = unique("e2e-pico");
     let joined: Value = h
@@ -497,79 +522,6 @@ async fn trim_moves_kafka_log_start() {
     let consumed = consume_n(&h.consumer(&topic), 2).await;
     assert_eq!(consumed[0].offset, 2);
     assert_eq!(consumed[0].value, b"c");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore]
-async fn schema_binding_applies_to_every_writer() {
-    let h = Harness::new();
-    let schema_name = unique("person");
-    let schema = r#"{
-        "type": "object",
-        "properties": {
-            "value": {
-                "type": "object",
-                "properties": { "name": { "type": "string" } },
-                "required": ["name"]
-            }
-        }
-    }"#;
-    assert_eq!(
-        h.http
-            .put(h.url(&format!("/_schemas/{schema_name}")))
-            .header("Content-Type", "application/schema+json")
-            .body(schema)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        204
-    );
-    let path = format!("/e2e/schema-{}", unique("s"));
-    let topic = path.trim_start_matches('/').replace('/', ".");
-    assert_eq!(
-        h.http
-            .put(h.url(&path))
-            .header("Content-Type", "application/json")
-            .header("Pico-Schema", schema_name.as_str())
-            .header("Pico-Schema-Validate", "true")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        201
-    );
-
-    let producer = h.producer();
-    assert_eq!(
-        produce(&producer, &topic, None, r#"{"name":"alice"}"#).await,
-        0
-    );
-    let rejected = producer
-        .send(
-            FutureRecord::to(&topic).payload(r#"{"name":1}"#).key("bad"),
-            Duration::from_secs(15),
-        )
-        .await
-        .unwrap_err()
-        .0;
-    assert_eq!(
-        rejected.rdkafka_error_code(),
-        Some(RDKafkaErrorCode::InvalidRecord)
-    );
-
-    let rejected = h
-        .http
-        .post(h.url(&path))
-        .header("Content-Type", "application/json")
-        .body(r#"{"name":2}"#)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), 400);
-    let body: Value = rejected.json().await.unwrap();
-    assert_eq!(body["error"], "schema_violation");
-    assert_eq!(pico_read_json(&h, &path).await.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

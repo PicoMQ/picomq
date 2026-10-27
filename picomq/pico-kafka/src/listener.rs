@@ -95,7 +95,8 @@ impl KafkaListener {
             let config = self.config.clone();
             let broker = self.broker.clone();
             tokio::spawn(async move {
-                if let Err(error) = serve_connection(socket, broker, config).await {
+                let client_host: Arc<str> = Arc::from(peer.ip().to_string());
+                if let Err(error) = serve_connection(socket, client_host, broker, config).await {
                     debug!(%peer, %error, "kafka client disconnected");
                 }
             });
@@ -105,6 +106,7 @@ impl KafkaListener {
 
 async fn serve_connection(
     socket: Stream,
+    client_host: Arc<str>,
     broker: Arc<BrokerContext>,
     config: ListenerConfig,
 ) -> Result<(), KafkaError> {
@@ -115,7 +117,7 @@ async fn serve_connection(
     let mut writer = tokio::spawn(run_ordered_writer(write_half, response_rx));
 
     tokio::select! {
-        result = run_reader(read_half, response_tx, broker, config, in_flight) => {
+        result = run_reader(read_half, response_tx, client_host, broker, config, in_flight) => {
             // EOF or read error: let in-flight responses drain, then stop.
             let _ = writer.await;
             result
@@ -130,6 +132,7 @@ async fn serve_connection(
 async fn run_reader(
     mut read_half: Reader,
     response_tx: mpsc::Sender<(u64, Slot)>,
+    client_host: Arc<str>,
     broker: Arc<BrokerContext>,
     config: ListenerConfig,
     in_flight: Arc<Semaphore>,
@@ -138,6 +141,7 @@ async fn run_reader(
     tokio::spawn(run_produce_worker(
         produce_rx,
         response_tx.clone(),
+        client_host.clone(),
         broker.clone(),
     ));
 
@@ -169,7 +173,7 @@ async fn run_reader(
             let answer = if session.awaits_raw_token() {
                 Some(session.authenticate_raw(&body).await)
             } else if api_key.is_some_and(sasl::is_sasl) {
-                let Ok((req, rest)) = request_context(&body, None) else {
+                let Ok((req, rest)) = request_context(&body, None, &client_host) else {
                     send(&response_tx, seq, permit, Reply::Close).await;
                     return Ok(());
                 };
@@ -200,7 +204,7 @@ async fn run_reader(
                 continue;
             }
         } else if api_key.is_some_and(sasl::is_sasl) {
-            let reply = match request_context(&body, None) {
+            let reply = match request_context(&body, None, &client_host) {
                 Ok((req, _)) => Reply::Frame(sasl::illegal_state(&req)),
                 Err(_) => Reply::Close,
             };
@@ -231,8 +235,9 @@ async fn run_reader(
         }
         let tx = response_tx.clone();
         let broker = broker.clone();
+        let client_host = client_host.clone();
         tokio::spawn(async move {
-            let reply = to_reply(dispatch(&broker, principal, &body).await).await;
+            let reply = to_reply(dispatch(&broker, principal, &client_host, &body).await).await;
             let _ = tx
                 .send((
                     seq,
@@ -262,10 +267,11 @@ async fn send(
 async fn run_produce_worker(
     mut produce_rx: mpsc::Receiver<(u64, Bytes, Option<AuthPrincipal>, OwnedSemaphorePermit)>,
     response_tx: mpsc::Sender<(u64, Slot)>,
+    client_host: Arc<str>,
     broker: Arc<BrokerContext>,
 ) {
     while let Some((seq, body, principal, permit)) = produce_rx.recv().await {
-        match dispatch(&broker, principal, &body).await {
+        match dispatch(&broker, principal, &client_host, &body).await {
             Ok(HandlerOutcome::Deferred(deferred)) => {
                 let tx = response_tx.clone();
                 tokio::spawn(async move {

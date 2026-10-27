@@ -357,6 +357,58 @@ fn certificate(dir: &Path) -> (TlsConfig, Authority) {
 }
 
 #[tokio::test]
+async fn a_bad_ca_certificate_stops_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let garbage = dir.path().join("ca.pem");
+    std::fs::write(&garbage, "not a certificate").unwrap();
+
+    for path in [garbage, dir.path().join("missing.pem")] {
+        let started = picomq_runtime::start(ServerConfig {
+            tls_ca_certificate: Some(path),
+            ..config(dir.path(), HttpProtocol::Pico, 1)
+        })
+        .await;
+        assert!(matches!(started, Err(RuntimeError::CaCertificate { .. })));
+    }
+}
+
+#[tokio::test]
+async fn nodes_register_their_admin_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = picomq_runtime::start(config(dir.path(), HttpProtocol::Pico, 1))
+        .await
+        .unwrap();
+    let admin = |server: &picomq_runtime::PicoServer| {
+        server
+            .node()
+            .views()
+            .load()
+            .state
+            .nodes()
+            .get(&1)
+            .and_then(|node| node.protocol_addresses.get("admin").cloned())
+    };
+
+    assert_eq!(
+        admin(&server),
+        Some(format!("http://{}", server.admin_addr().unwrap()))
+    );
+    server.shutdown().await;
+
+    let advertised = picomq_runtime::start(ServerConfig {
+        admin_url: Some("https://node1.internal:9090".to_owned()),
+        ..config(dir.path(), HttpProtocol::Pico, 2)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        admin(&advertised).as_deref(),
+        Some("https://node1.internal:9090")
+    );
+    advertised.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_plain_node_can_advertise_a_proxy_that_terminates_tls() {
     let dir = tempfile::tempdir().unwrap();
     let mut proxied = config(dir.path(), HttpProtocol::Pico, 1);

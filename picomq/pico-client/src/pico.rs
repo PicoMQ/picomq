@@ -14,7 +14,6 @@ use picomq_protocol::pico::{
     decode_error,
 };
 use picomq_protocol::record::PicoRecord;
-use picomq_protocol::schemas::Schema;
 use reqwest::Response;
 
 use crate::ClientConfig;
@@ -174,14 +173,19 @@ impl PicoClient {
         self.call(request.encode()).await.map(drop)
     }
 
-    pub async fn list_groups(&self) -> Result<Vec<String>> {
-        let response = self
-            .retry
-            .run(|| self.call(ListGroupsRequest.encode()))
-            .await?;
-        GroupListing::decode(&response.bytes().await?)
-            .map(|listing| listing.groups)
-            .map_err(invalid_response)
+    pub async fn list_groups(
+        &self,
+        prefix: &str,
+        limit: u64,
+        cursor: Option<&str>,
+    ) -> Result<GroupListing> {
+        let request = ListGroupsRequest {
+            prefix,
+            limit,
+            cursor,
+        };
+        let response = self.retry.run(|| self.call(request.encode())).await?;
+        GroupListing::decode(&response.bytes().await?).map_err(invalid_response)
     }
 
     async fn call(&self, wire: WireRequest) -> Result<Response> {
@@ -209,7 +213,6 @@ impl PicoClient {
             expires_at: head.expires_at,
             retention_ms: head.retention_ms,
             retention_bytes: head.retention_bytes,
-            schema: head.schema,
             kafka_topic: head.kafka_topic,
         }))
     }
@@ -255,11 +258,16 @@ impl PicoClient {
         })
     }
 
-    async fn list_once(&self, prefix: &str, limit: u64) -> Result<StreamListing> {
+    async fn list_once(
+        &self,
+        prefix: &str,
+        limit: u64,
+        cursor: Option<&str>,
+    ) -> Result<StreamListing> {
         let request = ListRequest {
             prefix,
             limit,
-            start_after: None,
+            cursor,
         };
         let response = self.call(request.encode()).await?;
         let body = response.bytes().await?;
@@ -273,18 +281,17 @@ impl PicoClient {
                     name: entry.name,
                     content_type: entry.content_type,
                     partitions: entry.partitions,
-                    start: entry.start_seq.map(|seq| seq.to_string()),
-                    next: entry.next_seq.map(|seq| seq.to_string()),
+                    start: None,
+                    next: None,
                     closed: entry.closed,
                     ttl_seconds: entry.ttl_seconds,
                     expires_at: entry.expires_at,
                     retention_ms: None,
                     retention_bytes: None,
-                    schema: None,
                     kafka_topic: None,
                 })
                 .collect(),
-            has_more: listing.has_more,
+            next: listing.next,
         })
     }
 }
@@ -311,8 +318,6 @@ impl StreamApi for PicoClient {
             ttl_seconds: options.ttl_seconds,
             expires_at: options.expires_at.as_deref(),
             closed: options.closed,
-            schema: options.schema.as_deref(),
-            schema_validate: options.schema_validate,
             partitions: options.partitions,
             retention_ms: options.retention_ms,
             retention_bytes: options.retention_bytes,
@@ -362,8 +367,10 @@ impl StreamApi for PicoClient {
             .await
     }
 
-    async fn list(&self, prefix: &str, limit: u64) -> Result<StreamListing> {
-        self.retry.run(|| self.list_once(prefix, limit)).await
+    async fn list(&self, prefix: &str, limit: u64, cursor: Option<&str>) -> Result<StreamListing> {
+        self.retry
+            .run(|| self.list_once(prefix, limit, cursor))
+            .await
     }
 
     async fn close(&self, name: &str) -> Result<String> {
@@ -383,18 +390,6 @@ impl StreamApi for PicoClient {
 
     async fn update_config(&self, update: &ConfigUpdate) -> Result<TopicConfig> {
         self.transport.update_config(update).await
-    }
-
-    async fn put_schema(&self, name: &str, content_type: Option<&str>, body: Bytes) -> Result<()> {
-        self.transport.put_schema(name, content_type, body).await
-    }
-
-    async fn get_schema(&self, name: &str) -> Result<Option<Schema>> {
-        self.retry.run(|| self.transport.get_schema(name)).await
-    }
-
-    async fn delete_schema(&self, name: &str) -> Result<bool> {
-        self.transport.delete_schema(name).await
     }
 }
 

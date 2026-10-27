@@ -34,11 +34,15 @@ A group runs in one of two modes, fixed by its first member. A member of the oth
 
 HTTP members subscribe to a list of topics. The coordinator gives each topic to exactly one member, assigning the topics with the fewest subscribers first, each to the member that holds the fewest so far.
 
-Every join, leave, or expiry starts a rebalance and bumps the group's generation. A member that misses heartbeats for its session timeout, between `1` and `300` seconds, is removed. A commit made as a member is checked against its member id and generation, so a member that was removed or missed a rebalance cannot overwrite the group's progress. Commits made without joining, as Kafka standalone consumers do, are not checked.
+Every join, leave, or expiry starts a rebalance and bumps the group's generation.
+
+- **Sessions.** A member that misses heartbeats for its session timeout, between `1` and `300` seconds, is removed.
+- **Member commits.** A commit made as a member is checked against its member id and generation, so a member that was removed or missed a rebalance cannot overwrite the group's progress.
+- **Other commits.** Commits made without joining, as Kafka standalone consumers and offset tools make them, are accepted only while the group has no members, as in Kafka.
 
 ## Listing and deleting
 
-- **List:** HTTP `GET /_groups` returns every group in the cluster, read from the group logs in the metadata. Kafka `ListGroups` answers per broker, as Kafka does, with the groups that node coordinates and that have members.
+- **List:** HTTP `GET /_groups` returns the group ids the token may describe in [pages](/docs/api#lists), read from the group logs in the metadata. The [admin API](/docs/operations/admin#consumer-groups) adds each group's state from its coordinator. Kafka `ListGroups` answers per broker, as Kafka does, with the groups that node coordinates and that have members.
 - **Describe:** state, generation, and members, from the coordinator.
 - **Delete:** only a group without members can be deleted. Deleting removes its log and its offsets.
 

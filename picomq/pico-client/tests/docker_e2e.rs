@@ -68,7 +68,7 @@ async fn read_bodies(client: &PicoClient, name: &str) -> Vec<String> {
         .unwrap();
     page.records
         .into_iter()
-        .map(|r| String::from_utf8(r.body.to_vec()).unwrap())
+        .map(|r| String::from_utf8(r.body.unwrap().to_vec()).unwrap())
         .collect()
 }
 
@@ -336,7 +336,7 @@ async fn rust_and_trait_clients_agree() {
         )
         .await
         .unwrap();
-    assert_eq!(page.records[0].body, Bytes::from_static(b"via-trait"));
+    assert_eq!(page.records[0].body, Some(Bytes::from_static(b"via-trait")));
 }
 
 fn names(streams: &[&str]) -> Vec<String> {
@@ -467,7 +467,8 @@ async fn rust_client_groups_join_commit_describe_leave() {
     assert_eq!(described.state, "Stable");
     assert_eq!(described.members[0].client_id, "rust-e2e");
 
-    assert!(client.list_groups().await.unwrap().contains(&group));
+    let listed = client.list_groups("", 0, None).await.unwrap();
+    assert!(listed.groups.contains(&group));
 
     client
         .leave_group(&group, &joined.member_id, None)

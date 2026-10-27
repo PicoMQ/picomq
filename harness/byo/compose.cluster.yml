@@ -31,6 +31,7 @@ services:
       <<: *pico-env
       PICO_NODE_ID: "1"
       PICO_HTTP_ADDRESS: ${PICO_HTTP_ADDRESS_1:-http://localhost:4437}
+      PICO_ADMIN_ADDRESS: ${PICO_ADMIN_ADDRESS_1:-http://pico1:9090}
     ports:
       - "4437:4437"
       - "9090:9090"
@@ -41,6 +42,7 @@ services:
       <<: *pico-env
       PICO_NODE_ID: "2"
       PICO_HTTP_ADDRESS: ${PICO_HTTP_ADDRESS_2:-http://localhost:4438}
+      PICO_ADMIN_ADDRESS: ${PICO_ADMIN_ADDRESS_2:-http://pico2:9090}
     ports:
       - "4438:4437"
       - "9091:9090"

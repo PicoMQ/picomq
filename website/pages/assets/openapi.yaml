@@ -7,8 +7,9 @@ info:
     each node's admin listener. A topic is addressed by its path. Topics with
     more than one partition take `?partition=N` on every topic request.
     Requests for a partition owned by another node return 307 with the owner's
-    address. With auth required, send `Authorization: Bearer <token>` (probes
-    stay open).
+    address. Every list answers `{items, next}` and continues with `cursor`.
+    With auth required, send `Authorization: Bearer <token>` (probes stay
+    open).
 servers:
   - url: http://127.0.0.1:4437
     description: Protocol listener
@@ -18,13 +19,17 @@ tags:
     description: Topics over the Pico protocol.
   - name: groups
     description: Consumer groups on a Pico protocol listener.
-  - name: schemas
-    description: Schema registry on the protocol listener.
   - name: stream-config
     description: Topic config on the protocol listener.
-  - name: admin
-    description: Admin listener endpoints (default port 9090).
-  - name: tokens
+  - name: admin-cluster
+    description: Probes, cluster state, nodes, transfers, and metrics on the admin listener (default port 9090).
+  - name: admin-topics
+    description: Topics and partitions on the admin listener.
+  - name: admin-records
+    description: Browsing and producing records on the admin listener.
+  - name: admin-groups
+    description: Consumer groups on the admin listener.
+  - name: admin-tokens
     description: Token control plane on the admin listener.
 
 security:
@@ -41,20 +46,16 @@ paths:
           in: query
           description: Name prefix to filter by.
           schema: { type: string, default: "/" }
-        - name: start_after
-          in: query
-          description: Continue after this name from the previous page.
-          schema: { type: string }
-        - name: limit
-          in: query
-          description: Page size cap.
-          schema: { type: integer, minimum: 0 }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
-          description: Topics under the prefix that the caller may read.
+          description: A page of topics under the prefix that the caller may list.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StreamList" }
+        "400":
+          $ref: "#/components/responses/BadPage"
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -100,14 +101,6 @@ paths:
         - name: Pico-Closed
           in: header
           description: Create the stream already sealed.
-          schema: { type: boolean }
-        - name: Pico-Schema
-          in: header
-          description: Bind a registered schema by name.
-          schema: { type: string }
-        - name: Pico-Schema-Validate
-          in: header
-          description: Validate appends against the bound schema. Defaults to false.
           schema: { type: boolean }
       responses:
         "201":
@@ -301,9 +294,6 @@ paths:
               schema: { type: string }
             Pico-Closed:
               schema: { type: boolean }
-            Pico-Schema:
-              description: The bound schema name, present when bound.
-              schema: { type: string }
             Pico-Kafka-Topic:
               description: The topic's Kafka name, present when it has one.
               schema: { type: string }
@@ -358,16 +348,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              properties:
-                schema: { type: [string, "null"] }
-                schemaValidate: { type: boolean }
-                retentionMs: { type: [integer, "null"], minimum: 1 }
-                retentionBytes: { type: [integer, "null"], minimum: 1 }
-                partitions:
-                  type: integer
-                  description: Grows the topic to this many partitions, at most 10000 more at a time. Never shrinks it.
+            schema: { $ref: "#/components/schemas/TopicUpdate" }
       responses:
         "200":
           description: Updated config.
@@ -375,7 +356,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TopicConfig" }
         "400":
-          description: Empty patch, unknown schema, a partition count that does not grow the topic, an attempt to set kafkaTopic, or invalid body.
+          description: Empty patch, a partition count that does not grow the topic, an attempt to set kafkaTopic, or invalid body.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MessageError" }
@@ -386,85 +367,33 @@ paths:
         "404":
           description: No such topic.
 
-  /_schemas/{name}:
-    parameters:
-      - name: name
-        in: path
-        required: true
-        description: The schema name. Names are paths and may contain slashes.
-        schema: { type: string }
-    put:
-      tags: [schemas]
-      summary: Register a schema
-      description: >
-        Store or replace a schema. The format comes from the Content-Type, or
-        from an extension on the name. 400 when the schema does not parse or
-        the node runs without a schema registry.
-      operationId: putSchema
-      requestBody:
-        required: true
-        content:
-          application/schema+json:
-            schema: { type: string }
-          application/avro:
-            schema: { type: string }
-          application/x-protobuf:
-            schema: { type: string }
-      responses:
-        "204":
-          description: Stored.
-        "400":
-          description: Unparseable schema, unknown format, or no registry configured.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/MessageError" }
-        "401":
-          $ref: "#/components/responses/Unauthenticated"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-    get:
-      tags: [schemas]
-      summary: Fetch a schema
-      operationId: getSchema
-      responses:
-        "200":
-          description: The schema body with its content type.
-        "401":
-          $ref: "#/components/responses/Unauthenticated"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          description: No such schema.
-    delete:
-      tags: [schemas]
-      summary: Delete a schema
-      operationId: deleteSchema
-      responses:
-        "204":
-          description: Deleted.
-        "401":
-          $ref: "#/components/responses/Unauthenticated"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          description: No such schema.
-
   /_groups:
     get:
       tags: [groups]
-      summary: List every group in the cluster
+      summary: List groups
       operationId: listGroups
+      parameters:
+        - name: prefix
+          in: query
+          description: Group id prefix to filter by.
+          schema: { type: string }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
-          description: Group names.
+          description: A page of group ids the caller may describe.
           content:
             application/json:
               schema:
                 type: object
+                required: [items, next]
                 properties:
-                  groups:
+                  items:
                     type: array
                     items: { type: string }
+                  next: { $ref: "#/components/schemas/Next" }
+        "400":
+          $ref: "#/components/responses/BadPage"
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -613,7 +542,9 @@ paths:
     put:
       tags: [groups]
       summary: Commit offsets
-      description: Send memberId and generation together to commit as a member.
+      description: >
+        Send memberId and generation together to commit as a member. Without
+        them the commit is accepted only while the group has no members.
       operationId: commitOffsets
       requestBody:
         required: true
@@ -655,41 +586,54 @@ paths:
                   offsets: { $ref: "#/components/schemas/Offsets" }
 
   /health:
+    servers: [{ url: "http://127.0.0.1:9090" }]
     get:
-      tags: [admin]
+      tags: [admin-cluster]
       summary: Liveness
-      servers: [{ url: "http://127.0.0.1:9090" }]
+      operationId: health
       security: []
       responses:
         "200":
           description: The process is up.
   /ready:
+    servers: [{ url: "http://127.0.0.1:9090" }]
     get:
-      tags: [admin]
+      tags: [admin-cluster]
       summary: Readiness
-      servers: [{ url: "http://127.0.0.1:9090" }]
+      operationId: ready
       security: []
       responses:
         "200":
           description: Serving and registered in the metadata state.
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  ready: { type: boolean }
-                  serving: { type: boolean }
-                  registered: { type: boolean }
-                  fenced: { type: boolean }
-                  appliedIndex: { type: integer }
-                  nodeId: { type: integer }
+              schema: { $ref: "#/components/schemas/Readiness" }
         "503":
           description: Not ready, with the same body. A fenced node is never ready.
-  /admin/cluster:
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+  /metrics:
+    servers: [{ url: "http://127.0.0.1:9090" }]
     get:
-      tags: [admin]
-      summary: Cluster overview
-      servers: [{ url: "http://127.0.0.1:9090" }]
+      tags: [admin-cluster]
+      summary: This node's metrics
+      description: Needs node_read.
+      operationId: metrics
+      responses:
+        "200":
+          $ref: "#/components/responses/Metrics"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+  /admin/cluster:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    get:
+      tags: [admin-cluster]
+      summary: Cluster state
+      description: Needs cluster_read.
+      operationId: getCluster
       responses:
         "200":
           description: Identity, counts, applied index, lease holder, pending transfers.
@@ -700,94 +644,146 @@ paths:
           $ref: "#/components/responses/AdminUnauthenticated"
         "403":
           $ref: "#/components/responses/AdminForbidden"
-  /admin/nodes:
+  /admin/overview:
+    servers: [{ url: "http://127.0.0.1:9090" }]
     get:
-      tags: [admin]
-      summary: Registered nodes
-      servers: [{ url: "http://127.0.0.1:9090" }]
+      tags: [admin-cluster]
+      summary: Largest and busiest topics
+      description: Needs cluster_read. Recomputed at most every 60 seconds.
+      operationId: getOverview
       responses:
         "200":
-          description: Every registered node.
+          description: The ten largest topics by stored bytes and the ten busiest by write rate.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Overview" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+  /admin/transfers:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    get:
+      tags: [admin-cluster]
+      summary: List pending transfers
+      description: Needs cluster_read.
+      operationId: listTransfers
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of pending transfers.
           content:
             application/json:
               schema:
                 type: object
+                required: [items, next]
                 properties:
-                  nodes:
+                  items:
                     type: array
-                    items: { $ref: "#/components/schemas/Node" }
+                    items: { $ref: "#/components/schemas/Transfer" }
+                  next: { $ref: "#/components/schemas/Next" }
+        "400":
+          $ref: "#/components/responses/BadPage"
         "401":
           $ref: "#/components/responses/AdminUnauthenticated"
         "403":
           $ref: "#/components/responses/AdminForbidden"
-  /admin/streams/{stream}:
-    get:
-      tags: [admin]
-      summary: One partition's placement and state
-      servers: [{ url: "http://127.0.0.1:9090" }]
-      parameters:
-        - $ref: "#/components/parameters/Stream"
-        - $ref: "#/components/parameters/Partition"
-      responses:
-        "200":
-          description: Owner, state, epoch, offsets, pending transfer.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/StreamDetail" }
-        "401":
-          $ref: "#/components/responses/AdminUnauthenticated"
-        "403":
-          $ref: "#/components/responses/AdminForbidden"
-        "404":
-          description: No such stream.
-  /admin/transfer:
     post:
-      tags: [admin]
+      tags: [admin-cluster]
       summary: Transfer a partition to another node
-      servers: [{ url: "http://127.0.0.1:9090" }]
+      description: Needs transfer_stream.
+      operationId: createTransfer
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [stream, toNode]
+              required: [topic, toNode]
               properties:
-                stream: { type: string }
-                partition: { type: integer, description: Required for topics with several partitions. }
+                topic: { type: string }
+                partition: { type: integer, minimum: 0, description: Required for topics with several partitions. }
                 toNode: { type: integer }
       responses:
         "202":
           description: Transfer recorded. Completion is asynchronous.
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  stream: { type: string }
-                  partition: { type: integer }
-                  streamId: { type: integer }
-                  toNode: { type: integer }
-                  pending: { type: boolean }
+              schema: { $ref: "#/components/schemas/Transfer" }
         "400":
-          description: Invalid target or a conflicting transfer is pending.
+          $ref: "#/components/responses/AdminBadRequest"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+        "409":
+          description: The partition is not open, or a conflicting transfer is pending.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MessageError" }
+  /admin/nodes:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    get:
+      tags: [admin-cluster]
+      summary: List nodes
+      description: Needs node_read.
+      operationId: listNodes
+      parameters:
+        - name: fenced
+          in: query
+          description: Only fenced nodes, or only live ones.
+          schema: { type: boolean }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of registered nodes by id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Node" }
+                  next: { $ref: "#/components/schemas/Next" }
+        "400":
+          $ref: "#/components/responses/BadPage"
         "401":
           $ref: "#/components/responses/AdminUnauthenticated"
         "403":
           $ref: "#/components/responses/AdminForbidden"
   /admin/nodes/{id}:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      tags: [admin-cluster]
+      summary: Describe a node
+      description: Needs node_read.
+      operationId: getNode
+      responses:
+        "200":
+          description: The node.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
     post:
-      tags: [admin]
+      tags: [admin-cluster]
       summary: Update a node's placement slots
-      servers: [{ url: "http://127.0.0.1:9090" }]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: integer }
+      description: Needs update_node_slots.
+      operationId: updateNode
       requestBody:
         required: true
         content:
@@ -803,31 +799,623 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Node" }
+        "400":
+          $ref: "#/components/responses/AdminBadRequest"
         "401":
           $ref: "#/components/responses/AdminUnauthenticated"
         "403":
           $ref: "#/components/responses/AdminForbidden"
         "404":
-          description: No such node.
-  /admin/tokens:
+          $ref: "#/components/responses/AdminNotFound"
+  /admin/nodes/{id}/metrics:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
     get:
-      tags: [tokens]
-      summary: List tokens
-      servers: [{ url: "http://127.0.0.1:9090" }]
+      tags: [admin-cluster]
+      summary: Another node's metrics
+      description: Needs node_read. Forwarded to the node named.
+      operationId: nodeMetrics
       responses:
         "200":
-          description: Records visible to the caller. Secrets are never returned.
+          $ref: "#/components/responses/Metrics"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+        "502":
+          $ref: "#/components/responses/ForwardFailed"
+        "504":
+          $ref: "#/components/responses/ForwardFailed"
+
+  /admin/topics:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    get:
+      tags: [admin-topics]
+      summary: List topics
+      description: Needs list, checked on each topic.
+      operationId: adminListTopics
+      parameters:
+        - name: prefix
+          in: query
+          description: Name prefix to filter by.
+          schema: { type: string, default: "/" }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of topics by name.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/TokenList" }
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Topic" }
+                  next: { $ref: "#/components/schemas/Next" }
+        "400":
+          $ref: "#/components/responses/BadPage"
         "401":
           $ref: "#/components/responses/AdminUnauthenticated"
         "403":
           $ref: "#/components/responses/AdminForbidden"
     post:
-      tags: [tokens]
+      tags: [admin-topics]
+      summary: Create a topic
+      description: Needs create.
+      operationId: adminCreateTopic
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TopicCreate" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Topic" }
+        "200":
+          description: Already exists with the same settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Topic" }
+        "400":
+          $ref: "#/components/responses/AdminBadRequest"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "409":
+          description: Exists with different settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageError" }
+  /admin/topics/{name}:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/TopicName"
+    get:
+      tags: [admin-topics]
+      summary: Describe a topic
+      description: Needs head.
+      operationId: adminGetTopic
+      responses:
+        "200":
+          description: The topic with stored bytes and owners.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TopicDetail" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+    patch:
+      tags: [admin-topics]
+      summary: Change a topic's settings
+      description: Needs create.
+      operationId: adminUpdateTopic
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TopicUpdate" }
+      responses:
+        "200":
+          description: The updated topic.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Topic" }
+        "400":
+          $ref: "#/components/responses/AdminBadRequest"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+    delete:
+      tags: [admin-topics]
+      summary: Delete a topic
+      description: Needs delete.
+      operationId: adminDeleteTopic
+      responses:
+        "204":
+          description: Deleted with all of its partitions.
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+  /admin/topics/{name}/partitions:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/TopicName"
+    get:
+      tags: [admin-topics]
+      summary: List partitions
+      description: Needs head. Offsets come live from each partition's owner.
+      operationId: listPartitions
+      parameters:
+        - name: node
+          in: query
+          description: Only partitions this node owns.
+          schema: { type: integer }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of partitions by index.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Partition" }
+                  next: { $ref: "#/components/schemas/Next" }
+        "400":
+          $ref: "#/components/responses/BadPage"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+  /admin/topics/{name}/partitions/{index}:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/TopicName"
+      - $ref: "#/components/parameters/Index"
+    get:
+      tags: [admin-topics]
+      summary: Describe a partition
+      description: Needs head.
+      operationId: getPartition
+      responses:
+        "200":
+          description: The partition.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Partition" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+  /admin/topics/{name}/partitions/{index}/trim:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/TopicName"
+      - $ref: "#/components/parameters/Index"
+    post:
+      tags: [admin-topics]
+      summary: Delete records before an offset
+      description: Needs trim. Answered by the partition's owner.
+      operationId: trimPartition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [before]
+              properties:
+                before: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: The partition's new start offset.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  startOffset: { type: integer }
+        "400":
+          $ref: "#/components/responses/AdminBadRequest"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+
+  /admin/topics/{name}/partitions/{index}/records:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/TopicName"
+      - $ref: "#/components/parameters/Index"
+    get:
+      tags: [admin-records]
+      summary: Browse records
+      description: >
+        Needs read. Answered by the partition's owner. Fields are cut to a
+        4 KiB preview. Filters run under a scan budget, so a page can be short
+        while `next` is set.
+      operationId: listRecords
+      parameters:
+        - name: offset
+          in: query
+          description: Start at this offset. Defaults to 0. Not with `timestamp`.
+          schema: { type: integer, minimum: 0 }
+        - name: timestamp
+          in: query
+          description: Start at the first record at or after these epoch milliseconds.
+          schema: { type: integer }
+        - name: key
+          in: query
+          description: Keep records whose key contains this text.
+          schema: { type: string }
+        - name: value
+          in: query
+          description: Keep records whose value contains this text.
+          schema: { type: string }
+        - name: header
+          in: query
+          description: Keep records with this header.
+          schema: { type: string }
+        - name: headerValue
+          in: query
+          description: With `header`, keep records whose header value contains this text.
+          schema: { type: string }
+        - name: wait
+          in: query
+          description: Milliseconds to wait for new records when none are there yet.
+          schema: { type: integer, minimum: 0, maximum: 5000 }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of records by offset.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AdminRecord" }
+                  next: { $ref: "#/components/schemas/Next" }
+        "400":
+          $ref: "#/components/responses/BadPage"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+    post:
+      tags: [admin-records]
+      summary: Produce a record
+      description: Needs append. Answered by the partition's owner. The body is at most 2 MiB.
+      operationId: produceRecord
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecordWrite" }
+      responses:
+        "201":
+          description: Appended.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  offset: { type: integer }
+                  timestamp: { type: [integer, "null"] }
+        "400":
+          $ref: "#/components/responses/AdminBadRequest"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+        "413":
+          description: The body is too large.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageError" }
+  /admin/topics/{name}/partitions/{index}/records/{offset}:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/TopicName"
+      - $ref: "#/components/parameters/Index"
+      - name: offset
+        in: path
+        required: true
+        schema: { type: integer, minimum: 0 }
+    get:
+      tags: [admin-records]
+      summary: Read one record
+      description: Needs read. Fields up to 1 MiB.
+      operationId: getRecord
+      responses:
+        "200":
+          description: The record.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminRecord" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+
+  /admin/groups:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    get:
+      tags: [admin-groups]
+      summary: List groups
+      description: Needs describe_group, checked on each group. Each group's state comes from its coordinator.
+      operationId: adminListGroups
+      parameters:
+        - name: prefix
+          in: query
+          description: Group id prefix to filter by.
+          schema: { type: string }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of groups by id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Group" }
+                  next: { $ref: "#/components/schemas/Next" }
+        "400":
+          $ref: "#/components/responses/BadPage"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+  /admin/groups/{group}:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/Group"
+    get:
+      tags: [admin-groups]
+      summary: Describe a group
+      description: Needs describe_group. Answered by the coordinator.
+      operationId: adminGetGroup
+      responses:
+        "200":
+          description: The group.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupDetail" }
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+    delete:
+      tags: [admin-groups]
+      summary: Delete a group and its offsets
+      description: Needs delete_group.
+      operationId: adminDeleteGroup
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+        "409":
+          $ref: "#/components/responses/GroupHasMembers"
+  /admin/groups/{group}/members:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/Group"
+    get:
+      tags: [admin-groups]
+      summary: List members
+      description: Needs describe_group.
+      operationId: listMembers
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of members.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Member" }
+                  next: { $ref: "#/components/schemas/Next" }
+        "400":
+          $ref: "#/components/responses/BadPage"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+  /admin/groups/{group}/offsets:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/Group"
+    get:
+      tags: [admin-groups]
+      summary: List committed offsets with lag
+      description: Needs describe_group, and head on each topic shown.
+      operationId: listGroupOffsets
+      parameters:
+        - name: topic
+          in: query
+          description: Only this topic.
+          schema: { type: string }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of committed offsets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/GroupOffset" }
+                  next: { $ref: "#/components/schemas/Next" }
+        "400":
+          $ref: "#/components/responses/BadPage"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+    delete:
+      tags: [admin-groups]
+      summary: Delete one topic's offsets
+      description: Needs delete_group.
+      operationId: deleteGroupOffsets
+      parameters:
+        - name: topic
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Deleted.
+        "400":
+          $ref: "#/components/responses/AdminBadRequest"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+        "409":
+          $ref: "#/components/responses/GroupHasMembers"
+  /admin/groups/{group}/offsets/reset:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    parameters:
+      - $ref: "#/components/parameters/Group"
+    post:
+      tags: [admin-groups]
+      summary: Reset offsets
+      description: Needs consume on the group and read on the topic.
+      operationId: resetGroupOffsets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OffsetReset" }
+      responses:
+        "200":
+          description: The new positions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  partitions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        partition: { type: integer }
+                        offset: { type: integer }
+        "400":
+          $ref: "#/components/responses/AdminBadRequest"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+        "404":
+          $ref: "#/components/responses/AdminNotFound"
+        "409":
+          $ref: "#/components/responses/GroupHasMembers"
+
+  /admin/tokens:
+    servers: [{ url: "http://127.0.0.1:9090" }]
+    get:
+      tags: [admin-tokens]
+      summary: List tokens
+      description: Needs list_tokens. Secrets are never returned.
+      operationId: listTokens
+      parameters:
+        - name: prefix
+          in: query
+          description: Token id prefix to filter by.
+          schema: { type: string }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of tokens by id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/TokenRecord" }
+                  next: { $ref: "#/components/schemas/Next" }
+        "400":
+          $ref: "#/components/responses/BadPage"
+        "401":
+          $ref: "#/components/responses/AdminUnauthenticated"
+        "403":
+          $ref: "#/components/responses/AdminForbidden"
+    post:
+      tags: [admin-tokens]
       summary: Issue a token
-      servers: [{ url: "http://127.0.0.1:9090" }]
+      description: Needs issue_token, and the new scope must be narrower than the caller's.
+      operationId: issueToken
       requestBody:
         required: true
         content:
@@ -840,10 +1428,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/IssueTokenResponse" }
         "400":
-          description: Invalid id or scope.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/MessageError" }
+          $ref: "#/components/responses/AdminBadRequest"
         "401":
           $ref: "#/components/responses/AdminUnauthenticated"
         "403":
@@ -854,10 +1439,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/MessageError" }
   /admin/tokens/{id}:
+    servers: [{ url: "http://127.0.0.1:9090" }]
     delete:
-      tags: [tokens]
+      tags: [admin-tokens]
       summary: Revoke a token
-      servers: [{ url: "http://127.0.0.1:9090" }]
+      description: Needs revoke_token.
+      operationId: revokeToken
       parameters:
         - name: id
           in: path
@@ -871,10 +1458,7 @@ paths:
         "403":
           $ref: "#/components/responses/AdminForbidden"
         "404":
-          description: No such token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/MessageError" }
+          $ref: "#/components/responses/AdminNotFound"
         "409":
           description: Token changed concurrently.
           content:
@@ -908,6 +1492,33 @@ components:
       in: path
       required: true
       schema: { type: string }
+    TopicName:
+      name: name
+      in: path
+      required: true
+      description: The full topic name, URL-encoded.
+      schema: { type: string }
+    Index:
+      name: index
+      in: path
+      required: true
+      description: The partition index.
+      schema: { type: integer, minimum: 0 }
+    NodeId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+    Limit:
+      name: limit
+      in: query
+      description: Items per page.
+      schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+    Cursor:
+      name: cursor
+      in: query
+      description: The `next` of the previous page. Send the same filters with it.
+      schema: { type: string }
   headers:
     NextSeq:
       description: The partition's next sequence. Pass as `seq` to resume.
@@ -934,6 +1545,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    BadPage:
+      description: An invalid limit or filter, or a cursor sent with different filters.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     GroupError:
       description: >
         unknown_member, not_found, rebalance_in_progress, illegal_generation,
@@ -942,6 +1558,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    AdminBadRequest:
+      description: Invalid parameters or body.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/MessageError" }
     AdminUnauthenticated:
       description: Missing or invalid credential.
       headers:
@@ -951,10 +1572,30 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/MessageError" }
     AdminForbidden:
-      description: Valid credential, insufficient scope.
+      description: Valid credential, insufficient scope, or a token with autoPrefix.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/MessageError" }
+    AdminNotFound:
+      description: No such topic, partition, record, group, node, or token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/MessageError" }
+    GroupHasMembers:
+      description: The group still has members.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/MessageError" }
+    ForwardFailed:
+      description: The node that holds the answer could not be reached.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/MessageError" }
+    Metrics:
+      description: Counters and gauges since process start.
+      content:
+        text/plain:
+          schema: { type: string, description: Prometheus text format. }
   schemas:
     Error:
       type: object
@@ -965,45 +1606,58 @@ components:
         next_seq: { type: integer }
     MessageError:
       type: object
-      description: Errors on the admin listener and the topic config and schema routes.
+      description: Errors on the admin listener and the topic config route.
       required: [error]
       properties:
         error: { type: string, description: A message. }
+    Next:
+      type: [string, "null"]
+      description: The cursor for the next page, null on the last one.
+    Header:
+      type: object
+      required: [name]
+      description: A header value is null, text in `value`, or other bytes in `value_b64`.
+      properties:
+        name: { type: string }
+        value: { type: [string, "null"] }
+        value_b64: { type: string }
+    PicoRecord:
+      type: object
+      description: >
+        Text goes in `key`, `body`, and header `value`. Other bytes use the
+        `_b64` field instead. A null body is a tombstone. An absent key means
+        no key.
+      properties:
+        key: { type: [string, "null"] }
+        key_b64: { type: string }
+        headers:
+          type: array
+          description: In record order, so a name can repeat.
+          items: { $ref: "#/components/schemas/Header" }
+        body: { type: [string, "null"] }
+        body_b64: { type: string }
     JsonBatch:
       type: object
       required: [records]
       properties:
         records:
           type: array
-          items:
-            type: object
-            required: [body]
-            properties:
-              body: { type: string }
-              headers:
-                type: object
-                additionalProperties: { type: string }
+          items: { $ref: "#/components/schemas/PicoRecord" }
     ReadPage:
       type: array
       items:
-        type: object
-        required: [seq, timestamp]
-        properties:
-          seq: { type: integer }
-          timestamp: { type: integer }
-          headers:
-            type: object
-            additionalProperties: { type: string }
-          body:
-            type: string
-            description: Present when the record body is valid UTF-8.
-          body_b64:
-            type: string
-            description: Base64 body, present when the body is not UTF-8.
+        allOf:
+          - $ref: "#/components/schemas/PicoRecord"
+          - type: object
+            required: [seq, timestamp]
+            properties:
+              seq: { type: integer }
+              timestamp: { type: integer }
     StreamList:
       type: object
+      required: [items, next]
       properties:
-        streams:
+        items:
           type: array
           items:
             type: object
@@ -1011,12 +1665,63 @@ components:
               name: { type: string }
               content_type: { type: string }
               partitions: { type: integer }
-              start_seq: { type: integer, description: Single-partition topics only. }
-              next_seq: { type: integer, description: Single-partition topics only. }
               closed: { type: boolean }
               ttl: { type: integer }
               expires_at: { type: string }
-        has_more: { type: boolean }
+        next: { $ref: "#/components/schemas/Next" }
+    TopicConfig:
+      type: object
+      properties:
+        partitions: { type: integer, minimum: 1 }
+        kafkaTopic: { type: [string, "null"], description: Follows from the name. Read only. }
+        retentionMs: { type: [integer, "null"], minimum: 1, description: Null when unlimited. }
+        retentionBytes: { type: [integer, "null"], minimum: 1, description: Null when unlimited. }
+    TopicUpdate:
+      type: object
+      properties:
+        retentionMs: { type: [integer, "null"], minimum: 1 }
+        retentionBytes: { type: [integer, "null"], minimum: 1 }
+        partitions:
+          type: integer
+          description: Grows the topic to this many partitions, at most 10000 more at a time. Never shrinks it.
+    Offsets:
+      type: object
+      additionalProperties:
+        type: object
+        required: [position]
+        properties:
+          position: { type: integer }
+          metadata: { type: [string, "null"] }
+    GroupDescription:
+      type: object
+      properties:
+        group: { type: string }
+        state: { type: string }
+        generation: { type: integer }
+        protocolType: { type: string }
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              memberId: { type: string }
+              instanceId: { type: [string, "null"] }
+              clientId: { type: string }
+              subscription:
+                type: array
+                items: { type: string }
+              assignment:
+                type: array
+                items: { type: string }
+    Readiness:
+      type: object
+      properties:
+        ready: { type: boolean }
+        serving: { type: boolean }
+        registered: { type: boolean }
+        fenced: { type: boolean }
+        appliedIndex: { type: integer }
+        nodeId: { type: integer }
     Cluster:
       type: object
       properties:
@@ -1054,55 +1759,242 @@ components:
         leaseHolder:
           type: [boolean, "null"]
           description: Whether this node holds the maintenance lease. Null when unknown.
-        pendingTransfers:
+        pendingTransferCount: { type: integer }
+    Overview:
+      type: object
+      properties:
+        computedAtMs: { type: integer }
+        topicsBySize:
           type: array
           items:
             type: object
             properties:
-              streamId: { type: integer }
-              fromNode: { type: integer }
-              toNode: { type: integer }
+              topic: { type: string }
+              storedBytes: { type: integer }
+        topicsByWriteRate:
+          type: array
+          items:
+            type: object
+            properties:
+              topic: { type: string }
+              recordsPerSecond: { type: number }
+        writeRateSinceMs:
+          type: [integer, "null"]
+          description: Start of the window the write rates cover. Null on a node's first pass, when there is no rate yet.
+    Transfer:
+      type: object
+      properties:
+        log:
+          type: [object, "null"]
+          description: The partition, or the group, being moved.
+          properties:
+            topic: { type: string }
+            partition: { type: integer }
+            group: { type: string }
+        fromNode: { type: integer }
+        toNode: { type: integer }
     Node:
       type: object
       properties:
         nodeId: { type: integer }
         nodeEpoch: { type: integer }
-        advertisedAddress: { type: string }
+        advertisedAddress: { type: [string, "null"] }
         slots: { type: integer }
         openingCount: { type: integer }
         placedCount: { type: integer }
         local: { type: boolean }
         fenced: { type: boolean }
-    StreamDetail:
+    Topic:
       type: object
       properties:
         name: { type: string }
-        topicId: { type: string }
+        id: { type: string }
         partitions: { type: integer }
-        partition: { type: integer }
-        streamId: { type: integer }
-        ownerNodeId: { type: [integer, "null"] }
-        ownerAdvertisedAddress: { type: [string, "null"] }
-        ownerLocal: { type: boolean }
         contentType: { type: string }
         kafkaTopic: { type: [string, "null"] }
+        retentionMs: { type: [integer, "null"] }
+        retentionBytes: { type: [integer, "null"] }
         ttlSeconds: { type: [integer, "null"] }
         expiresAtMs: { type: [integer, "null"] }
         closed: { type: boolean }
-        state:
-          type: [string, "null"]
-          description: opened or closed. Null before first open.
+    TopicDetail:
+      allOf:
+        - $ref: "#/components/schemas/Topic"
+        - type: object
+          properties:
+            storedBytes: { type: integer }
+            owners:
+              type: array
+              items:
+                type: object
+                properties:
+                  nodeId: { type: [integer, "null"] }
+                  partitions: { type: integer }
+    TopicCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        partitions: { type: integer, minimum: 1 }
+        contentType: { type: string }
+        retentionMs: { type: integer, minimum: 1 }
+        retentionBytes: { type: integer, minimum: 1 }
+        ttlSeconds: { type: integer, minimum: 0 }
+    Partition:
+      type: object
+      properties:
+        index: { type: integer }
+        streamId: { type: [integer, "null"] }
+        ownerNodeId: { type: [integer, "null"] }
         epoch: { type: [integer, "null"] }
-        nodeId:
-          type: [integer, "null"]
-          description: Node in the placement row, may lag the effective owner during a transfer.
-        startOffset: { type: [integer, "null"] }
-        endOffset: { type: [integer, "null"] }
+        state: { type: [string, "null"], enum: [opened, closed, null] }
         pendingTransfer:
           type: [object, "null"]
           properties:
             fromNode: { type: integer }
             toNode: { type: integer }
+        startOffset: { type: [integer, "null"] }
+        nextOffset: { type: [integer, "null"] }
+        current: { type: boolean, description: False when the owner could not be asked and the offsets are missing. }
+        storedBytes: { type: [integer, "null"] }
+    Field:
+      type: object
+      properties:
+        data: { type: string }
+        encoding: { type: string, enum: [utf8, base64] }
+        size: { type: integer, description: The full length in bytes. }
+        truncated: { type: boolean }
+    AdminRecord:
+      type: object
+      properties:
+        offset: { type: integer }
+        timestamp: { type: integer }
+        key:
+          oneOf: [{ $ref: "#/components/schemas/Field" }, { type: "null" }]
+        value:
+          oneOf: [{ $ref: "#/components/schemas/Field" }, { type: "null" }]
+        headers:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              value:
+                oneOf: [{ $ref: "#/components/schemas/Field" }, { type: "null" }]
+    FieldWrite:
+      type: object
+      required: [data, encoding]
+      additionalProperties: false
+      properties:
+        data: { type: string }
+        encoding: { type: string, enum: [utf8, base64] }
+    RecordWrite:
+      type: object
+      additionalProperties: false
+      properties:
+        key:
+          oneOf: [{ $ref: "#/components/schemas/FieldWrite" }, { type: "null" }]
+        value:
+          description: Null is a tombstone.
+          oneOf: [{ $ref: "#/components/schemas/FieldWrite" }, { type: "null" }]
+        headers:
+          type: array
+          items:
+            type: object
+            required: [name]
+            properties:
+              name: { type: string }
+              value:
+                oneOf: [{ $ref: "#/components/schemas/FieldWrite" }, { type: "null" }]
+    GroupState:
+      type: string
+      enum: [Empty, PreparingRebalance, CompletingRebalance, Stable]
+    Group:
+      type: object
+      properties:
+        groupId: { type: string }
+        state:
+          oneOf: [{ $ref: "#/components/schemas/GroupState" }, { type: "null" }]
+          description: Null when the coordinator could not be asked.
+        protocolType: { type: string }
+        protocolName: { type: string }
+        generation: { type: integer }
+        members: { type: integer }
+        coordinatorNodeId: { type: [integer, "null"] }
+        current: { type: boolean }
+    GroupDetail:
+      type: object
+      properties:
+        groupId: { type: string }
+        state: { $ref: "#/components/schemas/GroupState" }
+        protocolType: { type: string }
+        protocolName: { type: string }
+        generation: { type: integer }
+        members: { type: integer }
+        coordinatorNodeId: { type: integer }
+        committedPartitions: { type: integer }
+    Member:
+      type: object
+      properties:
+        memberId: { type: string }
+        instanceId: { type: [string, "null"] }
+        clientId: { type: string }
+        clientHost: { type: string }
+        assignment:
+          description: >
+            Topics for Pico members, topics and partitions decoded from Kafka
+            consumers, or only the size for other Kafka protocols.
+          oneOf:
+            - type: object
+              properties:
+                streams:
+                  type: array
+                  items: { type: string }
+            - type: object
+              properties:
+                topics:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      topic: { type: string }
+                      partitions:
+                        type: array
+                        items: { type: integer }
+            - type: object
+              properties:
+                bytes: { type: integer }
+    GroupOffset:
+      type: object
+      properties:
+        topic: { type: [string, "null"] }
+        partition: { type: integer }
+        committedOffset: { type: integer }
+        metadata: { type: [string, "null"] }
+        nextOffset: { type: [integer, "null"] }
+        lag: { type: [integer, "null"] }
+        current: { type: boolean }
+    OffsetReset:
+      type: object
+      required: [topic, to]
+      properties:
+        topic: { type: string }
+        to:
+          oneOf:
+            - type: string
+              enum: [earliest, latest]
+            - type: object
+              required: [offset]
+              properties:
+                offset: { type: integer, minimum: 0 }
+            - type: object
+              required: [timestamp]
+              properties:
+                timestamp: { type: integer }
+        partitions:
+          type: array
+          description: All partitions when absent.
+          items: { type: integer }
     ResourceMatcher:
       type: object
       oneOf:
@@ -1158,7 +2050,6 @@ components:
                 delete_group,
                 cluster_read,
                 node_read,
-                stream_inspect,
                 transfer_stream,
                 update_node_slots,
               ]
@@ -1174,13 +2065,6 @@ components:
         scope: { $ref: "#/components/schemas/Scope" }
         createdAtMs: { type: integer }
         issuedBy: { type: string }
-    TokenList:
-      type: object
-      properties:
-        count: { type: integer }
-        tokens:
-          type: array
-          items: { $ref: "#/components/schemas/TokenRecord" }
     IssueTokenRequest:
       type: object
       required: [id, scope]
@@ -1188,47 +2072,8 @@ components:
         id: { type: string }
         scope: { $ref: "#/components/schemas/Scope" }
     IssueTokenResponse:
-      type: object
-      properties:
-        id: { type: string }
-        token: { type: string }
-        scope: { $ref: "#/components/schemas/Scope" }
-        createdAtMs: { type: integer }
-    TopicConfig:
-      type: object
-      properties:
-        schema: { type: [string, "null"] }
-        schemaValidate: { type: boolean }
-        partitions: { type: integer, minimum: 1 }
-        kafkaTopic: { type: [string, "null"], description: Follows from the name. Read only. }
-        retentionMs: { type: [integer, "null"], minimum: 1, description: Null when unlimited. }
-        retentionBytes: { type: [integer, "null"], minimum: 1, description: Null when unlimited. }
-    Offsets:
-      type: object
-      additionalProperties:
-        type: object
-        required: [position]
-        properties:
-          position: { type: integer }
-          metadata: { type: [string, "null"] }
-    GroupDescription:
-      type: object
-      properties:
-        group: { type: string }
-        state: { type: string }
-        generation: { type: integer }
-        protocolType: { type: string }
-        members:
-          type: array
-          items:
-            type: object
-            properties:
-              memberId: { type: string }
-              instanceId: { type: [string, "null"] }
-              clientId: { type: string }
-              subscription:
-                type: array
-                items: { type: string }
-              assignment:
-                type: array
-                items: { type: string }
+      allOf:
+        - $ref: "#/components/schemas/TokenRecord"
+        - type: object
+          properties:
+            token: { type: string, description: The wire token, shown only here. }

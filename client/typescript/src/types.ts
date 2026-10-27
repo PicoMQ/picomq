@@ -37,13 +37,18 @@ export interface RecordsOptions extends PartitionOptions {
 
 export type HeaderValue = string | Uint8Array
 
+export interface Header {
+  name: string
+  value: HeaderValue | null
+}
+
 export type AppendInput =
   | Uint8Array
   | string
   | {
-      body: Uint8Array | string
+      body: Uint8Array | string | null
       key?: Uint8Array | string
-      headers?: { [key: string]: HeaderValue }
+      headers?: Header[]
       timestamp?: number | bigint
     }
 
@@ -58,7 +63,6 @@ export interface StreamInfo {
   expiresAt?: string
   retentionMs?: number
   retentionBytes?: number
-  schema?: string
   kafkaTopic?: string
 }
 
@@ -69,14 +73,10 @@ export interface CreateOptions extends CallOptions {
   expiresAt?: string
   retentionMs?: number
   retentionBytes?: number
-  schema?: string
-  schemaValidate?: boolean
   closed?: boolean
 }
 
 export interface TopicConfig {
-  schema?: string
-  schemaValidate: boolean
   kafkaTopic?: string
   partitions: number
   retentionMs?: number
@@ -88,20 +88,9 @@ export interface TopicConfig {
  * removes the setting. `partitions` grows the topic and never shrinks it.
  */
 export interface ConfigUpdate {
-  schema?: string | null
-  schemaValidate?: boolean
   retentionMs?: number | null
   retentionBytes?: number | null
   partitions?: number
-}
-
-export interface PutSchemaOptions extends CallOptions {
-  contentType?: string
-}
-
-export interface Schema {
-  contentType?: string
-  body: Uint8Array
 }
 
 export interface AppendAck {
@@ -114,8 +103,8 @@ export interface StreamRecord {
   position: string
   timestamp?: number
   key?: Uint8Array
-  headers: { [key: string]: HeaderValue }
-  body: Uint8Array
+  headers: Header[]
+  body: Uint8Array | null
 }
 
 export interface ReadPage {
@@ -127,7 +116,12 @@ export interface ReadPage {
 
 export interface StreamListing {
   streams: StreamInfo[]
-  hasMore: boolean
+  next?: string
+}
+
+export interface GroupListing {
+  groups: string[]
+  next?: string
 }
 
 export interface ReadLimits {
@@ -216,13 +210,15 @@ export interface StreamApi {
     options?: PartitionOptions,
   ): Promise<ReadPage>
   subscribe(name: string, from: string, options?: SubscribeOptions): AsyncIterable<SseEvent>
-  list(prefix: string, limit?: number, options?: CallOptions): Promise<StreamListing>
+  list(
+    prefix: string,
+    limit?: number,
+    cursor?: string,
+    options?: CallOptions,
+  ): Promise<StreamListing>
   close(name: string, options?: CallOptions): Promise<string>
   delete(name: string, options?: CallOptions): Promise<boolean>
   config(name: string, options?: CallOptions): Promise<TopicConfig | null>
   updateConfig(name: string, update: ConfigUpdate, options?: CallOptions): Promise<TopicConfig>
-  putSchema(name: string, body: Uint8Array | string, options?: PutSchemaOptions): Promise<void>
-  getSchema(name: string, options?: CallOptions): Promise<Schema | null>
-  deleteSchema(name: string, options?: CallOptions): Promise<boolean>
   closeTransport(): Promise<void>
 }

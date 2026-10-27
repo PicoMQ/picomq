@@ -1,0 +1,24 @@
+.tabs {
+  display: flex;
+}
+
+.tabs::after {
+  flex: 1;
+  border-bottom: var(--line);
+  content: "";
+}
+
+.tabs-item {
+  padding: var(--space-2) var(--space-4);
+  border-bottom: var(--line);
+  color: var(--color-text-2);
+}
+
+.tabs-item:hover {
+  color: var(--color-text-1);
+}
+
+.tabs-item[aria-current="page"] {
+  border-bottom: var(--line-active);
+  color: var(--color-text-1);
+}

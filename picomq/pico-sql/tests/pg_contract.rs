@@ -1,8 +1,8 @@
 //! Postgres contract test. The same behavioral suite the SQLite backends
-//! pass, run against a real Postgres when `PICOMQ_PG_URL` is set, e.g.:
+//! pass, run against a real Postgres when `PICO_TEST_PG_URL` is set, e.g.:
 //!
 //! ```text
-//! PICOMQ_PG_URL=postgres://user:pass@localhost:5432/picomq \
+//! PICO_TEST_PG_URL=postgres://user:pass@localhost:5432/picomq \
 //!     cargo test -p picomq-sql --test pg_contract
 //! ```
 //!
@@ -15,8 +15,8 @@ use picomq_sql::store::contract_suite;
 
 #[tokio::test]
 async fn postgres_contract() {
-    let Ok(url) = std::env::var("PICOMQ_PG_URL") else {
-        eprintln!("PICOMQ_PG_URL not set; skipping postgres contract test");
+    let Ok(url) = std::env::var("PICO_TEST_PG_URL") else {
+        eprintln!("PICO_TEST_PG_URL not set; skipping postgres contract test");
         return;
     };
 

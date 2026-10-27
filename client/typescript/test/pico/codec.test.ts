@@ -36,19 +36,30 @@ const utf8 = (s: string) => new TextEncoder().encode(s)
 describe('codec', () => {
   it('batch append bytes match the server layout', () => {
     const encoded = encodeBatchAppend([
-      { timestamp: 0n, key: utf8('k'), headers: { a: 'b' }, body: utf8('xy') },
-      { timestamp: 0n, headers: {}, body: new Uint8Array() },
+      {
+        timestamp: 0n,
+        key: utf8('k'),
+        headers: [
+          { name: 'a', value: 'b' },
+          { name: 'n', value: null },
+        ],
+        body: utf8('xy'),
+      },
+      { timestamp: 0n, headers: [], body: new Uint8Array() },
     ])
     const expected = concat(
       [1],
       beU32(2),
       beI32(1),
       utf8('k'),
-      beU32(1),
+      beU32(2),
       beU32(1),
       utf8('a'),
-      beU32(1),
+      beI32(1),
       utf8('b'),
+      beU32(1),
+      utf8('n'),
+      beI32(-1),
       beU32(2),
       utf8('xy'),
       beI32(-1),
@@ -58,31 +69,46 @@ describe('codec', () => {
     expect(encoded).toEqual(expected)
   })
 
-  it('round trips keys, binary headers, and empty vs absent keys', () => {
+  it('round trips keys, repeated, binary and null headers, and empty vs absent keys', () => {
     const records = [
       {
         timestamp: 0n,
         key: utf8('k1'),
-        headers: { text: 'v', bin: new Uint8Array([0xff, 0x00]) },
+        headers: [
+          { name: 'text', value: 'v' },
+          { name: 'bin', value: new Uint8Array([0xff, 0x00]) },
+          { name: 'text', value: 'w' },
+          { name: 'flag', value: null },
+          { name: 'empty', value: '' },
+        ],
         body: utf8('one'),
       },
-      { timestamp: 0n, headers: {}, body: utf8('two') },
-      { timestamp: 0n, key: new Uint8Array(), headers: {}, body: new Uint8Array([0xfe]) },
+      { timestamp: 0n, headers: [], body: utf8('two') },
+      { timestamp: 0n, key: new Uint8Array(), headers: [], body: new Uint8Array([0xfe]) },
+      { timestamp: 0n, key: utf8('gone'), headers: [], body: null },
+      { timestamp: 0n, headers: [], body: new Uint8Array() },
     ]
     const decoded = decodeBatchAppend(encodeBatchAppend(records))
     expect(decoded).toEqual(records)
     expect(decoded[1]!.key).toBeUndefined()
     expect(decoded[2]!.key).toEqual(new Uint8Array())
+    expect(decoded[3]!.body).toBeNull()
+    expect(decoded[4]!.body).toEqual(new Uint8Array())
 
     const sequenced = [
-      { seq: 4n, envelope: { timestamp: 9n, key: utf8('k'), headers: { k: 'v' }, body: utf8('one') } },
-      { seq: 5n, envelope: { timestamp: 9n, headers: {}, body: new Uint8Array() } },
+      {
+        seq: 4n,
+        envelope: { timestamp: 9n, key: utf8('k'), headers: [{ name: 'k', value: 'v' }], body: utf8('one') },
+      },
+      { seq: 5n, envelope: { timestamp: 9n, headers: [], body: new Uint8Array() } },
     ]
     expect(decodeBatchRead(encodeBatchRead(sequenced))).toEqual(sequenced)
   })
 
   it('rejects bad version, truncation, and trailing bytes', () => {
-    const encoded = encodeBatchAppend([{ timestamp: 0n, headers: { a: 'b' }, body: utf8('x') }])
+    const encoded = encodeBatchAppend([
+      { timestamp: 0n, headers: [{ name: 'a', value: 'b' }], body: utf8('x') },
+    ])
     const bad = new Uint8Array(encoded)
     bad[0] = 9
     expect(() => decodeBatchAppend(bad)).toThrow(CodecError)

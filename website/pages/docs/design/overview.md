@@ -10,7 +10,7 @@ A PicoMQ deployment has three components. Nodes serve clients and hold only cach
 
 ## Anatomy of a node
 
-Each node runs the same stack. An HTTP listener speaks the Pico protocol or Durable Streams, a Kafka listener serves Kafka clients, and an admin listener serves the admin API and the dashboard. Behind them:
+Each node runs the same stack. An HTTP listener speaks the Pico protocol or Durable Streams, a Kafka listener serves Kafka clients, and an admin listener serves the [admin API](/docs/operations/admin) and the [console](/docs/operations/console). Behind them:
 
 - The ownership router decides whether this node serves a partition or redirects, see [Ownership and routing](/docs/design/ownership).
 - The topic layer maps names to topics, partitions, and logs, see [Topics and streams](/docs/design/streams), and the group coordinator runs [consumer groups](/docs/design/groups).
@@ -31,7 +31,7 @@ Each node runs the same stack. An HTTP listener speaks the Pico protocol or Dura
 <text x="108" y="82" text-anchor="middle" class="sub">Pico, Durable Streams, Kafka</text>
     <rect x="276" y="40" width="216" height="56" class="box"/>
 <text x="383" y="64" text-anchor="middle" class="label">admin listener</text>
-<text x="383" y="82" text-anchor="middle" class="sub">API, dashboard</text>
+<text x="383" y="82" text-anchor="middle" class="sub">API, console</text>
     <rect x="0" y="136" width="216" height="56" class="box"/>
 <text x="108" y="160" text-anchor="middle" class="label">ownership router</text>
 <text x="108" y="178" text-anchor="middle" class="sub">serve here or 307</text>

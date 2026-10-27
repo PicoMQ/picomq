@@ -1,0 +1,19 @@
+.login {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: var(--space-5);
+}
+
+.login-card {
+  display: grid;
+  gap: var(--space-4);
+  width: min(100%, 26rem);
+  padding: var(--space-6);
+  border: var(--line);
+  background: var(--color-surface-1);
+}
+
+.login-note {
+  color: var(--color-text-3);
+}

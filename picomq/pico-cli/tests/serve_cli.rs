@@ -85,7 +85,10 @@ async fn rejects_an_unsupported_meta_url() {
 
 async fn owner_of(client: &reqwest::Client, admin_url: &str, stream: &str) -> i64 {
     let body: serde_json::Value = client
-        .get(format!("{admin_url}/admin/streams/{stream}"))
+        .get(format!(
+            "{admin_url}/admin/topics/{}/partitions/0",
+            picomq_protocol::stream_segment(stream)
+        ))
         .send()
         .await
         .unwrap()
@@ -227,7 +230,7 @@ async fn sigterm_hands_the_node_off_and_exits_cleanly() {
             .json()
             .await
             .unwrap();
-        let fenced = nodes["nodes"]
+        let fenced = nodes["items"]
             .as_array()
             .unwrap()
             .iter()

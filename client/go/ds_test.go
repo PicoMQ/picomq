@@ -97,7 +97,7 @@ var _ = ginkgo.Describe("Durable Streams client", func() {
 	ginkgo.It("reports unsupported union operations as structured errors", func() {
 		client, err := NewDurableStreams("http://127.0.0.1:4437")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = client.List(context.Background(), "", 0)
+		_, err = client.List(context.Background(), "", 0, "")
 		Expect(IsKind(err, ErrorUnsupported)).To(BeTrue())
 		var clientError *ClientError
 		Expect(errors.As(err, &clientError)).To(BeTrue())
@@ -120,6 +120,13 @@ var _ = ginkgo.Describe("Durable Streams client", func() {
 		client, err := NewDurableStreams("http://127.0.0.1:4437")
 		Expect(err).NotTo(HaveOccurred())
 		_, err = client.Append(context.Background(), "events", []AppendRecord{{Key: []byte("key"), Body: []byte("value")}})
+		Expect(IsKind(err, ErrorUnsupported)).To(BeTrue())
+	})
+
+	ginkgo.It("rejects null record bodies as unsupported", func() {
+		client, err := NewDurableStreams("http://127.0.0.1:4437")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = client.Append(context.Background(), "events", []AppendRecord{{Body: nil}})
 		Expect(IsKind(err, ErrorUnsupported)).To(BeTrue())
 	})
 })

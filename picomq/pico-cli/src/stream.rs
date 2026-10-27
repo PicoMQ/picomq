@@ -11,7 +11,8 @@ use picomq_client::{
 };
 
 use crate::io::{note, print_record, stdin_records};
-use crate::schema::SchemaCommand;
+
+const LS_PAGE: u64 = 1_000;
 
 #[derive(Debug, Args)]
 pub struct Endpoint {
@@ -143,12 +144,6 @@ pub enum StreamCommand {
         /// Keep at least the newest this many bytes per partition.
         #[arg(long)]
         retention_bytes: Option<u64>,
-        /// Bind this registered schema.
-        #[arg(long)]
-        schema: Option<String>,
-        /// Validate appends against the bound schema.
-        #[arg(long, requires = "schema")]
-        schema_validate: bool,
         /// Create the topic already sealed.
         #[arg(long)]
         closed: bool,
@@ -165,14 +160,7 @@ pub enum StreamCommand {
         retention_ms: Option<String>,
         #[arg(long, value_name = "BYTES|none")]
         retention_bytes: Option<String>,
-        #[arg(long, value_name = "NAME|none")]
-        schema: Option<String>,
-        #[arg(long)]
-        schema_validate: Option<bool>,
     },
-    /// Register, print, or remove schemas.
-    #[command(subcommand)]
-    Schema(SchemaCommand),
     /// Print a stream's position and metadata.
     Head {
         stream: String,
@@ -248,8 +236,6 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
             expires_at,
             retention_ms,
             retention_bytes,
-            schema,
-            schema_validate,
             closed,
         } => {
             let options = CreateOptions {
@@ -258,8 +244,6 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
                 expires_at,
                 retention_ms,
                 retention_bytes,
-                schema,
-                schema_validate,
                 closed,
                 ..CreateOptions::new(content_type)
             };
@@ -288,21 +272,14 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
             partitions,
             retention_ms,
             retention_bytes,
-            schema,
-            schema_validate,
         } => {
             let update = ConfigUpdate {
                 stream,
-                schema: alter_value(schema, "--schema")?,
-                schema_validate,
                 retention_ms: alter_value(retention_ms, "--retention-ms")?,
                 retention_bytes: alter_value(retention_bytes, "--retention-bytes")?,
                 partitions,
             };
             print_config(&client.update_config(&update).await?);
-        }
-        StreamCommand::Schema(command) => {
-            return crate::schema::run(client.as_ref(), command).await;
         }
         StreamCommand::Head { stream, partition } => {
             let Some(head) = client.head(&stream, partition).await? else {
@@ -411,19 +388,26 @@ pub async fn run(endpoint: &Target, command: StreamCommand) -> Result<i32, Clien
             }
         }
         StreamCommand::Ls { prefix, limit } => {
-            let listing = client.list(&prefix, limit).await?;
-            for stream in &listing.streams {
-                println!(
-                    "{} partitions={} start={} next={} closed={}",
-                    stream.name,
-                    stream.partitions,
-                    stream.start.as_deref().unwrap_or("-"),
-                    stream.next.as_deref().unwrap_or("-"),
-                    stream.closed
-                );
-            }
-            if listing.has_more {
-                note("more streams available, raise --limit");
+            let mut cursor: Option<String> = None;
+            let mut listed = 0;
+
+            'pages: loop {
+                let page = client.list(&prefix, LS_PAGE, cursor.as_deref()).await?;
+                for stream in &page.streams {
+                    if limit > 0 && listed == limit {
+                        break 'pages;
+                    }
+                    println!(
+                        "{} partitions={} closed={}",
+                        stream.name, stream.partitions, stream.closed
+                    );
+                    listed += 1;
+                }
+
+                match page.next {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
             }
         }
         StreamCommand::Close { stream } => {
@@ -456,8 +440,6 @@ fn print_config(config: &TopicConfig) {
     println!("partitions={}", config.partitions);
     println!("retention.ms={}", or_dash(config.retention_ms));
     println!("retention.bytes={}", or_dash(config.retention_bytes));
-    println!("schema={}", config.schema.as_deref().unwrap_or("-"));
-    println!("schema_validate={}", config.schema_validate);
     println!(
         "kafka_topic={}",
         config.kafka_topic.as_deref().unwrap_or("-")

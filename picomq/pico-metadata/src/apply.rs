@@ -308,6 +308,7 @@ fn create_stream(state: &mut MetadataState) -> Result<MetadataResult, MetadataEr
         end_offset: 0,
         state: StreamState::Closed,
         node_id: -1,
+        stored_bytes: 0,
     });
     Ok(MetadataResult::Id(stream_id))
 }
@@ -336,6 +337,7 @@ fn create_streams(state: &mut MetadataState, count: u32) -> Result<MetadataResul
             end_offset: 0,
             state: StreamState::Closed,
             node_id: -1,
+            stored_bytes: 0,
         });
     }
     state.next_stream_id = first + count as u64;
@@ -513,8 +515,7 @@ fn trim_stream(
         .map(|(key, _)| *key)
         .collect();
     for key in dead {
-        state.stream_objects.remove(&key);
-        state.stream_object_ids.remove(&key.2);
+        state.remove_stream_object(key.2);
         mark_destroyed(state, key.2, CompactOperations::Delete);
     }
     Ok(MetadataResult::Unit)
@@ -685,8 +686,7 @@ fn delete_stream(
         .map(|(key, _)| *key)
         .collect();
     for key in keys {
-        state.stream_objects.remove(&key);
-        state.stream_object_ids.remove(&key.2);
+        state.remove_stream_object(key.2);
         mark_destroyed(state, key.2, CompactOperations::Delete);
     }
     Ok(MetadataResult::Unit)
@@ -731,16 +731,9 @@ fn prepare_object(
     state.next_object_id += count as u64;
     let deadline = now_ms + ttl_ms.max(0);
     for id in first..first + count as u64 {
-        state.prepared.insert(id, deadline);
-        state.prepared_by_deadline.insert((deadline, id), ());
+        state.put_prepared(id, deadline);
     }
     Ok(MetadataResult::Id(first))
-}
-
-fn commit_prepared(state: &mut MetadataState, object_id: u64) {
-    if let Some(deadline) = state.prepared.remove(&object_id) {
-        state.prepared_by_deadline.remove(&(deadline, object_id));
-    }
 }
 
 fn advance_end_offset(
@@ -789,14 +782,15 @@ fn advance_end_offset(
 /// semantics: re-marking an existing id updates its operation but keeps its
 /// original FIFO position.
 fn mark_destroyed(state: &mut MetadataState, object_id: u64, op: CompactOperations) {
-    if let Some(seq) = state.destroyed_by_id.get(&object_id).copied() {
-        state.mark_destroyed.insert(seq, (object_id, op));
-        return;
-    }
-    let seq = state.next_destroyed_seq;
-    state.next_destroyed_seq += 1;
-    state.mark_destroyed.insert(seq, (object_id, op));
-    state.destroyed_by_id.insert(object_id, seq);
+    let seq = match state.destroyed_by_id.get(&object_id).copied() {
+        Some(seq) => seq,
+        None => {
+            let seq = state.next_destroyed_seq;
+            state.next_destroyed_seq += 1;
+            seq
+        }
+    };
+    state.put_destroyed(seq, object_id, op);
 }
 
 fn mark_destroy_objects(
@@ -922,13 +916,13 @@ fn commit_stream_set_object(
         .max()
         .unwrap_or(now_ms);
     for &id in &request.compacted_object_ids {
-        remove_stream_set_object(state, id);
+        state.remove_stream_set_object(id);
         mark_destroyed(state, id, CompactOperations::Delete);
     }
 
     if request.object_id != NOOP_OBJECT_ID {
         check_object_id_free(state, request.object_id, None)?;
-        commit_prepared(state, request.object_id);
+        state.remove_prepared(request.object_id);
         for range in &request.stream_ranges {
             advance_end_offset(
                 state,
@@ -955,22 +949,12 @@ fn commit_stream_set_object(
             committed_timestamp_ms: now_ms,
             data_timestamp_ms: data_time_ms,
         };
-        for range in &request.stream_ranges {
-            state.sso_ranges.insert(
-                (range.stream_id, range.start_offset, request.object_id),
-                (range.end_offset, range.size),
-            );
-        }
-        state.sso_by_node.insert((node_id, request.object_id), ());
-        state.stream_set_objects.insert(
-            request.object_id,
-            StreamSetObjectRow {
-                node_id,
-                object,
-                range_sizes: request.stream_ranges.iter().map(|r| r.size).collect(),
-                last_write_ms,
-            },
-        );
+        state.put_stream_set_object(StreamSetObjectRow {
+            node_id,
+            object,
+            range_sizes: request.stream_ranges.iter().map(|r| r.size).collect(),
+            last_write_ms,
+        });
     }
 
     for stream_object in &request.stream_objects {
@@ -983,7 +967,7 @@ fn commit_stream_set_object(
                 stream_object.object_id,
             )),
         )?;
-        commit_prepared(state, stream_object.object_id);
+        state.remove_prepared(stream_object.object_id);
         advance_end_offset(
             state,
             stream_object.stream_id,
@@ -1049,7 +1033,7 @@ fn compact_stream_object(
             Some((stream_id, request.start_offset, request.object_id)),
         )?;
     }
-    commit_prepared(state, request.object_id);
+    state.remove_prepared(request.object_id);
     if request.object_id != NOOP_OBJECT_ID {
         let last_write_ms = request
             .source_object_ids
@@ -1070,11 +1054,12 @@ fn compact_stream_object(
         insert_stream_object(state, &object, now_ms, now_ms, last_write_ms);
     }
     for &source_id in &request.source_object_ids {
-        if let Some(key) = state.stream_object_ids.get(&source_id).copied()
-            && key.0 == stream_id
+        if state
+            .stream_object_ids
+            .get(&source_id)
+            .is_some_and(|key| key.0 == stream_id)
         {
-            state.stream_objects.remove(&key);
-            state.stream_object_ids.remove(&source_id);
+            state.remove_stream_object(source_id);
         }
     }
     mark_destroy_objects(state, &request.source_object_ids, &request.operations)?;
@@ -1088,42 +1073,22 @@ fn insert_stream_object(
     now_ms: i64,
     last_write_ms: i64,
 ) {
-    let key = (
-        stream_object.stream_id,
-        stream_object.start_offset,
-        stream_object.object_id,
-    );
-    state.stream_objects.insert(
-        key,
-        StreamObjectRow {
-            object: S3ObjectMetadata {
-                object_id: stream_object.object_id,
-                object_type: S3ObjectType::Stream,
-                offset_ranges: vec![StreamOffsetRange {
-                    stream_id: stream_object.stream_id,
-                    start_offset: stream_object.start_offset,
-                    end_offset: stream_object.end_offset,
-                }],
-                object_size: stream_object.object_size,
-                attributes: s3stream::ObjectAttributes(stream_object.attributes),
-                committed_timestamp_ms: now_ms,
-                data_timestamp_ms: data_time_ms,
-            },
-            last_write_ms,
+    state.put_stream_object(StreamObjectRow {
+        object: S3ObjectMetadata {
+            object_id: stream_object.object_id,
+            object_type: S3ObjectType::Stream,
+            offset_ranges: vec![StreamOffsetRange {
+                stream_id: stream_object.stream_id,
+                start_offset: stream_object.start_offset,
+                end_offset: stream_object.end_offset,
+            }],
+            object_size: stream_object.object_size,
+            attributes: s3stream::ObjectAttributes(stream_object.attributes),
+            committed_timestamp_ms: now_ms,
+            data_timestamp_ms: data_time_ms,
         },
-    );
-    state.stream_object_ids.insert(stream_object.object_id, key);
-}
-
-fn remove_stream_set_object(state: &mut MetadataState, object_id: u64) {
-    if let Some(row) = state.stream_set_objects.remove(&object_id) {
-        for range in &row.object.offset_ranges {
-            state
-                .sso_ranges
-                .remove(&(range.stream_id, range.start_offset, object_id));
-        }
-        state.sso_by_node.remove(&(row.node_id, object_id));
-    }
+        last_write_ms,
+    });
 }
 
 fn expire_prepared_objects(
@@ -1135,9 +1100,8 @@ fn expire_prepared_objects(
         .range(..=(now_ms, u64::MAX))
         .map(|(key, _)| *key)
         .collect();
-    for (deadline, object_id) in &expired {
-        state.prepared_by_deadline.remove(&(*deadline, *object_id));
-        state.prepared.remove(object_id);
+    for (_, object_id) in &expired {
+        state.remove_prepared(*object_id);
     }
     Ok(MetadataResult::Count(expired.len() as u64))
 }
@@ -1147,9 +1111,7 @@ fn clean_destroyed_objects(
     object_ids: &[u64],
 ) -> Result<MetadataResult, MetadataError> {
     for id in object_ids {
-        if let Some(seq) = state.destroyed_by_id.remove(id) {
-            state.mark_destroyed.remove(&seq);
-        }
+        state.remove_destroyed(*id);
     }
     Ok(MetadataResult::Unit)
 }
@@ -1159,10 +1121,7 @@ fn put_kv(
     key: &str,
     value: &bytes::Bytes,
 ) -> Result<MetadataResult, MetadataError> {
-    if let Some(old) = state.kv.insert(key.to_owned(), value.clone()) {
-        state.kv_bytes -= (key.len() + old.len()) as u64;
-    }
-    state.kv_bytes += (key.len() + value.len()) as u64;
+    state.put_kv(key, value.clone());
     Ok(MetadataResult::Value(Some(value.clone())))
 }
 
@@ -1174,17 +1133,12 @@ fn put_kv_if_absent(
     if let Some(existing) = state.kv.get(key) {
         return Ok(MetadataResult::Value(Some(existing.clone())));
     }
-    state.kv.insert(key.to_owned(), value.clone());
-    state.kv_bytes += (key.len() + value.len()) as u64;
+    state.put_kv(key, value.clone());
     Ok(MetadataResult::Value(Some(value.clone())))
 }
 
 fn delete_kv(state: &mut MetadataState, key: &str) -> Result<MetadataResult, MetadataError> {
-    let removed = state.kv.remove(key);
-    if let Some(old) = &removed {
-        state.kv_bytes -= (key.len() + old.len()) as u64;
-    }
-    Ok(MetadataResult::Value(removed))
+    Ok(MetadataResult::Value(state.remove_kv(key)))
 }
 
 fn put_kv_if_matches(
@@ -1207,13 +1161,7 @@ fn delete_kv_if_matches(
     expected: &bytes::Bytes,
 ) -> Result<MetadataResult, MetadataError> {
     match state.kv.get(key) {
-        Some(current) if current == expected => {
-            let removed = state.kv.remove(key);
-            if let Some(old) = &removed {
-                state.kv_bytes -= (key.len() + old.len()) as u64;
-            }
-            Ok(MetadataResult::Value(removed))
-        }
+        Some(current) if current == expected => Ok(MetadataResult::Value(state.remove_kv(key))),
         _ => Err(MetadataError::Redundant {
             message: format!("kv key {key} missing or value mismatch"),
         }),
@@ -1773,6 +1721,88 @@ mod tests {
         assert_eq!(
             state.stream_object_ids.keys().copied().collect::<Vec<_>>(),
             [objects[1]]
+        );
+        assert_indexes_consistent(&state);
+    }
+
+    #[test]
+    fn stored_bytes_follow_every_object_change() {
+        let mut state = setup();
+        let a = create(&mut state, NODE_1, EPOCH_1);
+        let b = create(&mut state, NODE_1, EPOCH_1);
+        open(&mut state, NODE_1, EPOCH_1, a, 1).unwrap();
+        open(&mut state, NODE_1, EPOCH_1, b, 1).unwrap();
+        let stored = |state: &MetadataState| {
+            (
+                state.streams[&a].stored_bytes,
+                state.streams[&b].stored_bytes,
+                state.stored_bytes,
+            )
+        };
+        let shared = |object_id, compacted, sizes: (u64, u64), object_size| {
+            MetadataCommand::CommitStreamSetObject {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                request: CommitStreamSetObjectRequest {
+                    object_id,
+                    object_size,
+                    attributes: 0,
+                    stream_ranges: vec![
+                        ObjectStreamRange {
+                            stream_id: a,
+                            epoch: 1,
+                            start_offset: 0,
+                            end_offset: 4,
+                            size: sizes.0,
+                        },
+                        ObjectStreamRange {
+                            stream_id: b,
+                            epoch: 1,
+                            start_offset: 0,
+                            end_offset: 4,
+                            size: sizes.1,
+                        },
+                    ],
+                    stream_objects: vec![],
+                    compacted_object_ids: compacted,
+                },
+                now_ms: 1,
+            }
+        };
+
+        let first = prepare(&mut state, 1, 60_000, 0);
+        apply(&mut state, &shared(first, vec![], (10, 20), 40)).unwrap();
+        assert_eq!(stored(&state), (10, 20, 40));
+
+        commit_split(&mut state, a, &[(4, 8)], 1);
+        assert_eq!(stored(&state), (42, 20, 72));
+
+        let merged = prepare(&mut state, 1, 60_000, 0);
+        apply(&mut state, &shared(merged, vec![first], (9, 18), 30)).unwrap();
+        assert_eq!(stored(&state), (41, 18, 62));
+
+        let stale = StreamRow {
+            stored_bytes: 0,
+            ..state.streams[&a]
+        };
+        state.put_stream(stale);
+        assert_eq!(stored(&state), (41, 18, 62));
+
+        close(&mut state, NODE_1, EPOCH_1, a, 1).unwrap();
+        trim(&mut state, NODE_1, EPOCH_1, a, 1, 8).unwrap();
+        assert_eq!(stored(&state), (9, 18, 30));
+
+        apply(
+            &mut state,
+            &MetadataCommand::DeleteStream {
+                proposer: Proposer::new(NODE_1, EPOCH_1),
+                stream_id: a,
+                epoch: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (state.streams[&b].stored_bytes, state.stored_bytes),
+            (18, 30)
         );
         assert_indexes_consistent(&state);
     }
@@ -2423,6 +2453,41 @@ mod tests {
             assert_eq!(state.destroyed_by_id.get(id), Some(seq), "destroyed_by_id");
         }
 
+        let derived_kv_bytes: u64 = state
+            .kv
+            .iter()
+            .map(|(key, value)| (key.len() + value.len()) as u64)
+            .sum();
+        assert_eq!(state.kv_bytes, derived_kv_bytes, "kv_bytes");
+
+        let mut derived_stream_bytes: OrdMap<u64, u64> = OrdMap::new();
+        for ((stream_id, _, _), (_, size)) in state.sso_ranges.iter() {
+            *derived_stream_bytes.entry(*stream_id).or_default() += size;
+        }
+        for ((stream_id, _, _), row) in state.stream_objects.iter() {
+            *derived_stream_bytes.entry(*stream_id).or_default() += row.object.object_size;
+        }
+        for (stream_id, row) in state.streams.iter() {
+            assert_eq!(
+                row.stored_bytes,
+                derived_stream_bytes.get(stream_id).copied().unwrap_or(0),
+                "stored_bytes of stream {stream_id}"
+            );
+        }
+
+        let derived_stored_bytes: u64 = state
+            .stream_set_objects
+            .values()
+            .map(|row| row.object.object_size)
+            .chain(
+                state
+                    .stream_objects
+                    .values()
+                    .map(|row| row.object.object_size),
+            )
+            .sum();
+        assert_eq!(state.stored_bytes, derived_stored_bytes, "stored_bytes");
+
         for (stream_id, _) in state.pending_transfers.iter() {
             assert!(
                 state.streams.contains_key(stream_id),
@@ -2536,46 +2601,80 @@ mod tests {
                     node.clone(),
                     stream_id.clone(),
                     epoch.clone(),
-                    0u64..8,
-                    0u64..16
+                    (0u64..8, 0u64..16, 1u64..8),
+                    (
+                        1u64..100,
+                        proptest::collection::vec(0u64..16, 0..2),
+                        any::<bool>()
+                    )
                 )
-                    .prop_map(|((n, ne), s, e, obj, end)| {
-                        MetadataCommand::CommitStreamSetObject {
-                            proposer: Proposer::new(n, ne),
+                    .prop_map(
+                        |((n, ne), s, e, (obj, start, len), (size, compacted, with_object))| {
+                            let end = start + len;
+                            MetadataCommand::CommitStreamSetObject {
+                                proposer: Proposer::new(n, ne),
 
-                            request: CommitStreamSetObjectRequest {
-                                object_id: obj,
-                                object_size: 64,
-                                attributes: 0,
-                                stream_ranges: vec![ObjectStreamRange {
-                                    stream_id: s,
-                                    epoch: e.max(0) as u64,
-                                    start_offset: 0,
-                                    end_offset: end,
-                                    size: 64,
-                                }],
-                                stream_objects: vec![],
-                                compacted_object_ids: vec![],
-                            },
-                            now_ms: 1,
+                                request: CommitStreamSetObjectRequest {
+                                    object_id: obj,
+                                    object_size: size + 7,
+                                    attributes: 0,
+                                    stream_ranges: vec![ObjectStreamRange {
+                                        stream_id: s,
+                                        epoch: e.max(0) as u64,
+                                        start_offset: start,
+                                        end_offset: end,
+                                        size,
+                                    }],
+                                    stream_objects: with_object
+                                        .then(|| StreamObject {
+                                            object_id: obj + 8,
+                                            object_size: size * 3,
+                                            stream_id: s,
+                                            start_offset: end,
+                                            end_offset: end + 4,
+                                            attributes: 0,
+                                        })
+                                        .into_iter()
+                                        .collect(),
+                                    compacted_object_ids: compacted,
+                                },
+                                now_ms: 1,
+                            }
                         }
-                    }),
-                (node.clone(), stream_id, epoch, 0u64..8).prop_map(|((n, ne), s, e, obj)| {
-                    MetadataCommand::CompactStreamObject {
-                        proposer: Proposer::new(n, ne),
+                    ),
+                (
+                    node.clone(),
+                    stream_id.clone(),
+                    epoch.clone(),
+                    (0u64..24, 0u64..16, 0u64..8),
+                    (1u64..50, proptest::collection::vec(0u64..24, 0..3))
+                )
+                    .prop_map(
+                        |((n, ne), s, e, (obj, start, len), (size, sources))| {
+                            MetadataCommand::CompactStreamObject {
+                                proposer: Proposer::new(n, ne),
 
-                        request: CompactStreamObjectRequest {
-                            object_id: obj,
-                            object_size: 10,
-                            stream_id: s,
-                            stream_epoch: e.max(0) as u64,
-                            start_offset: 0,
-                            end_offset: 0,
-                            source_object_ids: vec![],
-                            operations: vec![],
-                            attributes: 0,
-                        },
-                        now_ms: 1,
+                                request: CompactStreamObjectRequest {
+                                    object_id: obj,
+                                    object_size: size,
+                                    stream_id: s,
+                                    stream_epoch: e.max(0) as u64,
+                                    start_offset: start,
+                                    end_offset: start + len,
+                                    source_object_ids: sources,
+                                    operations: vec![],
+                                    attributes: 0,
+                                },
+                                now_ms: 1,
+                            }
+                        }
+                    ),
+                (node.clone(), stream_id, epoch, 0u64..24).prop_map(|((n, ne), s, e, offset)| {
+                    MetadataCommand::TrimStream {
+                        proposer: Proposer::new(n, ne),
+                        stream_id: s,
+                        epoch: e,
+                        new_start_offset: offset,
                     }
                 }),
                 (0i64..200).prop_map(|now| MetadataCommand::ExpirePreparedObjects {

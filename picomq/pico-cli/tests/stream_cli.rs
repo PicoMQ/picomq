@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{await_ready, pico, start, start_with};
+use common::{await_ready, pico, start};
 
 /// Every command that means the same thing on both wires.
 async fn lifecycle(protocol: &str) {
@@ -184,12 +184,11 @@ async fn ds_protocol_partition_flag() {
     partition_flag("ds").await;
 }
 
-/// Topic settings set on create, described, and altered, and the schemas
-/// they bind, the same on both wires.
+/// Topic settings set on create, described, and altered, the same on both
+/// wires.
 async fn settings(protocol: &str) {
     let dir = tempfile::tempdir().unwrap();
-    let registry = format!("3@file://{}", dir.path().join("schemas").display());
-    let server = start_with(dir.path(), protocol, &["--schema-registry", &registry]);
+    let server = start(dir.path(), protocol);
     await_ready(&reqwest::Client::new(), &server.admin_url).await;
 
     pico(
@@ -211,16 +210,6 @@ async fn settings(protocol: &str) {
         assert!(described.stdout.contains(line), "{}", described.stdout);
     }
 
-    pico(
-        &server,
-        protocol,
-        &["schema", "put", "order.json"],
-        Some(r#"{"type": "object"}"#),
-    )
-    .ok();
-    let schema = pico(&server, protocol, &["schema", "get", "order.json"], None).ok();
-    assert_eq!(schema.stdout, r#"{"type": "object"}"#);
-
     let altered = pico(
         &server,
         protocol,
@@ -233,18 +222,11 @@ async fn settings(protocol: &str) {
             "none",
             "--retention-bytes",
             "4096",
-            "--schema",
-            "order.json",
         ],
         None,
     )
     .ok();
-    for line in [
-        "partitions=3",
-        "retention.ms=-",
-        "retention.bytes=4096",
-        "schema=order.json",
-    ] {
+    for line in ["partitions=3", "retention.ms=-", "retention.bytes=4096"] {
         assert!(altered.stdout.contains(line), "{}", altered.stdout);
     }
 
@@ -256,22 +238,6 @@ async fn settings(protocol: &str) {
     );
     assert_eq!(shrink.code, 1, "{}", shrink.stderr);
     assert!(shrink.stderr.contains("bad_request"), "{}", shrink.stderr);
-
-    pico(
-        &server,
-        protocol,
-        &["alter", "/streams/settings", "--schema", "none"],
-        None,
-    )
-    .ok();
-    let removed = pico(&server, protocol, &["schema", "rm", "order.json"], None).ok();
-    assert!(
-        removed.stderr.contains("deleted=true"),
-        "{}",
-        removed.stderr
-    );
-    let missing = pico(&server, protocol, &["schema", "get", "order.json"], None);
-    assert_eq!(missing.code, 1, "{}", missing.stderr);
 }
 
 #[tokio::test]

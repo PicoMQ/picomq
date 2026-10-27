@@ -1,0 +1,100 @@
+:root {
+  color-scheme: light;
+  background: var(--color-surface-0);
+  color: var(--color-text-1);
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  color: var(--color-text-1);
+  font-weight: 500;
+}
+
+h1 {
+  font-size: var(--text-xl);
+  line-height: 1.2;
+}
+
+h2 {
+  font-size: var(--text-lg);
+  line-height: 1.3;
+}
+
+h3 {
+  font-size: var(--text-md);
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+:is(p, td, dd) a {
+  color: var(--color-text-1);
+  text-decoration: underline;
+  text-decoration-color: var(--color-border-strong);
+  text-underline-offset: 0.2em;
+}
+
+:is(p, td, dd) a:hover {
+  text-decoration-color: currentcolor;
+}
+
+th,
+dt,
+small {
+  color: var(--color-text-3);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+
+code,
+kbd,
+pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+pre {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  appearance: none;
+}
+
+:focus-visible {
+  outline: var(--line-active);
+  outline-offset: 1px;
+}
+
+::selection {
+  background: var(--color-surface-3);
+}

@@ -39,11 +39,16 @@ async fn admin_commands() {
 
     let stream = admin(&server, &["stream", "/streams/adm"]).ok();
     assert!(
-        stream.stdout.contains("name=/streams/adm"),
+        stream.stdout.contains("stream=/streams/adm partition=0"),
         "{}",
         stream.stdout
     );
     assert!(stream.stdout.contains("state=opened"), "{}", stream.stdout);
+    assert!(
+        stream.stdout.contains("next=1 current=true"),
+        "{}",
+        stream.stdout
+    );
 
     let missing = admin(&server, &["stream", "/absent"]);
     assert_eq!(missing.code, 1, "{}", missing.stderr);

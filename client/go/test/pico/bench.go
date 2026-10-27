@@ -150,7 +150,7 @@ func formatRate(value float64) string {
 func cleanup(client *picomq.PicoClient, base string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	listing, err := client.List(ctx, base+"/", 100)
+	listing, err := client.List(ctx, base+"/", 100, "")
 	if err != nil {
 		log.Printf("cleanup: %v", err)
 		return

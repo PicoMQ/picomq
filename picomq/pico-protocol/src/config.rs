@@ -10,8 +10,6 @@ pub const STREAMS_PATH_PREFIX: &str = "/_streams";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicConfig {
-    pub schema: Option<String>,
-    pub schema_validate: bool,
     pub kafka_topic: Option<String>,
     pub partitions: u32,
     pub retention_ms: Option<u64>,
@@ -21,8 +19,6 @@ pub struct TopicConfig {
 impl TopicConfig {
     pub fn encode(&self) -> Bytes {
         json_body(json!({
-            "schema": self.schema,
-            "schemaValidate": self.schema_validate,
             "kafkaTopic": self.kafka_topic,
             "partitions": self.partitions,
             "retentionMs": self.retention_ms,
@@ -33,11 +29,6 @@ impl TopicConfig {
     pub fn decode(body: &[u8]) -> Result<Self, CodecError> {
         let node = object(body)?;
         Ok(Self {
-            schema: string(&node, "schema")?,
-            schema_validate: node
-                .get("schemaValidate")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
             kafka_topic: string(&node, "kafkaTopic")?,
             partitions: partitions_of(&node)?.unwrap_or(1),
             retention_ms: limit_of(&node, "retentionMs")?.flatten(),
@@ -63,8 +54,6 @@ impl ConfigRequest<'_> {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConfigUpdate {
     pub stream: String,
-    pub schema: Option<Option<String>>,
-    pub schema_validate: Option<bool>,
     pub retention_ms: Option<Option<u64>>,
     pub retention_bytes: Option<Option<u64>>,
     pub partitions: Option<u32>,
@@ -73,12 +62,6 @@ pub struct ConfigUpdate {
 impl ConfigUpdate {
     pub fn encode(&self) -> WireRequest {
         let mut body = Map::new();
-        if let Some(schema) = &self.schema {
-            body.insert("schema".into(), json!(schema));
-        }
-        if let Some(validate) = self.schema_validate {
-            body.insert("schemaValidate".into(), json!(validate));
-        }
         if let Some(ms) = self.retention_ms {
             body.insert("retentionMs".into(), json!(ms));
         }
@@ -100,24 +83,8 @@ impl ConfigUpdate {
             ));
         }
 
-        let schema = match node.get("schema") {
-            None => None,
-            Some(Value::Null) => Some(None),
-            Some(Value::String(name)) if !name.is_empty() => Some(Some(name.clone())),
-            Some(_) => {
-                return Err(CodecError::new("schema must be a non-empty string or null"));
-            }
-        };
-        let schema_validate = match node.get("schemaValidate") {
-            None => None,
-            Some(Value::Bool(validate)) => Some(*validate),
-            Some(_) => return Err(CodecError::new("schemaValidate must be a boolean")),
-        };
-
         Ok(Self {
             stream,
-            schema,
-            schema_validate,
             retention_ms: limit_of(&node, "retentionMs")?,
             retention_bytes: limit_of(&node, "retentionBytes")?,
             partitions: partitions_of(&node)?,
@@ -154,8 +121,6 @@ mod tests {
     #[test]
     fn config_round_trips() {
         let config = TopicConfig {
-            schema: Some("orders.json".to_owned()),
-            schema_validate: true,
             kafka_topic: Some("orders".to_owned()),
             partitions: 3,
             retention_ms: Some(60_000),
@@ -169,11 +134,9 @@ mod tests {
     fn update_round_trips_removals_and_omissions() {
         let update = ConfigUpdate {
             stream: "/orders".to_owned(),
-            schema: Some(None),
             retention_ms: Some(Some(1_000)),
             retention_bytes: Some(None),
             partitions: Some(4),
-            ..Default::default()
         };
 
         let wire = update.encode();
@@ -199,8 +162,6 @@ mod tests {
     fn update_rejects_bad_fields() {
         for body in [
             r#"{"kafkaTopic": "x"}"#,
-            r#"{"schema": ""}"#,
-            r#"{"schemaValidate": "yes"}"#,
             r#"{"retentionMs": -1}"#,
             r#"{"partitions": 1.5}"#,
             "[]",

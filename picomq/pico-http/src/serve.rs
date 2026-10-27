@@ -16,11 +16,14 @@ use std::time::Duration;
 use axum::Router;
 use picomq_auth::{Audience, Authorizer};
 use picomq_listener::{Listener, Stream};
+use picomq_metrics::Metrics;
 use picomq_server::PicoNode;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::admin::{self, AdminState};
+use crate::forward::Forward;
+use crate::observe::observe;
 use crate::{DsFrontend, PicoFrontend, RoutingMode};
 use crate::{common, groups};
 
@@ -48,6 +51,8 @@ pub struct ServeOptions {
     /// load balancer can drain traffic first.
     pub shutdown_drain: Duration,
     pub shutdown_timeout: Duration,
+    pub forward: Option<Forward>,
+    pub metrics: Option<Metrics>,
     /// Maintenance-lease holdership for the admin API, when the host runs a
     /// lease keeper. `None` reports `leaseHolder: null`.
     pub leadership: Option<watch::Receiver<bool>>,
@@ -66,6 +71,8 @@ impl Default for ServeOptions {
             max_request_size: 32 * 1024 * 1024,
             shutdown_drain: Duration::ZERO,
             shutdown_timeout: Duration::from_secs(10),
+            forward: None,
+            metrics: None,
             leadership: None,
             authorizer: None,
         }
@@ -156,15 +163,22 @@ pub async fn serve(
     let (stop, _) = watch::channel(false);
     let admin_state = AdminState::new(node.clone())
         .with_leadership(options.leadership.clone())
-        .with_authorizer(options.authorizer.clone());
+        .with_authorizer(options.authorizer.clone())
+        .with_forward(options.forward.clone())
+        .with_metrics(options.metrics);
     let mut tasks = Vec::with_capacity(2);
 
+    let protocol_router =
+        protocol_router.layer(axum::middleware::from_fn_with_state(audience, observe));
     let (local_addr, task) = spawn_listener(listener, protocol_router, &stop);
     tasks.push(task);
 
     let mut admin_addr = None;
     if let Some(listener) = admin {
-        let (bound, task) = spawn_listener(listener, admin::router(admin_state.clone()), &stop);
+        let admin_router = admin::router(admin_state.clone()).layer(
+            axum::middleware::from_fn_with_state(Audience::Admin, observe),
+        );
+        let (bound, task) = spawn_listener(listener, admin_router, &stop);
         admin_addr = Some(bound);
         tasks.push(task);
     }
@@ -197,7 +211,8 @@ fn spawn_listener(
     let bound = listener.local_addr();
     let mut stop = stop.subscribe();
     let task = tokio::spawn(async move {
-        let result = axum::serve(HttpListener(listener), router)
+        let service = router.into_make_service_with_connect_info::<Peer>();
+        let result = axum::serve(HttpListener(listener), service)
             .with_graceful_shutdown(async move {
                 // Only the shutdown path sends, and the sender outlives these
                 // tasks, so a receive error cannot mean "stop" was missed.
@@ -212,6 +227,17 @@ fn spawn_listener(
 }
 
 struct HttpListener(Listener);
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Peer(pub(crate) SocketAddr);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, HttpListener>>
+    for Peer
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, HttpListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
+}
 
 impl axum::serve::Listener for HttpListener {
     type Io = Stream;

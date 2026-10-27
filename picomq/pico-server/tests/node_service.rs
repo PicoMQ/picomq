@@ -43,7 +43,7 @@ async fn start_engine(
         ..Default::default()
     };
     let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
-    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal))
         .await
         .unwrap()
 }
@@ -96,7 +96,10 @@ async fn create_append_read_close_via_topics() {
         .await
         .unwrap();
     assert_eq!(batch.records.len(), 1);
-    assert_eq!(&batch.records[0].record.value[..], b"hello");
+    assert_eq!(
+        batch.records[0].record.value.as_deref(),
+        Some(&b"hello"[..])
+    );
     assert!(batch.up_to_date);
 
     let closed = topics.close("/streams/demo").await.unwrap();
@@ -123,7 +126,11 @@ async fn create_append_read_close_via_topics() {
         .read("/streams/batch", 0, OffsetToken::beginning(), 1024, 0)
         .await
         .unwrap();
-    let values: Vec<&[u8]> = all.records.iter().map(|r| &r.record.value[..]).collect();
+    let values: Vec<&[u8]> = all
+        .records
+        .iter()
+        .map(|r| r.record.value.as_deref().unwrap())
+        .collect();
     assert_eq!(values, [b"a".as_slice(), b"bb", b"ccc"]);
     let offsets: Vec<u64> = all
         .records
@@ -144,7 +151,7 @@ async fn create_append_read_close_via_topics() {
         .await
         .unwrap();
     assert_eq!(tail.records.len(), 2);
-    assert_eq!(&tail.records[0].record.value[..], b"bb");
+    assert_eq!(tail.records[0].record.value.as_deref(), Some(&b"bb"[..]));
 
     let limited = topics
         .read("/streams/batch", 0, OffsetToken::beginning(), 1024, 2)
@@ -157,7 +164,7 @@ async fn create_append_read_close_via_topics() {
     let effective = topics.trim("/streams/batch", 0, 2).await.unwrap();
     assert!(effective <= 2, "effective trim {effective}");
     let topic = topics.get("/streams/batch").await.unwrap().unwrap();
-    let offsets = topics.offsets(&topic, 0).await.unwrap();
+    let offsets = topics.live_offsets(&topic, 0).await.unwrap();
     assert_eq!(offsets.start_offset.record_offset(), effective);
 
     let trimmed = topics
@@ -171,7 +178,10 @@ async fn create_append_read_close_via_topics() {
         .await
         .unwrap();
     assert_eq!(trimmed.records.len(), 1);
-    assert_eq!(&trimmed.records[0].record.value[..], b"ccc");
+    assert_eq!(
+        trimmed.records[0].record.value.as_deref(),
+        Some(&b"ccc"[..])
+    );
 
     node.close().await;
 }
@@ -218,8 +228,8 @@ async fn concurrent_producers_on_one_topic_pipeline() {
         let seen: Vec<u8> = all
             .records
             .iter()
-            .filter(|r| r.record.value[0] == producer)
-            .map(|r| r.record.value[1])
+            .filter(|r| r.record.value.as_ref().unwrap()[0] == producer)
+            .map(|r| r.record.value.as_ref().unwrap()[1])
             .collect();
         assert_eq!(
             seen,
@@ -240,24 +250,24 @@ async fn list_and_match_seq_via_topics() {
         topics.create(create(name, "text/plain")).await.unwrap();
     }
 
-    let names = |list: &picomq_server::TopicList| -> Vec<String> {
-        list.topics
+    let names = |page: &picomq_server::Page<String, picomq_server::Topic>| -> Vec<String> {
+        page.items
             .iter()
-            .map(|m| m.topic.name.spelling().to_owned())
+            .map(|(_, topic)| topic.name.spelling().to_owned())
             .collect()
     };
 
-    let all = topics.list("/list/", None, 0).unwrap();
+    let all = topics.list("/list/", None, 100, |_| true);
     assert_eq!(names(&all), ["/list/a", "/list/b", "/list/c"]);
-    assert!(!all.has_more);
+    assert_eq!(all.next, None);
 
-    let page = topics.list("/list/", None, 2).unwrap();
+    let page = topics.list("/list/", None, 2, |_| true);
     assert_eq!(names(&page), ["/list/a", "/list/b"]);
-    assert!(page.has_more);
+    assert_eq!(page.next.as_deref(), Some("list.b"));
 
-    let rest = topics.list("/list/", Some("/list/b"), 0).unwrap();
+    let rest = topics.list("/list/", page.next.as_deref(), 100, |_| true);
     assert_eq!(names(&rest), ["/list/c"]);
-    assert!(!rest.has_more);
+    assert_eq!(rest.next, None);
 
     let at = |payload: &'static [u8], match_seq: u64| AppendCommand {
         match_seq: Some(match_seq),
@@ -326,8 +336,14 @@ async fn core_flow_on_sql_sink() {
         .await
         .unwrap();
     assert_eq!(read.records.len(), 2);
-    assert_eq!(&read.records[0].record.value[..], br#"{"a":1}"#);
-    assert_eq!(&read.records[1].record.value[..], br#"{"b":2}"#);
+    assert_eq!(
+        read.records[0].record.value.as_deref(),
+        Some(&br#"{"a":1}"#[..])
+    );
+    assert_eq!(
+        read.records[1].record.value.as_deref(),
+        Some(&br#"{"b":2}"#[..])
+    );
 
     assert!(topics.delete("/sql/demo").await.unwrap());
     assert!(topics.get("/sql/demo").await.unwrap().is_none());
@@ -546,7 +562,7 @@ async fn start_shared_node(
         ..Default::default()
     };
     let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
-    PicoNode::start(config, sink, views, object_storage, Arc::new(wal), None)
+    PicoNode::start(config, sink, views, object_storage, Arc::new(wal))
         .await
         .unwrap()
 }
@@ -627,21 +643,22 @@ async fn transfer_moves_partition_to_target_node() {
             applied
         })
     };
-    let stream_id = node1.transfer(&log, 2).await.unwrap();
+    node1.transfer(&log, 2).await.unwrap();
+    let stream_id = node1.service().stream_id(&log).unwrap().unwrap();
     let raced = racer.await.unwrap();
 
     wait_for_view(&views, "transfer completion", |view| {
-        !view.state.pending_transfers.contains_key(&stream_id)
+        !view.state.pending_transfers().contains_key(&stream_id)
             && view
                 .state
-                .streams
+                .streams()
                 .get(&stream_id)
                 .is_some_and(|row| row.node_id == 2)
     })
     .await;
     wait_for_view(&views, "target pre-warm open", |view| {
         view.state
-            .streams
+            .streams()
             .get(&stream_id)
             .is_some_and(|row| row.state == s3stream::StreamState::Opened && row.node_id == 2)
     })
@@ -664,8 +681,11 @@ async fn transfer_moves_partition_to_target_node() {
         .await
         .unwrap();
     assert_eq!(all.records.len() as u64, 2 + raced);
-    assert_eq!(&all.records[0].record.value[..], b"before");
-    assert_eq!(&all.records.last().unwrap().record.value[..], b"after");
+    assert_eq!(all.records[0].record.value.as_deref(), Some(&b"before"[..]));
+    assert_eq!(
+        all.records.last().unwrap().record.value.as_deref(),
+        Some(&b"after"[..])
+    );
 
     let after = node2.topics().watermarks(&topic, 0).await.unwrap().epoch;
     assert!(after > before, "epoch {before} -> {after}");
@@ -711,7 +731,7 @@ async fn stale_transfer_completes_when_source_restarts() {
     })
     .await
     .unwrap();
-    let stream_id = views.load().state.next_stream_id - 1;
+    let stream_id = views.load().state.next_stream_id() - 1;
     sink.propose(MetadataCommand::OpenStream {
         proposer: Proposer::new(1, 1),
 
@@ -732,16 +752,16 @@ async fn stale_transfer_completes_when_source_restarts() {
         views
             .load()
             .state
-            .pending_transfers
+            .pending_transfers()
             .contains_key(&stream_id)
     );
 
     let node1 = start_shared_node(1, 2, sink, views.clone(), object_storage, wal_storage).await;
     wait_for_view(&views, "stale transfer completion", |view| {
-        !view.state.pending_transfers.contains_key(&stream_id)
+        !view.state.pending_transfers().contains_key(&stream_id)
             && view
                 .state
-                .streams
+                .streams()
                 .get(&stream_id)
                 .is_some_and(|row| row.node_id == 2)
     })
@@ -780,7 +800,7 @@ async fn topics_survive_restart() {
     let node = start_shared_node(1, 2, sink, views, object_storage, wal_storage).await;
 
     let topic = node.topics().get("/durable/a").await.unwrap().unwrap();
-    let offsets = node.topics().offsets(&topic, 0).await.unwrap();
+    let offsets = node.topics().live_offsets(&topic, 0).await.unwrap();
     assert_eq!(offsets.next_offset.record_offset(), 1);
     let read = node
         .topics()
@@ -788,7 +808,7 @@ async fn topics_survive_restart() {
         .await
         .unwrap();
     assert_eq!(read.records.len(), 1);
-    assert_eq!(&read.records[0].record.value[..], b"kept");
+    assert_eq!(read.records[0].record.value.as_deref(), Some(&b"kept"[..]));
 
     node.close().await;
 }
@@ -868,7 +888,7 @@ async fn kafka_batch_append_read_and_idempotency() {
     let values: Vec<&[u8]> = records
         .records
         .iter()
-        .map(|r| &r.record.value[..])
+        .map(|r| r.record.value.as_deref().unwrap())
         .collect();
     assert_eq!(values, [b"k2", b"k3"]);
     assert_eq!(records.records[0].offset.record_offset(), 1);
@@ -987,7 +1007,11 @@ async fn http_and_kafka_writers_share_one_log() {
         .read("/mixed/log", 0, OffsetToken::beginning(), 0, 0)
         .await
         .unwrap();
-    let values: Vec<&[u8]> = all.records.iter().map(|r| &r.record.value[..]).collect();
+    let values: Vec<&[u8]> = all
+        .records
+        .iter()
+        .map(|r| r.record.value.as_deref().unwrap())
+        .collect();
     assert_eq!(values, [b"h1", b"h2", b"k1", b"h3"]);
     let offsets: Vec<u64> = all
         .records
@@ -1290,147 +1314,33 @@ async fn ttl_sweep_expires_untouched_topics() {
 }
 
 #[tokio::test]
-async fn list_paginates_with_start_after() {
+async fn a_filtered_list_spends_its_budget_and_resumes() {
     let node = local_node().await;
     let topics = node.topics();
-    for i in 0..5 {
+    for i in 0..30 {
         topics
-            .create(create(&format!("/page/{i}"), "text/plain"))
+            .create(create(&format!("/page/{i:02}"), "text/plain"))
             .await
             .unwrap();
     }
+    let wanted =
+        |topic: &picomq_server::Topic| ["/page/15", "/page/25"].contains(&topic.name.spelling());
 
-    let names = |list: picomq_server::TopicList| -> (Vec<String>, bool) {
-        let names = list
-            .topics
-            .iter()
-            .map(|m| m.topic.name.spelling().to_owned())
-            .collect();
-        (names, list.has_more)
-    };
+    let first = topics.list("/page/", None, 1, wanted);
+    assert!(first.items.is_empty());
+    assert_eq!(first.next.as_deref(), Some("page.09"));
 
-    let (first, more) = names(topics.list("/page/", None, 2).unwrap());
-    assert_eq!(first, ["/page/0", "/page/1"]);
-    assert!(more);
-
-    let (second, more) = names(topics.list("/page/", Some("/page/1"), 2).unwrap());
-    assert_eq!(second, ["/page/2", "/page/3"]);
-    assert!(more);
-
-    let (last, more) = names(topics.list("/page/", Some("/page/3"), 2).unwrap());
-    assert_eq!(last, ["/page/4"]);
-    assert!(!more);
-
-    node.close().await;
-}
-
-#[tokio::test]
-async fn append_rejects_schema_invalid_records() {
-    use object_store::memory::InMemory;
-    use picomq_schema::{Registry, SchemaFormat};
-
-    let schema = Bytes::from_static(
-        br#"{
-        "title": "Person",
-        "type": "object",
-        "properties": {
-            "value": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" }
-                },
-                "required": ["name"]
-            }
+    let mut after = None;
+    let mut found = Vec::new();
+    loop {
+        let page = topics.list("/page/", after.as_deref(), 1, wanted);
+        found.extend(page.items.into_iter().map(|(name, _)| name));
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
         }
-    }"#,
-    );
-
-    let (sink, views) = LocalSink::new();
-    let object_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(1));
-    let wal_storage: Arc<dyn ObjectStorageTrait> = Arc::new(MemoryObjectStorage::new(2));
-    let config = NodeConfig {
-        node_id: 1,
-        node_epoch: 1,
-        http_address: "http://127.0.0.1:4010".into(),
-        ..Default::default()
-    };
-    let wal = ObjectWal::new(&config.cluster_id, &config.engine.wal_config, wal_storage);
-    let node = PicoNode::start(
-        config,
-        Arc::new(sink),
-        views,
-        object_storage,
-        Arc::new(wal),
-        Some(Arc::new(Registry::new(InMemory::new()))),
-    )
-    .await
-    .unwrap();
-    let topics = node.topics();
-
-    let registry = topics.schema_registry().unwrap();
-    registry
-        .put("person", SchemaFormat::Json, schema)
-        .await
-        .unwrap();
-    assert_eq!(
-        registry.get("person").await.unwrap().unwrap().0,
-        SchemaFormat::Json
-    );
-
-    let mut cmd = create("/streams/orders", "application/json");
-    cmd.schema_name = Some("person".into());
-    cmd.schema_validate = true;
-    topics.create(cmd).await.unwrap();
-
-    let ok = topics
-        .append(
-            "/streams/orders",
-            0,
-            append(&[br#"{"name":"alice"}"#], "application/json"),
-        )
-        .await
-        .unwrap();
-    assert!(ok.applied);
-
-    let err = topics
-        .append(
-            "/streams/orders",
-            0,
-            append(&[br#"{"name":1}"#], "application/json"),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(err.kind, ErrorKind::SchemaViolation);
-
-    topics
-        .create(create("/streams/raw", "application/json"))
-        .await
-        .unwrap();
-    topics
-        .append(
-            "/streams/raw",
-            0,
-            append(&[br#"{"name":1}"#], "application/json"),
-        )
-        .await
-        .unwrap();
-
-    topics
-        .update(picomq_server::UpdateTopicCommand {
-            name: "/streams/orders".into(),
-            schema_validate: Some(false),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    topics
-        .append(
-            "/streams/orders",
-            0,
-            append(&[br#"{"name":1}"#], "application/json"),
-        )
-        .await
-        .unwrap();
+    }
+    assert_eq!(found, ["page.15", "page.25"]);
 
     node.close().await;
 }
@@ -1462,7 +1372,7 @@ async fn partitions_grow_and_stay_independent() {
         .await
         .unwrap();
     assert!(first.records.is_empty());
-    assert_eq!(&second.records[0].record.value[..], b"one");
+    assert_eq!(second.records[0].record.value.as_deref(), Some(&b"one"[..]));
 
     let grown = grow(&topics, "/parts", 4, &[]).await.unwrap();
     assert_eq!(grown.partitions, 4);
@@ -1550,7 +1460,7 @@ fn placements(node: &PicoNode, topic: &Topic) -> Vec<(i32, StreamState)> {
     stream_ids(node, topic)
         .iter()
         .map(|stream_id| {
-            let row = view.state.streams[stream_id];
+            let row = view.state.streams()[stream_id];
             (row.node_id, row.state)
         })
         .collect()
@@ -1645,7 +1555,7 @@ async fn deleted_topics_release_streams_held_by_other_nodes() {
         .topic;
     let mut held = Vec::new();
     for (index, stream_id) in stream_ids(&node1, &topic).into_iter().enumerate() {
-        if views.load().state.streams[&stream_id].node_id != 2 {
+        if views.load().state.streams()[&stream_id].node_id != 2 {
             continue;
         }
 
@@ -1659,12 +1569,12 @@ async fn deleted_topics_release_streams_held_by_other_nodes() {
     assert!(!held.is_empty());
     assert!(
         held.iter()
-            .all(|id| views.load().state.streams[id].state == StreamState::Opened)
+            .all(|id| views.load().state.streams()[id].state == StreamState::Opened)
     );
 
     assert!(node1.topics().delete("/doomed").await.unwrap());
     wait_for_view(&views, "held streams deleted", |view| {
-        held.iter().all(|id| !view.state.streams.contains_key(id))
+        held.iter().all(|id| !view.state.streams().contains_key(id))
     })
     .await;
 
@@ -1703,7 +1613,7 @@ async fn a_clean_shutdown_hands_streams_to_the_survivors() {
     wait_for_view(&views, "streams of node 2 placed on node 1", |view| {
         streams
             .iter()
-            .all(|stream_id| view.state.streams[stream_id].node_id == 1)
+            .all(|stream_id| view.state.streams()[stream_id].node_id == 1)
     })
     .await;
 
@@ -1719,7 +1629,7 @@ async fn a_fenced_node_notices() {
     let node2 = start_node(2, sink.clone(), views.clone()).await;
     let mut fenced = node2.fenced();
 
-    let heartbeats = views.load().state.nodes[&2].heartbeats;
+    let heartbeats = views.load().state.nodes()[&2].heartbeats;
     node1
         .metadata()
         .fence_node(2, node2.metadata().node_epoch(), heartbeats)
@@ -1762,7 +1672,7 @@ async fn delete_records_waits_for_the_upload() {
     assert!(start >= 2, "start {start}");
     assert_eq!(
         topics
-            .offsets(&topic, 0)
+            .live_offsets(&topic, 0)
             .await
             .unwrap()
             .start_offset
@@ -1917,13 +1827,13 @@ async fn deleted_topics_destroy_streams_that_were_never_opened() {
         .unwrap();
     let log = log_of(&topics, "/never-opened").await;
     let stream_id = node.service().stream_id(&log).unwrap().unwrap();
-    let row = views.load().state.streams[&stream_id];
+    let row = views.load().state.streams()[&stream_id];
     assert_eq!(row.state, StreamState::Closed);
     assert_eq!(row.node_id, 1);
 
     assert!(topics.delete("/never-opened").await.unwrap());
     wait_for_view(&views, "the placed stream to be destroyed", |view| {
-        !view.state.streams.contains_key(&stream_id)
+        !view.state.streams().contains_key(&stream_id)
     })
     .await;
 
@@ -1953,7 +1863,7 @@ async fn partitions_go_to_the_requested_owners() {
             .map(|index| {
                 let log = partition_log(topic, index).unwrap();
                 let stream_id = node1.service().stream_id(&log).unwrap().unwrap();
-                state.streams[&stream_id].node_id
+                state.streams()[&stream_id].node_id
             })
             .collect()
     };
@@ -1992,6 +1902,7 @@ async fn a_restarted_coordinator_keeps_the_members_that_join_it() {
         member_id: String::new(),
         instance_id: None,
         client_id: "test".to_owned(),
+        client_host: String::new(),
         membership: Membership::Subscribed(vec!["/a".to_owned()]),
         session_timeout_ms: 10_000,
         rebalance_timeout_ms: 2_000,
@@ -2064,7 +1975,8 @@ async fn new_logs_are_published_with_their_owner() {
         for (key, stream_id) in &streams {
             if state.get_kv(key).is_some() {
                 assert_ne!(
-                    state.streams[stream_id].node_id, -1,
+                    state.streams()[stream_id].node_id,
+                    -1,
                     "{key} was published before it had an owner"
                 );
             }
@@ -2085,7 +1997,7 @@ async fn a_lost_claim_destroys_its_stream() {
 
     let winner = node1.service().stream_id(&log).unwrap().unwrap();
     assert_eq!(node2.service().stream_id(&log).unwrap(), Some(winner));
-    assert!(views2.load().state.streams.keys().eq([&winner]));
+    assert!(views2.load().state.streams().keys().eq([&winner]));
 
     node1.close().await;
     node2.close().await;
@@ -2101,7 +2013,7 @@ async fn a_claim_that_cannot_own_its_stream_destroys_it() {
     assert!(placed.is_err());
     assert_eq!(node.service().stream_id(&log).unwrap(), None);
     let state = &views.load().state;
-    assert!(state.streams.is_empty());
+    assert!(state.streams().is_empty());
     assert!(state.get_kv(&log.key()).is_none());
 
     node.close().await;
@@ -2136,7 +2048,7 @@ async fn a_failed_append_reopens_the_stream_at_a_new_epoch() {
         .await
         .unwrap();
     assert_eq!(appended.next_offset.record_offset(), 2);
-    let row = views.load().state.streams[&stream_id];
+    let row = views.load().state.streams()[&stream_id];
     assert_eq!((row.state, row.epoch), (StreamState::Opened, 2));
 
     node.close().await;
@@ -2262,7 +2174,6 @@ async fn faulty_node() -> (PicoNode, Arc<AtomicBool>) {
         views,
         Arc::new(MemoryObjectStorage::new(0)),
         Arc::new(wal),
-        None,
     )
     .await
     .unwrap();
@@ -2276,7 +2187,7 @@ async fn values(topics: &Topics, name: &str) -> Vec<Bytes> {
         .unwrap()
         .records
         .into_iter()
-        .map(|record| record.record.value)
+        .map(|record| record.record.value.unwrap())
         .collect()
 }
 
@@ -2461,6 +2372,95 @@ async fn timestamp_lookups_skip_records_trimmed_inside_a_batch() {
     node.close().await;
 }
 
+#[tokio::test]
+async fn timestamp_lookups_find_records_across_objects_and_the_wal() {
+    let node = uploading_node().await;
+    let topics = node.topics();
+    topics
+        .create(create("/stamped", "text/plain"))
+        .await
+        .unwrap();
+    for objects in 1..=3 {
+        append_object(&node, "/stamped", b"uploaded", objects).await;
+    }
+    topics
+        .append("/stamped", 0, append(&[b"tail"], "text/plain"))
+        .await
+        .unwrap();
+    let topic = topics.get("/stamped").await.unwrap().unwrap();
+    let written = topics
+        .read("/stamped", 0, OffsetToken::of_record_offset(0), 0, 0)
+        .await
+        .unwrap()
+        .records;
+    assert_eq!(written.len(), 4);
+
+    for record in &written {
+        let found = topics
+            .record_at_or_after(&topic, 0, record.record.timestamp_ms)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.offset, record.offset);
+    }
+    let newest = written.last().unwrap();
+    assert!(
+        topics
+            .record_at_or_after(&topic, 0, newest.record.timestamp_ms + 1)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let found = topics
+        .record_with_max_timestamp(&topic, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.offset, newest.offset);
+
+    node.close().await;
+}
+
+#[tokio::test]
+async fn the_max_timestamp_is_found_before_a_later_older_batch() {
+    let node = uploading_node().await;
+    let topics = node.topics();
+    topics
+        .create(create("/skewed", "application/octet-stream"))
+        .await
+        .unwrap();
+    for (timestamp_ms, values) in [(100, &[&b"a"[..]][..]), (500, &[b"b", b"c"])] {
+        produce(
+            &topics,
+            "/skewed",
+            Bytes::from(timed_batch(timestamp_ms, values)),
+        )
+        .await
+        .unwrap();
+    }
+    let log = log_of(&topics, "/skewed").await;
+    let stream_id = node.service().stream_id(&log).unwrap().unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while node.views().load().state.object_spans(stream_id).is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "no upload");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    produce(&topics, "/skewed", Bytes::from(timed_batch(300, &[b"d"])))
+        .await
+        .unwrap();
+    let topic = topics.get("/skewed").await.unwrap().unwrap();
+
+    let newest = topics
+        .record_with_max_timestamp(&topic, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(newest.offset.record_offset(), 1);
+    assert_eq!(newest.record.timestamp_ms, 500);
+
+    node.close().await;
+}
+
 async fn uploading_node() -> PicoNode {
     let (sink, views) = LocalSink::new();
     let engine = s3stream::Config {
@@ -2513,7 +2513,7 @@ async fn retention_trims_a_closed_partition_without_reopening_it() {
         .await
         .unwrap();
 
-    let row = node.views().load().state.streams[&stream_id];
+    let row = node.views().load().state.streams()[&stream_id];
     assert_eq!(row.state, StreamState::Closed);
     assert_eq!(row.start_offset, row.end_offset);
     assert!(node.service().streams().held(stream_id).is_none());
@@ -2560,7 +2560,7 @@ async fn retention_does_not_reopen_a_partition_released_while_it_waited() {
     release.await.unwrap().unwrap();
     trim.await.unwrap().unwrap();
 
-    let row = node.views().load().state.streams[&stream_id];
+    let row = node.views().load().state.streams()[&stream_id];
     assert_eq!(row.state, StreamState::Closed);
     assert_eq!(row.start_offset, row.end_offset);
     assert!(service.streams().held(stream_id).is_none());
@@ -2620,7 +2620,7 @@ async fn retention_bytes_keeps_the_newest_object_of_an_open_partition() {
         .await
         .unwrap();
 
-    let row = node.views().load().state.streams[&stream_id];
+    let row = node.views().load().state.streams()[&stream_id];
     assert_eq!(row.state, StreamState::Opened);
     assert_eq!(row.start_offset, spans[0].end_offset);
 
@@ -2644,12 +2644,13 @@ async fn grow(
 }
 
 async fn move_log(from: &PicoNode, views: &ViewPublisher, log: &Log, to: i32) {
-    let stream_id = from.transfer(log, to).await.unwrap();
+    from.transfer(log, to).await.unwrap();
+    let stream_id = from.service().stream_id(log).unwrap().unwrap();
     wait_for_view(views, "transfer completion", |view| {
-        !view.state.pending_transfers.contains_key(&stream_id)
+        !view.state.pending_transfers().contains_key(&stream_id)
             && view
                 .state
-                .streams
+                .streams()
                 .get(&stream_id)
                 .is_some_and(|row| row.node_id == to)
     })

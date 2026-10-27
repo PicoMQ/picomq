@@ -25,10 +25,9 @@ use picomq_auth::{Audience, Authorizer};
 use picomq_protocol::ds::{
     DEFAULT_CT, H_PRODUCER_EPOCH, H_PRODUCER_EXPECTED_SEQ, H_PRODUCER_ID, H_PRODUCER_RECEIVED_SEQ,
     H_PRODUCER_SEQ, H_STREAM_CLOSED, H_STREAM_CURSOR, H_STREAM_EXPIRES_AT, H_STREAM_NEXT_OFFSET,
-    H_STREAM_PARTITIONS, H_STREAM_RETENTION_BYTES, H_STREAM_RETENTION_MS, H_STREAM_SCHEMA,
-    H_STREAM_SCHEMA_VALIDATE, H_STREAM_SEQ, H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL,
-    H_STREAM_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE, OFFSET_NOW, Q_CURSOR, Q_LIVE, Q_OFFSET,
-    SseEncoder, encode_json_array, split_body,
+    H_STREAM_PARTITIONS, H_STREAM_RETENTION_BYTES, H_STREAM_RETENTION_MS, H_STREAM_SEQ,
+    H_STREAM_SSE_DATA_ENCODING, H_STREAM_TTL, H_STREAM_UP_TO_DATE, LIVE_LONG_POLL, LIVE_SSE,
+    OFFSET_NOW, Q_CURSOR, Q_LIVE, Q_OFFSET, SseEncoder, encode_json_array, split_body,
 };
 use picomq_protocol::mime::{is_json, mime_of};
 use picomq_server::ownership::OwnershipService;
@@ -240,10 +239,6 @@ impl DsFrontend {
                 expires_at_ms,
                 closed: truthy(headers, H_STREAM_CLOSED),
                 initial_records,
-                schema_name: header_str(headers, H_STREAM_SCHEMA)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned),
-                schema_validate: truthy(headers, H_STREAM_SCHEMA_VALIDATE),
                 partitions,
                 retention,
                 ..CreateCommand::new(name, content_type)
@@ -358,9 +353,6 @@ impl DsFrontend {
                 &format_instant(expires_at_ms),
             );
         }
-        if let Some(schema_name) = &topic.schema_name {
-            set_header(&mut response, H_STREAM_SCHEMA, schema_name);
-        }
         if let Some(ms) = topic.retention.ms {
             set_header(&mut response, H_STREAM_RETENTION_MS, &ms.to_string());
         }
@@ -436,6 +428,7 @@ impl DsFrontend {
             return Ok(response);
         }
 
+        let _reader = picomq_metrics::live_reader();
         if self
             .topics
             .wait_appended(name, partition, offset, self.long_poll_timeout)
@@ -492,7 +485,9 @@ impl DsFrontend {
         let name = name.to_owned();
         let max_chunk_size = self.max_chunk_size;
         let deadline = tokio::time::Instant::now() + self.sse_max_duration;
+        let reader = picomq_metrics::live_reader();
         tokio::spawn(async move {
+            let _reader = reader;
             let mut offset = start;
             let mut announced_caught_up = false;
             while tokio::time::Instant::now() < deadline {
@@ -507,7 +502,7 @@ impl DsFrontend {
                     let payloads: Vec<Bytes> = read
                         .records
                         .iter()
-                        .map(|r| r.record.value.clone())
+                        .map(|r| r.record.value.clone().unwrap_or_default())
                         .collect();
                     if tx.send(encoder.data_event(&payloads)).await.is_err() {
                         return;
@@ -609,8 +604,11 @@ impl DsFrontend {
 
         if !(empty_tail && live) {
             let body = if json {
-                let payloads: Vec<Bytes> =
-                    out.records.iter().map(|r| r.record.value.clone()).collect();
+                let payloads: Vec<Bytes> = out
+                    .records
+                    .iter()
+                    .map(|r| r.record.value.clone().unwrap_or_default())
+                    .collect();
                 encode_json_array(&payloads)
             } else {
                 out.concatenated_values()
@@ -654,8 +652,8 @@ fn options() -> Response {
         &mut response,
         "Access-Control-Allow-Headers",
         "content-type, authorization, If-None-Match, Stream-Seq, Stream-TTL, Stream-Expires-At, \
-         Stream-Partitions, Stream-Retention-Ms, Stream-Retention-Bytes, Stream-Schema, \
-         Stream-Schema-Validate, Stream-Closed, Producer-Id, Producer-Epoch, Producer-Seq",
+         Stream-Partitions, Stream-Retention-Ms, Stream-Retention-Bytes, Stream-Closed, \
+         Producer-Id, Producer-Epoch, Producer-Seq",
     );
     set_header(
         &mut response,
@@ -673,7 +671,6 @@ pub(crate) fn service_error_response(e: ServiceError) -> Response {
         ErrorKind::BadRequest
         | ErrorKind::InvalidName
         | ErrorKind::CorruptBatch
-        | ErrorKind::SchemaViolation
         | ErrorKind::MatchFailed => fail(400, &e.message),
         ErrorKind::Fenced => {
             let mut response = fail(403, &e.message);

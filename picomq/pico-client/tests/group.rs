@@ -133,8 +133,8 @@ async fn operations_join_commit_fetch_describe_and_leave() {
         described.members[0].assignment.as_deref(),
         Some(joined.assignment.as_slice())
     );
-    let listed = client.list_groups().await.unwrap();
-    assert!(listed.contains(&"ops".to_owned()));
+    let listed = client.list_groups("", 0, None).await.unwrap();
+    assert!(listed.groups.contains(&"ops".to_owned()));
     let occupied = client.delete_group("ops").await.unwrap_err();
     assert_eq!(occupied.code, "conflict");
 

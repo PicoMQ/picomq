@@ -4,13 +4,13 @@ use bytes::{BufMut, Bytes, BytesMut};
 use picomq_common::now_ms;
 
 use crate::codec::{
-    expect_end, expect_version, get_bytes, get_i64, get_opt_i64, get_opt_str, get_opt_u64, get_str,
-    get_u8, get_u32, put_opt_i64, put_opt_str, put_opt_u64, put_str,
+    expect_end, expect_version, get_bytes, get_i64, get_opt_i64, get_opt_u64, get_str, get_u8,
+    get_u32, put_opt_i64, put_opt_u64, put_str,
 };
 use crate::error::{ErrorKind, ServiceError};
 use crate::retention::Retention;
 
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const MAX_KAFKA_NAME_LEN: usize = 249;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +85,11 @@ impl TopicId {
     pub fn hex(&self) -> String {
         hex::encode(self.0)
     }
+
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        let bytes: [u8; 16] = hex::decode(hex).ok()?.try_into().ok()?;
+        Some(Self(bytes))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,8 +110,6 @@ pub struct Topic {
     pub deadline_ms: i64,
     pub closed: bool,
     pub closed_by: Option<ClosedBy>,
-    pub schema_name: Option<String>,
-    pub schema_validate: bool,
     pub retention: Retention,
 }
 
@@ -133,12 +136,6 @@ impl Topic {
         self
     }
 
-    pub fn validation_schema(&self) -> Option<&str> {
-        self.schema_validate
-            .then_some(self.schema_name.as_deref())
-            .flatten()
-    }
-
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_u8(VERSION);
@@ -156,8 +153,6 @@ impl Topic {
             buf.put_u64(closed_by.epoch);
             buf.put_u64(closed_by.seq);
         }
-        put_opt_str(&mut buf, self.schema_name.as_deref());
-        buf.put_u8(self.schema_validate as u8);
         put_opt_u64(&mut buf, self.retention.ms);
         put_opt_u64(&mut buf, self.retention.bytes);
         buf.freeze()
@@ -183,8 +178,6 @@ impl Topic {
                 seq: get_i64(&mut buf)? as u64,
             }),
         };
-        let schema_name = get_opt_str(&mut buf)?;
-        let schema_validate = get_u8(&mut buf)? == 1;
         let retention = Retention {
             ms: get_opt_u64(&mut buf)?,
             bytes: get_opt_u64(&mut buf)?,
@@ -201,8 +194,6 @@ impl Topic {
             deadline_ms,
             closed,
             closed_by,
-            schema_name,
-            schema_validate,
             retention,
         })
     }
@@ -237,8 +228,6 @@ mod tests {
                 epoch: 2,
                 seq: 41,
             }),
-            schema_name: Some("orders".into()),
-            schema_validate: true,
             retention: Retention {
                 ms: Some(86_400_000),
                 bytes: Some(1 << 30),
@@ -285,7 +274,7 @@ mod tests {
 
     #[test]
     fn the_underscore_namespace_is_reserved() {
-        for reserved in ["/_groups/x", "_streams.x", "/_schemas", "/_p/1/0"] {
+        for reserved in ["/_groups/x", "_streams.x", "/_reserved", "/_p/1/0"] {
             let error = TopicName::parse(reserved).unwrap_err();
             assert_eq!(error.kind, ErrorKind::InvalidName, "{reserved}");
         }
@@ -303,8 +292,6 @@ mod tests {
                 expires_at_ms: Some(999),
                 closed: false,
                 closed_by: None,
-                schema_name: None,
-                schema_validate: false,
                 ..topic()
             },
         ] {

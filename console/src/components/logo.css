@@ -1,0 +1,14 @@
+.logo {
+  display: block;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: none;
+}
+
+.logo-mark {
+  fill: var(--color-text-1);
+}
+
+.logo-glyph {
+  fill: var(--color-surface-1);
+}

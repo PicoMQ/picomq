@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use kafka_protocol::messages::delete_groups_response::{
     DeletableGroupResult, DeleteGroupsResponse,
 };
@@ -21,10 +21,9 @@ use kafka_protocol::messages::offset_fetch_response::{
     OffsetFetchResponse, OffsetFetchResponsePartition, OffsetFetchResponseTopic,
 };
 use kafka_protocol::messages::{
-    ApiKey, ConsumerProtocolSubscription, DeleteGroupsRequest, DescribeGroupsRequest,
-    FindCoordinatorRequest, HeartbeatRequest, HeartbeatResponse, JoinGroupRequest,
-    LeaveGroupRequest, ListGroupsRequest, OffsetCommitRequest, OffsetDeleteRequest,
-    OffsetFetchRequest, SyncGroupRequest,
+    ApiKey, DeleteGroupsRequest, DescribeGroupsRequest, FindCoordinatorRequest, HeartbeatRequest,
+    HeartbeatResponse, JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest, OffsetCommitRequest,
+    OffsetDeleteRequest, OffsetFetchRequest, SyncGroupRequest,
 };
 use kafka_protocol::protocol::{Decodable, StrBytes};
 use picomq_common::name::canonical;
@@ -42,6 +41,7 @@ use crate::handlers::common::{
     topic_name,
 };
 use crate::handlers::{HandlerError, HandlerOutcome};
+use picomq_server::group::consumer;
 use picomq_server::{
     CommittedOffset, GroupError, JoinInput, JoinProtocol, Joined, MemberFence, MemberRole,
     Membership, OffsetCommit, Partition, SyncInput, Topic, TopicId,
@@ -163,6 +163,7 @@ async fn join_group(
                 member_id: request.member_id.to_string(),
                 instance_id: request.group_instance_id.map(|id| id.to_string()),
                 client_id: req.client_id.clone().unwrap_or_default(),
+                client_host: req.client_host.to_string(),
                 membership: Membership::Client {
                     protocol_type: request.protocol_type.to_string(),
                     protocols: request
@@ -410,13 +411,14 @@ async fn describe_groups(
                             MemberRole::Client {
                                 metadata,
                                 assignment,
+                                ..
                             } => (metadata, assignment),
                             MemberRole::Subscribed { .. } => (Bytes::new(), Bytes::new()),
                         };
                         let mut wire = DescribedGroupMember::default()
                             .with_member_id(StrBytes::from(member.member_id))
                             .with_client_id(StrBytes::from(member.client_id))
-                            .with_client_host(StrBytes::from_static_str(""))
+                            .with_client_host(StrBytes::from(wire_host(&member.client_host)))
                             .with_member_metadata(metadata)
                             .with_member_assignment(assignment);
                         if req.api_version >= 4 {
@@ -803,19 +805,17 @@ async fn offset_delete(
     )))
 }
 
-fn subscription_topics(metadata: &Bytes) -> Result<Vec<String>, i16> {
-    let mut buf = metadata.clone();
-    let subscription = buf
-        .try_get_i16()
-        .ok()
-        .and_then(|version| ConsumerProtocolSubscription::decode(&mut buf, version.min(3)).ok())
-        .ok_or(INVALID_REQUEST)?;
+fn wire_host(host: &str) -> String {
+    if host.is_empty() {
+        String::new()
+    } else {
+        format!("/{host}")
+    }
+}
 
-    Ok(subscription
-        .topics
-        .iter()
-        .map(|topic| canonical(topic))
-        .collect())
+fn subscription_topics(metadata: &Bytes) -> Result<Vec<String>, i16> {
+    let topics = consumer::subscription(metadata).ok_or(INVALID_REQUEST)?;
+    Ok(topics.iter().map(|topic| canonical(topic)).collect())
 }
 
 async fn subscribed_topics(
@@ -823,24 +823,8 @@ async fn subscribed_topics(
     req: &RequestContext,
     group_id: &str,
 ) -> Result<BTreeSet<String>, i16> {
-    let described = ctx
-        .groups
-        .describe(req.scope(), group_id)
+    ctx.groups
+        .subscribed_topics(req.scope(), group_id)
         .await
-        .map_err(error_code)?;
-
-    let mut subscribed = BTreeSet::new();
-    for member in &described.members {
-        match &member.role {
-            MemberRole::Subscribed { subscription, .. } => {
-                subscribed.extend(subscription.iter().map(|name| canonical(name)));
-            }
-            MemberRole::Client { metadata, .. } if described.protocol_type == "consumer" => {
-                subscribed.extend(subscription_topics(metadata)?);
-            }
-            MemberRole::Client { .. } => return Err(NON_EMPTY_GROUP),
-        }
-    }
-
-    Ok(subscribed)
+        .map_err(error_code)
 }

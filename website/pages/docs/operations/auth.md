@@ -30,11 +30,11 @@ pico serve --auth required --auth-bootstrap-token "$TOKEN" ...
 
 Three endpoints on the admin listener:
 
-| Method and path | What it does |
-| --- | --- |
-| `GET /admin/tokens` | List records visible to the caller, scopes and issuers, never secrets. |
-| `POST /admin/tokens` | Issue a token narrowed from the caller's scope. `403` when it would widen. |
-| `DELETE /admin/tokens/{id}` | Revoke. Effective on the next request, cluster-wide. |
+| Method and path | Permission | What it does |
+| --- | --- | --- |
+| `GET /admin/tokens?prefix=` | `list_tokens` | List the records the caller may see, in [pages](/docs/api#lists), never secrets. |
+| `POST /admin/tokens` | `issue_token` | Issue a token narrowed from the caller's scope. `403` when it would widen. |
+| `DELETE /admin/tokens/{id}` | `revoke_token` | Revoke. Effective on the next request, cluster-wide. |
 
 ```bash
 curl -s -X POST http://127.0.0.1:9090/admin/tokens \
@@ -50,7 +50,7 @@ curl -s -X POST http://127.0.0.1:9090/admin/tokens \
     }'
 ```
 
-The response contains the wire token once. Only its hash is stored, so a lost secret means issuing a replacement. This token appends under `/logs/` over Pico and produces to the Kafka topics `logs.*`, and nothing else on either protocol.
+The response holds the token's record, `id`, `scope`, `createdAtMs`, and `issuedBy` (the issuing token's id), plus the wire `token`, shown only this once. Only its hash is stored, so a lost secret means issuing a replacement. This token appends under `/logs/` over Pico and produces to the Kafka topics `logs.*`, and nothing else on either protocol.
 
 The scope JSON takes these keys:
 
@@ -75,7 +75,7 @@ One token serves every kind of client. How each one carries it:
 | --- | --- |
 | `pico` CLI | A stored profile from `pico auth login`, in the OS keyring or in a private file with `PICO_NO_KEYRING=1`. `status` verifies it and `logout` removes it. An explicit `--token` or `PICO_TOKEN` wins over storage, see [CLI](/docs/operations/cli#connecting) |
 | `picomq-client` and the HTTP clients | The bearer set on the client config. The client follows `307`s itself and re-attaches the credential on every hop, because standard HTTP clients drop `Authorization` on cross-origin redirects and ownership redirects cross origins |
-| Dashboard | A token entered on rejection, held in session storage |
+| [Console](/docs/operations/console#signing-in) | A token entered at sign in, held in the tab's session storage |
 | Kafka clients | SASL PLAIN credentials, the token id as the username and the token as the password, see [Kafka protocol](/docs/kafka#authentication) |
 
 ## Errors

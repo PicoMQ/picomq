@@ -54,7 +54,7 @@ docker compose -f compose.cluster.yml up --build   # same stack, 2 nodes
 docker compose -f compose.lite.yml up --build      # SQLite + file://, no deps
 ```
 
-Nodes serve on `http://localhost:4437` (the cluster adds `:4438`). The admin dashboard is at `http://localhost:9090`, and `:9091` for the second node. RustFS exposes its API on `:9000` and a console on `:9001`.
+Nodes serve on `http://localhost:4437` (the cluster adds `:4438`). The [console](/docs/operations/console) is at `http://localhost:9090`, and `:9091` for the second node. RustFS exposes its API on `:9000` and a console on `:9001`.
 
 ::: info Note
 The compose nodes run with auth off for development. Setting `PICO_AUTH=required` in `.env` turns it on, see [Authentication](/docs/operations/auth).
@@ -159,4 +159,4 @@ pico admin --admin-endpoint http://localhost:9090 cluster
 pico admin --admin-endpoint http://localhost:9090 nodes
 ```
 
-The same information is on the dashboard at `http://localhost:9090`.
+The same information, with topics, messages, and groups, is in the [console](/docs/operations/console) at `http://localhost:9090`.

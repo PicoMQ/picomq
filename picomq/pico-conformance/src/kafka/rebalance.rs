@@ -7,10 +7,14 @@ use std::time::Duration;
 use bytes::{BufMut, Bytes, BytesMut};
 use kafka_protocol::messages::join_group_request::JoinGroupRequestProtocol;
 use kafka_protocol::messages::leave_group_request::MemberIdentity;
+use kafka_protocol::messages::offset_commit_request::{
+    OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+};
 use kafka_protocol::messages::sync_group_request::SyncGroupRequestAssignment;
 use kafka_protocol::messages::{
     ApiKey, ConsumerProtocolSubscription, GroupId, JoinGroupRequest, JoinGroupResponse,
-    LeaveGroupRequest, LeaveGroupResponse, SyncGroupRequest, SyncGroupResponse,
+    LeaveGroupRequest, LeaveGroupResponse, ListGroupsRequest, ListGroupsResponse,
+    OffsetCommitRequest, OffsetCommitResponse, SyncGroupRequest, SyncGroupResponse, TopicName,
 };
 use kafka_protocol::protocol::{Encodable, StrBytes};
 
@@ -19,6 +23,8 @@ use crate::kafka::raw::{Reply, decode, encode, exchange};
 const JOIN_VERSION: i16 = 5;
 const SYNC_VERSION: i16 = 3;
 const LEAVE_VERSION: i16 = 3;
+const COMMIT_VERSION: i16 = 7;
+const LIST_VERSION: i16 = 4;
 const HEADER_VERSION: i16 = 1;
 const MEMBER_ID_REQUIRED: i16 = 79;
 const PENDING: Duration = Duration::from_millis(500);
@@ -80,13 +86,69 @@ pub async fn missing(address: &str, group: &str) -> Vec<String> {
     )]
 }
 
+pub async fn simple_commit(address: &str, group: &str) -> Vec<String> {
+    let (member, generation) = match stable_member(address, group).await {
+        Ok(stable) => stable,
+        Err(failure) => return vec![failure],
+    };
+
+    let unfenced = commit(address, group, "", -1).await;
+    let fenced = commit(address, group, &member, generation).await;
+    let left = leave_group(address, group, &member).await;
+    let empty = commit(address, group, "", -1).await;
+
+    vec![
+        format!("unfenced commit while stable: {unfenced}"),
+        format!("member commit: {fenced}"),
+        format!("leave: {left}"),
+        format!("unfenced commit once empty: {empty}"),
+    ]
+}
+
+pub async fn list_empty(address: &str, group: &str) -> Vec<String> {
+    let committed = commit(address, group, "", -1).await;
+    let reply = exchange(
+        address,
+        ApiKey::ListGroups,
+        LIST_VERSION,
+        HEADER_VERSION,
+        encode(&ListGroupsRequest::default(), LIST_VERSION),
+    )
+    .await;
+
+    let Reply::Frame(mut frame) = reply else {
+        return vec![format!("commit: {committed}"), silent(reply)];
+    };
+    let listed = match decode::<ListGroupsResponse>(&mut frame, ApiKey::ListGroups, LIST_VERSION) {
+        Ok(response) => response
+            .groups
+            .iter()
+            .find(|listed| listed.group_id.as_str() == group)
+            .map_or("absent".to_owned(), |listed| {
+                format!("listed, state {}", listed.group_state.as_str())
+            }),
+        Err(_) => "unreadable".to_owned(),
+    };
+
+    vec![format!("commit: {committed}"), format!("group: {listed}")]
+}
+
 /// A stable first member that holds generation 1, and the member id the
 /// coordinator handed a second member.
 async fn two_members(address: &str, group: &str) -> Result<(String, String), String> {
-    let first = member_id(address, group)
+    let (first, _) = stable_member(address, group).await?;
+    let second = member_id(address, group)
+        .await
+        .map_err(|step| format!("second member id: {step}"))?;
+
+    Ok((first, second))
+}
+
+async fn stable_member(address: &str, group: &str) -> Result<(String, i32), String> {
+    let member = member_id(address, group)
         .await
         .map_err(|step| format!("first member id: {step}"))?;
-    let generation = match join(address, group, &first).await {
+    let generation = match join(address, group, &member).await {
         Reply::Frame(mut frame) => {
             match decode::<JoinGroupResponse>(&mut frame, ApiKey::JoinGroup, JOIN_VERSION) {
                 Ok(response) if response.error_code == 0 => response.generation_id,
@@ -95,14 +157,49 @@ async fn two_members(address: &str, group: &str) -> Result<(String, String), Str
         }
         reply => return Err(format!("first join: {}", silent(reply))),
     };
-    sync(address, group, &first, generation)
+    sync(address, group, &member, generation)
         .await
         .map_err(|step| format!("first sync: {step}"))?;
-    let second = member_id(address, group)
-        .await
-        .map_err(|step| format!("second member id: {step}"))?;
 
-    Ok((first, second))
+    Ok((member, generation))
+}
+
+async fn commit(address: &str, group: &str, member: &str, generation: i32) -> String {
+    let request = OffsetCommitRequest::default()
+        .with_group_id(group_id(group))
+        .with_generation_id_or_member_epoch(generation)
+        .with_member_id(StrBytes::from(member.to_owned()))
+        .with_topics(vec![
+            OffsetCommitRequestTopic::default()
+                .with_name(TopicName(StrBytes::from(group.to_owned())))
+                .with_partitions(vec![
+                    OffsetCommitRequestPartition::default()
+                        .with_partition_index(0)
+                        .with_committed_offset(1),
+                ]),
+        ]);
+    let reply = exchange(
+        address,
+        ApiKey::OffsetCommit,
+        COMMIT_VERSION,
+        HEADER_VERSION,
+        encode(&request, COMMIT_VERSION),
+    )
+    .await;
+
+    let Reply::Frame(mut frame) = reply else {
+        return silent(reply);
+    };
+    match decode::<OffsetCommitResponse>(&mut frame, ApiKey::OffsetCommit, COMMIT_VERSION) {
+        Ok(response) => response
+            .topics
+            .iter()
+            .flat_map(|topic| &topic.partitions)
+            .map(|partition| format!("error {}", partition.error_code))
+            .collect::<Vec<_>>()
+            .join(", "),
+        Err(_) => "unreadable".to_owned(),
+    }
 }
 
 async fn member_id(address: &str, group: &str) -> Result<String, String> {

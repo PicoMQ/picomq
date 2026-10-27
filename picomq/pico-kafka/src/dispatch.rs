@@ -1,10 +1,15 @@
+use std::sync::Arc;
+use std::time::Instant;
+
 use bytes::Bytes;
 use picomq_auth::{AuthPrincipal, Authorizer, Operation, Scope};
 
+use kafka_protocol::messages::ApiKey;
 use kafka_protocol::protocol::decode_request_header_from_buffer;
 
 use crate::broker::BrokerContext;
 use crate::handlers::{HandlerError, HandlerOutcome};
+use crate::versions::supported_apis;
 
 #[derive(Debug, Clone)]
 pub struct RequestContext {
@@ -12,6 +17,7 @@ pub struct RequestContext {
     pub api_version: i16,
     pub correlation_id: i32,
     pub client_id: Option<String>,
+    pub client_host: Arc<str>,
     pub principal: Option<AuthPrincipal>,
 }
 
@@ -49,6 +55,7 @@ impl RequestContext {
 pub fn request_context(
     frame: &[u8],
     principal: Option<AuthPrincipal>,
+    client_host: &Arc<str>,
 ) -> Result<(RequestContext, Bytes), HandlerError> {
     let mut body = Bytes::copy_from_slice(frame);
     let header = decode_request_header_from_buffer(&mut body)
@@ -59,6 +66,7 @@ pub fn request_context(
         api_version: header.request_api_version,
         correlation_id: header.correlation_id,
         client_id: header.client_id.map(|id| id.to_string()),
+        client_host: Arc::clone(client_host),
         principal,
     };
     Ok((req, body))
@@ -67,8 +75,39 @@ pub fn request_context(
 pub async fn dispatch(
     ctx: &BrokerContext,
     principal: Option<AuthPrincipal>,
+    client_host: &Arc<str>,
     frame: &[u8],
 ) -> Result<HandlerOutcome, HandlerError> {
-    let (req, body) = request_context(frame, principal)?;
-    crate::handlers::dispatch(ctx, &req, &body).await
+    let (req, body) = request_context(frame, principal, client_host)?;
+    let api_key = req.api_key;
+    let started = Instant::now();
+
+    let outcome = crate::handlers::dispatch(ctx, &req, &body).await;
+    observed(outcome, api_key, started)
+}
+
+pub fn name_operations() {
+    for api in supported_apis() {
+        if let Ok(key) = ApiKey::try_from(api.api_key) {
+            picomq_metrics::name_kafka_operation(api.api_key, format!("{key:?}"));
+        }
+    }
+}
+
+fn observed(
+    outcome: Result<HandlerOutcome, HandlerError>,
+    api_key: i16,
+    started: Instant,
+) -> Result<HandlerOutcome, HandlerError> {
+    match outcome {
+        Ok(HandlerOutcome::Deferred(deferred)) => {
+            Ok(HandlerOutcome::Deferred(Box::pin(async move {
+                observed(deferred.await, api_key, started)
+            })))
+        }
+        outcome => {
+            picomq_metrics::kafka(api_key, outcome.is_ok(), started.elapsed());
+            outcome
+        }
+    }
 }

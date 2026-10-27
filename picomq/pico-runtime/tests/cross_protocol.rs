@@ -43,7 +43,6 @@ fn config(dir: &Path, protocol: HttpProtocol, node_epoch: i64) -> ServerConfig {
             .unwrap(),
         storage_uri: format!("1@file://{}", dir.join("objects").display()),
         wal_uri: Some(wal(dir, "wal")),
-        schema_registry: Some(format!("3@file://{}", dir.join("schemas").display())),
         engine: s3stream::Config {
             wal_upload_interval_ms: 200,
             ..Default::default()
@@ -438,7 +437,7 @@ async fn kafka_writes_pico_reads() {
         .json()
         .await
         .unwrap();
-    let names: Vec<&str> = listing["streams"]
+    let names: Vec<&str> = listing["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -507,22 +506,48 @@ async fn one_group_serves_kafka_and_pico_consumers() {
         .unwrap();
     assert_eq!(offsets["offsets"]["/jobs"]["position"], 3);
 
-    let commit = node
-        .http
-        .put(node.url("/_groups/shared/offsets"))
-        .json(&serde_json::json!({ "offsets": { "/jobs": { "position": 1 } } }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(commit.status(), 204);
+    let commit = || {
+        node.http
+            .put(node.url("/_groups/shared/offsets"))
+            .json(&serde_json::json!({ "offsets": { "/jobs": { "position": 1 } } }))
+            .send()
+    };
+    assert_eq!(
+        commit().await.unwrap().status(),
+        404,
+        "an unfenced commit waits for the group to empty, as on a Kafka broker"
+    );
     let mut partitions = rdkafka::TopicPartitionList::new();
     partitions.add_partition("jobs", 0);
     let committed = subscriber
         .committed_offsets(partitions, Duration::from_secs(5))
         .unwrap();
-    assert_eq!(committed.elements()[0].offset(), rdkafka::Offset::Offset(1));
+    assert_eq!(committed.elements()[0].offset(), rdkafka::Offset::Offset(3));
 
     drop(subscriber);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = commit().await.unwrap().status();
+        if status == 204 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the group never emptied after the consumer left, last {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let offsets: Value = node
+        .http
+        .get(node.url("/_groups/shared/offsets"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(offsets["offsets"]["/jobs"]["position"], 1);
+
     node.shutdown().await;
 }
 
@@ -704,82 +729,6 @@ async fn slashes_and_dots_name_one_topic() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_binding_applies_to_every_writer() {
-    let dir = tempfile::tempdir().unwrap();
-    let node = Node::start(dir.path(), HttpProtocol::Pico, 1).await;
-    let schema = r#"{
-        "type": "object",
-        "properties": {
-            "value": {
-                "type": "object",
-                "properties": { "name": { "type": "string" } },
-                "required": ["name"]
-            }
-        }
-    }"#;
-    assert_eq!(
-        node.http
-            .put(node.url("/_schemas/person"))
-            .header("Content-Type", "application/schema+json")
-            .body(schema)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        204
-    );
-    assert_eq!(
-        node.http
-            .put(node.url("/people"))
-            .header("Content-Type", "application/json")
-            .header("Pico-Schema", "person")
-            .header("Pico-Schema-Validate", "true")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        201
-    );
-
-    let producer = node.producer();
-    assert_eq!(
-        produce(&producer, "people", None, r#"{"name":"alice"}"#).await,
-        0
-    );
-    let rejected = producer
-        .send(
-            FutureRecord::to("people")
-                .payload(r#"{"name":1}"#)
-                .key("bad"),
-            Duration::from_secs(15),
-        )
-        .await
-        .unwrap_err()
-        .0;
-    assert_eq!(
-        rejected.rdkafka_error_code(),
-        Some(RDKafkaErrorCode::InvalidRecord)
-    );
-
-    let rejected = node
-        .http
-        .post(node.url("/people"))
-        .header("Content-Type", "application/json")
-        .body(r#"{"name":2}"#)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), 400);
-    let body: Value = rejected.json().await.unwrap();
-    assert_eq!(body["error"], "schema_violation");
-
-    let records = pico_read_json(&node, "/people").await;
-    assert_eq!(records.len(), 1);
-
-    node.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn auth_gates_http_and_kafka_with_one_token() {
     let dir = tempfile::tempdir().unwrap();
     let (root, _) = AccessToken::issue("ops/root").unwrap();
@@ -923,8 +872,8 @@ async fn kafka_partitions_are_read_one_at_a_time_over_http() {
         .json()
         .await
         .unwrap();
-    assert_eq!(listing["streams"][0]["partitions"], 3);
-    assert!(listing["streams"][0].get("next_seq").is_none());
+    assert_eq!(listing["items"][0]["partitions"], 3);
+    assert!(listing["items"][0].get("next_seq").is_none());
 
     node.shutdown().await;
 }
@@ -1021,7 +970,11 @@ async fn rust_client_addresses_kafka_partitions() {
         )
         .await
         .unwrap();
-    let bodies: Vec<&[u8]> = page.records.iter().map(|r| &r.body[..]).collect();
+    let bodies: Vec<&[u8]> = page
+        .records
+        .iter()
+        .map(|r| r.body.as_deref().unwrap())
+        .collect();
     assert_eq!(bodies, [&b"a"[..], b"b", b"c"]);
 
     let without_partition = client
@@ -1112,7 +1065,7 @@ async fn kafka_clients_follow_partition_leaders_across_nodes() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while streams
         .iter()
-        .any(|stream_id| node.views().load().state.streams.contains_key(stream_id))
+        .any(|stream_id| node.views().load().state.streams().contains_key(stream_id))
     {
         assert!(
             tokio::time::Instant::now() < deadline,

@@ -16,7 +16,7 @@ use tokio::sync::watch;
 
 use crate::error::ServiceError;
 use crate::leadership;
-use crate::service::stream_id_key;
+use crate::log::stream_id_key;
 use crate::streams::Streams;
 use crate::wal::Wal;
 
@@ -87,7 +87,7 @@ impl Failover {
 
             let fenced = view
                 .state
-                .nodes
+                .nodes()
                 .values()
                 .filter(|row| row.fenced && row.node_id != local.node_id);
             for row in fenced {
@@ -103,8 +103,8 @@ impl Failover {
         for stream_id in state.placed_on(row.node_id) {
             let moved = if state.get_kv(&stream_id_key(stream_id)).is_none() {
                 self.streams.destroy(stream_id).await
-            } else if state.pending_transfers.contains_key(&stream_id) {
-                let epoch = state.streams[&stream_id].epoch;
+            } else if state.pending_transfers().contains_key(&stream_id) {
+                let epoch = state.streams()[&stream_id].epoch;
                 self.handle
                     .complete_transfer(stream_id, epoch)
                     .await
@@ -123,7 +123,7 @@ impl Failover {
         }
 
         let opened = state
-            .opening_by_node
+            .opening_by_node()
             .range((row.node_id, 0)..=(row.node_id, u64::MAX))
             .next()
             .is_some();
@@ -169,19 +169,19 @@ impl Liveness {
     /// Nodes that stayed silent for the timeout, as last seen: a fence must
     /// still find them at that epoch and heartbeat count.
     fn dead<'a>(&mut self, state: &'a MetadataState, local: Proposer) -> Vec<&'a NodeRow> {
-        let Some(clock) = state.nodes.get(&local.node_id).map(|row| row.heartbeats) else {
+        let Some(clock) = state.nodes().get(&local.node_id).map(|row| row.heartbeats) else {
             return Vec::new();
         };
 
         self.since.retain(|(node_id, epoch, heartbeats), _| {
             state
-                .nodes
+                .nodes()
                 .get(node_id)
                 .is_some_and(|row| (row.epoch, row.heartbeats) == (*epoch, *heartbeats))
         });
 
         state
-            .nodes
+            .nodes()
             .values()
             .filter(|row| row.node_id != local.node_id && !row.fenced)
             .filter(|row| {
@@ -262,7 +262,7 @@ mod tests {
         assert!(liveness.dead(&state, LEADER).is_empty());
 
         leader_heartbeats(&mut state, 1);
-        assert_eq!(liveness.dead(&state, LEADER), vec![&state.nodes[&2]]);
+        assert_eq!(liveness.dead(&state, LEADER), vec![&state.nodes()[&2]]);
     }
 
     #[test]
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn this_node_and_fenced_nodes_are_never_reported() {
         let mut state = cluster();
-        let heartbeats = state.nodes[&3].heartbeats;
+        let heartbeats = state.nodes()[&3].heartbeats;
         apply(
             &mut state,
             &MetadataCommand::FenceNode {

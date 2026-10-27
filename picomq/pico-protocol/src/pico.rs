@@ -23,8 +23,6 @@ pub const H_EXPIRES_AT: &str = "Pico-Expires-At";
 pub const H_RETENTION_MS: &str = "Pico-Retention-Ms";
 pub const H_RETENTION_BYTES: &str = "Pico-Retention-Bytes";
 pub const H_CLOSED: &str = "Pico-Closed";
-pub const H_SCHEMA: &str = "Pico-Schema";
-pub const H_SCHEMA_VALIDATE: &str = "Pico-Schema-Validate";
 pub const H_PARTITIONS: &str = "Pico-Partitions";
 pub const H_UP_TO_DATE: &str = "Pico-Up-To-Date";
 pub const H_CURSOR: &str = "Pico-Cursor";
@@ -49,7 +47,6 @@ pub const Q_LIVE: &str = "live";
 pub const Q_PREFIX: &str = "prefix";
 pub const Q_LIMIT: &str = "limit";
 pub use crate::wire::Q_PARTITION;
-pub const Q_START_AFTER: &str = "start_after";
 pub const Q_CURSOR: &str = "cursor";
 pub const FORMAT_JSON: &str = "json";
 pub const FORMAT_BINARY: &str = "binary";
@@ -60,7 +57,6 @@ pub const SEQ_NOW: &str = "now";
 pub const SEQ_BEGINNING: &str = "0";
 pub const E_NOT_FOUND: &str = "not_found";
 pub const E_BAD_REQUEST: &str = "bad_request";
-pub const E_SCHEMA_VIOLATION: &str = "schema_violation";
 pub const E_FENCED: &str = "fenced";
 pub const E_SEQUENCE_GAP: &str = "sequence_gap";
 pub const E_MATCH_FAILED: &str = "match_failed";
@@ -137,75 +133,59 @@ pub struct StreamEntry {
     pub name: String,
     pub content_type: Option<String>,
     pub partitions: u32,
-    pub start_seq: Option<u64>,
-    pub next_seq: Option<u64>,
     pub closed: bool,
     pub ttl_seconds: Option<u64>,
     pub expires_at: Option<String>,
 }
 
+impl StreamEntry {
+    pub fn encode(&self) -> Value {
+        let mut node = Map::new();
+        node.insert("name".into(), json!(self.name));
+        if let Some(content_type) = &self.content_type {
+            node.insert("content_type".into(), json!(content_type));
+        }
+        node.insert("partitions".into(), json!(self.partitions));
+        node.insert("closed".into(), json!(self.closed));
+        if let Some(ttl) = self.ttl_seconds {
+            node.insert("ttl".into(), json!(ttl));
+        }
+        if let Some(expires_at) = &self.expires_at {
+            node.insert("expires_at".into(), json!(expires_at));
+        }
+        Value::Object(node)
+    }
+
+    fn decode(node: &Value) -> Self {
+        Self {
+            name: node["name"].as_str().unwrap_or_default().to_owned(),
+            content_type: node["content_type"].as_str().map(str::to_owned),
+            partitions: node["partitions"].as_u64().unwrap_or(1) as u32,
+            closed: node["closed"].as_bool().unwrap_or(false),
+            ttl_seconds: node["ttl"].as_u64(),
+            expires_at: node["expires_at"].as_str().map(str::to_owned),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Listing {
     pub streams: Vec<StreamEntry>,
-    pub has_more: bool,
+    pub next: Option<String>,
 }
 
 impl Listing {
-    pub fn encode(&self) -> Bytes {
-        let streams: Vec<Value> = self
-            .streams
-            .iter()
-            .map(|entry| {
-                let mut node = Map::new();
-                node.insert("name".into(), json!(entry.name));
-                if let Some(content_type) = &entry.content_type {
-                    node.insert("content_type".into(), json!(content_type));
-                }
-                node.insert("partitions".into(), json!(entry.partitions));
-                if let Some(start_seq) = entry.start_seq {
-                    node.insert("start_seq".into(), json!(start_seq));
-                }
-                if let Some(next_seq) = entry.next_seq {
-                    node.insert("next_seq".into(), json!(next_seq));
-                }
-                node.insert("closed".into(), json!(entry.closed));
-                if let Some(ttl) = entry.ttl_seconds {
-                    node.insert("ttl".into(), json!(ttl));
-                }
-                if let Some(expires_at) = &entry.expires_at {
-                    node.insert("expires_at".into(), json!(expires_at));
-                }
-                Value::Object(node)
-            })
-            .collect();
-        let body = json!({ "streams": streams, "has_more": self.has_more });
-        Bytes::from(serde_json::to_vec(&body).expect("json encode"))
-    }
-
     pub fn decode(payload: &[u8]) -> Result<Self, CodecError> {
         let root: Value =
             serde_json::from_slice(payload).map_err(|_| CodecError::new("invalid JSON"))?;
-        let streams = root["streams"]
+        let streams = root["items"]
             .as_array()
-            .map(|entries| {
-                entries
-                    .iter()
-                    .map(|node| StreamEntry {
-                        name: node["name"].as_str().unwrap_or_default().to_owned(),
-                        content_type: node["content_type"].as_str().map(str::to_owned),
-                        partitions: node["partitions"].as_u64().unwrap_or(1) as u32,
-                        start_seq: node["start_seq"].as_u64(),
-                        next_seq: node["next_seq"].as_u64(),
-                        closed: node["closed"].as_bool().unwrap_or(false),
-                        ttl_seconds: node["ttl"].as_u64(),
-                        expires_at: node["expires_at"].as_str().map(str::to_owned),
-                    })
-                    .collect()
-            })
+            .map(|items| items.iter().map(StreamEntry::decode).collect())
             .unwrap_or_default();
+
         Ok(Self {
             streams,
-            has_more: root["has_more"].as_bool().unwrap_or(false),
+            next: root["next"].as_str().map(str::to_owned),
         })
     }
 }
@@ -241,8 +221,6 @@ pub struct CreateRequest<'a> {
     pub ttl_seconds: Option<u64>,
     pub expires_at: Option<&'a str>,
     pub closed: bool,
-    pub schema: Option<&'a str>,
-    pub schema_validate: bool,
     pub partitions: Option<u32>,
     pub retention_ms: Option<u64>,
     pub retention_bytes: Option<u64>,
@@ -256,8 +234,6 @@ impl<'a> CreateRequest<'a> {
             ttl_seconds: None,
             expires_at: None,
             closed: false,
-            schema: None,
-            schema_validate: false,
             partitions: None,
             retention_ms: None,
             retention_bytes: None,
@@ -270,8 +246,6 @@ impl<'a> CreateRequest<'a> {
             .header_opt(H_TTL, self.ttl_seconds)
             .header_opt(H_EXPIRES_AT, self.expires_at)
             .flag(H_CLOSED, self.closed)
-            .header_opt(H_SCHEMA, self.schema)
-            .flag(H_SCHEMA_VALIDATE, self.schema_validate)
             .header_opt(H_PARTITIONS, self.partitions)
             .header_opt(H_RETENTION_MS, self.retention_ms)
             .header_opt(H_RETENTION_BYTES, self.retention_bytes)
@@ -413,7 +387,6 @@ pub struct HeadResponse {
     pub expires_at: Option<String>,
     pub retention_ms: Option<u64>,
     pub retention_bytes: Option<u64>,
-    pub schema: Option<String>,
     pub kafka_topic: Option<String>,
 }
 
@@ -432,7 +405,6 @@ impl HeadResponse {
             expires_at: header_string(headers, H_EXPIRES_AT),
             retention_ms: header_u64(headers, H_RETENTION_MS),
             retention_bytes: header_u64(headers, H_RETENTION_BYTES),
-            schema: header_string(headers, H_SCHEMA),
             kafka_topic: header_string(headers, H_KAFKA_TOPIC),
         })
     }
@@ -522,7 +494,7 @@ impl ReadResponse {
 pub struct ListRequest<'a> {
     pub prefix: &'a str,
     pub limit: u64,
-    pub start_after: Option<&'a str>,
+    pub cursor: Option<&'a str>,
 }
 
 impl ListRequest<'_> {
@@ -531,8 +503,8 @@ impl ListRequest<'_> {
         if self.limit > 0 {
             query.push_str(&format!("&{Q_LIMIT}={}", self.limit));
         }
-        if let Some(start_after) = self.start_after {
-            query.push_str(&format!("&{Q_START_AFTER}={}", urlencode(start_after)));
+        if let Some(cursor) = self.cursor {
+            query.push_str(&format!("&{Q_CURSOR}={}", urlencode(cursor)));
         }
         WireRequest::new(Method::GET, format!("/{query}"), &[200])
     }
@@ -626,33 +598,24 @@ mod tests {
     }
 
     #[test]
-    fn listing_round_trip() {
-        let listing = Listing {
-            streams: vec![
-                StreamEntry {
-                    name: "/a".to_owned(),
-                    content_type: Some("application/json".to_owned()),
-                    partitions: 1,
-                    start_seq: Some(1),
-                    next_seq: Some(5),
-                    closed: false,
-                    ttl_seconds: Some(60),
-                    expires_at: Some("2026-01-01T00:00:00Z".to_owned()),
-                },
-                StreamEntry {
-                    name: "/orders".to_owned(),
-                    content_type: None,
-                    partitions: 3,
-                    start_seq: None,
-                    next_seq: None,
-                    closed: false,
-                    ttl_seconds: None,
-                    expires_at: None,
-                },
-            ],
-            has_more: true,
+    fn listing_decodes_items_and_the_next_cursor() {
+        let entry = StreamEntry {
+            name: "/a".to_owned(),
+            content_type: Some("application/json".to_owned()),
+            partitions: 3,
+            closed: false,
+            ttl_seconds: Some(60),
+            expires_at: Some("2026-01-01T00:00:00Z".to_owned()),
         };
-        assert_eq!(Listing::decode(&listing.encode()).unwrap(), listing);
+        let body = json!({ "items": [entry.encode()], "next": "opaque" });
+
+        assert_eq!(
+            Listing::decode(body.to_string().as_bytes()).unwrap(),
+            Listing {
+                streams: vec![entry],
+                next: Some("opaque".to_owned()),
+            }
+        );
         assert_eq!(Listing::decode(b"{}").unwrap(), Listing::default());
         assert!(Listing::decode(b"not json").is_err());
     }

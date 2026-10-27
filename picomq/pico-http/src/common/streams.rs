@@ -83,28 +83,24 @@ async fn patch_config(
         Ok(update) => update,
         Err(error) => return bad_request(&error.message),
     };
-    match state
-        .topics
-        .update(UpdateTopicCommand {
-            name,
-            schema_name: update.schema,
-            schema_validate: update.schema_validate,
-            retention_ms: update.retention_ms,
-            retention_bytes: update.retention_bytes,
-            partitions: update.partitions,
-            ..Default::default()
-        })
-        .await
-    {
+    match state.topics.update(update_command(name, update)).await {
         Ok(topic) => config(&topic),
         Err(error) => service_error(error),
     }
 }
 
+pub(crate) fn update_command(name: String, update: ConfigUpdate) -> UpdateTopicCommand {
+    UpdateTopicCommand {
+        name,
+        retention_ms: update.retention_ms,
+        retention_bytes: update.retention_bytes,
+        partitions: update.partitions,
+        ..Default::default()
+    }
+}
+
 fn config(topic: &Topic) -> Response {
     let config = TopicConfig {
-        schema: topic.schema_name.clone(),
-        schema_validate: topic.schema_validate,
         kafka_topic: topic.name.kafka().map(str::to_owned),
         partitions: topic.partitions,
         retention_ms: topic.retention.ms,

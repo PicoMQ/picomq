@@ -3,30 +3,33 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::routing::{get, post, put};
 use picomq_auth::{Audience, AuthError, Authorizer, Operation, Resource, Scope};
 use picomq_protocol::groups::{
-    self as wire, AssignmentResponse, CommitRequest, GroupListing, HeartbeatRequest, JoinRequest,
-    JoinResponse, OffsetsResponse, Q_GENERATION, Q_INSTANCE_ID, Q_STREAM,
+    self as wire, AssignmentResponse, CommitRequest, HeartbeatRequest, JoinRequest, JoinResponse,
+    OffsetsResponse, Q_GENERATION, Q_INSTANCE_ID, Q_STREAM,
 };
 use picomq_protocol::pico::{
     CT_JSON, E_BAD_REQUEST, E_CAPACITY_EXCEEDED, E_CONFLICT, E_COORDINATOR_UNAVAILABLE,
     E_DURABILITY, E_FENCED, E_ILLEGAL_GENERATION, E_INCONSISTENT_PROTOCOL, E_NOT_FOUND,
-    E_PERMISSION_DENIED, E_REBALANCE_IN_PROGRESS, E_UNKNOWN_MEMBER,
+    E_PERMISSION_DENIED, E_REBALANCE_IN_PROGRESS, E_UNKNOWN_MEMBER, Q_PREFIX,
 };
 use picomq_server::ownership::OwnershipService;
 use picomq_server::{
     CommittedOffset, GroupCoordinator, GroupDescription, GroupError, JoinInput, Joined,
     MemberFence, MemberRole, Membership, OffsetCommit, Partition, Topic, Topics,
 };
+use serde_json::json;
 
 use crate::auth::{Caller, authenticate};
 use crate::http::{base_response, query_param, query_params, set_header};
+use crate::paging::Paging;
 use crate::pico::{error, service_error_response};
 use crate::route::{RoutingMode, owner_redirect};
+use crate::serve::Peer;
 
 #[derive(Clone)]
 pub struct GroupState {
@@ -110,18 +113,29 @@ impl GroupState {
     }
 }
 
-async fn list(State(state): State<GroupState>, headers: HeaderMap) -> Response {
+async fn list(State(state): State<GroupState>, uri: Uri, headers: HeaderMap) -> Response {
     let caller = match state.admit(&headers).await {
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    let groups = state
-        .groups
-        .list(scope(&caller))
-        .iter()
-        .map(|group| strip_group(&caller, group).to_owned())
-        .collect();
-    ok(GroupListing { groups }.encode())
+    let paging = match Paging::from_query(&uri, &[Q_PREFIX]) {
+        Ok(paging) => paging,
+        Err(message) => return bad_request(&message),
+    };
+    let prefix = match resolve_group(&caller, paging.filter(Q_PREFIX).unwrap_or("")) {
+        Ok(prefix) => prefix,
+        Err(response) => return *response,
+    };
+
+    let page = state.groups.list(
+        scope(&caller),
+        &prefix,
+        paging.after.as_deref(),
+        paging.limit,
+    );
+    let mut response = paging.reply(page, |group, _| json!(strip_group(&caller, group)));
+    set_header(&mut response, header::CACHE_CONTROL.as_str(), "no-store");
+    response
 }
 
 async fn describe(
@@ -172,6 +186,7 @@ async fn remove(
 
 async fn join(
     State(state): State<GroupState>,
+    ConnectInfo(Peer(peer)): ConnectInfo<Peer>,
     Path(group): Path<String>,
     uri: Uri,
     headers: HeaderMap,
@@ -216,6 +231,7 @@ async fn join(
                 member_id: request.member_id.unwrap_or_default(),
                 instance_id: request.instance_id,
                 client_id: request.client_id.unwrap_or_else(|| "pico".to_owned()),
+                client_host: peer.ip().to_string(),
                 membership: Membership::Subscribed(subscribed),
                 session_timeout_ms: request
                     .session_timeout_ms

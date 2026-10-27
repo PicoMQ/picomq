@@ -1,4 +1,4 @@
-//! JSON form of [`Scope`], shared by the admin API, CLI, and dashboard.
+//! JSON form of [`Scope`], shared by the admin API, CLI, and console.
 //!
 //! Decoding is strict: unknown keys, operations, audiences, and matcher kinds
 //! are [`AuthError::Malformed`], never ignored.
@@ -26,7 +26,6 @@ pub fn operation_name(op: Operation) -> &'static str {
         Operation::DeleteGroup => "delete_group",
         Operation::ClusterRead => "cluster_read",
         Operation::NodeRead => "node_read",
-        Operation::StreamInspect => "stream_inspect",
         Operation::TransferStream => "transfer_stream",
         Operation::UpdateNodeSlots => "update_node_slots",
     }

@@ -30,12 +30,16 @@ pub fn stdin_records(batch: usize) -> std::io::Result<Vec<Vec<Bytes>>> {
 /// as a byte count instead of corrupting the terminal.
 pub fn print_record(record: &Record) {
     let mut out = std::io::stdout().lock();
-    match std::str::from_utf8(&record.body) {
+    let Some(body) = &record.body else {
+        let _ = writeln!(out, "{}\t<null>", record.position);
+        return;
+    };
+    match std::str::from_utf8(body) {
         Ok(text) => {
             let _ = writeln!(out, "{}\t{}", record.position, text);
         }
         Err(_) => {
-            let _ = writeln!(out, "{}\t<{} bytes>", record.position, record.body.len());
+            let _ = writeln!(out, "{}\t<{} bytes>", record.position, body.len());
         }
     }
 }

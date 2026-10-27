@@ -511,6 +511,19 @@ impl MetadataKvClient {
         self.node.views.load().state.list_kv(prefix)
     }
 
+    pub fn list_kv_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> Vec<(String, Bytes)> {
+        self.node
+            .views
+            .load()
+            .state
+            .list_kv_page(prefix, start_after, limit)
+    }
+
     pub async fn put_kv(&self, key: &str, value: Bytes) -> Result<Bytes, MetadataError> {
         let command = MetadataCommand::PutKv {
             proposer: self.node.proposer(),

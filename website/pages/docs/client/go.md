@@ -47,7 +47,9 @@ func main() {
 }
 ```
 
-`NewDurableStreams` builds a Durable Streams client, and `Connect` returns the protocol-neutral `Client` interface. Constructors do no network I/O. Every call takes a `context.Context`, and cancelling it interrupts both requests and retry delays.
+- **Clients.** `NewDurableStreams` builds a Durable Streams client, and `Connect` returns the protocol-neutral `Client` interface. Constructors do no network I/O. Every call takes a `context.Context`, and cancelling it interrupts both requests and retry delays.
+- **Records.** `AppendRecord` and `Record` carry a `Body`, a `Key`, and `Headers`, a `[]Header{Name, Value}` kept in order, so a name can repeat. A nil `Body` is a tombstone, a nil header `Value` is null, and a nil `Key` means no key, see [Records](/docs/api#records).
+- **Lists.** `List` and `ListGroups` return one [page](/docs/api#lists) with a `Next` cursor. Pass it back to continue, until it comes back empty.
 
 ## Partitions
 
@@ -73,7 +75,7 @@ unlimited := time.Duration(0)
 config, err := client.UpdateConfig(ctx, "/orders", picomq.ConfigUpdate{Partitions: 6, Retention: &unlimited})
 ```
 
-`PutSchema`, `GetSchema`, and `DeleteSchema` manage the [schema registry](/docs/schemas). All of these work on both protocols.
+Settings work on both protocols.
 
 ## Reads and subscriptions
 

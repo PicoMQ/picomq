@@ -381,7 +381,11 @@ async fn reader(client: Arc<Client>, name: String, read: Arc<Counters>, stop: Ar
             .await
         {
             Ok(page) => {
-                let bytes: u64 = page.records.iter().map(|r| r.body.len() as u64).sum();
+                let bytes: u64 = page
+                    .records
+                    .iter()
+                    .map(|r| r.body.as_ref().map_or(0, |body| body.len() as u64))
+                    .sum();
                 read.add(bytes, page.records.len() as u64);
                 next = page.next;
                 if page.records.is_empty() {

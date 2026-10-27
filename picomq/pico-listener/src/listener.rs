@@ -2,6 +2,7 @@ use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use picomq_metrics::ListenerKind;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -18,7 +19,12 @@ pub struct Listener {
 }
 
 impl Listener {
-    pub fn bind(addr: SocketAddr, backlog: i32, tls: Option<Tls>) -> std::io::Result<Self> {
+    pub fn bind(
+        kind: ListenerKind,
+        addr: SocketAddr,
+        backlog: i32,
+        tls: Option<Tls>,
+    ) -> std::io::Result<Self> {
         let domain = if addr.is_ipv6() {
             Domain::IPV6
         } else {
@@ -37,7 +43,7 @@ impl Listener {
         Ok(Self {
             local_addr,
             incoming,
-            task: tokio::spawn(accept(tcp, tls, accepted)),
+            task: tokio::spawn(accept(kind, tcp, tls, accepted)),
         })
     }
 
@@ -56,7 +62,12 @@ impl Drop for Listener {
     }
 }
 
-async fn accept(tcp: TcpListener, tls: Option<Tls>, accepted: mpsc::Sender<(Stream, SocketAddr)>) {
+async fn accept(
+    kind: ListenerKind,
+    tcp: TcpListener,
+    tls: Option<Tls>,
+    accepted: mpsc::Sender<(Stream, SocketAddr)>,
+) {
     loop {
         let (socket, peer) = match tcp.accept().await {
             Ok(connection) => connection,
@@ -69,7 +80,8 @@ async fn accept(tcp: TcpListener, tls: Option<Tls>, accepted: mpsc::Sender<(Stre
         };
 
         let Some(tls) = &tls else {
-            if accepted.send((Stream::Plain(socket), peer)).await.is_err() {
+            let stream = Stream::plain(socket, picomq_metrics::connection(kind));
+            if accepted.send((stream, peer)).await.is_err() {
                 return;
             }
             continue;
@@ -78,7 +90,8 @@ async fn accept(tcp: TcpListener, tls: Option<Tls>, accepted: mpsc::Sender<(Stre
         let (tls, accepted) = (tls.clone(), accepted.clone());
         tokio::spawn(async move {
             if let Some(stream) = tls.handshake(socket, peer).await {
-                let _ = accepted.send((Stream::Tls(Box::new(stream)), peer)).await;
+                let stream = Stream::tls(stream, picomq_metrics::connection(kind));
+                let _ = accepted.send((stream, peer)).await;
             }
         });
     }

@@ -8,10 +8,11 @@
 #
 # Scenarios:
 #   single    one node, Pico HTTP + Kafka, auth off
-#             protocol cross tests (pico <-> kafka, groups, ttl, trim, schema, producers)
-#             Rust, TypeScript and Go client suites, Go restart test
+#             protocol cross tests (pico <-> kafka, groups, ttl, trim, producers)
+#             Rust, TypeScript and Go client suites, console e2e, Go restart test
 #   cluster   two nodes, Pico HTTP + Kafka, auth required
 #             ownership redirects, groups across nodes, Rust, TypeScript and Go cluster suites
+#             console e2e with sign in and partition moves
 #             Kafka partitions across nodes, admin APIs, failover of a killed node
 #   chaos     two nodes under faults: paused nodes, a paused leader, a paused
 #             Postgres and a clean stop lose no acknowledged write and fence
@@ -73,7 +74,7 @@ rust_protocol_suite() {
 
 rust_cluster_suite() {
   log "$1: rust cluster e2e"
-  (cd "$ROOT" && cargo test --locked -p picomq-runtime --test cluster -- --ignored --test-threads=1 --nocapture)
+  (cd "$ROOT" && cargo test --locked -p picomq-runtime --test cluster -- --ignored --test-threads=1 --nocapture "${@:2}")
 }
 
 rust_chaos_suite() {
@@ -91,6 +92,12 @@ typescript_suite() {
   (cd "$ROOT/client/typescript" && npm ci --no-audit --no-fund && npm test)
 }
 
+console_suite() {
+  log "$1: console e2e"
+  (cd "$ROOT/client/typescript" && npm ci --no-audit --no-fund && npm run build) &&
+    (cd "$ROOT/console/e2e" && npm ci --no-audit --no-fund && npx playwright install chromium && npm run live)
+}
+
 go_suite() {
   log "$1: go live e2e"
   (cd "$ROOT/client/go" && go test ./... -count=1 -timeout 20m -v)
@@ -98,31 +105,31 @@ go_suite() {
 
 run_single() {
   export PICO_PROTOCOL=pico PICO_AUTH=off
-  export PICO_ENDPOINT="$NODE1" PICO_KAFKA="$KAFKA"
-  export PICOMQ_INTEGRATION=1 PICOMQ_ENDPOINT="$NODE1"
-  export PICOMQ_RESTART_CMD="docker compose $(compose_files single) restart pico"
-  unset PICO_ENDPOINT_2 PICOMQ_ENDPOINT_2 PICOMQ_AUTH_REQUIRED PICOMQ_DS_INTEGRATION
+  export PICO_INTEGRATION=1 PICO_ENDPOINT="$NODE1" PICO_KAFKA="$KAFKA" PICO_ADMIN="$ADMIN1"
+  export PICO_RESTART_CMD="docker compose $(compose_files single) restart pico"
+  unset PICO_ENDPOINT_2 PICO_ADMIN_2 PICO_DS_INTEGRATION
 
   wait_ready "$ADMIN1" &&
     rust_protocol_suite single &&
     rust_client_suite single --skip follow_cluster_redirects &&
     typescript_suite single &&
+    console_suite single &&
     go_suite single
 }
 
 run_cluster() {
   export PICO_PROTOCOL=pico PICO_AUTH=required
-  export PICO_ENDPOINT="$NODE1" PICO_ENDPOINT_2="$NODE2" PICO_KAFKA="$KAFKA"
-  export PICOMQ_INTEGRATION=1 PICOMQ_AUTH_REQUIRED=1 PICOMQ_ENDPOINT="$NODE1" PICOMQ_ENDPOINT_2="$NODE2"
-  export PICO_KAFKA_2="$KAFKA2" PICO_ADMIN_2="$ADMIN2"
-  export PICOMQ_KILL_CMD="docker compose $(compose_files cluster) kill -s KILL pico2"
-  export PICOMQ_START_CMD="docker compose $(compose_files cluster) up --detach pico2"
-  unset PICOMQ_RESTART_CMD PICOMQ_DS_INTEGRATION
+  export PICO_INTEGRATION=1 PICO_ENDPOINT="$NODE1" PICO_ENDPOINT_2="$NODE2" PICO_KAFKA="$KAFKA"
+  export PICO_KAFKA_2="$KAFKA2" PICO_ADMIN="$ADMIN1" PICO_ADMIN_2="$ADMIN2"
+  export PICO_KILL_CMD="docker compose $(compose_files cluster) kill -s KILL pico2"
+  export PICO_START_CMD="docker compose $(compose_files cluster) up --detach pico2"
+  unset PICO_RESTART_CMD PICO_DS_INTEGRATION
 
   wait_ready "$ADMIN1" &&
     wait_ready "$ADMIN2" &&
     rust_client_suite cluster &&
     typescript_suite cluster &&
+    console_suite cluster &&
     go_suite cluster &&
     rust_cluster_suite cluster
 }
@@ -130,7 +137,7 @@ run_cluster() {
 run_chaos() {
   export PICO_PROTOCOL=pico PICO_AUTH=required
   export PICO_ENDPOINT="$NODE1" PICO_KAFKA="$KAFKA" PICO_KAFKA_2="$KAFKA2" PICO_ADMIN_2="$ADMIN2"
-  export PICOMQ_COMPOSE="docker compose $(compose_files chaos)"
+  export PICO_COMPOSE="docker compose $(compose_files chaos)"
 
   wait_ready "$ADMIN1" &&
     wait_ready "$ADMIN2" &&
@@ -141,11 +148,14 @@ run_tls() {
   export PICO_PROTOCOL=pico PICO_AUTH=required
   export PICO_ENDPOINT="https://localhost:4437" PICO_ENDPOINT_2="https://localhost:4438"
   export PICO_CA_CERTIFICATE="$PICO_CERTS/ca.pem"
-  unset PICOMQ_RESTART_CMD PICOMQ_DS_INTEGRATION
+  unset PICO_RESTART_CMD PICO_DS_INTEGRATION
+
+  export PICO_ADMIN="https://localhost:9090" PICO_ADMIN_2="https://localhost:9091"
 
   wait_ready "https://localhost:9090" &&
     wait_ready "https://localhost:9091" &&
-    rust_client_suite tls
+    rust_client_suite tls &&
+    rust_cluster_suite tls each_node_answers_for_the_other
 }
 
 mint_certificates() {
@@ -157,7 +167,7 @@ mint_certificates() {
       -subj "/CN=PicoMQ e2e" -keyout "$dir/key.pem" -out "$dir/request.pem" &&
     openssl x509 -req -days 1 -in "$dir/request.pem" -CA "$dir/ca.pem" -CAkey "$dir/ca-key.pem" \
       -CAcreateserial -out "$dir/certificate.pem" \
-      -extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth') &&
+      -extfile <(printf 'subjectAltName=DNS:localhost,DNS:pico1,DNS:pico2,IP:127.0.0.1\nextendedKeyUsage=serverAuth') &&
     chmod 644 "$dir"/*.pem; then
     echo "$dir"
   else
@@ -168,8 +178,8 @@ mint_certificates() {
 
 run_ds() {
   export PICO_PROTOCOL=ds PICO_AUTH=off
-  export PICOMQ_DS_INTEGRATION=1 PICOMQ_DS_ENDPOINT="$NODE1" PICOMQ_DS_ENDPOINT_2="$NODE2"
-  unset PICO_ENDPOINT PICO_ENDPOINT_2 PICOMQ_INTEGRATION PICOMQ_AUTH_REQUIRED PICOMQ_ENDPOINT PICOMQ_ENDPOINT_2 PICOMQ_RESTART_CMD
+  export PICO_DS_INTEGRATION=1 PICO_DS_ENDPOINT="$NODE1" PICO_DS_ENDPOINT_2="$NODE2"
+  unset PICO_ENDPOINT PICO_ENDPOINT_2 PICO_INTEGRATION PICO_RESTART_CMD
 
   wait_ready "$ADMIN1" &&
     wait_ready "$ADMIN2" &&
@@ -210,7 +220,7 @@ run() {
       rm -rf "${PICO_CERTS:?}"
     fi
   fi
-  unset PICO_CERTS PICO_CA_CERTIFICATE
+  unset PICO_CERTS PICO_CA_CERTIFICATE PICO_ADMIN
   return "$status"
 }
 

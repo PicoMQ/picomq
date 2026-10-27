@@ -47,7 +47,13 @@ async fn gated_server(
 
     let server = serve(
         node.clone(),
-        Listener::bind(SocketAddr::from(([127, 0, 0, 1], 0)), 1024, None).unwrap(),
+        Listener::bind(
+            picomq_metrics::ListenerKind::Stream,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            1024,
+            None,
+        )
+        .unwrap(),
         None,
         ServeOptions {
             protocol,
@@ -186,7 +192,7 @@ async fn auto_prefix_resolves_stores_and_strips() {
         .unwrap();
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.unwrap();
-    let names: Vec<&str> = body["streams"]
+    let names: Vec<&str> = body["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -313,7 +319,7 @@ async fn auto_prefix_isolates_tenants() {
         .json()
         .await
         .unwrap();
-    assert_eq!(listing["streams"].as_array().unwrap().len(), 0);
+    assert_eq!(listing["items"].as_array().unwrap().len(), 0);
 
     server.shutdown().await;
 }
@@ -593,7 +599,7 @@ async fn an_exact_scope_lists_only_its_stream() {
         .await
         .unwrap();
 
-    let names: Vec<&str> = listed["streams"]
+    let names: Vec<&str> = listed["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -629,7 +635,7 @@ async fn a_stream_reader_reads_its_stream_config() {
     let patched = client
         .patch(format!("http://{}/_streams/cfg/a", server.local_addr()))
         .bearer_auth(&wire)
-        .json(&serde_json::json!({ "schemaValidate": true }))
+        .json(&serde_json::json!({ "retentionMs": 60000 }))
         .send()
         .await
         .unwrap();

@@ -15,9 +15,10 @@ website/node_modules/
 website/.vitepress/cache/
 website/.vitepress/dist/
 
-# Dashboard
-dashboard/node_modules/
-picomq/pico-frontend/_dashboard/
+# Console
+console/node_modules/
+console/e2e/
+picomq/pico-http/_console/
 
 # Local runtime state
 /data/

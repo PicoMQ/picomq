@@ -68,17 +68,17 @@ var _ = ginkgo.Describe("Pico producer", func() {
 
 		body := []byte("original-body")
 		key := []byte("original-key")
-		headers := map[string][]byte{"source": []byte("original")}
+		headers := []Header{{Name: "source", Value: []byte("original")}}
 		pending, err := producer.Send(context.Background(), AppendRecord{Body: body, Key: key, Headers: headers})
 		Expect(err).NotTo(HaveOccurred())
 		copy(body, []byte("mutated-body!"))
 		copy(key, []byte("mutated-key!"))
-		headers["source"][0] = 'X'
-		headers["added"] = []byte("later")
+		headers[0].Value[0] = 'X'
+		headers[0].Name = "changed"
 
 		_, err = pending.Await(context.Background())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(<-received).To(Equal(AppendRecord{Body: []byte("original-body"), Key: []byte("original-key"), Headers: map[string][]byte{"source": []byte("original")}}))
+		Expect(<-received).To(Equal(AppendRecord{Body: []byte("original-body"), Key: []byte("original-key"), Headers: []Header{{Name: "source", Value: []byte("original")}}}))
 		Expect(producer.Close(context.Background())).To(Succeed())
 	})
 
@@ -101,7 +101,7 @@ var _ = ginkgo.Describe("Pico producer", func() {
 		config := DefaultProducerConfig()
 		config.MaxBufferedBytes = 5
 		producer := client.Stream("orders").NewProducer("writer", &config)
-		_, err = producer.Send(context.Background(), AppendRecord{Key: []byte("key"), Headers: map[string][]byte{"h": []byte("xx")}})
+		_, err = producer.Send(context.Background(), AppendRecord{Key: []byte("key"), Headers: []Header{{Name: "h", Value: []byte("xx")}}})
 		Expect(err).To(MatchError(ContainSubstring("exceeds producer budget")))
 		Expect(producer.Close(context.Background())).To(Succeed())
 	})
@@ -239,7 +239,7 @@ func decodeAppendBatchForTest(data []byte) ([]AppendRecord, error) {
 	}
 	records := make([]AppendRecord, 0, count)
 	for i := uint32(0); i < count; i++ {
-		key, err := readKey(r)
+		key, err := readNullable(r)
 		if err != nil {
 			return nil, err
 		}
@@ -247,7 +247,7 @@ func decodeAppendBatchForTest(data []byte) ([]AppendRecord, error) {
 		if err != nil {
 			return nil, err
 		}
-		value, err := readBytes(r)
+		value, err := readNullable(r)
 		if err != nil {
 			return nil, err
 		}

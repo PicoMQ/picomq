@@ -18,8 +18,6 @@ pub const H_STREAM_UP_TO_DATE: &str = "Stream-Up-To-Date";
 pub const H_STREAM_TTL: &str = "Stream-TTL";
 pub const H_STREAM_EXPIRES_AT: &str = "Stream-Expires-At";
 pub const H_STREAM_CLOSED: &str = "Stream-Closed";
-pub const H_STREAM_SCHEMA: &str = "Stream-Schema";
-pub const H_STREAM_SCHEMA_VALIDATE: &str = "Stream-Schema-Validate";
 pub const H_STREAM_CURSOR: &str = "Stream-Cursor";
 pub const H_STREAM_SSE_DATA_ENCODING: &str = "Stream-SSE-Data-Encoding";
 pub const H_STREAM_SEQ: &str = "Stream-Seq";
@@ -174,8 +172,6 @@ pub struct CreateRequest<'a> {
     pub ttl_seconds: Option<u64>,
     pub expires_at: Option<&'a str>,
     pub closed: bool,
-    pub schema: Option<&'a str>,
-    pub schema_validate: bool,
     pub partitions: Option<u32>,
     pub retention_ms: Option<u64>,
     pub retention_bytes: Option<u64>,
@@ -190,8 +186,6 @@ impl<'a> CreateRequest<'a> {
             ttl_seconds: None,
             expires_at: None,
             closed: false,
-            schema: None,
-            schema_validate: false,
             partitions: None,
             retention_ms: None,
             retention_bytes: None,
@@ -205,8 +199,6 @@ impl<'a> CreateRequest<'a> {
             .header_opt(H_STREAM_TTL, self.ttl_seconds)
             .header_opt(H_STREAM_EXPIRES_AT, self.expires_at)
             .flag(H_STREAM_CLOSED, self.closed)
-            .header_opt(H_STREAM_SCHEMA, self.schema)
-            .flag(H_STREAM_SCHEMA_VALIDATE, self.schema_validate)
             .header_opt(H_STREAM_PARTITIONS, self.partitions)
             .header_opt(H_STREAM_RETENTION_MS, self.retention_ms)
             .header_opt(H_STREAM_RETENTION_BYTES, self.retention_bytes)
@@ -316,7 +308,6 @@ pub struct HeadResponse {
     pub expires_at: Option<String>,
     pub retention_ms: Option<u64>,
     pub retention_bytes: Option<u64>,
-    pub schema: Option<String>,
 }
 
 impl HeadResponse {
@@ -333,7 +324,6 @@ impl HeadResponse {
             expires_at: header_string(headers, H_STREAM_EXPIRES_AT),
             retention_ms: header_u64(headers, H_STREAM_RETENTION_MS),
             retention_bytes: header_u64(headers, H_STREAM_RETENTION_BYTES),
-            schema: header_string(headers, H_STREAM_SCHEMA),
         })
     }
 }

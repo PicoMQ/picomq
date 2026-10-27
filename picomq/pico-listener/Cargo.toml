@@ -13,6 +13,7 @@ testing = ["dep:rcgen"]
 
 [dependencies]
 arc-swap = { workspace = true }
+picomq-metrics = { workspace = true }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true }
 socket2 = { workspace = true }

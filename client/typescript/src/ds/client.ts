@@ -28,10 +28,8 @@ import type {
   Live,
   PartitionOptions,
   Protocol,
-  PutSchemaOptions,
   ReadLimits,
   ReadPage,
-  Schema,
   SseEvent,
   StreamApi,
   StreamInfo,
@@ -106,11 +104,14 @@ export class DsClient implements StreamApi {
       )
     }
     const envelope = toEnvelope(records[0]!)
-    if (Object.keys(envelope.headers).length > 0) {
+    if (envelope.headers.length > 0) {
       throw ClientError.unsupported('the Durable Streams protocol has no record headers')
     }
     if (envelope.key !== undefined) {
       throw ClientError.unsupported('the Durable Streams protocol has no record keys')
+    }
+    if (envelope.body === null) {
+      throw ClientError.unsupported('the Durable Streams protocol has no null record bodies')
     }
     const response = await expectDs(
       await this.http.send({
@@ -158,7 +159,7 @@ export class DsClient implements StreamApi {
       onData: (raw, ctx): StreamRecord[] => [
         {
           position: '',
-          headers: {},
+          headers: [],
           body: decodeDsData(raw.data, ctx.encoding),
         },
       ],
@@ -167,7 +168,12 @@ export class DsClient implements StreamApi {
     })
   }
 
-  async list(_prefix: string, _limit = 0, _options?: CallOptions): Promise<StreamListing> {
+  async list(
+    _prefix: string,
+    _limit = 0,
+    _cursor?: string,
+    _options?: CallOptions,
+  ): Promise<StreamListing> {
     throw ClientError.unsupported(
       'the Durable Streams protocol has no stream listing; use protocol pico',
     )
@@ -194,18 +200,6 @@ export class DsClient implements StreamApi {
 
   updateConfig(name: string, update: ConfigUpdate, options?: CallOptions): Promise<TopicConfig> {
     return this.control.updateConfig(name, update, options)
-  }
-
-  putSchema(name: string, body: Uint8Array | string, options?: PutSchemaOptions): Promise<void> {
-    return this.control.putSchema(name, body, options)
-  }
-
-  getSchema(name: string, options?: CallOptions): Promise<Schema | null> {
-    return this.control.getSchema(name, options)
-  }
-
-  deleteSchema(name: string, options?: CallOptions): Promise<boolean> {
-    return this.control.deleteSchema(name, options)
   }
 
 
@@ -308,7 +302,7 @@ export class DsClient implements StreamApi {
         : [
             {
               position: next,
-              headers: {},
+              headers: [],
               body,
             },
           ]

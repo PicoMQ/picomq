@@ -19,10 +19,13 @@ website/node_modules/
 website/.vitepress/cache/
 website/.vitepress/dist/
 
-# Dashboard (Vite)
-dashboard/node_modules/
-picomq/pico-http/_dashboard/*
-!picomq/pico-http/_dashboard/.gitkeep
+# Console (Vite)
+console/node_modules/
+console/*.tsbuildinfo
+console/e2e/node_modules/
+console/e2e/test-results/
+console/e2e/playwright-report/
+picomq/pico-http/_console/
 
 # Env / secrets
 .env

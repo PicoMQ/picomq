@@ -245,14 +245,17 @@ func (s *Subscription) decode(raw rawEvent) (Event, error) {
 	event.Type = EventData
 	if s.protocol == ProtocolPico {
 		var rows []struct {
-			Seq           json.Number       `json:"seq"`
-			Timestamp     int64             `json:"timestamp"`
-			Key           *string           `json:"key"`
-			KeyBase64     *string           `json:"key_b64"`
-			Headers       map[string]string `json:"headers"`
-			HeadersBase64 map[string]string `json:"headers_b64"`
-			Body          string            `json:"body"`
-			Body64        string            `json:"body_b64"`
+			Seq       json.Number `json:"seq"`
+			Timestamp int64       `json:"timestamp"`
+			Key       *string     `json:"key"`
+			KeyBase64 *string     `json:"key_b64"`
+			Headers   []struct {
+				Name        string  `json:"name"`
+				Value       *string `json:"value"`
+				ValueBase64 *string `json:"value_b64"`
+			} `json:"headers"`
+			Body   *string `json:"body"`
+			Body64 *string `json:"body_b64"`
 		}
 		decoder := json.NewDecoder(strings.NewReader(raw.data))
 		decoder.UseNumber()
@@ -260,13 +263,15 @@ func (s *Subscription) decode(raw rawEvent) (Event, error) {
 			return Event{}, invalidResponse(fmt.Errorf("invalid SSE data: %w", err))
 		}
 		for _, row := range rows {
-			value := []byte(row.Body)
-			if row.Body64 != "" {
-				decoded, err := base64.StdEncoding.DecodeString(row.Body64)
+			var value []byte
+			if row.Body64 != nil {
+				decoded, err := base64.StdEncoding.DecodeString(*row.Body64)
 				if err != nil {
 					return Event{}, invalidResponse(err)
 				}
 				value = decoded
+			} else if row.Body != nil {
+				value = []byte(*row.Body)
 			}
 			var key []byte
 			if row.KeyBase64 != nil {
@@ -278,16 +283,19 @@ func (s *Subscription) decode(raw rawEvent) (Event, error) {
 			} else if row.Key != nil {
 				key = []byte(*row.Key)
 			}
-			headers := make(map[string][]byte, len(row.Headers)+len(row.HeadersBase64))
-			for name, header := range row.Headers {
-				headers[name] = []byte(header)
-			}
-			for name, encoded := range row.HeadersBase64 {
-				header, decodeErr := base64.StdEncoding.DecodeString(encoded)
-				if decodeErr != nil {
-					return Event{}, invalidResponse(decodeErr)
+			var headers []Header
+			for _, header := range row.Headers {
+				var value []byte
+				if header.ValueBase64 != nil {
+					decoded, decodeErr := base64.StdEncoding.DecodeString(*header.ValueBase64)
+					if decodeErr != nil {
+						return Event{}, invalidResponse(decodeErr)
+					}
+					value = decoded
+				} else if header.Value != nil {
+					value = []byte(*header.Value)
 				}
-				headers[name] = header
+				headers = append(headers, Header{Name: header.Name, Value: value})
 			}
 			event.Records = append(event.Records, Record{Position: row.Seq.String(), Timestamp: row.Timestamp, Key: key, Headers: headers, Body: value})
 		}
@@ -300,7 +308,7 @@ func (s *Subscription) decode(raw rawEvent) (Event, error) {
 			}
 			value = decoded
 		}
-		event.Records = []Record{{Headers: map[string][]byte{}, Body: value}}
+		event.Records = []Record{{Body: value}}
 	}
 	return event, nil
 }

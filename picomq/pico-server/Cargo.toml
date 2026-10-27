@@ -13,7 +13,6 @@ picomq-metadata = { workspace = true }
 picomq-common = { workspace = true }
 picomq-auth = { workspace = true }
 picomq-protocol = { workspace = true }
-picomq-schema = { workspace = true }
 
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -21,6 +20,7 @@ crc32c = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
 kafka-protocol = { workspace = true }
+picomq-metrics = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -30,7 +30,6 @@ uuid = { workspace = true }
 [dev-dependencies]
 s3stream-wal = { workspace = true }
 picomq-sql = { workspace = true }
-object_store = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

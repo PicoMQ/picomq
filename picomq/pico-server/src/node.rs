@@ -5,17 +5,19 @@
 //! `picomq-sql`'s `SqlSink`) and owns, including its shutdown and any lease
 //! keeper.
 
+use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use picomq_auth::Authorizer;
 use picomq_metadata::{
-    CommandSink, MetadataError, MetadataNodeHandle, Registration, ViewPublisher,
+    CommandSink, MetadataError, MetadataNodeHandle, NodeRow, PendingTransfer, Registration,
+    ViewPublisher,
 };
 use s3stream::{
     Config, Error as StreamError, ObjectStorageTrait, S3StreamBuilder, S3StreamEngine,
-    StorageFailureHandler, WalError,
+    StorageFailureHandler, StreamState, WalError,
 };
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -25,7 +27,9 @@ use crate::error::ServiceError;
 use crate::failover::{Factory, Failover};
 use crate::group::GroupCoordinator;
 use crate::log::Log;
+use crate::overview::Overview;
 use crate::ownership::MetadataOwnershipService;
+use crate::page::Page;
 use crate::service::S3StreamService;
 use crate::streams::Streams;
 use crate::topics::Topics;
@@ -54,6 +58,7 @@ pub struct NodeConfig {
     /// How long a node may go without a heartbeat before the cluster fences
     /// it.
     pub node_timeout: Duration,
+    pub max_groups: usize,
     pub engine: Config,
 }
 
@@ -68,6 +73,7 @@ impl Default for NodeConfig {
             cluster_id: "picomq".to_owned(),
             heartbeat_interval: Duration::from_secs(5),
             node_timeout: Duration::from_secs(30),
+            max_groups: crate::group::DEFAULT_MAX_GROUPS,
             engine: Config::default(),
         }
     }
@@ -83,6 +89,7 @@ pub struct PicoNode {
     ownership: Arc<MetadataOwnershipService>,
     groups: Arc<GroupCoordinator>,
     tokens: Arc<TokenService>,
+    overview: Arc<Overview>,
     transfer_watcher: tokio::task::JoinHandle<()>,
     deleted_cleanup: tokio::task::JoinHandle<()>,
     liveness: tokio::task::JoinHandle<()>,
@@ -99,7 +106,6 @@ impl PicoNode {
         views: Arc<ViewPublisher>,
         object_storage: Arc<dyn ObjectStorageTrait>,
         wal: Arc<dyn Wal>,
-        schema_registry: Option<Arc<dyn picomq_schema::SchemaStore>>,
     ) -> Result<Self, ServiceError> {
         let handle = MetadataNodeHandle::register(
             sink,
@@ -138,11 +144,11 @@ impl PicoNode {
             Arc::new(StreamWaiterRegistry::new()),
         ));
 
-        let mut topics = Topics::new(service.clone(), kv_client.clone(), views.clone());
-        if let Some(registry) = schema_registry {
-            topics = topics.with_schema_registry(registry);
-        }
-        let topics = Arc::new(topics);
+        let topics = Arc::new(Topics::new(
+            service.clone(),
+            kv_client.clone(),
+            views.clone(),
+        ));
 
         let ownership = Arc::new(MetadataOwnershipService::new(
             views.clone(),
@@ -152,12 +158,14 @@ impl PicoNode {
         ));
         let groups = GroupCoordinator::new(
             config.node_id,
+            config.max_groups,
             service.clone(),
             topics.clone(),
             ownership.clone(),
             views.clone(),
         );
         let tokens = Arc::new(TokenService::new(kv_client));
+        let overview = Arc::new(Overview::new(views.clone()));
         let transfer_watcher =
             TransferWatcher::spawn(service.clone(), views.clone(), config.node_id);
         let deleted_cleanup = service.spawn_deleted_cleanup(DELETED_CLEANUP_TICK);
@@ -172,6 +180,7 @@ impl PicoNode {
             ownership,
             groups,
             tokens,
+            overview,
             transfer_watcher,
             deleted_cleanup,
             liveness,
@@ -221,6 +230,10 @@ impl PicoNode {
         self.groups.clone()
     }
 
+    pub fn overview(&self) -> Arc<Overview> {
+        self.overview.clone()
+    }
+
     pub fn tokens(&self) -> Arc<TokenService> {
         self.tokens.clone()
     }
@@ -241,18 +254,106 @@ impl PicoNode {
         &self.handle
     }
 
+    pub fn registration(&self) -> Option<NodeRow> {
+        let proposer = self.handle.proposer();
+        self.views
+            .load()
+            .state
+            .nodes()
+            .get(&proposer.node_id)
+            .filter(|row| row.epoch == proposer.node_epoch)
+            .cloned()
+    }
+
+    pub async fn set_slots(&self, node_id: i32, slots: u32) -> Result<NodeRow, ServiceError> {
+        let unregistered = || {
+            ServiceError::with_message(
+                crate::ErrorKind::NotFound,
+                None,
+                false,
+                format!("node {node_id} is not registered"),
+            )
+        };
+        if !self.views.load().state.nodes().contains_key(&node_id) {
+            return Err(unregistered());
+        }
+
+        self.handle.set_node_slots(node_id, slots).await?;
+        self.views
+            .load()
+            .state
+            .nodes()
+            .get(&node_id)
+            .cloned()
+            .ok_or_else(unregistered)
+    }
+
+    pub fn node(&self, node_id: i32) -> Option<NodeRow> {
+        self.views.load().state.nodes().get(&node_id).cloned()
+    }
+
+    pub fn nodes(
+        &self,
+        after: Option<i32>,
+        limit: usize,
+        keep: impl FnMut(&i32, &NodeRow) -> bool,
+    ) -> Page<i32, NodeRow> {
+        let view = self.views.load();
+        let start = after.map_or(Bound::Unbounded, Bound::Excluded);
+
+        Page::scan(
+            view.state
+                .nodes()
+                .range((start, Bound::Unbounded))
+                .map(|(id, row)| (*id, row.clone())),
+            limit,
+            keep,
+        )
+    }
+
+    pub fn transfers(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Page<u64, (Option<Log>, PendingTransfer)> {
+        let view = self.views.load();
+        let start = after.map_or(Bound::Unbounded, Bound::Excluded);
+
+        Page::scan(
+            view.state
+                .pending_transfers()
+                .range((start, Bound::Unbounded))
+                .map(|(stream_id, pending)| {
+                    (
+                        *stream_id,
+                        (Log::of_stream(&view.state, *stream_id), *pending),
+                    )
+                }),
+            limit,
+            |_, _| true,
+        )
+    }
+
     /// Request a live ownership move of a log to another node.
-    pub async fn transfer(&self, log: &Log, to_node: i32) -> Result<u64, ServiceError> {
+    pub async fn transfer(&self, log: &Log, to_node: i32) -> Result<PendingTransfer, ServiceError> {
         let Some(stream_id) = self.service.stream_id(log)? else {
             return Err(ServiceError::kind(crate::ErrorKind::NotFound));
         };
         let view = self.views.load();
-        let Some(row) = view.state.streams.get(&stream_id).copied() else {
+        let Some(row) = view.state.streams().get(&stream_id).copied() else {
             return Err(ServiceError::kind(crate::ErrorKind::NotFound));
         };
+        if row.state != StreamState::Opened {
+            return Err(ServiceError::with_message(
+                crate::ErrorKind::Conflict,
+                None,
+                false,
+                "the log is not open on any node, so there is nothing to move",
+            ));
+        }
         if !view
             .state
-            .nodes
+            .nodes()
             .get(&to_node)
             .is_some_and(|node| !node.fenced)
         {
@@ -267,7 +368,10 @@ impl PicoNode {
         self.handle
             .propose_transfer(stream_id, row.node_id, to_node)
             .await?;
-        Ok(stream_id)
+        Ok(PendingTransfer {
+            from_node: row.node_id,
+            to_node,
+        })
     }
 
     pub fn spawn_failover(
@@ -291,6 +395,16 @@ impl PicoNode {
         self.fenced.subscribe()
     }
 
+    pub fn logs_owned(&self) -> u64 {
+        self.views
+            .load()
+            .state
+            .streams_by_node()
+            .get(&self.config.node_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn views(&self) -> Arc<ViewPublisher> {
         self.views.clone()
     }
@@ -311,7 +425,7 @@ impl PicoNode {
             .views
             .load()
             .state
-            .nodes
+            .nodes()
             .get(&node.node_id)
             .filter(|_| !*self.fenced.borrow())
             .map(|row| row.heartbeats)

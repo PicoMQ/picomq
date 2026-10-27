@@ -48,14 +48,11 @@ type Client interface {
 	Append(context.Context, string, []AppendRecord) (AppendAck, error)
 	Read(context.Context, string, string, ReadOptions) (ReadPage, error)
 	Subscribe(context.Context, string, string, SubscribeOptions) *Subscription
-	List(context.Context, string, uint64) (StreamListing, error)
+	List(context.Context, string, uint64, string) (StreamListing, error)
 	Close(context.Context, string) (string, error)
 	Delete(context.Context, string) (bool, error)
 	Config(context.Context, string) (*TopicConfig, error)
 	UpdateConfig(context.Context, string, ConfigUpdate) (TopicConfig, error)
-	PutSchema(context.Context, string, string, []byte) error
-	GetSchema(context.Context, string) (*Schema, error)
-	DeleteSchema(context.Context, string) (bool, error)
 }
 
 var (
@@ -416,14 +413,14 @@ func expectDS(response *http.Response, expected ...int) ([]byte, error) {
 func cloneRecords(records []AppendRecord) []AppendRecord {
 	out := make([]AppendRecord, len(records))
 	for i, record := range records {
-		var headers map[string][]byte
+		var headers []Header
 		if record.Headers != nil {
-			headers = make(map[string][]byte, len(record.Headers))
-			for name, value := range record.Headers {
-				headers[name] = cloneBytes(value)
+			headers = make([]Header, len(record.Headers))
+			for j, header := range record.Headers {
+				headers[j] = Header{Name: header.Name, Value: cloneBytes(header.Value)}
 			}
 		}
-		out[i] = AppendRecord{Body: append([]byte(nil), record.Body...), Key: cloneBytes(record.Key), Headers: headers, Timestamp: record.Timestamp, ContentType: record.ContentType}
+		out[i] = AppendRecord{Body: cloneBytes(record.Body), Key: cloneBytes(record.Key), Headers: headers, Timestamp: record.Timestamp, ContentType: record.ContentType}
 	}
 	return out
 }
@@ -432,5 +429,7 @@ func cloneBytes(value []byte) []byte {
 	if value == nil {
 		return nil
 	}
-	return append([]byte(nil), value...)
+	clone := make([]byte, len(value))
+	copy(clone, value)
+	return clone
 }

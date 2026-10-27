@@ -45,6 +45,40 @@ describe('Producer', () => {
     await producer.close().catch(() => undefined)
   })
 
+  it('counts keys and headers in the buffer budget', async () => {
+    const { client } = fakeClient(() => okAck(0, 1))
+    const producer = new Producer(client, '/s', 'id', { maxBufferedBytes: 5 })
+    await expect(
+      producer.send({ body: '', key: 'key', headers: [{ name: 'h', value: 'xx' }] }),
+    ).rejects.toMatchObject({ code: 'record_too_large' })
+    await producer.close().catch(() => undefined)
+  })
+
+  it('rejects records larger than the batch limit', async () => {
+    const { client } = fakeClient(() => okAck(0, 1))
+    const producer = new Producer(client, '/s', 'id', { maxBatchBytes: 4 })
+    await expect(producer.send('hello')).rejects.toMatchObject({ code: 'record_too_large' })
+    await producer.close().catch(() => undefined)
+  })
+
+  it('keeps every batch within the batch limit and in order', async () => {
+    let next = 0
+    const { client, calls } = fakeClient((call) => {
+      const ack = okAck(next, call.records.length)
+      next += call.records.length
+      return ack
+    })
+    const producer = new Producer(client, '/s', 'id', { lingerMs: 50, maxBatchBytes: 8 })
+    const sent = [await producer.send('aaaa'), await producer.send('bbb'), await producer.send('cccc')]
+
+    expect(await Promise.all(sent.map((pending) => pending.durable()))).toEqual([0, 1, 2])
+    const sizes = calls.map((call) =>
+      toEnvelopes(call.records).reduce((n, envelope) => n + envelope.body!.byteLength, 0),
+    )
+    expect(sizes).toEqual([7, 4])
+    await producer.close()
+  })
+
   it('batches queued records and resolves sequential seqs', async () => {
     let next = 0
     const { client, calls } = fakeClient((call) => {
@@ -171,9 +205,9 @@ describe('Producer', () => {
   it('accepts record objects with headers', async () => {
     const { client, calls } = fakeClient((call) => okAck(0, call.records.length))
     const producer = new Producer(client, '/s', 'id', { lingerMs: 0 })
-    await producer.sendDurable({ body: 'x', headers: { a: 'b' } })
+    await producer.sendDurable({ body: 'x', headers: [{ name: 'a', value: 'b' }] })
     const envelopes = toEnvelopes(calls[0]!.records)
-    expect(envelopes[0]!.headers).toEqual({ a: 'b' })
+    expect(envelopes[0]!.headers).toEqual([{ name: 'a', value: 'b' }])
     await producer.close()
   })
 })

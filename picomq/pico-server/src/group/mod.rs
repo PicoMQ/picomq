@@ -1,19 +1,24 @@
 mod assign;
+pub mod consumer;
 mod offsets;
 mod state;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Bound;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use crate::log::Log;
+use crate::page::{self, Page};
 use crate::partition::Partition;
+use crate::topic::TopicId;
 use crate::topics::Topics;
 use crate::{
     ErrorKind, LogRecord, MetadataOwnershipService, OffsetToken, OwnershipService, S3StreamService,
 };
 use bytes::Bytes;
 use picomq_auth::{Operation, Scope};
+use picomq_common::name::canonical;
 use picomq_metadata::ViewPublisher;
 use tokio::sync::{Mutex, oneshot};
 
@@ -66,6 +71,8 @@ use state::{
 
 const OFFSET_SNAPSHOT_INTERVAL: u64 = 64;
 
+pub const DEFAULT_MAX_GROUPS: usize = 10_000;
+
 #[derive(Debug, Clone)]
 pub struct JoinProtocol {
     pub name: String,
@@ -87,6 +94,7 @@ pub struct JoinInput {
     pub member_id: String,
     pub instance_id: Option<String>,
     pub client_id: String,
+    pub client_host: String,
     pub membership: Membership,
     pub session_timeout_ms: i32,
     pub rebalance_timeout_ms: i32,
@@ -163,6 +171,7 @@ pub enum MemberRole {
     Client {
         metadata: Bytes,
         assignment: Bytes,
+        partitions: Option<Vec<(String, Vec<i32>)>>,
     },
 }
 
@@ -171,6 +180,7 @@ pub struct MemberDescription {
     pub member_id: String,
     pub instance_id: Option<String>,
     pub client_id: String,
+    pub client_host: String,
     pub role: MemberRole,
 }
 
@@ -189,10 +199,14 @@ pub struct ListedGroup {
     pub group_id: String,
     pub state: GroupState,
     pub protocol_type: String,
+    pub protocol_name: String,
+    pub generation: i32,
+    pub members: usize,
 }
 
 pub struct GroupCoordinator {
     node_id: i32,
+    max_groups: usize,
     service: Arc<S3StreamService>,
     topics: Arc<Topics>,
     ownership: Arc<MetadataOwnershipService>,
@@ -203,6 +217,7 @@ pub struct GroupCoordinator {
 impl GroupCoordinator {
     pub fn new(
         node_id: i32,
+        max_groups: usize,
         service: Arc<S3StreamService>,
         topics: Arc<Topics>,
         ownership: Arc<MetadataOwnershipService>,
@@ -210,6 +225,7 @@ impl GroupCoordinator {
     ) -> Arc<Self> {
         Arc::new(Self {
             node_id,
+            max_groups,
             service,
             topics,
             ownership,
@@ -583,11 +599,15 @@ impl GroupCoordinator {
         let now = Instant::now();
         state.expire_members(now);
         state.last_activity = now;
-        if let Some(fence) = fence {
-            check_fence(&state, fence)?;
-            if state.phase != GroupState::Stable {
-                return Err(GroupError::RebalanceInProgress);
+        match fence {
+            Some(fence) => {
+                check_fence(&state, fence)?;
+                if state.phase != GroupState::Stable {
+                    return Err(GroupError::RebalanceInProgress);
+                }
             }
+            None if state.phase != GroupState::Empty => return Err(GroupError::UnknownMember),
+            None => {}
         }
         if commits.is_empty() {
             return Ok(());
@@ -740,36 +760,12 @@ impl GroupCoordinator {
         let group = self.local_group(group_id, false).await?;
         let mut state = group.lock().await;
         state.expire_members(Instant::now());
-        let protocol_name = state.protocol_name().to_owned();
         let members = state
             .members
             .iter()
-            .map(|(id, member)| MemberDescription {
-                member_id: id.clone(),
-                instance_id: member.instance_id.clone(),
-                client_id: member.client_id.clone(),
-                role: match &member.role {
-                    Role::Subscribed {
-                        subscription,
-                        assignment,
-                    } => MemberRole::Subscribed {
-                        subscription: subscription.iter().map(|s| s.to_string()).collect(),
-                        assignment: assignment.iter().map(|s| s.to_string()).collect(),
-                    },
-                    Role::Client {
-                        protocols,
-                        assignment,
-                    } => MemberRole::Client {
-                        metadata: protocols
-                            .iter()
-                            .find(|protocol| protocol.name == protocol_name)
-                            .map(|protocol| protocol.metadata.clone())
-                            .unwrap_or_default(),
-                        assignment: assignment.clone(),
-                    },
-                },
-            })
+            .map(|(id, member)| member_description(id, member, &state))
             .collect();
+        let protocol_name = state.protocol_name().to_owned();
         Ok(GroupDescription {
             group_id: group_id.to_owned(),
             state: state.phase,
@@ -780,11 +776,137 @@ impl GroupCoordinator {
         })
     }
 
-    pub fn list(&self, scope: Option<&Scope>) -> Vec<String> {
-        Log::groups(&self.views.load().state)
-            .into_iter()
-            .filter(|group_id| authorize(scope, Operation::DescribeGroup, group_id).is_ok())
-            .collect()
+    pub fn list(
+        &self,
+        scope: Option<&Scope>,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Page<String, ()> {
+        let ids = Log::groups(
+            &self.views.load().state,
+            prefix,
+            after,
+            page::fetch_count(limit),
+        );
+        Page::scan(ids.into_iter().map(|id| (id, ())), limit, |id, _| {
+            authorize(scope, Operation::DescribeGroup, id).is_ok()
+        })
+    }
+
+    pub async fn listed_groups(
+        &self,
+        scope: Option<&Scope>,
+        group_ids: &[String],
+    ) -> Vec<ListedGroup> {
+        let mut listed = Vec::with_capacity(group_ids.len());
+        for group_id in group_ids {
+            if authorize(scope, Operation::DescribeGroup, group_id).is_err() {
+                continue;
+            }
+            let loaded = self
+                .groups
+                .lock()
+                .expect("group map lock")
+                .get(group_id)
+                .map(Arc::clone);
+            let summary = match loaded {
+                Some(group) => listed_group(group_id, &mut *group.lock().await),
+                None => ListedGroup::unloaded(group_id),
+            };
+            listed.push(summary);
+        }
+        listed
+    }
+
+    pub async fn listed_group(
+        &self,
+        scope: Option<&Scope>,
+        group_id: &str,
+    ) -> Result<(ListedGroup, usize), GroupError> {
+        authorize(scope, Operation::DescribeGroup, group_id)?;
+        let group = self.local_group(group_id, false).await?;
+        let mut state = group.lock().await;
+
+        let committed = state.offsets.len();
+        Ok((listed_group(group_id, &mut state), committed))
+    }
+
+    pub async fn members(
+        &self,
+        scope: Option<&Scope>,
+        group_id: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Page<String, MemberDescription>, GroupError> {
+        authorize(scope, Operation::DescribeGroup, group_id)?;
+        let group = self.local_group(group_id, false).await?;
+        let mut state = group.lock().await;
+        state.expire_members(Instant::now());
+
+        let from = after.map_or(Bound::Unbounded, |after| Bound::Excluded(after.to_owned()));
+        let members = state
+            .members
+            .range::<String, _>((from, Bound::Unbounded))
+            .map(|(id, member)| (id.clone(), member_description(id, member, &state)));
+        Ok(Page::scan(members, limit, |_, _| true))
+    }
+
+    pub async fn fetch_offsets_after(
+        &self,
+        scope: Option<&Scope>,
+        group_id: &str,
+        topic: Option<TopicId>,
+        after: Option<Partition>,
+        count: usize,
+    ) -> Result<Vec<(Partition, CommittedOffset)>, GroupError> {
+        authorize(scope, Operation::DescribeGroup, group_id)?;
+        let group = match self.local_group(group_id, false).await {
+            Ok(group) => group,
+            Err(GroupError::GroupNotFound) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let state = group.lock().await;
+
+        let from = match (after, topic) {
+            (Some(after), _) => Bound::Excluded(after),
+            (None, Some(topic)) => Bound::Included(Partition::new(topic, 0)),
+            (None, None) => Bound::Unbounded,
+        };
+        Ok(state
+            .offsets
+            .range((from, Bound::Unbounded))
+            .take_while(|(partition, _)| topic.is_none_or(|topic| partition.topic == topic))
+            .take(count)
+            .map(|(partition, offset)| (*partition, offset.clone()))
+            .collect())
+    }
+
+    pub async fn subscribed_topics(
+        &self,
+        scope: Option<&Scope>,
+        group_id: &str,
+    ) -> Result<BTreeSet<String>, GroupError> {
+        let described = self.describe(scope, group_id).await?;
+
+        let mut subscribed = BTreeSet::new();
+        for member in &described.members {
+            match &member.role {
+                MemberRole::Subscribed { subscription, .. } => {
+                    subscribed.extend(subscription.iter().map(|name| canonical(name)));
+                }
+                MemberRole::Client { metadata, .. }
+                    if described.protocol_type == consumer::PROTOCOL_TYPE =>
+                {
+                    let topics =
+                        consumer::subscription(metadata).ok_or(GroupError::InvalidRequest)?;
+                    subscribed.extend(topics.iter().map(|topic| canonical(topic)));
+                }
+                MemberRole::Client { .. } => return Err(GroupError::NonEmpty),
+            }
+        }
+
+        Ok(subscribed)
     }
 
     pub async fn coordinated(&self, scope: Option<&Scope>) -> Vec<ListedGroup> {
@@ -799,14 +921,9 @@ impl GroupCoordinator {
         };
         let mut listed = Vec::new();
         for (group_id, group) in groups {
-            let mut state = group.lock().await;
-            state.expire_members(Instant::now());
-            if !state.members.is_empty() {
-                listed.push(ListedGroup {
-                    group_id,
-                    state: state.phase,
-                    protocol_type: state.protocol_type().to_owned(),
-                });
+            let listed_group = listed_group(&group_id, &mut *group.lock().await);
+            if listed_group.members > 0 {
+                listed.push(listed_group);
             }
         }
         listed.sort_by(|a, b| a.group_id.cmp(&b.group_id));
@@ -856,8 +973,8 @@ impl GroupCoordinator {
             if let Some(group) = groups.get(group_id) {
                 Arc::clone(group)
             } else {
-                evict_idle_groups(&mut groups, Instant::now());
-                if groups.len() >= state::MAX_GROUPS {
+                evict_idle_groups(&mut groups, Instant::now(), self.max_groups);
+                if groups.len() >= self.max_groups {
                     return Err(GroupError::CapacityExceeded);
                 }
                 let group = Arc::new(Mutex::new(Group::loaded(i64::MIN, OffsetTable::new(), 0)));
@@ -908,13 +1025,73 @@ impl GroupCoordinator {
                 break;
             }
             for record in read.records {
-                decode_into(&record.record.value, &mut offsets)
-                    .map_err(|_| GroupError::NotCoordinator)?;
+                decode_into(
+                    record.record.value.as_deref().unwrap_or_default(),
+                    &mut offsets,
+                )
+                .map_err(|_| GroupError::NotCoordinator)?;
                 replayed += 1;
             }
             cursor = read.next_offset.record_offset();
         }
         Ok((offsets, replayed))
+    }
+}
+
+impl ListedGroup {
+    pub fn unloaded(group_id: &str) -> Self {
+        Self {
+            group_id: group_id.to_owned(),
+            state: GroupState::Empty,
+            protocol_type: String::new(),
+            protocol_name: String::new(),
+            generation: 0,
+            members: 0,
+        }
+    }
+}
+
+fn listed_group(group_id: &str, state: &mut Group) -> ListedGroup {
+    state.expire_members(Instant::now());
+    ListedGroup {
+        group_id: group_id.to_owned(),
+        state: state.phase,
+        protocol_type: state.protocol_type().to_owned(),
+        protocol_name: state.protocol_name().to_owned(),
+        generation: state.generation,
+        members: state.members.len(),
+    }
+}
+
+fn member_description(id: &str, member: &state::Member, group: &Group) -> MemberDescription {
+    MemberDescription {
+        member_id: id.to_owned(),
+        instance_id: member.instance_id.clone(),
+        client_id: member.client_id.clone(),
+        client_host: member.client_host.clone(),
+        role: match &member.role {
+            Role::Subscribed {
+                subscription,
+                assignment,
+            } => MemberRole::Subscribed {
+                subscription: subscription.iter().map(|s| s.to_string()).collect(),
+                assignment: assignment.iter().map(|s| s.to_string()).collect(),
+            },
+            Role::Client {
+                protocols,
+                assignment,
+            } => MemberRole::Client {
+                metadata: protocols
+                    .iter()
+                    .find(|protocol| protocol.name == group.protocol_name())
+                    .map(|protocol| protocol.metadata.clone())
+                    .unwrap_or_default(),
+                assignment: assignment.clone(),
+                partitions: (group.protocol_type() == consumer::PROTOCOL_TYPE)
+                    .then(|| consumer::assignment(assignment))
+                    .flatten(),
+            },
+        },
     }
 }
 

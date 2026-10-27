@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use picomq_protocol::config::{ConfigUpdate, TopicConfig};
-use picomq_protocol::schemas::Schema;
 
 use crate::error::Result;
 
@@ -33,7 +32,6 @@ pub struct StreamInfo {
     pub expires_at: Option<String>,
     pub retention_ms: Option<u64>,
     pub retention_bytes: Option<u64>,
-    pub schema: Option<String>,
     pub kafka_topic: Option<String>,
 }
 
@@ -45,8 +43,6 @@ pub struct CreateOptions {
     pub expires_at: Option<String>,
     pub retention_ms: Option<u64>,
     pub retention_bytes: Option<u64>,
-    pub schema: Option<String>,
-    pub schema_validate: bool,
     pub closed: bool,
 }
 
@@ -70,11 +66,12 @@ pub struct AppendAck {
 pub struct Record {
     pub position: String,
     pub timestamp: Option<i64>,
-    /// Kafka-shaped: an optional key and ordered headers with byte values.
-    /// DS reads carry neither.
+    /// Kafka-shaped: an optional key, ordered headers whose values may be
+    /// null, and a body that is null for a Kafka tombstone. DS reads carry a
+    /// body only.
     pub key: Option<Bytes>,
-    pub headers: Vec<(String, Bytes)>,
-    pub body: Bytes,
+    pub headers: Vec<(String, Option<Bytes>)>,
+    pub body: Option<Bytes>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,7 +85,7 @@ pub struct ReadPage {
 #[derive(Debug, Clone)]
 pub struct StreamListing {
     pub streams: Vec<StreamInfo>,
-    pub has_more: bool,
+    pub next: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -142,7 +139,7 @@ pub trait StreamApi: Send + Sync {
         limits: ReadLimits,
     ) -> Result<ReadPage>;
 
-    async fn list(&self, prefix: &str, limit: u64) -> Result<StreamListing>;
+    async fn list(&self, prefix: &str, limit: u64, cursor: Option<&str>) -> Result<StreamListing>;
 
     async fn close(&self, name: &str) -> Result<String>;
 
@@ -151,10 +148,4 @@ pub trait StreamApi: Send + Sync {
     async fn config(&self, name: &str) -> Result<Option<TopicConfig>>;
 
     async fn update_config(&self, update: &ConfigUpdate) -> Result<TopicConfig>;
-
-    async fn put_schema(&self, name: &str, content_type: Option<&str>, body: Bytes) -> Result<()>;
-
-    async fn get_schema(&self, name: &str) -> Result<Option<Schema>>;
-
-    async fn delete_schema(&self, name: &str) -> Result<bool>;
 }

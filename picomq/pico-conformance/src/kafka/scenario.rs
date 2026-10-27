@@ -31,6 +31,8 @@ pub enum Scenario {
     GroupLeave,
     GroupRejoin,
     GroupMissing,
+    GroupSimpleCommit,
+    GroupListEmpty,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +72,8 @@ impl Scenario {
         Scenario::GroupLeave,
         Scenario::GroupRejoin,
         Scenario::GroupMissing,
+        Scenario::GroupSimpleCommit,
+        Scenario::GroupListEmpty,
     ];
 
     pub fn name(self) -> &'static str {
@@ -100,6 +104,8 @@ impl Scenario {
             Scenario::GroupLeave => "group-leave-during-rebalance",
             Scenario::GroupRejoin => "group-rejoin-while-pending",
             Scenario::GroupMissing => "group-missing-member",
+            Scenario::GroupSimpleCommit => "group-simple-commit",
+            Scenario::GroupListEmpty => "group-list-empty",
         }
     }
 
@@ -143,6 +149,16 @@ impl Scenario {
             Scenario::GroupLeave => rebalance::leave(host_address, topic).await,
             Scenario::GroupRejoin => rebalance::rejoin(host_address, topic).await,
             Scenario::GroupMissing => rebalance::missing(host_address, topic).await,
+            Scenario::GroupSimpleCommit => {
+                let mut lines = vec![create(clients, broker, topic, 1).await];
+                lines.extend(rebalance::simple_commit(host_address, topic).await);
+                lines
+            }
+            Scenario::GroupListEmpty => {
+                let mut lines = vec![create(clients, broker, topic, 1).await];
+                lines.extend(rebalance::list_empty(host_address, topic).await);
+                lines
+            }
         }
     }
 }

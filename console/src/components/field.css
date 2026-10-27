@@ -1,0 +1,23 @@
+.field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.field-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field[data-kind="binary"] .field-text {
+  color: var(--color-text-2);
+}
+
+.field-size {
+  flex: none;
+  color: var(--color-text-3);
+}

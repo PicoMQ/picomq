@@ -20,7 +20,7 @@ describe('PicoClient.append', () => {
 
     const client = new PicoClient('http://example.test')
     const ack = await client.append('/s', [
-      { body: 'hello', headers: { kind: 'greeting' } },
+      { body: 'hello', headers: [{ name: 'kind', value: 'greeting' }] },
       new TextEncoder().encode('raw'),
     ])
 
@@ -28,9 +28,9 @@ describe('PicoClient.append', () => {
     const body = fetch.mock.calls[0]![1]!.body as ArrayBuffer
     const decoded = decodeBatchAppend(new Uint8Array(body))
     expect(decoded).toHaveLength(2)
-    expect(decoded[0]!.headers).toEqual({ kind: 'greeting' })
-    expect(new TextDecoder().decode(decoded[0]!.body)).toBe('hello')
-    expect(new TextDecoder().decode(decoded[1]!.body)).toBe('raw')
+    expect(decoded[0]!.headers).toEqual([{ name: 'kind', value: 'greeting' }])
+    expect(new TextDecoder().decode(decoded[0]!.body!)).toBe('hello')
+    expect(new TextDecoder().decode(decoded[1]!.body!)).toBe('raw')
   })
 
   it('does not retry appends', async () => {
@@ -237,7 +237,7 @@ describe('PicoClient groups', () => {
           ],
         }),
       )
-      .mockResolvedValueOnce(json({ groups: ['g'] }))
+      .mockResolvedValueOnce(json({ items: ['g'], next: 'opaque' }))
     vi.stubGlobal('fetch', fetch)
 
     const client = new PicoClient('http://example.test', undefined, false, new RetryPolicy(3, 0, 0, 1))
@@ -252,8 +252,8 @@ describe('PicoClient groups', () => {
     })
     expect(request(fetch, 1).url).toBe('http://example.test/_groups/g')
 
-    expect(await client.listGroups()).toEqual(['g'])
-    expect(request(fetch, 2).url).toBe('http://example.test/_groups')
+    expect(await client.listGroups('o/', 5, 'c')).toEqual({ groups: ['g'], next: 'opaque' })
+    expect(request(fetch, 2).url).toBe('http://example.test/_groups?prefix=o%2F&limit=5&cursor=c')
     expect(fetch).toHaveBeenCalledTimes(3)
   })
 
@@ -379,16 +379,16 @@ describe('PicoClient partitions', () => {
     })
   })
 
-  it('decodes partitions from list with absent offsets', async () => {
+  it('decodes list items and the next cursor', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
         json({
-          streams: [
-            { name: '/a', partitions: 1, start_seq: 0, next_seq: 4, closed: false },
+          items: [
+            { name: '/a', partitions: 1, closed: false },
             { name: '/b', partitions: 3, closed: false },
           ],
-          has_more: false,
+          next: 'opaque',
         }),
       ),
     )
@@ -396,10 +396,10 @@ describe('PicoClient partitions', () => {
 
     expect(await client.list('/')).toEqual({
       streams: [
-        { name: '/a', partitions: 1, start: '0', next: '4', closed: false },
+        { name: '/a', partitions: 1, closed: false },
         { name: '/b', partitions: 3, closed: false },
       ],
-      hasMore: false,
+      next: 'opaque',
     })
   })
 })
