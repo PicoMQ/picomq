@@ -71,7 +71,7 @@ export function openSse(res: ServerResponse): SseClient {
 }
 
 export async function ensureStream(pico: PicoClient, name: string) {
-  await pico.create(name, CT).catch(() => undefined)
+  await pico.create(name, { contentType: CT }).catch(() => undefined)
 }
 
 export async function readBody(req: IncomingMessage): Promise<string> {

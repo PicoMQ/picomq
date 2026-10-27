@@ -88,6 +88,7 @@ async function load(streamName: string) {
     const page = await pico.read(streamName, from, 'off', { count: 500 })
 
     for (const record of page.records) {
+      if (record.body === null) continue
       try {
         const msg = JSON.parse(dec.decode(record.body)) as ModelMessage
 
@@ -125,6 +126,7 @@ async function titleFor(streamName: string): Promise<{ title: string; records: n
   let count = page.records.length
 
   for (const record of page.records) {
+    if (record.body === null) continue
     try {
       const msg = JSON.parse(dec.decode(record.body)) as ModelMessage
       if (msg.role !== 'user') continue
