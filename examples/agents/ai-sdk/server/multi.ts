@@ -88,7 +88,7 @@ function broadcast(event: string, data?: unknown) {
 }
 
 async function ensureStream(name: string) {
-  await pico.create(name, CT).catch(() => undefined)
+  await pico.create(name, { contentType: CT }).catch(() => undefined)
 }
 
 async function readAll(streamName: string): Promise<{ position: string; body: Uint8Array }[]> {
@@ -97,7 +97,7 @@ async function readAll(streamName: string): Promise<{ position: string; body: Ui
 
   for (;;) {
     const page = await pico.read(streamName, from, 'off', { count: 500 })
-    for (const r of page.records) out.push({ position: r.position, body: r.body })
+    for (const r of page.records) if (r.body !== null) out.push({ position: r.position, body: r.body })
 
     if (page.records.length === 0 || page.upToDate || page.next === from) break
     from = page.next

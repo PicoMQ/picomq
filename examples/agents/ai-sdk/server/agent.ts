@@ -244,6 +244,7 @@ async function loadRunStream(streamName: string) {
     const page = await pico.read(streamName, from, 'off', { count: 500 })
 
     for (const record of page.records) {
+      if (record.body === null) continue
       try {
         const event = JSON.parse(dec.decode(record.body)) as AgentEvent
         if (!event?.type) continue
