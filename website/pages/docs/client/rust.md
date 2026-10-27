@@ -38,7 +38,9 @@ async fn main() -> picomq_client::Result<()> {
 }
 ```
 
-`read` with `Live::LongPoll` waits server side until data arrives or the poll times out. Positions are protocol-specific strings, so always continue from the `next` a call returned.
+- **Reads.** `read` with `Live::LongPoll` waits server side until data arrives or the poll times out. Positions are protocol-specific strings, so always continue from the `next` a call returned.
+- **Records.** A `Record` has an optional `key`, `headers` as a `Vec<(String, Option<Bytes>)>` kept in order, and a `body` that is `None` for a tombstone, see [Records](/docs/api#records). Durable Streams reads carry a body only.
+- **Lists.** `list` and `list_groups` take a `limit` and a `cursor` and return one [page](/docs/api#lists) whose `next` continues it, `None` on the last page.
 
 ## Partitions
 
@@ -67,7 +69,7 @@ let update = ConfigUpdate {
 let config = client.update_config(&update).await?;
 ```
 
-`put_schema`, `get_schema`, and `delete_schema` manage the [schema registry](/docs/schemas). All of these work on both protocols.
+Settings work on both protocols.
 
 ## Producers
 

@@ -58,7 +58,7 @@ pico delete /streams/orders
 `create` takes a flag for every [topic setting](/docs/api#topic-settings), `describe` prints them, and `alter` changes the ones that can change, with `none` removing a setting.
 
 ```bash
-pico create /streams/orders --partitions 3 --retention-ms 86400000 --schema orders.json --schema-validate
+pico create /streams/orders --partitions 3 --retention-ms 86400000
 pico describe /streams/orders
 pico alter /streams/orders --partitions 6 --retention-ms none --retention-bytes 1073741824
 ```
@@ -69,30 +69,31 @@ pico alter /streams/orders --partitions 6 --retention-ms none --retention-bytes 
 | `--partitions` | `--partitions`, grow only |
 | `--ttl` or `--expires-at` | |
 | `--retention-ms`, `--retention-bytes` | The same, or `none` |
-| `--schema`, `--schema-validate` | `--schema` or `none`, `--schema-validate true\|false` |
 | `--closed` | |
-
-[Schemas](/docs/schemas) are registered from a file or stdin, printed to stdout, and removed by name.
-
-```bash
-pico schema put orders.json --file orders.schema.json
-pico schema get orders.json
-pico schema rm orders.json
-```
 
 ## Admin commands
 
-Admin commands talk to a node's admin listener, not the stream endpoint. The target comes from `--admin-endpoint` or `PICO_ADMIN_ENDPOINT`, defaulting to `http://127.0.0.1:9090`. The credential comes from `--token` or `PICO_ADMIN_TOKEN`, then `PICO_TOKEN`, then the stored one. `--json` switches any command from formatted lines to raw JSON.
+Admin commands talk to a node's [admin listener](/docs/operations/admin), not the stream endpoint. The target comes from `--admin-endpoint` or `PICO_ADMIN_ENDPOINT`, defaulting to `http://127.0.0.1:9090`. The credential comes from `--token` or `PICO_ADMIN_TOKEN`, then `PICO_TOKEN`, then the stored one. `--json` switches any command from formatted lines to raw JSON.
 
 ```bash
 pico admin cluster
 pico admin nodes
-pico admin stream /streams/orders
-pico admin transfer /streams/orders --to-node 2 --wait
+pico admin transfers
+pico admin stream /streams/orders --partition 0
+pico admin transfer /streams/orders --partition 0 --to-node 2 --wait
 pico admin set-slots 2 --slots 4
 ```
 
-`cluster` prints the node's identity, counts, the applied index, the lease holder, and any pending transfers. `nodes` lists every registered node with its epoch, slots, stream counts, and whether it is fenced. `stream` shows one partition's owner, state, epoch, and offsets. `transfer` starts a move and with `--wait` polls until the partition settles on the target. Both take `--partition` for topics with several partitions. `set-slots` changes a node's placement weight.
+| Command | Does |
+| --- | --- |
+| `cluster` | Prints the node's identity, the applied index, stream and object counts, the GC backlog, how many transfers are pending, and whether it holds the lease |
+| `nodes` | Lists every registered node with its epoch, address, slots, open and closed log counts, and whether it is fenced |
+| `transfers` | Lists the partitions moving between nodes |
+| `stream` | Shows one partition's owner, state, epoch, offsets, and stored bytes |
+| `transfer` | Starts a move, and with `--wait` polls until the partition settles on the target |
+| `set-slots` | Changes a node's placement weight |
+
+`stream` and `transfer` take `--partition` for topics with several partitions. `nodes` and `transfers` follow every page of the list.
 
 ## Benchmarking
 

@@ -11,7 +11,7 @@ On the wire a token is `BASE64URL(id).BASE64URL(secret)`. The id is public. The 
 A scope answers three independent questions.
 
 - **Which resources.** Three matcher sets of exact names and prefixes: streams, token ids, and consumer groups.
-- **Which operations.** Read and write flags for each access category, plus nineteen single operations for tokens that need one verb, such as an append-only producer.
+- **Which operations.** Read and write flags for each access category, plus eighteen single operations for tokens that need one verb, such as an append-only producer.
 - **Which listeners.** The audiences `pico`, `durable_streams`, `kafka`, and `admin`.
 
 A scope may also have an absolute expiry. An expired token fails on its next use, and a sweep on the maintenance-lease holder deletes the record.
@@ -21,7 +21,7 @@ A scope may also have an absolute expiry. An expired token fails on its next use
 | `stream` | streams | `read`, `head`, `list` | `create`, `append`, `trim`, `close`, `delete` |
 | `tokens` | token ids | `list_tokens` | `issue_token`, `revoke_token` |
 | `group` | consumer groups | `consume`, `describe_group` | `delete_group` |
-| `admin` | nothing, they act on the whole cluster | `cluster_read`, `node_read`, `stream_inspect` | `transfer_stream`, `update_node_slots` |
+| `admin` | nothing, they act on the whole cluster | `cluster_read`, `node_read` | `transfer_stream`, `update_node_slots` |
 
 Every operation is checked against the set its row names, so `consume` on the group `billing-eu` needs a group matcher that covers `billing-eu`.
 

@@ -35,7 +35,7 @@ One image is published to GitHub Container Registry for every release.
 
 | Image | Tags | Contents |
 | --- | --- | --- |
-| `ghcr.io/picomq/picomq` | `latest`, version, major.minor, commit SHA | The `pico` binary with the dashboard embedded |
+| `ghcr.io/picomq/picomq` | `latest`, version, major.minor, commit SHA | The `pico` binary with the console embedded |
 
 The repository has two compose harnesses. `harness/aio` is self-contained, starting Postgres and RustFS alongside one or two nodes, auth off by default (`PICO_AUTH=required` in `.env` turns it on with a known dev bootstrap token). `harness/byo` has the same layout against an existing Postgres and object store, configured through `.env`, runs with auth required, and refuses to start without a bootstrap token.
 

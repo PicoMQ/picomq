@@ -20,8 +20,8 @@ A listener speaks either TLS or plaintext, never both. A plaintext client gets a
 ## The certificate
 
 - **Format.** A PEM certificate chain, leaf first, and its PEM private key.
-- **Names.** The certificate must cover every name clients dial: the host in `--http-address`, the host in `--kafka-advertise`, and any load balancer name that passes TLS through to the node. Redirects and Kafka metadata send clients to those names directly.
-- **Clusters.** Nodes never connect to each other over TLS, so a cluster can share one certificate whose names cover every node, or a wildcard, or give each node its own.
+- **Names.** The certificate must cover every name clients dial: the hosts in `--http-address`, `--admin-address`, and `--kafka-advertise`, and any load balancer name that passes TLS through to the node. Redirects and Kafka metadata send clients to those names directly.
+- **Clusters.** Nodes forward admin requests to each other over HTTPS at their `--admin-address`, and check the certificate like any client. A cluster can share one certificate whose names cover every node, or a wildcard, or give each node its own.
 - **Key usage.** The certificate must list `serverAuth` in its extended key usage. Clients that verify through macOS reject a certificate without it. Public CAs include it, and the openssl recipe below asks for it.
 
 ## Rotation
@@ -41,12 +41,13 @@ Each client has `--tls-handshake-timeout-sec`, 10 seconds by default, to finish 
 
 ## Clients
 
-A certificate from a public CA works with every client as is. A private CA has to be trusted explicitly.
+A certificate from a public CA works with every client as is, other nodes included. A private CA has to be trusted explicitly.
 
 | Client | Trusting a private CA |
 | --- | --- |
 | `pico` CLI | `--ca-certificate` or `PICO_CA_CERTIFICATE`, a PEM file of CA certificates added to the system's |
 | `picomq-client` | `ClientConfig::ca_certificate`, the same PEM bytes |
+| Other nodes | `--tls-ca-certificate` or `PICO_TLS_CA_CERTIFICATE` on every node, for the admin requests they forward |
 | librdkafka clients, kcat | `security.protocol=SASL_SSL` and `ssl.ca.location` |
 | Java Kafka clients | `security.protocol=SASL_SSL`, `ssl.truststore.type=PEM`, and `ssl.truststore.location` |
 

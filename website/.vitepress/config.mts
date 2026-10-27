@@ -52,7 +52,8 @@ const docsSidebar = [
           { text: 'AWS', link: '/docs/operations/deployment/aws' },
         ],
       },
-      { text: 'Admin API & dashboard', link: '/docs/operations/admin' },
+      { text: 'Admin API', link: '/docs/operations/admin' },
+      { text: 'Console', link: '/docs/operations/console' },
       { text: 'Tuning', link: '/docs/operations/tuning' },
     ],
   },
@@ -90,7 +91,6 @@ const docsSidebar = [
     items: [
       { text: 'HTTP API', link: '/docs/api' },
       { text: 'Kafka protocol', link: '/docs/kafka' },
-      { text: 'Schemas', link: '/docs/schemas' },
       { text: 'Protocol facades', link: '/docs/extending' },
       {
         text: 'Clients',

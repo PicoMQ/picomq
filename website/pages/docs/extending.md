@@ -43,7 +43,7 @@ A facade takes what it needs from `PicoNode` at startup: `node.topics()`, `node.
 
 - **Topics** are named by path. Any spelling of a name works, see [Topics and streams](/docs/design/streams#names).
 - **Partitions** are addressed by index. Calls that take a name and a partition resolve the topic themselves. Calls that take a `&Topic` are for a facade that already loaded it, as Kafka does once per request.
-- **Records** are `LogRecord { timestamp_ms, key, value, headers }`, a Kafka record.
+- **Records** are `LogRecord { timestamp_ms, key, value, headers }`, a Kafka record. A `None` value is a tombstone, and `headers` is an ordered list whose values can be `None`.
 - **Positions** are `OffsetToken`: `parse()` treats `None`, `-1` and negatives as the beginning, `value()` renders the padded string HTTP returns, `record_offset()` is the `u64` Kafka wants.
 - **Errors** are `ServiceError`. A facade maps its `kind`, see [Errors](#errors).
 
@@ -52,9 +52,8 @@ A facade takes what it needs from `PicoNode` at startup: `node.topics()`, `node.
 ```rust
 create(CreateCommand) -> CreateResult
 get(name) -> Option<Topic>
-list(prefix, start_after, limit) -> TopicList
+list(prefix, after, limit, keep) -> Page<String, Topic>
 update(UpdateTopicCommand) -> Topic
-grow(name, partitions, owners) -> Topic
 close(name) -> CloseResult
 delete(name) -> bool
 ```
@@ -69,9 +68,12 @@ delete(name) -> bool
 | `ttl_seconds`, `expires_at_ms` | Expiry. Setting both is `BadRequest` |
 | `closed` | Create already sealed |
 | `initial_records` | Appended to partition `0` in the same call |
-| `schema_name`, `schema_validate` | Bind a [schema](/docs/schemas) and whether appends are checked against it |
+| `retention` | Time and size limits, `None` for unlimited |
 
-`update` changes the schema bind. Its fields are `Option`, so `None` leaves a field alone and `Some(None)` clears the schema. `grow` adds partitions. `close` seals the topic. `list` pages by name and says through `has_more` whether to expose a continuation. Kafka also uses `get_kafka(name)` and `kafka_topics()`.
+- **`update`** changes retention and grows partitions. Its retention fields are `Option<Option<u64>>`, so `None` leaves a limit alone and `Some(None)` removes it. New partitions take `owners` like `create`.
+- **`close`** seals the topic.
+- **`list`** pages by name after `after`, keeping the topics `keep` accepts, and returns `next` to continue from. It is the same [paging](/docs/api#lists) every HTTP list uses.
+- **Kafka** also uses `get_kafka(name)` and `kafka_topics()`.
 
 ## Append
 
@@ -79,7 +81,7 @@ delete(name) -> bool
 append(name, partition, AppendCommand) -> AppendResult
 ```
 
-Records in. The service assigns offsets, stamps a monotonic `LogAppendTime`, validates against the bound schema, encodes one RecordBatch v2, and returns once it is durable.
+Records in. The service assigns offsets, stamps a monotonic `LogAppendTime`, encodes one RecordBatch v2, and returns once it is durable.
 
 | `AppendCommand` field | Meaning |
 | --- | --- |

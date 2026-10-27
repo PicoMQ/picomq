@@ -53,7 +53,7 @@ The structure follows from that. A node can be stopped and replaced at any time 
 - **Automatic failover.** A dead node is detected, fenced, and its streams moved to live nodes with its buffered records recovered. See [Failover](/docs/design/failover).
 - **Live stream transfer.** Ownership of a stream moves between nodes without losing writes, with seconds of handoff.
 - **Fencing everywhere.** Node epochs, stream epochs, and WAL reservations keep zombie processes from corrupting anything.
-- **One binary.** `pico` is the server, the client, the admin CLI, and the benchmark tool. The admin dashboard is embedded in it.
+- **One binary.** `pico` is the server, the client, the admin CLI, and the benchmark tool. The admin [console](/docs/operations/console) is embedded in it.
 
 ## Use cases
 

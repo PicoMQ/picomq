@@ -31,7 +31,12 @@ A Kafka topic is a PicoMQ topic, with the same partitions. The HTTP name `/order
 - **Offsets.** Kafka offsets are the partition's record offsets, so `earliest` is the trim watermark and `latest` is the high watermark.
 - **Auto creation.** A metadata request creates a missing topic with one partition when the client asks for it.
 
-Produce and fetch are a copy of the stored [RecordBatch v2](/docs/design/protocols#records) bytes. The broker patches each produced batch's base offset, the one rewrite a Kafka broker also performs and one the batch CRC excludes. Everything below the frontend, durability, ownership, transfers, and failover, behaves as the [design docs](/docs/design/overview) describe.
+Produce and fetch are a copy of the stored [RecordBatch v2](/docs/design/protocols#records) bytes.
+
+- **Records.** Keys, headers in their order, and null values for tombstones arrive as they were sent. HTTP reads show them in the [record shape](/docs/api#records).
+- **Base offsets.** The broker patches each produced batch's base offset, the one rewrite a Kafka broker also performs and one the batch CRC excludes.
+
+Everything below the frontend, durability, ownership, transfers, and failover, behaves as the [design docs](/docs/design/overview) describe.
 
 ## Supported APIs
 
@@ -53,7 +58,7 @@ Produce and fetch are a copy of the stored [RecordBatch v2](/docs/design/protoco
 | `DescribeCluster` | 0 to 2 | |
 | `FindCoordinator` | 0 to 3 | Group coordinators only |
 | `JoinGroup`, `SyncGroup`, `Heartbeat`, `LeaveGroup` | 0 to 7, 0 to 5, 0 to 4, 0 to 5 | The classic group protocol, see [Consumer groups](/docs/design/groups) |
-| `OffsetCommit`, `OffsetFetch` | 2 to 8, 1 to 7 | |
+| `OffsetCommit`, `OffsetFetch` | 2 to 8, 1 to 7 | A commit without a member is accepted only while the group is empty, as in Kafka |
 | `DescribeGroups`, `ListGroups` | 0 to 5 | `ListGroups` answers per broker, as in Kafka |
 | `DeleteGroups` | 0 to 2 | Only groups without members |
 | `OffsetDelete` | 0 | Not for topics the group is subscribed to |
@@ -70,10 +75,8 @@ Not supported: transactions and control batches, which are rejected, and the KIP
 | `cleanup.policy` | `delete` | No |
 | `retention.ms` | The topic's limit, `-1` when unlimited | Yes |
 | `retention.bytes` | The topic's limit, `-1` when unlimited | Yes |
-| `pico.schema` | The bound [schema](/docs/schemas) | Yes |
-| `pico.schema.validate` | Whether produce is validated against it | Yes |
 
-Both retention configs can be set on `CreateTopics` too, and `-1` removes a limit. Retention goes by when PicoMQ wrote the data, not by record timestamps, so it matches Kafka's `LogAppendTime` topics, see [Retention](/docs/design/streams#retention). The `pico.schema` configs appear only when a schema is bound, and can also be set on `CreateTopics`. Changing any other config fails with `INVALID_CONFIG`.
+Both retention configs can be set on `CreateTopics` too, and `-1` removes a limit. Retention goes by when PicoMQ wrote the data, not by record timestamps, so it matches Kafka's `LogAppendTime` topics, see [Retention](/docs/design/streams#retention). Changing any other config fails with `INVALID_CONFIG`.
 
 PicoMQ does not compact topics, so `CreateTopics` refuses `cleanup.policy=compact` with `INVALID_CONFIG` instead of creating a topic that would never compact. This rules out Kafka Connect and Kafka Streams state stores, which need compacted topics. Broker resources describe no configs.
 
@@ -146,7 +149,7 @@ A refused group answers `GROUP_AUTHORIZATION_FAILED` for that group, whatever th
 
 ### Differences from Kafka
 
-- `DescribeConfigs` needs `head`, where Kafka needs a separate `DescribeConfigs` right. Configs hold retention and schema settings, nothing secret.
+- `DescribeConfigs` needs `head`, where Kafka needs a separate `DescribeConfigs` right. Configs hold retention settings, nothing secret.
 - `OffsetDelete` looks the group up before checking `delete_group`. A token that may describe a group but not delete it gets `GROUP_ID_NOT_FOUND` for a group that does not exist, which describing the group would show anyway. Kafka requires `Delete` on the group for `OffsetDelete`.
 - SASL PLAIN is the only mechanism. SCRAM is listed under [Deliberately excluded](/docs/design/auth#deliberately-excluded).
 - Tokens with `autoPrefix` are refused at authentication rather than half applied, since Kafka names cannot be rewritten per tenant, see [Auto-prefixing](/docs/design/auth#auto-prefixing).

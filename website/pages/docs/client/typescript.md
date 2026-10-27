@@ -24,7 +24,9 @@ for await (const record of stream.records()) {
 }
 ```
 
-Records accept `Uint8Array`, `string`, or `{ body, key, headers, timestamp }`. Header values are strings or `Uint8Array`. Records read back carry the server timestamp, and the key when one was set. `records()` starts at the beginning, or at a position you pass, and `records(from, { live: true })` keeps tailing after catching up. Positions are protocol-specific strings, so always continue from the `next` a call returned.
+- **Records.** Appends take `Uint8Array`, `string`, or `{ body, key, headers, timestamp }`. `headers` is a list of `{ name, value }` kept in order, so a name can repeat, with values as strings, `Uint8Array`, or `null`. A `null` body is a tombstone. Records read back carry the server timestamp, the key when one was set, and the headers, see [Records](/docs/api#records).
+- **Reads.** `records()` starts at the beginning, or at a position you pass, and `records(from, { live: true })` keeps tailing after catching up. Positions are protocol-specific strings, so always continue from the `next` a call returned.
+- **Lists.** `list` and `listGroups` take a `limit` and a `cursor` and return one [page](/docs/api#lists) whose `next` continues it, absent on the last page.
 
 ## Partitions
 
@@ -46,7 +48,7 @@ await pico.create('/orders', { contentType: 'application/json', partitions: 3, r
 const config = await pico.updateConfig('/orders', { partitions: 6, retentionMs: null })
 ```
 
-`putSchema`, `getSchema`, and `deleteSchema` manage the [schema registry](/docs/schemas). All of these work on both protocols.
+Settings work on both protocols.
 
 ## Producers
 
@@ -99,7 +101,7 @@ Subscriptions reconnect with exponential backoff by default. Tune with `reconnec
 | --- | --- |
 | `token` | Bearer token sent on every request, including each redirect hop |
 | `http2` | Speak cleartext HTTP/2 (h2c) for multiplexed appends. The server must support it |
-| `retry` | `RetryPolicy` for idempotent calls: `create`, `head`, `read`, `list`, `close`, `delete`, `trim`, `config`, `getSchema`. Plain `append` is never retried, because it has no dedupe key |
+| `retry` | `RetryPolicy` for idempotent calls: `create`, `head`, `read`, `list`, `close`, `delete`, `trim`, `config`. Plain `append` is never retried, because it has no dedupe key |
 
 The client follows ownership redirects itself and re-attaches the credential on every hop, see the [HTTP API conventions](/docs/api#conventions).
 

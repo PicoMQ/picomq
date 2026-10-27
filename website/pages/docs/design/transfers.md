@@ -4,7 +4,7 @@ A transfer moves ownership of a stream from one node to another. No record data 
 
 ## Starting a transfer
 
-A transfer begins as a metadata command, proposed through the admin API or the CLI. Apply validates it: the stream must be open on the source, the target must be a live node with slots, and the stream must not already be transferring. What lands in the state is a pending transfer record, the pair of source and target node ids keyed by stream id. Proposing the same transfer twice is a no-op, and proposing a conflicting one is rejected.
+A transfer begins as a metadata command, proposed through the [admin API](/docs/operations/admin#cluster-and-nodes), the console, or the CLI. Apply validates it: the stream must be open on the source, the target must be a live node with slots, and the stream must not already be transferring. What lands in the state is a pending transfer record, the pair of source and target node ids keyed by stream id. Proposing the same transfer twice is a no-op, and proposing a conflicting one is rejected.
 
 The pending record changes routing immediately, as long as the target stays live. From this point new requests for the stream route to the target, where opens wait for the handoff to settle instead of failing.
 

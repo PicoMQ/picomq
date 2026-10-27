@@ -43,7 +43,7 @@ docker compose -f compose.cluster.yml up --build   # same stack, 2 nodes
 docker compose -f compose.lite.yml up --build      # SQLite + file://, no deps
 ```
 
-Pico: `http://localhost:4437` (cluster also `:4438`). Dashboard: `:9090`.
+Pico: `http://localhost:4437` (cluster also `:4438`). Console: `:9090`.
 `harness/byo` is the same against an existing Postgres and object store, configured through `.env`.
 
 ## Use it

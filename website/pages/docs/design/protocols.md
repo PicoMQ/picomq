@@ -63,7 +63,6 @@ Every frontend maps the same internal error kinds onto its own vocabulary. Pico 
 | Permission denied, the scope is insufficient | `403 permission_denied` | `403` | `TOPIC_AUTHORIZATION_FAILED`, `GROUP_AUTHORIZATION_FAILED`, `CLUSTER_AUTHORIZATION_FAILED` |
 | Not found | `404 not_found` | `404` | `UNKNOWN_TOPIC_OR_PARTITION` |
 | Bad request, corrupt batch | `400 bad_request` | `400` | `INVALID_REQUEST`, `CORRUPT_MESSAGE` |
-| Schema violation | `400 schema_violation` | `400` | `INVALID_RECORD` |
 | Producer fenced | `403 fenced` | `403` | `INVALID_PRODUCER_EPOCH` |
 | Sequence gap | `409 sequence_gap` | `409` | `OUT_OF_ORDER_SEQUENCE_NUMBER` |
 | Match failed | `412 match_failed` | `400` | `INVALID_REQUEST` |
