@@ -17,6 +17,7 @@ website/.vitepress/dist/
 
 # Console
 console/node_modules/
+console/e2e/
 picomq/pico-http/_console/
 
 # Local runtime state

@@ -1,5 +1,5 @@
 import type { ComponentChildren } from 'preact'
-import { useEffect, useRef } from 'preact/hooks'
+import { useLayoutEffect, useRef } from 'preact/hooks'
 
 import './dialog.css'
 
@@ -13,7 +13,7 @@ interface Props {
 export function Dialog({ title, open, onClose, children }: Props) {
   const dialog = useRef<HTMLDialogElement>(null)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = dialog.current
     if (open && !element?.open) {
       element?.showModal()

@@ -9,9 +9,10 @@
 # Scenarios:
 #   single    one node, Pico HTTP + Kafka, auth off
 #             protocol cross tests (pico <-> kafka, groups, ttl, trim, producers)
-#             Rust, TypeScript and Go client suites, Go restart test
+#             Rust, TypeScript and Go client suites, console e2e, Go restart test
 #   cluster   two nodes, Pico HTTP + Kafka, auth required
 #             ownership redirects, groups across nodes, Rust, TypeScript and Go cluster suites
+#             console e2e with sign in and partition moves
 #             Kafka partitions across nodes, admin APIs, failover of a killed node
 #   chaos     two nodes under faults: paused nodes, a paused leader, a paused
 #             Postgres and a clean stop lose no acknowledged write and fence
@@ -91,6 +92,12 @@ typescript_suite() {
   (cd "$ROOT/client/typescript" && npm ci --no-audit --no-fund && npm test)
 }
 
+console_suite() {
+  log "$1: console e2e"
+  (cd "$ROOT/client/typescript" && npm ci --no-audit --no-fund && npm run build) &&
+    (cd "$ROOT/console/e2e" && npm ci --no-audit --no-fund && npx playwright install chromium && npm run live)
+}
+
 go_suite() {
   log "$1: go live e2e"
   (cd "$ROOT/client/go" && go test ./... -count=1 -timeout 20m -v)
@@ -98,21 +105,22 @@ go_suite() {
 
 run_single() {
   export PICO_PROTOCOL=pico PICO_AUTH=off
-  export PICO_INTEGRATION=1 PICO_ENDPOINT="$NODE1" PICO_KAFKA="$KAFKA"
+  export PICO_INTEGRATION=1 PICO_ENDPOINT="$NODE1" PICO_KAFKA="$KAFKA" PICO_ADMIN="$ADMIN1"
   export PICO_RESTART_CMD="docker compose $(compose_files single) restart pico"
-  unset PICO_ENDPOINT_2 PICO_DS_INTEGRATION
+  unset PICO_ENDPOINT_2 PICO_ADMIN_2 PICO_DS_INTEGRATION
 
   wait_ready "$ADMIN1" &&
     rust_protocol_suite single &&
     rust_client_suite single --skip follow_cluster_redirects &&
     typescript_suite single &&
+    console_suite single &&
     go_suite single
 }
 
 run_cluster() {
   export PICO_PROTOCOL=pico PICO_AUTH=required
   export PICO_INTEGRATION=1 PICO_ENDPOINT="$NODE1" PICO_ENDPOINT_2="$NODE2" PICO_KAFKA="$KAFKA"
-  export PICO_KAFKA_2="$KAFKA2" PICO_ADMIN_2="$ADMIN2"
+  export PICO_KAFKA_2="$KAFKA2" PICO_ADMIN="$ADMIN1" PICO_ADMIN_2="$ADMIN2"
   export PICO_KILL_CMD="docker compose $(compose_files cluster) kill -s KILL pico2"
   export PICO_START_CMD="docker compose $(compose_files cluster) up --detach pico2"
   unset PICO_RESTART_CMD PICO_DS_INTEGRATION
@@ -121,6 +129,7 @@ run_cluster() {
     wait_ready "$ADMIN2" &&
     rust_client_suite cluster &&
     typescript_suite cluster &&
+    console_suite cluster &&
     go_suite cluster &&
     rust_cluster_suite cluster
 }

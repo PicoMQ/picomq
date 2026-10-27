@@ -1,0 +1,17 @@
+{
+  "name": "picomq-console-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "check": "tsc -p tsconfig.json",
+    "live": "playwright test -c live.config.ts",
+    "scale": "playwright test -c scale.config.ts"
+  },
+  "devDependencies": {
+    "@picomq/client": "file:../../client/typescript",
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}

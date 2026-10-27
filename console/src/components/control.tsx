@@ -1,5 +1,6 @@
 import { Check, ChevronDown } from 'lucide-preact'
 import type { ComponentChildren, InputHTMLAttributes, SelectHTMLAttributes } from 'preact'
+import { useId } from 'preact/hooks'
 
 import './control.css'
 
@@ -8,18 +9,22 @@ type Prefixed<T> = T & {
 }
 
 export function Input({ prefix, ...props }: Prefixed<InputHTMLAttributes<HTMLInputElement>>) {
+  const id = useId()
+
   return (
-    <Prefix text={prefix}>
-      <input {...props} class="control" />
+    <Prefix text={prefix} id={id}>
+      <input {...props} id={id} class="control" />
     </Prefix>
   )
 }
 
 export function Select({ prefix, ...props }: Prefixed<SelectHTMLAttributes<HTMLSelectElement>>) {
+  const id = useId()
+
   return (
-    <Prefix text={prefix}>
+    <Prefix text={prefix} id={id}>
       <span class="control-select">
-        <select {...props} class="control" />
+        <select {...props} id={id} class="control" />
         <ChevronDown size={14} />
       </span>
     </Prefix>
@@ -48,14 +53,16 @@ export function numberOf(text: string): number | undefined {
   return text.trim() === '' ? undefined : Number(text)
 }
 
-function Prefix({ text, children }: { text: string | undefined; children: ComponentChildren }) {
+function Prefix({ text, id, children }: { text: string | undefined; id: string; children: ComponentChildren }) {
   if (text === undefined) {
     return <>{children}</>
   }
   return (
-    <label class="control-prefixed">
-      <span class="control-prefix">{text}</span>
+    <div class="control-prefixed">
+      <label class="control-prefix" for={id}>
+        {text}
+      </label>
       {children}
-    </label>
+    </div>
   )
 }

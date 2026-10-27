@@ -4,10 +4,11 @@ import { token } from '../api/client'
 import { Input } from './control'
 import { Form } from './form'
 import { Logo } from './logo'
+import { Notice } from './notice'
 
 import './login.css'
 
-export function Login({ onSignIn }: { onSignIn: () => void }) {
+export function Login({ refused, onSignIn }: { refused: boolean; onSignIn: () => void }) {
   const [value, setValue] = useState('')
 
   const submit = () => {
@@ -21,6 +22,7 @@ export function Login({ onSignIn }: { onSignIn: () => void }) {
         <Logo />
         <h1>PicoMQ Console</h1>
         <p class="login-note">This cluster requires a token with the admin audience.</p>
+        {refused && <Notice kind="danger">That token was not accepted. It may be wrong, revoked or expired.</Notice>}
         <Form submit="Sign in" disabled={value.trim() === ''} onSubmit={submit}>
           <Input
             type="password"

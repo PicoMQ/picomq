@@ -22,6 +22,9 @@ website/.vitepress/dist/
 # Console (Vite)
 console/node_modules/
 console/*.tsbuildinfo
+console/e2e/node_modules/
+console/e2e/test-results/
+console/e2e/playwright-report/
 picomq/pico-http/_console/
 
 # Env / secrets

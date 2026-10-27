@@ -38,9 +38,12 @@ const Missing = lazy(() => import('./views/missing'))
 
 export function App() {
   const [locked, setLocked] = useState(false)
+  const [refused, setRefused] = useState(false)
   const [client] = useState(() => {
     const onError = (error: Error) => {
       if (error instanceof AuthRequired) {
+        setRefused(token.get() !== null)
+        token.clear()
         setLocked(true)
       }
     }
@@ -59,17 +62,19 @@ export function App() {
 
   const unlock = () => {
     client.clear()
+    setRefused(false)
     setLocked(false)
   }
 
   const signOut = () => {
     token.clear()
     client.clear()
+    setRefused(false)
     setLocked(true)
   }
 
   if (locked) {
-    return <Login onSignIn={unlock} />
+    return <Login refused={refused} onSignIn={unlock} />
   }
   return (
     <QueryClientProvider client={client}>
@@ -133,7 +138,7 @@ function Navigation() {
   const active = current(path, SECTIONS.map((section) => section.href))
 
   return (
-    <nav class="app-nav">
+    <nav class="app-nav" aria-label="Sections">
       {SECTIONS.map(({ href, label, icon: Icon }) => (
         <a key={href} class="app-section" href={href} aria-current={href === active ? 'page' : undefined}>
           <Icon size={18} />

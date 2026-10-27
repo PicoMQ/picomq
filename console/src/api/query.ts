@@ -56,8 +56,8 @@ export function usePages<T>(listing: Listing<T>): Pages<T> {
     loading: query.isFetching,
     error: query.error,
     next: () => {
-      if (query.hasNextPage && !query.isFetchingNextPage) {
-        void query.fetchNextPage()
+      if (query.hasNextPage) {
+        void query.fetchNextPage({ cancelRefetch: false })
       }
     },
     refresh: () => {

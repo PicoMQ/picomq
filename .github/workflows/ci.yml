@@ -24,13 +24,28 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: console/package-lock.json
+          cache-dependency-path: |
+            console/package-lock.json
+            console/e2e/package-lock.json
+            client/typescript/package-lock.json
 
       - run: npm ci
       - run: npm run check
       - run: npm run lint
       - run: npm test
       - run: npm run build
+
+      - name: Build the TypeScript client the console tests use
+        working-directory: client/typescript
+        run: npm ci && npm run build
+
+      - name: Console scale tests
+        working-directory: console/e2e
+        run: |
+          npm ci
+          npm run check
+          npx playwright install --with-deps chromium
+          npm run scale
 
       - uses: actions/upload-artifact@v7
         with:
