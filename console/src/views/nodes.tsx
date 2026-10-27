@@ -16,8 +16,8 @@ export const NODE_COLUMNS: Column<ClusterNode>[] = [
   { name: 'node', header: 'Node', width: '8rem', cell: (node) => nodeLink(node.nodeId) },
   { name: 'status', header: 'Status', width: '14rem', cell: status },
   { name: 'address', header: 'Address', cell: (node) => node.advertisedAddress ?? 'none' },
-  { name: 'placed', header: 'Logs placed', width: '10rem', kind: 'number', cell: (node) => format.count(node.placedCount) },
-  { name: 'opening', header: 'Opening', width: '8rem', kind: 'number', cell: (node) => format.count(node.openingCount) },
+  { name: 'open', header: 'Open logs', width: '9rem', kind: 'number', cell: (node) => format.count(node.openingCount) },
+  { name: 'closed', header: 'Closed logs', width: '9rem', kind: 'number', cell: (node) => format.count(node.placedCount) },
   { name: 'slots', header: 'Slots', width: '7rem', kind: 'number', cell: (node) => format.count(node.slots) },
 ]
 

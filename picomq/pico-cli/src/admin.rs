@@ -120,7 +120,7 @@ pub async fn run(args: AdminArgs, flags: &Endpoint) -> Result<i32, String> {
             }
             for node in &nodes {
                 println!(
-                    "node={} epoch={} address={} slots={} opening={} placed={} fenced={}{}",
+                    "node={} epoch={} address={} slots={} open={} closed={} fenced={}{}",
                     node["nodeId"],
                     node["nodeEpoch"],
                     node["advertisedAddress"].as_str().unwrap_or("-"),

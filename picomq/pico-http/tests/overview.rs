@@ -57,6 +57,7 @@ async fn topics_rank_by_stored_bytes_and_by_write_rate() {
     assert!(first.by_size[0].1 > first.by_size[1].1);
     assert_eq!(first.by_size[2].1, 0);
     assert!(first.by_write_rate.is_empty(), "one pass has no rate");
+    assert_eq!(first.write_rate_since_ms, None);
 
     console.append("/small", 0, 60).await;
     committed(&console.node, "/small", 65).await;
@@ -68,6 +69,7 @@ async fn topics_rank_by_stored_bytes_and_by_write_rate() {
 
     let second = overview.rankings_at(1_060_000).await.unwrap();
     assert_eq!(second.computed_at_ms, 1_060_000);
+    assert_eq!(second.write_rate_since_ms, Some(1_000_000));
     assert_eq!(names(&second.by_write_rate), ["/small"]);
     assert_eq!(second.by_write_rate[0].1, 1.0);
 
@@ -99,6 +101,7 @@ async fn the_overview_needs_cluster_read_and_reports_its_age() {
     assert_eq!(overview["topicsBySize"][0]["topic"], "/seen");
     assert_eq!(overview["topicsBySize"][0]["storedBytes"], 0);
     assert_eq!(overview["topicsByWriteRate"], Value::Array(Vec::new()));
+    assert_eq!(overview["writeRateSinceMs"], Value::Null);
 
     console.server.shutdown().await;
 }

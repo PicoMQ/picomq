@@ -99,7 +99,7 @@ export async function fakeAdmin(page: Page): Promise<Fake> {
       })
     }
     if (area === 'overview') {
-      return route.fulfill({ json: { computedAtMs: Date.now(), topicsBySize: [], topicsByWriteRate: [] } })
+      return route.fulfill({ json: { computedAtMs: Date.now(), topicsBySize: [], topicsByWriteRate: [], writeRateSinceMs: null } })
     }
     if (area === 'nodes' && id === undefined) {
       return paged(route, url, SCALE.nodes, (each) => ({

@@ -105,8 +105,8 @@ export default function NodeView() {
       />
       <Details
         items={[
-          { label: 'Logs placed', value: format.count(shown.placedCount) },
-          { label: 'Opening', value: format.count(shown.openingCount) },
+          { label: 'Open logs', value: format.count(shown.openingCount) },
+          { label: 'Closed logs', value: format.count(shown.placedCount) },
           { label: 'Slots', value: format.count(shown.slots) },
           { label: 'Epoch', value: shown.nodeEpoch },
           { label: 'Address', value: shown.advertisedAddress ?? 'none', wide: true },

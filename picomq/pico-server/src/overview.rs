@@ -24,6 +24,7 @@ pub struct Rankings {
     pub computed_at_ms: i64,
     pub by_size: Vec<(Topic, u64)>,
     pub by_write_rate: Vec<(Topic, f64)>,
+    pub write_rate_since_ms: Option<i64>,
 }
 
 struct Pass {
@@ -93,9 +94,13 @@ fn measure(state: &MetadataState, now_ms: i64, previous: Option<Pass>) -> Pass {
         .map(|measured| (measured.topic.id, measured.end))
         .collect();
 
-    let mut by_write_rate = match &previous {
-        Some(previous) if now_ms > previous.rankings.computed_at_ms => {
-            let seconds = (now_ms - previous.rankings.computed_at_ms) as f64 / 1000.0;
+    let write_rate_since_ms = previous
+        .as_ref()
+        .map(|previous| previous.rankings.computed_at_ms)
+        .filter(|since| *since < now_ms);
+    let mut by_write_rate = match (&previous, write_rate_since_ms) {
+        (Some(previous), Some(since)) => {
+            let seconds = (now_ms - since) as f64 / 1000.0;
             measured
                 .iter()
                 .filter_map(|measured| {
@@ -129,6 +134,7 @@ fn measure(state: &MetadataState, now_ms: i64, previous: Option<Pass>) -> Pass {
             computed_at_ms: now_ms,
             by_size,
             by_write_rate,
+            write_rate_since_ms,
         }),
         ends,
     }

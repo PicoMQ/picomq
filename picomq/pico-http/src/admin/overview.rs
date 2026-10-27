@@ -46,6 +46,7 @@ async fn overview(State(state): State<AdminState>, headers: HeaderMap) -> Respon
         "computedAtMs": rankings.computed_at_ms,
         "topicsBySize": by_size,
         "topicsByWriteRate": by_write_rate,
+        "writeRateSinceMs": rankings.write_rate_since_ms,
     });
     (StatusCode::OK, Json(body)).into_response()
 }

@@ -90,7 +90,7 @@ export default function Overview() {
               ]}
               rows={ranking.data.topicsByWriteRate}
               rowKey={(entry) => entry.topic}
-              empty="No recent writes"
+              empty={ranking.data.writeRateSinceMs === null ? 'Measuring, ready within a minute' : 'No recent writes'}
             />
           </div>
         ) : (
