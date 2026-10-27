@@ -42,8 +42,10 @@ export function App() {
   const [client] = useState(() => {
     const onError = (error: Error) => {
       if (error instanceof AuthRequired) {
-        setRefused(token.get() !== null)
-        token.clear()
+        if (token.get() !== null) {
+          token.clear()
+          setRefused(true)
+        }
         setLocked(true)
       }
     }

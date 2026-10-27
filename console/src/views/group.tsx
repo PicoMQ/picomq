@@ -155,7 +155,8 @@ function Offsets({ id }: { id: string }) {
         <Input
           prefix="Topic"
           placeholder="all topics"
-          value={query.topic ?? ''}
+          key={query.topic ?? ''}
+          defaultValue={query.topic ?? ''}
           onChange={(event) => route(withQuery(path, query, { topic: event.currentTarget.value }), true)}
         />
       </Toolbar>

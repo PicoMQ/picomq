@@ -33,6 +33,7 @@ test('a group shows lag, refuses a reset while it has members, then resets and i
   await expect(row.getByRole('cell').nth(4)).toHaveText('5')
 
   await page.getByLabel('Topic').fill(topic)
+  await page.waitForTimeout(11_000)
   await page.getByLabel('Topic').press('Enter')
   await page.getByRole('button', { name: 'Delete offsets' }).click()
   await page.getByRole('dialog').getByRole('textbox').fill(topic)

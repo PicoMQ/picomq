@@ -15,7 +15,7 @@ test('a partition is moved to another node', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Move partition' }).click()
   const dialog = page.getByRole('dialog')
-  await dialog.getByLabel('Topic').fill(topic)
+  await dialog.getByLabel('Topic', { exact: true }).fill(topic)
   await dialog.getByLabel('Partition, empty for a single-partition topic').fill('0')
   await dialog.getByLabel('To node').selectOption(String(target))
   await dialog.getByRole('button', { name: 'Move' }).click()

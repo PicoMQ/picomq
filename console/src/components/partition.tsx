@@ -18,7 +18,8 @@ export function PartitionPicker({ partitions, value, prefix, onChange }: Props) 
         min={0}
         max={partitions - 1}
         size={6}
-        value={String(value)}
+        key={value}
+        defaultValue={String(value)}
         onChange={(event) => onChange(Number(event.currentTarget.value))}
       />
     )

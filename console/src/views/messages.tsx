@@ -132,7 +132,8 @@ function Controls({ name, topic, index, detail, onRefresh }: ControlsProps) {
             type="number"
             min={0}
             size={10}
-            value={query.at ?? ''}
+            key={query.at ?? ''}
+            defaultValue={query.at ?? ''}
             onChange={(event) => set({ at: event.currentTarget.value })}
           />
         )}
