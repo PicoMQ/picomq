@@ -1,6 +1,6 @@
 services:
   rustfs:
-    image: rustfs/rustfs:1.0.0-rc.3
+    image: rustfs/rustfs:1.0.6
     command: ["/data"]
     environment:
       RUSTFS_ACCESS_KEY: picomq
@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
 
   createbucket:
-    image: amazon/aws-cli:2.36.28
+    image: amazon/aws-cli:2.41.1
     depends_on:
       rustfs:
         condition: service_healthy

@@ -10,8 +10,8 @@
   },
   "devDependencies": {
     "@picomq/client": "file:../../client/typescript",
-    "@playwright/test": "^1.64.1",
-    "@types/node": "^26.6.5",
+    "@playwright/test": "^1.65.1",
+    "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
   }
 }

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use im::OrdMap;
+use imbl::OrdMap;
 use s3stream::{CompactOperations, StreamMetadata, StreamState};
 
 /// One stream's replicated control-plane row. `epoch` is `i64` because a

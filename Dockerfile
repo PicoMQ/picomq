@@ -3,7 +3,7 @@
 # Protocol / meta / storage are runtime config (flags or PICO_* env).
 
 # Console assets, embedded into the binary by the build stage.
-FROM node:24-bookworm-slim AS console
+FROM node:26-bookworm-slim AS console
 WORKDIR /src/console
 COPY console/package.json console/package-lock.json ./
 RUN npm ci --no-audit --no-fund
