@@ -8,16 +8,16 @@
     "start": "tsx server/index.ts"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^4.0.52",
+    "@ai-sdk/openai": "^4.0.121",
     "@picomq/client": "^0.1.2",
-    "ai": "^7.0.85"
+    "ai": "^7.0.177"
   },
   "devDependencies": {
-    "@types/node": "^26.4.0",
-    "tsx": "^4.23.13",
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
 }

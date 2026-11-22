@@ -1172,7 +1172,7 @@ fn delete_kv_if_matches(
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use im::OrdMap;
+    use imbl::OrdMap;
     use s3stream::ObjectStreamRange;
 
     use crate::state::ObjectSpan;
